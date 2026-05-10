@@ -1,6 +1,11 @@
 use std::ffi::{CString, CStr};
 use std::path::Path;
+use std::sync::Arc;
 
+use fairchild_core::device_registry::DeviceRegistry;
+use fairchild_core::Device;
+
+use crate::device::OsdiDevice;
 use crate::error::OsdiError;
 use crate::ffi::OsdiDescriptor;
 
@@ -84,6 +89,31 @@ impl OsdiLibrary {
             descriptor_size,
             descriptors_base,
         })
+    }
+
+    /// Register every descriptor in this library into a `DeviceRegistry`.
+    ///
+    /// Each descriptor is keyed by its `name` field. The factory closure
+    /// co-owns the library via `Arc`, so the library stays loaded as long as
+    /// any of its devices are alive.
+    pub fn register_into(self: &Arc<Self>, registry: &mut DeviceRegistry) {
+        for (i, desc) in self.descriptors().enumerate() {
+            let name = unsafe { CStr::from_ptr(desc.name) }
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let lib = Arc::clone(self);
+            registry.register(name, move |terminals, ctx| {
+                let mut dev = OsdiDevice::from_library(Arc::clone(&lib), i)
+                    .expect("descriptor index must be valid");
+                dev.setup_model(ctx);
+                dev.setup_instance(terminals, ctx);
+                Box::new(dev)
+            });
+        }
     }
 
     /// Iterate over the descriptors, striding by `descriptor_size` bytes.

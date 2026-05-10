@@ -28,6 +28,11 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             if let Some(card) = parse_model(&lc, *raw_lineno)? {
                 netlist.models.push(card);
             }
+        } else if lc.starts_with(".osdi") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 2 {
+                netlist.osdi_paths.push(tokens[1].to_string());
+            }
         } else if lc.starts_with('.') {
             // Ignore other directives (.param, .ic, .meas, etc.) for now.
         } else {

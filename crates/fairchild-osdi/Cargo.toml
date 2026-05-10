@@ -7,3 +7,7 @@ edition = "2021"
 fairchild-core = { workspace = true }
 libc      = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+fairchild-parser = { workspace = true }
+indexmap = { workspace = true }

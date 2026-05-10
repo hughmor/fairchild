@@ -14,6 +14,8 @@ pub struct Netlist {
     pub elements: Vec<Element>,
     pub analyses: Vec<Analysis>,
     pub models: Vec<ModelCard>,
+    /// Paths from `.osdi <path>` directives — OSDI shared libraries to load.
+    pub osdi_paths: Vec<String>,
 }
 
 /// Waveform specification for independent sources.

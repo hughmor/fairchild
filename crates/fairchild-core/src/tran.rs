@@ -8,9 +8,10 @@ use indexmap::IndexMap;
 use fairchild_parser::{Element, Netlist};
 
 use crate::device::{EvalFlags, SimContext};
+use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{cap_companion, ind_companion, stamp_netlist, CircuitTopology};
-use crate::newton::{build_devices, VMAX, VNTOL, RELTOL, MAX_ITER};
+use crate::newton::{build_devices, dc_op_nr_with_registry, GMIN, VMAX, VNTOL, RELTOL, MAX_ITER};
 use crate::solver::lu_solve;
 
 /// Output of a transient simulation.
@@ -204,24 +205,20 @@ fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[
 // Nonlinear transient solver
 // ---------------------------------------------------------------------------
 
-/// Fixed-step Backward Euler transient with Newton-Raphson for nonlinear devices.
-///
-/// Compared to `run_tran`:
-///   - Starts from the DC operating point (dc_op_nr) as initial conditions.
-///   - Runs a full NR inner loop at every time step.
-///   - Handles Diode elements (and any other `Device` implementations).
-///
-/// Reactive elements (C, L) are handled identically to `run_tran` via BE companion models.
-pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
+/// Fixed-step Backward Euler transient with Newton-Raphson and a pre-built device registry.
+pub fn tran_nr_with_registry(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+) -> Result<TranResult, SimError> {
     let ctx = SimContext::default();
-    let topo = CircuitTopology::build(netlist);
 
-    // DC operating point as initial condition for t = 0.
-    let dc = crate::newton::dc_op_nr(netlist)?;
+    let dc = dc_op_nr_with_registry(netlist, registry)?;
+    let topo = dc.topo;
     let mut x = dc.x;
 
-    // Build and initialise nonlinear devices.
-    let mut devices = build_devices(netlist, &topo, &ctx)?;
+    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
 
     // Reactive companion state seeded from the DC OP.
     let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x);
@@ -250,6 +247,10 @@ pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, Si
                 dev.eval(&x, EvalFlags::dc(), &ctx);
                 dev.load_residual(&mut mat.b);
                 dev.load_jacobian(&mut mat);
+            }
+
+            for i in 0..topo.n_nodes() {
+                mat.a[i][i] += GMIN;
             }
 
             let x_new = lu_solve(&mat.a, &mat.b)?;
@@ -284,6 +285,13 @@ pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, Si
     }
 
     Ok(result)
+}
+
+/// Fixed-step Backward Euler transient using only built-in models from `.model` cards.
+pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_diodes(&netlist.models);
+    tran_nr_with_registry(netlist, step, stop, &registry)
 }
 
 #[cfg(test)]
