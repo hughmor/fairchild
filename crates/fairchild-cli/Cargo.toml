@@ -1,0 +1,12 @@
+[package]
+name = "fairchild-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fairchild"
+path = "src/main.rs"
+
+[dependencies]
+fairchild-core   = { workspace = true }
+fairchild-parser = { workspace = true }

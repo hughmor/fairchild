@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/fairchild-core",
+    "crates/fairchild-parser",
+    "crates/fairchild-cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+fairchild-core   = { path = "crates/fairchild-core" }
+fairchild-parser = { path = "crates/fairchild-parser" }
+
+faer        = "0.24"
+thiserror   = "2"
+indexmap    = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "fairchild-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fairchild-parser = { workspace = true }
+faer             = { workspace = true }
+thiserror        = { workspace = true }
+indexmap         = { workspace = true }
