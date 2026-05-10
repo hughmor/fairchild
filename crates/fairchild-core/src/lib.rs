@@ -1,3 +1,6 @@
+pub mod error;
 pub mod mna;
 pub mod solver;
-pub mod error;
+
+pub use error::SimError;
+pub use solver::{dc_op, OpResult};

@@ -1,4 +1,5 @@
 /target/
+/memory/
 Cargo.lock
 *.osdi
 *.so
