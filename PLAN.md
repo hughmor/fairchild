@@ -225,7 +225,37 @@ The adjoint method gives `∂L/∂p` for any scalar loss `L` and parameter vecto
 
 **Strategic differentiation**: SAX/Photontorch do this only for frequency-domain S-matrices. We do it for time-domain DAE — enabling gradient-based optimization of circuits with lasers, modulators, and nonlinear dynamics.
 
-### 2.5 Crate Workspace Layout
+### 2.5 Device Model Abstraction — Unifying OSDI and Rust-Native Models
+
+The MNA solver is entirely agnostic about where a device model comes from. Both OSDI-loaded models and models written natively in Rust implement the same `Device` trait:
+
+```rust
+pub trait Device: Send + Sync {
+    fn num_terminals(&self) -> usize;
+    fn setup_model(&mut self, ctx: &SimContext);
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext);
+    // Evaluate device physics at current x; caches result for load_* calls.
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext);
+    // Stamp resistive (DC / quasi-static) KCL contributions into b.
+    fn load_residual(&self, b: &mut [f64]);
+    // Stamp linearised conductance (Jacobian) entries into the MNA matrix.
+    fn load_jacobian(&self, mat: &mut MnaMatrix);
+}
+```
+
+The netlist holds `Vec<Box<dyn Device>>`; the Newton-Raphson loop calls the same methods regardless of origin.
+
+**OSDI wrapper**: An `OsdiDevice` struct wraps a loaded `OsdiDescriptor` pointer and manages model/instance memory (`Vec<u8>` of size `descriptor.model_size` / `descriptor.instance_size`). Its `eval` calls `descriptor.eval`, its `load_residual` calls `descriptor.load_spice_rhs_dc` / `load_spice_rhs_tran`, and its `load_jacobian` calls `descriptor.load_jacobian_resist` / `load_jacobian_tran`. The OSDI Jacobian pointer array (stored inside the instance memory at `jacobian_ptr_resist_offset`) is initialised once at `setup_instance` time to point directly into the `MnaMatrix` data — this is the same technique ngspice uses and eliminates a copy on the critical path.
+
+**Rust-native models**: Compute everything inside `eval`, cache the Norton equivalent (G_eq, I_eq), and stamp in `load_residual` / `load_jacobian`. They use the same `stamp_conductance` / `stamp_current_source` helpers as the linear elements.
+
+**Optical models via OSDI**: Authors encode optical ports as pairs of electrical nodes (SVEA convention). The `SimContext` passed to `setup_instance` and `eval` includes `omega_0` (carrier frequency) so the model can compute wavelength-dependent quantities (propagation constant, coupling ratio, etc.) without it being a nodal variable. For OSDI models, `omega_0` is inserted into `OsdiSimParas` before each `eval` call. For Rust-native models, it is a field of `SimContext` directly.
+
+**No co-simulation barrier**: an OSDI BSIM4 transistor and a Rust-native ring resonator sit in the same `Vec<Box<dyn Device>>`, participate in the same Newton-Raphson iteration, and stamp into the same MNA matrix. Discipline checking (optical port connects only to optical port) happens at elaboration time, not at simulation time.
+
+---
+
+### 2.6 Crate Workspace Layout
 
 ```
 fairchild/                          # workspace root
