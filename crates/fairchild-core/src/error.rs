@@ -10,4 +10,8 @@ pub enum SimError {
     NoAnalysis,
     #[error("unknown node '{0}'")]
     UnknownNode(String),
+    #[error("unknown model '{0}'")]
+    UnknownModel(String),
+    #[error("Newton-Raphson did not converge after {iters} iterations")]
+    NoConvergence { iters: usize },
 }
