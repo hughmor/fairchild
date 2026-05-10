@@ -164,6 +164,33 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 model_name: tokens[3].to_lowercase(),
             })
         }
+        'm' => {
+            // M<name> drain gate source bulk model_name [W=x L=y ...]
+            if tokens.len() < 6 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥6 (Mname drain gate source bulk model)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            let mut params = Vec::new();
+            for tok in &tokens[6..] {
+                if let Some((k, v)) = tok.split_once('=') {
+                    if let Ok(val) = parse_value(v, lineno) {
+                        params.push((k.to_lowercase(), val));
+                    }
+                }
+            }
+            Ok(Element::Mosfet {
+                name,
+                drain: canon_node(tokens[1]),
+                gate: canon_node(tokens[2]),
+                source: canon_node(tokens[3]),
+                bulk: canon_node(tokens[4]),
+                model_name: tokens[5].to_lowercase(),
+                params,
+            })
+        }
         _ => Err(ParseError::UnknownElement { letter, line: lineno }),
     }
 }

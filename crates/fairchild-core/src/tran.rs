@@ -244,9 +244,9 @@ pub fn tran_nr_with_registry(
             let mut mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
 
             for dev in &mut devices {
-                dev.eval(&x, EvalFlags::dc(), &ctx);
-                dev.load_residual(&mut mat.b);
-                dev.load_jacobian(&mut mat);
+                dev.eval(&x, EvalFlags::tran(), &ctx);
+                dev.load_residual_tran(&mut mat.b, 1.0);
+                dev.load_jacobian_tran(&mut mat, 1.0);
             }
 
             for i in 0..topo.n_nodes() {

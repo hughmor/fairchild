@@ -29,11 +29,17 @@ impl SimContext {
 pub struct EvalFlags {
     /// Compute resistive (DC / quasi-static) contributions — I(V) and dI/dV.
     pub resistive: bool,
+    /// Compute reactive (capacitive/inductive) contributions — dq/dt and dq/dV.
+    pub transient: bool,
 }
 
 impl EvalFlags {
     pub fn dc() -> Self {
-        EvalFlags { resistive: true }
+        EvalFlags { resistive: true, transient: false }
+    }
+
+    pub fn tran() -> Self {
+        EvalFlags { resistive: true, transient: true }
     }
 }
 
@@ -63,4 +69,13 @@ pub trait Device: Send + Sync {
 
     /// Add the Norton-equivalent conductance contribution to the MNA Jacobian `mat`.
     fn load_jacobian(&self, mat: &mut MnaMatrix);
+
+    /// Transient residual: stamp reactive + resistive contributions for BE companion.
+    /// `alpha` = h_new/h_old (1.0 for fixed-step BE).
+    /// Default falls back to DC residual (correct for purely resistive devices).
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+
+    /// Transient Jacobian: stamp resistive + α·reactive conductances.
+    /// Default falls back to DC Jacobian.
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
 }

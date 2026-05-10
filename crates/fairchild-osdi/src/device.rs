@@ -19,7 +19,9 @@ use fairchild_core::mna::MnaMatrix;
 
 use crate::ffi::{
     OsdiDescriptor, OsdiInitInfo, OsdiSimInfo, OsdiSimParas,
-    ANALYSIS_DC, CALC_RESIST_JACOBIAN, CALC_RESIST_RESIDUAL,
+    ANALYSIS_DC, ANALYSIS_TRAN,
+    CALC_RESIST_JACOBIAN, CALC_RESIST_RESIDUAL,
+    CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL,
 };
 use crate::loader::OsdiLibrary;
 
@@ -183,9 +185,12 @@ impl Device for OsdiDevice {
 
         let eval_fn = self.desc().eval;
         if let Some(f) = eval_fn {
-            let mut osdi_flags = ANALYSIS_DC;
+            let mut osdi_flags = if flags.transient { ANALYSIS_TRAN } else { ANALYSIS_DC };
             if flags.resistive {
                 osdi_flags |= CALC_RESIST_RESIDUAL | CALC_RESIST_JACOBIAN;
+            }
+            if flags.transient {
+                osdi_flags |= CALC_REACT_RESIDUAL | CALC_REACT_JACOBIAN;
             }
             let mut info = OsdiSimInfo {
                 paras: null_sim_paras(),
@@ -259,6 +264,59 @@ impl Device for OsdiDevice {
                 self.mna_nodes.get(osdi_c).copied().flatten(),
             ) {
                 mat.a[mr][mc] += jac_buf[i];
+            }
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        if let Some(f) = self.desc().load_spice_rhs_tran {
+            // Same guard buffer trick as load_residual: pad by 1 at the front so that
+            // OSDI's ldpsw sign-extension of UINT32_MAX → -1 reads/writes temp[0].
+            let mut temp = vec![0.0f64; b.len() + 1];
+            let prev = unsafe { self.x_cache.as_ptr().add(1) as *mut f64 };
+            unsafe {
+                f(self.inst_ptr(), self.model_ptr(), temp.as_mut_ptr().add(1), prev, alpha);
+            }
+            for i in 0..b.len() {
+                b[i] += temp[i + 1];
+            }
+        } else {
+            self.load_residual(b);
+        }
+    }
+
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        // Resistive part is the same as DC.
+        self.load_jacobian(mat);
+
+        // Reactive part: stamp alpha * C/h entries from write_jacobian_array_react.
+        let desc = self.desc();
+        let n_react = desc.num_reactive_jacobian_entries as usize;
+        if n_react == 0 {
+            return;
+        }
+        let f = match desc.write_jacobian_array_react {
+            Some(f) => f,
+            None => return,
+        };
+
+        let mut jac_buf = vec![0.0f64; n_react];
+        unsafe { f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr()); }
+
+        let n_total = desc.num_jacobian_entries as usize;
+        let n_resist = desc.num_resistive_jacobian_entries as usize;
+        let entries = unsafe {
+            std::slice::from_raw_parts(desc.jacobian_entries, n_total)
+        };
+
+        for (i, entry) in entries.iter().skip(n_resist).take(n_react).enumerate() {
+            let osdi_r = entry.nodes.node_1 as usize;
+            let osdi_c = entry.nodes.node_2 as usize;
+            if let (Some(mr), Some(mc)) = (
+                self.mna_nodes.get(osdi_r).copied().flatten(),
+                self.mna_nodes.get(osdi_c).copied().flatten(),
+            ) {
+                mat.a[mr][mc] += alpha * jac_buf[i];
             }
         }
     }

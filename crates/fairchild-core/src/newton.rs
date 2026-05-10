@@ -50,12 +50,24 @@ pub(crate) fn build_devices(
 ) -> Result<Vec<Box<dyn Device>>, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
     for el in &netlist.elements {
-        if let Element::Diode { anode, cathode, model_name, .. } = el {
-            let factory = registry.get(model_name)
-                .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-            let pos: NodeId = topo.node_index.get(anode).copied();
-            let neg: NodeId = topo.node_index.get(cathode).copied();
-            devices.push(factory(&[pos, neg], ctx));
+        match el {
+            Element::Diode { anode, cathode, model_name, .. } => {
+                let factory = registry.get(model_name)
+                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                let pos: NodeId = topo.node_index.get(anode).copied();
+                let neg: NodeId = topo.node_index.get(cathode).copied();
+                devices.push(factory(&[pos, neg], ctx));
+            }
+            Element::Mosfet { drain, gate, source, bulk, model_name, .. } => {
+                let factory = registry.get(model_name)
+                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                let d: NodeId = topo.node_index.get(drain).copied();
+                let g: NodeId = topo.node_index.get(gate).copied();
+                let s: NodeId = topo.node_index.get(source).copied();
+                let b: NodeId = topo.node_index.get(bulk).copied();
+                devices.push(factory(&[d, g, s, b], ctx));
+            }
+            _ => {}
         }
     }
     Ok(devices)

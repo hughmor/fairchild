@@ -106,6 +106,15 @@ pub enum Element {
         cathode: NodeName,
         model_name: String,
     },
+    Mosfet {
+        name: String,
+        drain: NodeName,
+        gate: NodeName,
+        source: NodeName,
+        bulk: NodeName,
+        model_name: String,
+        params: Vec<(String, f64)>,
+    },
 }
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.

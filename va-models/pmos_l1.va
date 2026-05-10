@@ -1,0 +1,51 @@
+// PMOS Level 1 (Shichman-Hodges) — OSDI v0.4 target
+// Terminals: drain, gate, source, bulk (bulk ignored in this simplified model)
+// Uses mirrored voltages (Vsg, Vsd) so formulae are symmetric with nmos_l1.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module pmos_l1(drain, gate, source, bulk);
+  inout drain, gate, source, bulk;
+  electrical drain, gate, source, bulk;
+
+  // Model parameters (VTH0 is negative for PMOS)
+  parameter real KP     = 40e-6   from (0:inf);  // A/V² process transconductance
+  parameter real VTH0   = -0.7                ;  // V threshold (< 0 for PMOS)
+  parameter real LAMBDA = 0.01    from [0:inf);  // 1/V channel-length modulation
+  parameter real CGSO   = 200e-12 from [0:inf);  // F/m gate-source overlap cap/width
+  parameter real CGDO   = 200e-12 from [0:inf);  // F/m gate-drain overlap cap/width
+
+  // Instance parameters
+  parameter real W = 10e-6 from (0:inf);  // m channel width
+  parameter real L =  1e-6 from (0:inf);  // m channel length
+
+  // Mirror PMOS to NMOS convention: work in terms of Vsg and Vsd.
+  real vsg, vsd, beta, veff, vdsat, ids;
+
+  analog begin
+    vsg = V(source, gate);   // > 0 when gate is below source (PMOS on condition)
+    vsd = V(source, drain);  // > 0 when drain is below source (normal PMOS operating)
+
+    beta = KP * W / L;
+    // VTH0 < 0 here; -VTH0 > 0; so veff = vsg - (-VTH0) = vsg - |VTH0|
+    veff = vsg + VTH0;  // = Vsg - |Vthp|; > 0 when PMOS is on
+
+    if (veff <= 0.0) begin
+      ids = 0.0;
+    end else begin
+      vdsat = veff;
+      if (vsd < vdsat) begin
+        ids = beta * (veff * vsd - 0.5 * vsd * vsd);
+      end else begin
+        ids = 0.5 * beta * veff * veff * (1.0 + LAMBDA * vsd);
+      end
+    end
+
+    // ids > 0 → conventional current flows from source to drain
+    I(source, drain) <+ ids;
+
+    // Gate capacitances
+    I(gate, source) <+ ddt(CGSO * W * V(gate, source));
+    I(gate, drain)  <+ ddt(CGDO * W * V(gate, drain));
+  end
+endmodule
