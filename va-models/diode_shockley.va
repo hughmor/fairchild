@@ -1,0 +1,23 @@
+// Shockley diode — minimal Verilog-A model for OSDI v0.4 validation.
+// Parameters match the built-in ShockleyDiode (Is=1e-14, N=1).
+// Compiles with OpenVAF-Reloaded: openvaf diode_shockley.va
+
+`include "disciplines.vams"
+`include "constants.vams"
+
+module diode_shockley(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+
+    parameter real Is = 1e-14 from (0:inf);   // saturation current (A)
+    parameter real N  = 1.0   from (0:inf);   // ideality factor
+    parameter real Tnom = 300.15;             // nominal temperature (K)
+
+    real Vd, Id, gd;
+
+    analog begin
+        Vd = V(anode, cathode);
+        Id = Is * (exp(Vd / (N * `P_K * Tnom / `P_Q)) - 1.0);
+        I(anode, cathode) <+ Id;
+    end
+endmodule

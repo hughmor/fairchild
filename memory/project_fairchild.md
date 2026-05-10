@@ -10,41 +10,53 @@ Open-source EO co-simulation suite targeting SiPh. Rust core, PyO3 Python bindin
 
 **Plan document:** `/Users/hugh/Local/src/fairchild/PLAN.md`
 
-**Codebase layout (as of 2026-05-10, Day 4):**
+**Codebase layout (as of 2026-05-10, Day 5):**
 - `crates/fairchild-parser/` — SPICE parser: R, V(DC/PULSE), I, C, L, D; .op, .tran, .model
 - `crates/fairchild-core/` — MNA assembler, DC solver (faer LU), BE transient, NR solver
   - `src/device.rs` — Device trait, SimContext, NodeId, EvalFlags
   - `src/models/diode.rs` — ShockleyDiode with pnjlim
   - `src/newton.rs` — dc_op_nr: Newton-Raphson loop with pnjlim + global VMAX damping
 - `crates/fairchild-osdi/` — OSDI v0.4 runtime: #[repr(C)] FFI structs + dlopen loader
-- `crates/osdi-mock/` — cdylib test fixture; exports one "test_diode" descriptor
+  - `src/device.rs` — OsdiDevice: Device trait adapter for OSDI descriptors
+- `crates/osdi-mock/` — cdylib test fixture; exports "test_conductance" with real fn ptrs
 - `crates/fairchild-cli/` — stub binary
 - `tests/golden/` — reference netlists (DC, transient, diode) for ngspice comparison
 - `crates/fairchild-core/tests/ngspice_golden.rs` — DC integration test harness
 - `crates/fairchild-core/tests/ngspice_tran_golden.rs` — transient test harness (uses .meas)
 - `crates/fairchild-core/tests/ngspice_diode_golden.rs` — nonlinear DC diode test harness
 - `crates/fairchild-osdi/tests/load_mock.rs` — OSDI registry-walk integration test
+- `crates/fairchild-osdi/tests/osdi_device.rs` — OsdiDevice MNA stamp integration tests
 
-**Current state (Phase 0, Day 4 complete):**
+**Current state (Phase 0, Day 6 complete):**
 - DC OP solver for R, V, I — 5 ngspice golden tests passing
-- Fixed-step Backward Euler transient solver for R, C, L, V(PULSE), I
+- Fixed-step Backward Euler transient solver for R, C, L, V(PULSE), I (run_tran)
 - RC and RL step responses validated against ngspice .meas at t=τ,2τ,5τ (1% tolerance)
 - OSDI v0.4 runtime: dlopen + symbol resolution + registry walk — 1 integration test passing
 - Newton-Raphson DC solver (dc_op_nr) with ShockleyDiode device:
   - pnjlim voltage limiting + global VMAX=0.5V backup damping
   - 2 ngspice golden tests: current-source bias and R-D series (both within 0.1% of ngspice)
-- Total: 31 tests all green
+- OsdiDevice wrapper: Device trait adapter for OSDI v0.4 descriptors
+  - setup_model/setup_instance/eval/load_residual/load_jacobian all implemented
+  - Uses copy-based Jacobian path (write_jacobian_array_resist) — no pointer aliasing
+  - Handles ground terminals (NodeId = None) correctly
+- osdi-mock extended: "test_conductance" model with real function pointers (1 mS conductance)
+- tran_nr: nonlinear transient solver (BE companion + NR per step)
+  - Starts from dc_op_nr operating point; capacitors seeded from DC voltages
+  - Same pnjlim + VMAX damping as dc_op_nr; build_devices() shared helper
+  - Validated: pure RC matches run_tran; R-D steady state matches dc_op_nr
+  - ngspice golden: half-wave rectifier V(cap) at t=550µs within 2%
+- Total: 35 tests all green
 - Rust 1.95.0, faer 0.24, libc 0.2, ngspice 45.2 at /opt/homebrew/bin/ngspice
 
 **Phase 0 falsifiability gate (Weeks 1-6):** CMOS inverter transient via BSIM4 OSDI model.
 
 **Next priorities:**
-1. OsdiDevice wrapper: implement Device trait backed by an OsdiDescriptor function pointer
-2. Node mapping: connect OSDI terminal indices to MNA node indices at setup_instance time
-3. Jacobian pointer array: point directly into MnaMatrix at setup_instance (eliminates copy)
-4. Build OpenVAF-Reloaded on macOS to produce a real v0.4 .osdi file (VA diode model)
-5. Validate OSDI diode model against ngspice golden (forward-bias I-V)
-6. Add diode to transient NR loop (dc_op_nr → tran_nr)
+1. Build OpenVAF-Reloaded on macOS (arpadbuermen fork, mob branch) to produce a real v0.4 .osdi
+2. Validate OsdiDevice + real .osdi diode model against ngspice golden (forward-bias I-V)
+3. Integrate OsdiDevice into dc_op_nr/tran_nr (load OSDI devices from netlist alongside built-ins)
+   — requires parser extension: `.osdi path` directive + element-to-model name resolution
+4. Jacobian aliasing optimisation: refactor MnaMatrix to contiguous Vec<f64>, then point OSDI
+   jacobian_ptr_resist array directly into MnaMatrix (eliminates copy on critical NR path)
 
 **Key architectural decisions:**
 - Verilog-A compiler: OpenVAF-Reloaded (arpadbuermen fork, GitHub mob branch) → OSDI v0.4
