@@ -3,9 +3,9 @@ use indexmap::IndexMap;
 use fairchild_parser::{Element, Netlist};
 
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist, CircuitTopology};
-use crate::models::ShockleyDiode;
 use crate::solver::lu_solve;
 
 /// SPICE-standard convergence tolerances.
@@ -14,6 +14,9 @@ pub(crate) const RELTOL: f64 = 1e-3;    // 0.1 % relative tolerance
 /// Backup global step damping: max allowed Δ(node voltage) per iteration.
 pub(crate) const VMAX: f64 = 0.5;
 pub(crate) const MAX_ITER: usize = 150;
+/// Minimum conductance added to the diagonal to prevent near-singular matrices.
+/// Standard SPICE heuristic (ngspice default: 1e-12 S).
+pub(crate) const GMIN: f64 = 1e-12;
 
 /// Result of a nonlinear DC operating-point solve.
 pub struct NrResult {
@@ -36,57 +39,58 @@ impl NrResult {
     }
 }
 
-/// DC operating-point with Newton-Raphson for nonlinear devices (diodes, etc.).
+/// Build device instances from the Diode elements in a netlist via the registry.
 ///
-/// Falls back gracefully for purely linear circuits (no Diode elements):
-/// runs one NR iteration, which converges in a single step.
-/// Build Rust-native device instances from the Diode elements in a netlist.
-///
-/// Called by both `dc_op_nr` and `tran_nr` to avoid duplicating the setup sequence.
+/// Called by both `dc_op_nr` and `tran_nr`.
 pub(crate) fn build_devices(
     netlist: &Netlist,
     topo: &CircuitTopology,
     ctx: &SimContext,
+    registry: &DeviceRegistry,
 ) -> Result<Vec<Box<dyn Device>>, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
     for el in &netlist.elements {
         if let Element::Diode { anode, cathode, model_name, .. } = el {
-            let card = netlist.models.iter()
-                .find(|m| m.name == *model_name && m.kind.starts_with('d'))
+            let factory = registry.get(model_name)
                 .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-
-            let mut dev = Box::new(ShockleyDiode::from_params(&card.params));
-            dev.setup_model(ctx);
             let pos: NodeId = topo.node_index.get(anode).copied();
             let neg: NodeId = topo.node_index.get(cathode).copied();
-            dev.setup_instance(&[pos, neg], ctx);
-            devices.push(dev);
+            devices.push(factory(&[pos, neg], ctx));
         }
     }
     Ok(devices)
 }
 
-pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
+/// DC operating-point with a pre-built registry (supports OSDI and built-in models).
+pub fn dc_op_nr_with_registry(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+) -> Result<NrResult, SimError> {
     let ctx = SimContext::default();
     let topo = CircuitTopology::build(netlist);
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
 
-    let mut devices = build_devices(netlist, &topo, &ctx)?;
+    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
     let mut x = vec![0.0f64; topo.size];
 
     for iter in 0..MAX_ITER {
         let mut mat = stamp_netlist(&topo, netlist, 0.0, &empty, &empty);
 
-        // Evaluate and stamp nonlinear devices.
         for dev in &mut devices {
             dev.eval(&x, EvalFlags::dc(), &ctx);
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
 
+        // GMIN: add a small conductance to each node diagonal to prevent
+        // near-singular matrices when all devices have tiny conductance (e.g.
+        // a diode at Vd=0 has gd ≈ Is/Vt ≈ 4e-13 S ≪ GMIN).
+        for i in 0..topo.n_nodes() {
+            mat.a[i][i] += GMIN;
+        }
+
         let x_new = lu_solve(&mat.a, &mat.b)?;
 
-        // Global voltage step damping (backup — pnjlim handles most cases).
         let max_dv = x_new.iter()
             .zip(x.iter())
             .take(topo.n_nodes())
@@ -100,7 +104,6 @@ pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
             x_new
         };
 
-        // Convergence: |Δx[i]| < VNTOL + RELTOL·|x_next[i]| for all i.
         let converged = x_next.iter()
             .zip(x.iter())
             .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
@@ -113,6 +116,13 @@ pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
     }
 
     Err(SimError::NoConvergence { iters: MAX_ITER })
+}
+
+/// DC operating-point using only built-in models from `.model` cards.
+pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_diodes(&netlist.models);
+    dc_op_nr_with_registry(netlist, &registry)
 }
 
 #[cfg(test)]
