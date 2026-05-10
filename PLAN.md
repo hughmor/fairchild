@@ -187,6 +187,32 @@ Per optical port: two nodes — `(o_amp, o_phase)` or equivalently `(o_re, o_im)
 
 This maps directly to the existing keikawa Verilog-A model library convention and the MIT 2015 paper convention — photonic models written for Cadence/ADS will port with minimal changes.
 
+**Carrier frequency (wavelength) — third required parameter:**
+
+The complex envelope is defined relative to a carrier frequency ω₀ (equivalently, free-space wavelength λ = 2πc/ω₀). This is not a nodal variable — it does not vary with time — but it is required by every optical device model to compute wavelength-dependent quantities:
+- Propagation constant: β(ω₀) = 2π · n_eff(ω₀) / λ
+- Waveguide group delay, dispersion, loss
+- Directional coupler coupling ratio κ(λ)
+- Ring resonator resonance condition
+
+**Representation**: carrier frequency is a *connection attribute* associated with each optical port pair, not a separate MNA node. At netlist elaboration time, the elaborator:
+1. Resolves ω₀ for each optical port from the driving source (laser model parameter)
+2. Propagates it through passive connections via continuity rules
+3. Checks compatibility at junctions (connected ports must share ω₀, or be explicitly cross-connected via a wavelength-conversion element such as a SOA under XGM)
+
+**At simulation time**: ω₀ is passed to device model evaluation functions as a parameter (in `OsdiSimParas` for OSDI models; in a `SimContext` struct for Rust-native models). It is constant across all Newton iterations of a given simulation.
+
+**WDM**: each WDM channel is a distinct port pair `(o_λk_re, o_λk_im)` with its own ω₀_k. The number of channels and their carrier frequencies are fixed at elaboration time. Passive linear devices have one transfer function per channel (evaluated at their respective ω₀_k); nonlinear devices (SOA, EAM) couple channels.
+
+**YAML netlist representation**:
+```yaml
+laser:
+  model: cw_laser
+  ports: {o_p: optical_out_re, o_n: optical_out_im}
+  params: {power_dbm: 0, wavelength_nm: 1550}   # ← sets ω₀ for this port pair
+```
+The elaborator reads `wavelength_nm` from the driving source and tags the connected net with ω₀ = 2πc / 1550 nm. All downstream devices on that net receive ω₀ automatically — they do not need to repeat the wavelength parameter unless they are wavelength-selective (e.g., a ring filter parameterised by resonance wavelength).
+
 ### 2.4 Differentiable Simulation Design
 
 The adjoint method gives `∂L/∂p` for any scalar loss `L` and parameter vector `p` in a cost proportional to one forward simulation, regardless of the number of parameters.
