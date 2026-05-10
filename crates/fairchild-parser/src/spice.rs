@@ -1,4 +1,4 @@
-use crate::{Analysis, Element, Netlist, ParseError, Waveform};
+use crate::{Analysis, Element, ModelCard, Netlist, ParseError, Waveform};
 
 /// Parse a SPICE netlist from a string.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
@@ -24,6 +24,10 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             netlist.analyses.push(Analysis::Op);
         } else if lc.starts_with(".tran") {
             netlist.analyses.push(parse_tran(&lc, *raw_lineno)?);
+        } else if lc.starts_with(".model") {
+            if let Some(card) = parse_model(&lc, *raw_lineno)? {
+                netlist.models.push(card);
+            }
         } else if lc.starts_with('.') {
             // Ignore other directives (.param, .ic, .meas, etc.) for now.
         } else {
@@ -144,8 +148,47 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 waveform,
             })
         }
+        'd' => {
+            if tokens.len() < 4 {
+                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+            }
+            Ok(Element::Diode {
+                name,
+                anode: canon_node(tokens[1]),
+                cathode: canon_node(tokens[2]),
+                model_name: tokens[3].to_lowercase(),
+            })
+        }
         _ => Err(ParseError::UnknownElement { letter, line: lineno }),
     }
+}
+
+/// Parse `.model <name> <kind> [params]` — kind is the first letter of device type.
+/// Params may be bare `Name=Value` tokens or wrapped in parentheses.
+fn parse_model(line: &str, lineno: usize) -> Result<Option<ModelCard>, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return Ok(None);  // malformed, ignore silently
+    }
+    let name = tokens[1].to_string();
+    let kind = tokens[2].to_lowercase();
+
+    // Join remainder, strip parentheses, then split on whitespace.
+    let rest = tokens[3..].join(" ");
+    let rest = rest.trim_matches(|c| c == '(' || c == ')').trim().to_string();
+    // Handle inner parentheses too: remove all parens.
+    let rest = rest.replace('(', " ").replace(')', " ");
+
+    let mut params = Vec::new();
+    for tok in rest.split_whitespace() {
+        if let Some((k, v)) = tok.split_once('=') {
+            if let Ok(val) = parse_value(v, lineno) {
+                params.push((k.to_lowercase(), val));
+            }
+        }
+    }
+
+    Ok(Some(ModelCard { name, kind, params }))
 }
 
 /// Parse the waveform specification from a V/I source token list.
@@ -287,6 +330,44 @@ mod tests {
         assert_eq!(canon_node("GND"), "0");
         assert_eq!(canon_node("gnd"), "0");
         assert_eq!(canon_node("0"), "0");
+    }
+
+    #[test]
+    fn parse_diode_element() {
+        let input = "* Diode\nD1 anode cathode myd\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+        if let Element::Diode { name, anode, cathode, model_name } = &netlist.elements[0] {
+            assert_eq!(name, "d1");
+            assert_eq!(anode, "anode");
+            assert_eq!(cathode, "cathode");
+            assert_eq!(model_name, "myd");
+        } else {
+            panic!("expected Diode element");
+        }
+    }
+
+    #[test]
+    fn parse_model_card() {
+        let input = "* test\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.models.len(), 1);
+        let m = &netlist.models[0];
+        assert_eq!(m.name, "myd");
+        assert_eq!(m.kind, "d");
+        let is = m.params.iter().find(|(k, _)| k == "is").map(|(_, v)| *v).unwrap();
+        assert!((is - 1e-14).abs() < 1e-20, "is={is}");
+        let n = m.params.iter().find(|(k, _)| k == "n").map(|(_, v)| *v).unwrap();
+        assert!((n - 1.0).abs() < 1e-12, "n={n}");
+    }
+
+    #[test]
+    fn parse_model_card_no_parens() {
+        let input = "* test\n.model myd D Is=2.52e-9 N=1.752\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let m = &netlist.models[0];
+        assert_eq!(m.kind, "d");
+        assert_eq!(m.params.len(), 2);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub struct Netlist {
     pub title: String,
     pub elements: Vec<Element>,
     pub analyses: Vec<Analysis>,
+    pub models: Vec<ModelCard>,
 }
 
 /// Waveform specification for independent sources.
@@ -97,6 +98,20 @@ pub enum Element {
         neg: NodeName,
         waveform: Waveform,
     },
+    Diode {
+        name: String,
+        anode: NodeName,
+        cathode: NodeName,
+        model_name: String,
+    },
+}
+
+/// A model card parsed from `.model <name> <kind> [param=value ...]`.
+#[derive(Debug, Clone)]
+pub struct ModelCard {
+    pub name: String,
+    pub kind: String,
+    pub params: Vec<(String, f64)>,
 }
 
 /// A requested simulation analysis.
