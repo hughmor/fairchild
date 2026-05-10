@@ -147,7 +147,11 @@ fn stamp_vsource(
 }
 
 /// Stamp an independent current source.
-/// Positive convention: current flows from neg to pos (into pos node).
+///
+/// SPICE convention for `I name n+ n-`: positive current flows from n+ through
+/// the source to n-. So current LEAVES n+ and ENTERS n-.
+///   b[n+] -= dc    (removes dc from n+ KCL)
+///   b[n-] += dc    (injects dc into n- KCL)
 fn stamp_isource(
     b: &mut Vec<f64>,
     idx: &IndexMap<String, usize>,
@@ -156,10 +160,10 @@ fn stamp_isource(
     dc: f64,
 ) {
     if let Some(&p) = idx.get(pos) {
-        b[p] += dc;
+        b[p] -= dc;
     }
     if let Some(&n) = idx.get(neg) {
-        b[n] -= dc;
+        b[n] += dc;
     }
 }
 

@@ -8,3 +8,6 @@ fairchild-parser = { workspace = true }
 faer.workspace = true
 thiserror        = { workspace = true }
 indexmap         = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
