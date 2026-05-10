@@ -9,11 +9,11 @@ use crate::models::ShockleyDiode;
 use crate::solver::lu_solve;
 
 /// SPICE-standard convergence tolerances.
-const VNTOL: f64 = 1e-6;     // 1 μV absolute floor for voltages
-const RELTOL: f64 = 1e-3;    // 0.1 % relative tolerance
+pub(crate) const VNTOL: f64 = 1e-6;     // 1 μV absolute floor for voltages
+pub(crate) const RELTOL: f64 = 1e-3;    // 0.1 % relative tolerance
 /// Backup global step damping: max allowed Δ(node voltage) per iteration.
-const VMAX: f64 = 0.5;
-const MAX_ITER: usize = 150;
+pub(crate) const VMAX: f64 = 0.5;
+pub(crate) const MAX_ITER: usize = 150;
 
 /// Result of a nonlinear DC operating-point solve.
 pub struct NrResult {
@@ -40,12 +40,14 @@ impl NrResult {
 ///
 /// Falls back gracefully for purely linear circuits (no Diode elements):
 /// runs one NR iteration, which converges in a single step.
-pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
-    let ctx = SimContext::default();
-    let topo = CircuitTopology::build(netlist);
-    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-
-    // Build device list from Diode elements.
+/// Build Rust-native device instances from the Diode elements in a netlist.
+///
+/// Called by both `dc_op_nr` and `tran_nr` to avoid duplicating the setup sequence.
+pub(crate) fn build_devices(
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    ctx: &SimContext,
+) -> Result<Vec<Box<dyn Device>>, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
     for el in &netlist.elements {
         if let Element::Diode { anode, cathode, model_name, .. } = el {
@@ -54,15 +56,22 @@ pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
                 .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
 
             let mut dev = Box::new(ShockleyDiode::from_params(&card.params));
-            dev.setup_model(&ctx);
-
+            dev.setup_model(ctx);
             let pos: NodeId = topo.node_index.get(anode).copied();
             let neg: NodeId = topo.node_index.get(cathode).copied();
-            dev.setup_instance(&[pos, neg], &ctx);
+            dev.setup_instance(&[pos, neg], ctx);
             devices.push(dev);
         }
     }
+    Ok(devices)
+}
 
+pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
+    let ctx = SimContext::default();
+    let topo = CircuitTopology::build(netlist);
+    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+
+    let mut devices = build_devices(netlist, &topo, &ctx)?;
     let mut x = vec![0.0f64; topo.size];
 
     for iter in 0..MAX_ITER {

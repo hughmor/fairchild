@@ -11,4 +11,4 @@ pub use error::SimError;
 pub use models::ShockleyDiode;
 pub use newton::{dc_op_nr, NrResult};
 pub use solver::{dc_op, OpResult};
-pub use tran::{run_tran, TranResult};
+pub use tran::{run_tran, tran_nr, TranResult};

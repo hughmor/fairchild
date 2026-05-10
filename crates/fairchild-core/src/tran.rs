@@ -1,17 +1,16 @@
 /// Fixed-step Backward Euler (BDF-1) transient integrator.
 ///
-/// At each time step tn = t0 + n·h:
-///   1. Build MNA with BE companion models for capacitors and inductors.
-///   2. Solve A·x = b (faer LU).
-///   3. Update companion state (V_C, I_L) for the next step.
-///   4. Store the solution in TranResult.
+/// `run_tran` — linear-only (R, L, C, V, I).
+/// `tran_nr`  — adds Newton-Raphson for nonlinear devices (diodes, etc.).
 
 use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
+use crate::device::{EvalFlags, SimContext};
 use crate::error::SimError;
 use crate::mna::{cap_companion, ind_companion, stamp_netlist, CircuitTopology};
+use crate::newton::{build_devices, VMAX, VNTOL, RELTOL, MAX_ITER};
 use crate::solver::lu_solve;
 
 /// Output of a transient simulation.
@@ -129,10 +128,210 @@ pub fn run_tran(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, S
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Helpers shared by run_tran and tran_nr
+// ---------------------------------------------------------------------------
+
+/// Initialise capacitor and inductor companion state from a solution vector.
+///
+/// For capacitors: V_C_init = V(pos) - V(neg) from the provided x (typically the DC OP).
+/// For inductors: I_L_init = 0 (inductors are open-circuit in the DC solver).
+fn init_companions(
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    step: f64,
+    x: &[f64],
+) -> (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>) {
+    let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Capacitor { name, pos, neg, capacitance } => {
+                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
+                    - topo.node_voltage(neg, x).unwrap_or(0.0);
+                cap_state.insert(name.clone(), cap_companion(*capacitance, step, vc));
+            }
+            Element::Inductor { name, inductance, .. } => {
+                ind_state.insert(name.clone(), ind_companion(*inductance, step, 0.0));
+            }
+            _ => {}
+        }
+    }
+    (cap_state, ind_state)
+}
+
+/// Advance companion state: read post-step voltages/currents from x, update state maps.
+fn advance_companions(
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    step: f64,
+    x: &[f64],
+    cap_state: &mut IndexMap<String, (f64, f64)>,
+    ind_state: &mut IndexMap<String, (f64, f64)>,
+) {
+    for el in &netlist.elements {
+        match el {
+            Element::Capacitor { name, pos, neg, capacitance } => {
+                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
+                    - topo.node_voltage(neg, x).unwrap_or(0.0);
+                cap_state.insert(name.clone(), cap_companion(*capacitance, step, vc));
+            }
+            Element::Inductor { name, pos, neg, inductance } => {
+                let (g_eq, i_hist) = ind_state[name];
+                let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
+                    - topo.node_voltage(neg, x).unwrap_or(0.0);
+                let il = g_eq * vl + i_hist;
+                ind_state.insert(name.clone(), ind_companion(*inductance, step, il));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Append one time-point to a TranResult.
+fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
+    result.time.push(t);
+    for (name, &idx) in &topo.node_index {
+        result.node_voltages.get_mut(name).unwrap().push(x[idx]);
+    }
+    let n = topo.n_nodes();
+    for (name, &idx) in &topo.vsrc_index {
+        result.vsrc_currents.get_mut(name).unwrap().push(x[n + idx]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nonlinear transient solver
+// ---------------------------------------------------------------------------
+
+/// Fixed-step Backward Euler transient with Newton-Raphson for nonlinear devices.
+///
+/// Compared to `run_tran`:
+///   - Starts from the DC operating point (dc_op_nr) as initial conditions.
+///   - Runs a full NR inner loop at every time step.
+///   - Handles Diode elements (and any other `Device` implementations).
+///
+/// Reactive elements (C, L) are handled identically to `run_tran` via BE companion models.
+pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
+    let ctx = SimContext::default();
+    let topo = CircuitTopology::build(netlist);
+
+    // DC operating point as initial condition for t = 0.
+    let dc = crate::newton::dc_op_nr(netlist)?;
+    let mut x = dc.x;
+
+    // Build and initialise nonlinear devices.
+    let mut devices = build_devices(netlist, &topo, &ctx)?;
+
+    // Reactive companion state seeded from the DC OP.
+    let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x);
+
+    let n_steps = ((stop / step).ceil() as usize) + 2;
+    let mut result = TranResult {
+        time: Vec::with_capacity(n_steps),
+        node_voltages: topo.node_index.keys()
+            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
+            .collect(),
+        vsrc_currents: topo.vsrc_index.keys()
+            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
+            .collect(),
+    };
+
+    // Store t = 0 from DC OP.
+    push_timepoint(&mut result, 0.0, &topo, &x);
+
+    let mut t = step;
+    loop {
+        // --- NR loop for this time step ---
+        for _iter in 0..MAX_ITER {
+            let mut mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
+
+            for dev in &mut devices {
+                dev.eval(&x, EvalFlags::dc(), &ctx);
+                dev.load_residual(&mut mat.b);
+                dev.load_jacobian(&mut mat);
+            }
+
+            let x_new = lu_solve(&mat.a, &mat.b)?;
+
+            // Global voltage step damping (same as dc_op_nr).
+            let max_dv = x_new.iter()
+                .zip(x.iter())
+                .take(topo.n_nodes())
+                .map(|(n, o)| (n - o).abs())
+                .fold(0.0f64, f64::max);
+
+            let x_next: Vec<f64> = if max_dv > VMAX {
+                let scale = VMAX / max_dv;
+                x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
+            } else {
+                x_new
+            };
+
+            let converged = x_next.iter()
+                .zip(x.iter())
+                .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
+
+            x = x_next;
+            if converged { break; }
+        }
+
+        push_timepoint(&mut result, t, &topo, &x);
+
+        if t >= stop { break; }
+        advance_companions(netlist, &topo, step, &x, &mut cap_state, &mut ind_state);
+        t = (t + step).min(stop);
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
+
+    // ---------- tran_nr tests ----------
+
+    #[test]
+    fn tran_nr_matches_linear_for_rc() {
+        // Pure RC (no diode): tran_nr and run_tran should agree within 0.1%.
+        let netlist = parse_spice(
+            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n.end\n"
+        ).unwrap();
+        let r_linear = run_tran(&netlist, 1e-6, 2e-3).unwrap();
+        let r_nr = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
+
+        let v_lin = r_linear.voltage_at("out", 1e-3).unwrap();
+        let v_nr  = r_nr.voltage_at("out", 1e-3).unwrap();
+        assert!(
+            (v_lin - v_nr).abs() < 1e-4,
+            "tran_nr diverges from run_tran at t=1ms: linear={v_lin:.6}  nr={v_nr:.6}"
+        );
+    }
+
+    #[test]
+    fn tran_nr_diode_steady_state() {
+        // R-D series, constant V=5V, no reactive elements.
+        // tran_nr result at t=1µs must match dc_op_nr within 0.1%.
+        let netlist_str =
+            "* Diode DC via transient\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
+        let netlist = parse_spice(netlist_str).unwrap();
+
+        let dc = crate::newton::dc_op_nr(&netlist).unwrap();
+        let vb_dc = dc.node_voltage("b").unwrap();
+
+        let tr = tran_nr(&netlist, 1e-6, 10e-6).unwrap();
+        // At the last time step the solution should still be the DC OP.
+        let vb_tran = tr.voltage_at("b", 10e-6).unwrap();
+        assert!(
+            (vb_tran - vb_dc).abs() < 1e-6,
+            "V(b) tran_nr={vb_tran:.6e}  dc_op_nr={vb_dc:.6e}"
+        );
+    }
+
+    // ---------- run_tran regression tests ----------
 
     #[test]
     fn rc_step_response_shape() {
