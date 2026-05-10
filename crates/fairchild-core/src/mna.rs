@@ -89,17 +89,18 @@ pub fn stamp_netlist(
             Element::Capacitor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = cap_state.get(name) {
                     stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
-                    // Companion current source: I_hist injects into pos, removes from neg.
-                    stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, i_hist);
+                    // BE companion: KCL at pos gives b[pos] += I_hist.
+                    // stamp_current_source(neg, pos, v) adds v to b[pos].
+                    stamp_current_source(&mut mat.b, &topo.node_index, neg, pos, i_hist);
                 }
-                // If not in cap_state (no transient yet), capacitor = open circuit at DC.
+                // Capacitor absent from cap_state = open circuit (correct for DC OP).
             }
             Element::Inductor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
                     stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
-                    // Inductor companion: I_hist flows from pos to neg (same as inductor current).
-                    // In SPICE sign convention this is current LEAVING pos → subtract from pos.
-                    stamp_current_source(&mut mat.b, &topo.node_index, neg, pos, i_hist);
+                    // BE companion: KCL at pos gives b[pos] -= I_hist.
+                    // stamp_current_source(pos, neg, v) subtracts v from b[pos].
+                    stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, i_hist);
                 }
                 // If not in ind_state (no transient yet), inductor = short circuit at DC.
                 // For DC OP we treat L as wire — but that would make a voltage source loop.
