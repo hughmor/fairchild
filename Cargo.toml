@@ -3,13 +3,17 @@ members = [
     "crates/fairchild-core",
     "crates/fairchild-parser",
     "crates/fairchild-cli",
+    "crates/fairchild-osdi",
+    "crates/osdi-mock",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 fairchild-core   = { path = "crates/fairchild-core" }
 fairchild-parser = { path = "crates/fairchild-parser" }
+fairchild-osdi   = { path = "crates/fairchild-osdi" }
 
 faer        = "0.24"
 thiserror   = "2"
 indexmap    = "2"
+libc        = "0.2"
