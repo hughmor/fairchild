@@ -1,13 +1,6 @@
-use crate::{Analysis, Element, Netlist, ParseError};
+use crate::{Analysis, Element, Netlist, ParseError, Waveform};
 
 /// Parse a SPICE netlist from a string.
-///
-/// SPICE format rules implemented here:
-/// - Line 1 is always the title (even if it looks like an element).
-/// - Lines starting with `*` are comments.
-/// - Lines starting with `+` are continuations of the previous line.
-/// - Case-insensitive keywords and node names (except node "0"/"gnd").
-/// - Element type determined by first character of the element name.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     let logical_lines = logical_lines(input);
     let mut netlist = Netlist::default();
@@ -25,12 +18,14 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 
         let lc = trimmed.to_lowercase();
 
-        if lc.starts_with(".end") && (lc == ".end" || lc.starts_with(".ends")) {
+        if lc == ".end" || lc.starts_with(".ends") {
             break;
         } else if lc.starts_with(".op") {
             netlist.analyses.push(Analysis::Op);
+        } else if lc.starts_with(".tran") {
+            netlist.analyses.push(parse_tran(&lc, *raw_lineno)?);
         } else if lc.starts_with('.') {
-            // Ignore other directives for now (.tran, .param, etc.)
+            // Ignore other directives (.param, .ic, .meas, etc.) for now.
         } else {
             let el = parse_element(trimmed, *raw_lineno)?;
             netlist.elements.push(el);
@@ -40,15 +35,29 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     Ok(netlist)
 }
 
+/// Parse `.tran <step> <stop>` directive.
+fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return Err(ParseError::FieldCount { expected: "≥3 (.tran step stop)", got: tokens.len(), line: lineno });
+    }
+    Ok(Analysis::Tran {
+        step: parse_value(tokens[1], lineno)?,
+        stop: parse_value(tokens[2], lineno)?,
+    })
+}
+
 /// Canonicalise a node name: lowercase; "gnd" → "0".
 fn canon_node(s: &str) -> String {
     let s = s.to_lowercase();
     if s == "gnd" { "0".to_string() } else { s }
 }
 
-/// Parse an SPICE suffix (k=1e3, meg=1e6, etc.) into a float.
+/// Parse an SPICE suffix (k, meg, m, u, n, p, f, g, t) into a float.
 fn parse_value(s: &str, lineno: usize) -> Result<f64, ParseError> {
     let s_lc = s.to_lowercase();
+    // Strip trailing alphabetic suffix that might follow a number (e.g. "1.0v", "5.0a")
+    // We support SPICE multiplier suffixes only.
     let (num_part, multiplier) = if let Some(n) = s_lc.strip_suffix("meg") {
         (n, 1e6)
     } else if let Some(n) = s_lc.strip_suffix('k') {
@@ -95,44 +104,113 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 resistance: parse_value(tokens[3], lineno)?,
             })
         }
+        'c' => {
+            if tokens.len() < 4 {
+                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+            }
+            Ok(Element::Capacitor {
+                name,
+                pos: canon_node(tokens[1]),
+                neg: canon_node(tokens[2]),
+                capacitance: parse_value(tokens[3], lineno)?,
+            })
+        }
+        'l' => {
+            if tokens.len() < 4 {
+                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+            }
+            Ok(Element::Inductor {
+                name,
+                pos: canon_node(tokens[1]),
+                neg: canon_node(tokens[2]),
+                inductance: parse_value(tokens[3], lineno)?,
+            })
+        }
         'v' => {
-            // V<name> <pos> <neg> [DC] <value>
-            let dc = parse_vsrc_value(&tokens, lineno)?;
+            let waveform = parse_waveform(&tokens, lineno)?;
             Ok(Element::VoltageSource {
                 name,
                 pos: canon_node(tokens[1]),
                 neg: canon_node(tokens[2]),
-                dc,
+                waveform,
             })
         }
         'i' => {
-            let dc = parse_vsrc_value(&tokens, lineno)?;
+            let waveform = parse_waveform(&tokens, lineno)?;
             Ok(Element::CurrentSource {
                 name,
                 pos: canon_node(tokens[1]),
                 neg: canon_node(tokens[2]),
-                dc,
+                waveform,
             })
         }
         _ => Err(ParseError::UnknownElement { letter, line: lineno }),
     }
 }
 
-/// Extract the DC value from a V/I source token list.
-/// Handles: `V1 a b 5`, `V1 a b DC 5`, `V1 a b dc 5.0`
-fn parse_vsrc_value(tokens: &[&str], lineno: usize) -> Result<f64, ParseError> {
+/// Parse the waveform specification from a V/I source token list.
+/// Handles:
+///   `V1 a b 5`               → Dc(5)
+///   `V1 a b DC 5`            → Dc(5)
+///   `V1 a b PULSE(0 1 0 ...)`→ Pulse{...}
+fn parse_waveform(tokens: &[&str], lineno: usize) -> Result<Waveform, ParseError> {
     if tokens.len() < 4 {
         return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
     }
+
+    // Rejoin tokens[3..] so PULSE( 0 1 ...) with spaces around parens also works.
+    let rest = tokens[3..].join(" ");
+    let rest_lc = rest.to_lowercase();
+
+    if rest_lc.starts_with("pulse") {
+        return parse_pulse(&rest_lc, lineno);
+    }
+
+    // DC value: either "DC value" or just "value"
     let tok = tokens[3].to_lowercase();
     if tok == "dc" {
         if tokens.len() < 5 {
-            return Err(ParseError::FieldCount { expected: "≥5 (DC keyword present)", got: tokens.len(), line: lineno });
+            return Err(ParseError::FieldCount { expected: "≥5 (DC keyword)", got: tokens.len(), line: lineno });
         }
-        parse_value(tokens[4], lineno)
+        Ok(Waveform::Dc(parse_value(tokens[4], lineno)?))
     } else {
-        parse_value(tokens[3], lineno)
+        Ok(Waveform::Dc(parse_value(tokens[3], lineno)?))
     }
+}
+
+/// Parse `PULSE(v0 v1 td tr tf pw per)` into a `Waveform::Pulse`.
+/// Accepts both compact `PULSE(0 1 ...)` and spaced forms.
+fn parse_pulse(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    // Extract the parenthesised argument list.
+    let start = s.find('(').ok_or_else(|| ParseError::Syntax {
+        line: lineno,
+        msg: "PULSE: missing '('".into(),
+    })?;
+    let end = s.rfind(')').ok_or_else(|| ParseError::Syntax {
+        line: lineno,
+        msg: "PULSE: missing ')'".into(),
+    })?;
+    let inner = &s[start + 1..end];
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+
+    // v0 v1 td tr tf pw per  (7 fields, defaults for omitted trailing ones)
+    let get = |i: usize, default: f64| -> Result<f64, ParseError> {
+        parts.get(i).map_or(Ok(default), |s| parse_value(s, lineno))
+    };
+
+    if parts.len() < 2 {
+        return Err(ParseError::FieldCount { expected: "≥2 (PULSE v0 v1 ...)", got: parts.len(), line: lineno });
+    }
+
+    Ok(Waveform::Pulse {
+        v0:  get(0, 0.0)?,
+        v1:  get(1, 0.0)?,
+        td:  get(2, 0.0)?,
+        tr:  get(3, 0.0)?,
+        tf:  get(4, 0.0)?,
+        pw:  get(5, f64::INFINITY)?,
+        per: get(6, f64::INFINITY)?,
+    })
 }
 
 /// Join continuation lines (starting with `+`) and return (original_lineno, joined_line) pairs.
@@ -166,6 +244,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_rc_tran() {
+        let input = "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.elements.len(), 3);
+        match &netlist.analyses[0] {
+            Analysis::Tran { step, stop } => {
+                assert!((step - 1e-6).abs() < 1e-12);
+                assert!((stop - 5e-3).abs() < 1e-12);
+            }
+            _ => panic!("expected Tran analysis"),
+        }
+    }
+
+    #[test]
+    fn parse_pulse_waveform() {
+        let input = "* Pulse\nV1 a 0 PULSE(0 1 0 1n 1n 10m 20m)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        if let Element::VoltageSource { waveform: Waveform::Pulse { v0, v1, tr, .. }, .. } = &netlist.elements[0] {
+            assert!((v0 - 0.0).abs() < 1e-12);
+            assert!((v1 - 1.0).abs() < 1e-12);
+            assert!((tr - 1e-9).abs() < 1e-15);
+        } else {
+            panic!("expected PULSE VoltageSource");
+        }
+    }
+
+    #[test]
     fn parse_suffix_k() {
         let v = parse_value("2k", 1).unwrap();
         assert!((v - 2000.0).abs() < 1e-9);
@@ -182,5 +287,13 @@ mod tests {
         assert_eq!(canon_node("GND"), "0");
         assert_eq!(canon_node("gnd"), "0");
         assert_eq!(canon_node("0"), "0");
+    }
+
+    #[test]
+    fn pulse_waveform_at() {
+        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 1e-9, tf: 1e-9, pw: 1.0, per: 2.0 };
+        assert!((w.at(0.0) - 0.0).abs() < 1e-12);
+        assert!((w.at(1e-9) - 1.0).abs() < 1e-6); // fully risen
+        assert!((w.at(0.5e-9) - 0.5).abs() < 1e-6); // mid-rise
     }
 }

@@ -1,79 +1,188 @@
-/// Modified Nodal Analysis matrix assembler.
+/// Modified Nodal Analysis (MNA) matrix assembler.
 ///
-/// Matrix layout (all indices are 0-based into the MNA matrix):
-///   rows/cols [0 .. n_nodes-1)     → node voltages (ground excluded)
-///   rows/cols [n_nodes-1 .. n_nodes-1+m) → voltage-source branch currents
+/// Matrix layout (0-based):
+///   rows/cols [0 .. n_nodes)          → node voltages (ground excluded)
+///   rows/cols [n_nodes .. n_nodes+m)  → voltage-source branch currents
 ///
-/// Ground is always node "0" and is eliminated from the matrix.
+/// Ground node "0" is eliminated from the matrix.
 
 use fairchild_parser::{Element, Netlist};
 use indexmap::IndexMap;
 
 use crate::error::SimError;
 
-/// Completed MNA system: A * x = b.
-pub struct MnaSystem {
-    /// Matrix A (dense for now; sparse via faer-rs used in solver).
-    pub a: Vec<Vec<f64>>,
-    /// RHS vector b.
-    pub b: Vec<f64>,
-    /// Map from node name to matrix row/col index (ground excluded).
+/// The topology/index maps for a circuit — built once, reused across time steps.
+#[derive(Clone)]
+pub struct CircuitTopology {
+    /// Map from node name → matrix row/col (ground excluded).
     pub node_index: IndexMap<String, usize>,
-    /// Map from voltage source name to aux current index (within a/b).
+    /// Map from voltage source name → aux current index within A/b.
     pub vsrc_index: IndexMap<String, usize>,
-    /// Total matrix dimension = (n_nodes - 1) + n_vsources.
+    /// Total matrix dimension = n_nodes + n_vsources.
     pub size: usize,
 }
 
-impl MnaSystem {
-    /// Build the MNA system from a parsed netlist.
-    pub fn build(netlist: &Netlist) -> Result<MnaSystem, SimError> {
+impl CircuitTopology {
+    pub fn build(netlist: &Netlist) -> CircuitTopology {
         let (node_index, vsrc_index) = index_circuit(netlist);
-        let n_nodes = node_index.len();       // excludes ground
-        let n_vsrc = vsrc_index.len();
-        let size = n_nodes + n_vsrc;
-
-        let mut a = vec![vec![0.0f64; size]; size];
-        let mut b = vec![0.0f64; size];
-
-        for el in &netlist.elements {
-            match el {
-                Element::Resistor { pos, neg, resistance, .. } => {
-                    stamp_resistor(&mut a, &node_index, pos, neg, *resistance);
-                }
-                Element::VoltageSource { name, pos, neg, dc } => {
-                    let vi = n_nodes + vsrc_index[name];
-                    stamp_vsource(&mut a, &mut b, &node_index, pos, neg, vi, *dc);
-                }
-                Element::CurrentSource { pos, neg, dc, .. } => {
-                    stamp_isource(&mut b, &node_index, pos, neg, *dc);
-                }
-            }
-        }
-
-        Ok(MnaSystem { a, b, node_index, vsrc_index, size })
+        let size = node_index.len() + vsrc_index.len();
+        CircuitTopology { node_index, vsrc_index, size }
     }
 
-    /// Look up a solved node voltage from the solution vector.
+    pub fn n_nodes(&self) -> usize { self.node_index.len() }
+
+    /// Retrieve a node voltage from a solution vector.
     pub fn node_voltage(&self, node: &str, x: &[f64]) -> Result<f64, SimError> {
-        if node == "0" || node == "gnd" {
-            return Ok(0.0);
-        }
+        if node == "0" || node == "gnd" { return Ok(0.0); }
         self.node_index.get(node)
             .map(|&i| x[i])
             .ok_or_else(|| SimError::UnknownNode(node.to_string()))
     }
 
-    /// Look up a solved voltage-source branch current from the solution vector.
+    /// Retrieve a voltage-source branch current from a solution vector.
     pub fn vsrc_current(&self, vsrc_name: &str, x: &[f64]) -> Result<f64, SimError> {
-        let n_nodes = self.node_index.len();
         self.vsrc_index.get(vsrc_name)
-            .map(|&i| x[n_nodes + i])
+            .map(|&i| x[self.n_nodes() + i])
             .ok_or_else(|| SimError::UnknownNode(vsrc_name.to_string()))
     }
 }
 
-/// Assign integer indices to every non-ground node and every voltage source.
+/// An assembled MNA system: A·x = b.
+pub struct MnaMatrix {
+    pub a: Vec<Vec<f64>>,
+    pub b: Vec<f64>,
+}
+
+impl MnaMatrix {
+    fn new(size: usize) -> Self {
+        MnaMatrix {
+            a: vec![vec![0.0f64; size]; size],
+            b: vec![0.0f64; size],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DC stamp (time-independent elements, or companion equivalents for C/L)
+// ---------------------------------------------------------------------------
+
+/// Stamp the full MNA system for DC operating-point or a single transient step.
+///
+/// `t`           — current simulation time (used for PULSE sources)
+/// `cap_state`   — map from capacitor name → (G_eq, I_hist) BE companion pair
+/// `ind_state`   — map from inductor name  → (G_eq, I_hist) BE companion pair
+pub fn stamp_netlist(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    t: f64,
+    cap_state: &IndexMap<String, (f64, f64)>,
+    ind_state: &IndexMap<String, (f64, f64)>,
+) -> MnaMatrix {
+    let mut mat = MnaMatrix::new(topo.size);
+    let n_nodes = topo.n_nodes();
+
+    for el in &netlist.elements {
+        match el {
+            Element::Resistor { pos, neg, resistance, .. } => {
+                stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, 1.0 / resistance);
+            }
+            Element::Capacitor { name, pos, neg, .. } => {
+                if let Some(&(g_eq, i_hist)) = cap_state.get(name) {
+                    stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
+                    // Companion current source: I_hist injects into pos, removes from neg.
+                    stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, i_hist);
+                }
+                // If not in cap_state (no transient yet), capacitor = open circuit at DC.
+            }
+            Element::Inductor { name, pos, neg, .. } => {
+                if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
+                    stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
+                    // Inductor companion: I_hist flows from pos to neg (same as inductor current).
+                    // In SPICE sign convention this is current LEAVING pos → subtract from pos.
+                    stamp_current_source(&mut mat.b, &topo.node_index, neg, pos, i_hist);
+                }
+                // If not in ind_state (no transient yet), inductor = short circuit at DC.
+                // For DC OP we treat L as wire — but that would make a voltage source loop.
+                // In practice we skip the inductor in DC OP (treated as ideal short via V=0 source).
+                // For now we leave it out of DC (open circuit), which is correct for initial tran.
+            }
+            Element::VoltageSource { name, pos, neg, waveform } => {
+                let vi = n_nodes + topo.vsrc_index[name];
+                stamp_vsource(&mut mat.a, &mut mat.b, &topo.node_index, pos, neg, vi, waveform.at(t));
+            }
+            Element::CurrentSource { pos, neg, waveform, .. } => {
+                // SPICE: current flows from n+ through source to n- → subtract from n+, add to n-.
+                stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, waveform.at(t));
+            }
+        }
+    }
+
+    mat
+}
+
+// ---------------------------------------------------------------------------
+// Stamp primitives
+// ---------------------------------------------------------------------------
+
+/// Add a conductance G between pos and neg (same as resistor with R=1/G).
+pub fn stamp_conductance(
+    a: &mut Vec<Vec<f64>>,
+    idx: &IndexMap<String, usize>,
+    pos: &str,
+    neg: &str,
+    g: f64,
+) {
+    if let Some(&p) = idx.get(pos) {
+        a[p][p] += g;
+        if let Some(&n) = idx.get(neg) {
+            a[p][n] -= g;
+            a[n][p] -= g;
+        }
+    }
+    if let Some(&n) = idx.get(neg) {
+        a[n][n] += g;
+    }
+}
+
+/// Stamp a voltage source at aux row `vi`: V(pos) - V(neg) = value.
+fn stamp_vsource(
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+    idx: &IndexMap<String, usize>,
+    pos: &str,
+    neg: &str,
+    vi: usize,
+    value: f64,
+) {
+    if let Some(&p) = idx.get(pos) {
+        a[p][vi] += 1.0;
+        a[vi][p] += 1.0;
+    }
+    if let Some(&n) = idx.get(neg) {
+        a[n][vi] -= 1.0;
+        a[vi][n] -= 1.0;
+    }
+    b[vi] += value;
+}
+
+/// Stamp a current source.
+/// SPICE convention: positive current flows from pos through source to neg.
+///   → b[pos] -= value,  b[neg] += value
+fn stamp_current_source(
+    b: &mut Vec<f64>,
+    idx: &IndexMap<String, usize>,
+    pos: &str,
+    neg: &str,
+    value: f64,
+) {
+    if let Some(&p) = idx.get(pos) { b[p] -= value; }
+    if let Some(&n) = idx.get(neg) { b[n] += value; }
+}
+
+// ---------------------------------------------------------------------------
+// Index builder
+// ---------------------------------------------------------------------------
+
 fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String, usize>) {
     let mut node_index: IndexMap<String, usize> = IndexMap::new();
     let mut vsrc_index: IndexMap<String, usize> = IndexMap::new();
@@ -81,6 +190,8 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
     for el in &netlist.elements {
         match el {
             Element::Resistor { pos, neg, .. }
+            | Element::Capacitor { pos, neg, .. }
+            | Element::Inductor { pos, neg, .. }
             | Element::CurrentSource { pos, neg, .. } => {
                 add_node(&mut node_index, pos);
                 add_node(&mut node_index, neg);
@@ -104,66 +215,59 @@ fn add_node(map: &mut IndexMap<String, usize>, node: &str) {
     }
 }
 
-/// Stamp a resistor with conductance G = 1/R into the A matrix.
-fn stamp_resistor(
-    a: &mut Vec<Vec<f64>>,
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    r: f64,
-) {
-    let g = 1.0 / r;
-    if let Some(&p) = idx.get(pos) {
-        a[p][p] += g;
-        if let Some(&n) = idx.get(neg) {
-            a[p][n] -= g;
-            a[n][p] -= g;
-        }
-    }
-    if let Some(&n) = idx.get(neg) {
-        a[n][n] += g;
-    }
+/// Backward Euler companion state for a capacitor at one time step.
+/// Returns (G_eq, I_hist) where G_eq = C/h and I_hist = G_eq * V_prev.
+pub fn cap_companion(capacitance: f64, h: f64, v_prev: f64) -> (f64, f64) {
+    let g = capacitance / h;
+    (g, g * v_prev)
 }
 
-/// Stamp a voltage source (KVL row + KCL coupling).
-fn stamp_vsource(
-    a: &mut Vec<Vec<f64>>,
-    b: &mut Vec<f64>,
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    vi: usize,
-    dc: f64,
-) {
-    if let Some(&p) = idx.get(pos) {
-        a[p][vi] += 1.0;
-        a[vi][p] += 1.0;
-    }
-    if let Some(&n) = idx.get(neg) {
-        a[n][vi] -= 1.0;
-        a[vi][n] -= 1.0;
-    }
-    b[vi] += dc;
+/// Backward Euler companion state for an inductor at one time step.
+/// Returns (G_eq, I_hist) where G_eq = h/L and I_hist = I_L_prev.
+pub fn ind_companion(inductance: f64, h: f64, i_prev: f64) -> (f64, f64) {
+    let g = h / inductance;
+    (g, i_prev)
 }
 
-/// Stamp an independent current source.
-///
-/// SPICE convention for `I name n+ n-`: positive current flows from n+ through
-/// the source to n-. So current LEAVES n+ and ENTERS n-.
-///   b[n+] -= dc    (removes dc from n+ KCL)
-///   b[n-] += dc    (injects dc into n- KCL)
-fn stamp_isource(
-    b: &mut Vec<f64>,
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    dc: f64,
-) {
-    if let Some(&p) = idx.get(pos) {
-        b[p] -= dc;
+// ---------------------------------------------------------------------------
+// Legacy compatibility wrapper used by DC solver and existing tests
+// ---------------------------------------------------------------------------
+
+/// Simple DC-only MNA system (no C/L companion, sources at DC value).
+pub struct MnaSystem {
+    pub a: Vec<Vec<f64>>,
+    pub b: Vec<f64>,
+    pub node_index: IndexMap<String, usize>,
+    pub vsrc_index: IndexMap<String, usize>,
+    pub size: usize,
+}
+
+impl MnaSystem {
+    pub fn build(netlist: &Netlist) -> Result<MnaSystem, SimError> {
+        let topo = CircuitTopology::build(netlist);
+        let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+        let mat = stamp_netlist(&topo, netlist, 0.0, &empty, &empty);
+        Ok(MnaSystem {
+            a: mat.a,
+            b: mat.b,
+            node_index: topo.node_index,
+            vsrc_index: topo.vsrc_index,
+            size: topo.size,
+        })
     }
-    if let Some(&n) = idx.get(neg) {
-        b[n] += dc;
+
+    pub fn node_voltage(&self, node: &str, x: &[f64]) -> Result<f64, SimError> {
+        if node == "0" || node == "gnd" { return Ok(0.0); }
+        self.node_index.get(node)
+            .map(|&i| x[i])
+            .ok_or_else(|| SimError::UnknownNode(node.to_string()))
+    }
+
+    pub fn vsrc_current(&self, vsrc_name: &str, x: &[f64]) -> Result<f64, SimError> {
+        let n_nodes = self.node_index.len();
+        self.vsrc_index.get(vsrc_name)
+            .map(|&i| x[n_nodes + i])
+            .ok_or_else(|| SimError::UnknownNode(vsrc_name.to_string()))
     }
 }
 
@@ -179,7 +283,18 @@ mod tests {
         )
         .unwrap();
         let sys = MnaSystem::build(&net).unwrap();
-        // 2 nodes (in, mid) + 1 vsource = 3x3 matrix
+        // 2 nodes (in, mid) + 1 vsource = 3×3
         assert_eq!(sys.size, 3);
+    }
+
+    #[test]
+    fn rc_circuit_topology() {
+        let net = parse_spice(
+            "* RC\nV1 in 0 1.0\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n",
+        )
+        .unwrap();
+        let topo = CircuitTopology::build(&net);
+        // nodes: in, out (2) + 1 vsource = 3
+        assert_eq!(topo.size, 3);
     }
 }

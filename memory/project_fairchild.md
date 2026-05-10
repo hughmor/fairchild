@@ -1,32 +1,44 @@
 ---
 name: fairchild project context
-description: Context for the electronic-photonic co-simulation suite project (fairchild)
+description: Electronic-photonic co-simulation suite: Rust core, ngspice validation, SiPh target
 type: project
 ---
 
 Open-source EO co-simulation suite targeting SiPh. Rust core, PyO3 Python bindings, CLI.
 
-**Why:** No open-source time-domain EO co-simulator exists. Cadence Spectre Photonics is the only working implementation; it's proprietary and extremely expensive.
+**Why:** No open-source time-domain EO co-simulator exists. Cadence Spectre Photonics is the only working implementation; it is proprietary and extremely expensive.
 
-**Key architectural decisions:**
-- Verilog-A compiler: OpenVAF-Reloaded (arpadbuermen fork on Codeberg) → OSDI v0.4 shared libs
-- Solver: Port VACASK (C++, Codeberg: arpadbuermen/VACASK, FOSDEM 2025) architecture to Rust rather than deriving from scratch
-- Simulation mode: time-domain DAE first-class; S-matrix augmentation for passive components without time-domain models
-- Differentiable: design adjoint sensitivity from the start (not bolted on)
-- Photonic signal: complex envelope (SVEA), two nodes per optical port (amplitude + phase), following MIT Sorace-Agaskar 2015 convention
-- Netlist formats: SPICE, Verilog-AMS, YAML/TOML
-- PDK targets: SiEPIC_EBeam_PDK (primary open), GF45SPCLO (stretch), custom .va models
+**Plan document:** `/Users/hugh/Local/src/fairchild/PLAN.md`
 
-**Application domain:** Silicon photonics (SiPh) ICs.
+**Codebase layout (as of 2026-05-10):**
+- `crates/fairchild-parser/` — SPICE netlist parser (R, V, I, .op)
+- `crates/fairchild-core/` — MNA assembler + DC solver (faer 0.24 dense LU)
+- `crates/fairchild-cli/` — stub binary
+- `tests/golden/` — reference netlists for ngspice comparison
+- `crates/fairchild-core/tests/ngspice_golden.rs` — integration test harness
 
-**Timeline:** 6-12 months to working prototype.
+**Current state (Phase 0, Day 1 complete):**
+- DC operating-point solver for resistive circuits (R, V, I) working
+- 5 ngspice golden comparison tests passing (voltage divider, current divider, Wheatstone bridge, ladder, multi-source)
+- Rust 1.95.0, faer 0.24, ngspice 45.2 at /opt/homebrew/bin/ngspice
 
 **Phase 0 falsifiability gate (Weeks 1-6):** CMOS inverter transient via BSIM4 OSDI model.
 
-**Key open questions to validate immediately:**
-- Does OpenVAF-Reloaded need modification to handle a custom optical discipline? (Week 1-2 task)
-- Can OSDI v0.4 carry optical port semantics without compiler changes?
+**Next priorities:**
+1. GEAR order-1 transient integrator (BDF-1 = Backward Euler)
+2. Capacitor and inductor MNA stamps for transient
+3. ngspice golden tests for RC/RL/RLC transient responses
+4. OSDI runtime for loading OpenVAF-Reloaded compiled models
 
-**Plan document:** `/Users/hugh/Local/src/veriloga/PLAN.md`
+**Key architectural decisions:**
+- Verilog-A compiler: OpenVAF-Reloaded (arpadbuermen fork on Codeberg) → OSDI v0.4 shared libs
+- Solver: port VACASK (C++, FOSDEM 2025, arpadbuermen/VACASK on Codeberg) to Rust
+- Differentiable: design adjoint sensitivity from the start
+- Photonic signal: complex envelope (SVEA), two nodes per optical port, MIT Sorace-Agaskar 2015 convention
+
+**MNA sign convention (validated 2026-05-10 against ngspice):**
+- Current source `I n+ n-`: SPICE = current flows from n+ through source to n-
+  → b[n+] -= dc, b[n-] += dc
+- ngspice tests immediately caught a sign bug — validates test-first approach
 
 **How to apply:** Use this context when implementing any part of the simulator. The plan doc is the authoritative reference.
