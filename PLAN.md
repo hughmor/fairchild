@@ -300,195 +300,19 @@ fairchild/                          # workspace root
 
 ## Part 3 — Phased Roadmap
 
-### Phase 0: Foundation & Falsifiable Demo (Weeks 1–6)
+Detailed plans for active and upcoming phases are in `.claude/memory/`. This section summarises the full roadmap and contains the detailed specs for Phases 5–7 (which are not yet in `.claude/memory/`).
 
-**Goal**: A single passing integration test that exercises the complete stack: compile `.va` with OpenVAF-Reloaded → load `.osdi` in Rust runtime → run DC + transient on a CMOS inverter.
-
-This is the "if this can't work in 6 weeks the plan is fiction" milestone.
-
-**Week 1–2: Study VACASK architecture**
-- Read VACASK source: Newton-Raphson implementation, GEAR integrator, OSDI loading.
-- Read OpenVAF-Reloaded source: HIR, MIR, OSDI output, how disciplines are handled (key question: does OpenVAF strip discipline info, and can a custom optical discipline flow through unmodified?).
-- Read OSDI v0.4 spec in full.
-- Output: written notes on what to port vs. what to replace.
-
-**Week 2–4: Core scaffold**
-- Workspace setup; CI pipeline.
-- SPICE parser: R, L, C, V, I, `.subckt`, `.ends`, `.param`, `.tran`, `.dc`.
-- MNA assembler: node numbering, stamp matrix, RHS vector.
-- faer-rs sparse solver integration.
-- DC Newton-Raphson (no device models yet — just passive elements).
-
-**Week 4–6: OSDI runtime + first demo**
-- OSDI v0.4 runtime: `dlopen`, symbol lookup, model initialization, `calculate` call.
-- Build OpenVAF-Reloaded; compile BSIM4 model to `.osdi`.
-- GEAR order 1 transient integrator.
-- **Demo**: CMOS inverter transient using BSIM4 `.osdi` model. Compare output against ngspice golden.
-
-**Milestone**: `cargo test --test integration cmos_inverter` passes.
-
----
-
-### Phase 1: Solver Hardening (Months 1–4, overlaps Phase 0)
-
-**Goal**: Production-quality convergence; pass >90% of a standard SPICE golden test suite.
-
-- Source stepping homotopy (ramp source voltages from 0 to final).
-- GMIN stepping (add small conductance across all nonlinear elements; ramp to zero).
-- Pseudo-arclength continuation for difficult DC convergence.
-- GEAR orders 1–6 (BDF); variable-order variable-timestep control.
-- Local Truncation Error (LTE) estimation per variable; timestep accept/reject loop.
-- `@cross` event detection from Verilog-A models (zero-crossing step refinement).
-- Built-in diode (Shockley); MOSFET Level 1 SPICE.
-- KLU sparse solver via SuiteSparse FFI (replace faer-rs for production; keep faer for testing).
-- Waveform output: Nutmeg rawfile (ngspice compatible), CSV, HDF5.
-- Small-signal AC solver.
-
-**Milestone**: `tests/golden/` regression suite >90% pass rate; AC sweep on RC ladder matches analytical.
-
----
-
-### Phase 1.5: Consolidation & Ecosystem ✅ COMPLETE
-
-**Goal**: Make the simulator usable and presentable before adding photonic complexity.
-Clean up technical debt, produce documentation, validate publicly against ngspice.
-
-**All deliverables shipped:**
-- ✅ README: feature list, quickstart, benchmark results, ngspice comparison plots.
-- ✅ User guide (`docs/user-guide.md`): solver theory, waveform syntax, analysis directives, output formats.
-- ✅ CLI (`fairchild-cli`): `-f netlist.sp`, `--format nutmeg`, `--output`, `--ac-*` flags.
-- ✅ `.ac DEC|OCT|LIN` parser directive; netlist-driven AC sweep.
-- ✅ PWL waveform source: `V1 in 0 PWL(0 0 1u 5 2u 5 3u 0)`.
-- ✅ PULSE breakpoint insertion in variable-step solver.
-- ✅ 5 example circuits (RC, RLC, diode, CMOS, NMOS DC).
-- ✅ `compare_ngspice.py` and `benchmark.py` scripts.
-- ✅ OSDI reactive Jacobian fix: `write_jacobian_array_react` copy path with correct
-  `react_ptr_off` traversal order, `alpha = 1/h`, and `x_tprev`/`commit_timestep`
-  reactive history pinning. Variable-step OSDI transient now correct.
-- ✅ `@cross` event detection — deferred to end of Phase 2 (not needed for Phase 2 photonic work).
-
----
-
-### Phase 2: Photonic Discipline & First Optical Simulation (Months 2–5)
-
-**Goal**: First working optical circuit — CW laser → waveguide → coupler → photodetector.
-
-**Step 1: OpenVAF extension validation (critical path)**
-- Verify whether OpenVAF-Reloaded needs modification to handle a custom `optical` discipline.
-- Hypothesis: OpenVAF treats all ports as generic analog nodes; the discipline info is used only for connection checking (which we implement in our elaborator), not the compiled OSDI code. If true, no compiler modification is needed.
-- Fallback: if modification is needed, fork OpenVAF-Reloaded and add optical nature/discipline to the front-end.
-
-**Step 2: Optical discipline definition**
-```verilog-ams
-// va-models/disciplines/optical.vams
-nature Optical_Amplitude
-  units = "sqrt(W)";
-  access = Oamp;
-  abstol = 1e-12;
-endnature
-
-nature Optical_Phase
-  units = "rad";
-  access = Ophase;
-  abstol = 1e-9;
-endnature
-
-discipline optical
-  potential Optical_Phase;
-  flow Optical_Amplitude;
-enddiscipline
-```
-
-**Step 3: Port keikawa model library**
-- Adapt `waveguide.va`, `directional_coupler.va`, `cw_laser.va`, `photodetector.va` to use our optical discipline (or validate they work as-is with electrical port encoding).
-- Add to `va-models/`.
-
-**Step 4: Discipline checking in elaborator**
-- Connection rules: optical ports connect only to optical ports; electrical to electrical.
-- Mixed-domain components (modulator, photodetector) have both disciplines.
-
-**`@cross` event detection** (deferred from Phase 1.5): zero-crossing step refinement for
-Verilog-A `@cross` events. Required for accurate digital-input edges driving EO modulators.
-Implement after the first optical circuit is working.
-
-**Milestone**: Transient simulation of ring resonator modulation; compare transfer function against coupled-mode theory analytical solution. Pass/fail criterion: resonance wavelength within 0.1 nm.
-
----
-
-### Phase 3: Python Bindings (Months 3–5, parallel)
-
-**Goal**: Jupyter-native workflow from day one.
-
-```python
-import fairchild as fc
-
-ckt = fc.Circuit()
-ckt.load("transceiver.sp")
-result = ckt.run(analysis="tran", stop=10e-9, step=0.01e-9)
-
-# NumPy arrays
-t = result.time()
-v_out = result["V(out)"]
-o_amp = result["Oamp(optical_out)"]
-
-# Eye diagram
-result.eye_diagram("V(data_out)", ui=1/64e9)
-```
-
-- PyO3 bindings crate.
-- `Circuit`, `Netlist`, `SimResults` Python classes.
-- NumPy array bridge via `numpy` + `pyo3-numpy`.
-- Async simulation: non-blocking `.run_async()` returning a `Future`.
-- Jupyter demo notebook: SiPh transceiver, eye diagram, power spectrum.
-
-**Numpy waveform input (Phase 3 priority):**
-
-A first-class interface for injecting externally generated waveforms as circuit stimuli — the primary use case is driving a fairchild simulation with a numpy-generated bit pattern, channel response, or measured waveform without needing to manually serialise to PWL netlist syntax.
-
-```python
-import fairchild as fc
-import numpy as np
-
-t = np.linspace(0, 10e-9, 1000)
-v_in = np.where((t % 1e-9) < 0.5e-9, 1.8, 0.0)   # 1 Gbps PRBS
-
-ckt = fc.Circuit()
-ckt.load("modulator.sp")
-ckt.set_source("VIN", fc.WaveformSource(t, v_in))   # overrides netlist waveform
-result = ckt.run(analysis="tran", stop=10e-9)
-```
-
-Implementation: `WaveformSource(t, v)` converts the numpy arrays to an internal PWL representation at the Rust boundary (sorted breakpoints, linear interpolation). The existing PWL source infrastructure (Phase 1.5) handles it from there — no special Python-only code path in the solver.
-
----
-
-### Phase 4: Differentiable Simulation (Months 4–8)
-
-**Goal**: `∂L/∂p` flows through the photonic circuit. Inverse design via gradient descent.
-
-**Discrete adjoint for GEAR integrator:**
-Given forward solution `x(t₀...tₙ)`, the adjoint `λ(t)` satisfies a backward ODE:
-```
--dλ/dt = (∂f/∂x)ᵀ λ + (∂L/∂x)ᵀ
-```
-Integrated backward in time using the same GEAR coefficients as the forward pass.
-
-**OSDI adjoint extension:**
-OSDI already provides `∂f/∂x` (Jacobian w.r.t. state) for Newton-Raphson. We additionally call `∂f/∂p` (Jacobian w.r.t. parameters) — this may require adding a call to the OSDI interface or approximating via finite differences.
-
-**Python API:**
-```python
-with fc.GradientContext(params=["ring.kappa", "ring.L"]) as ctx:
-    result = ckt.run(analysis="tran", stop=10e-9)
-    loss = result.target_spectrum(measured_s21)
-    loss.backward()
-    
-grads = ctx.grads  # dict: {"ring.kappa": float, "ring.L": float}
-```
-
-**Demo milestone**: Optimize ring resonator coupling gap to hit target center wavelength. Convergence in <100 gradient steps from a random initialization.
-
-**JAX compatibility**: Expose as a `jax.pure_callback` so the simulation becomes a node in a JAX computation graph. Enables use of Optax, scipy.optimize, etc.
+| Phase | Status | One-line goal |
+|-------|--------|---------------|
+| 0 — Foundation | ✅ done | Cargo workspace, MNA, NR, SPICE parser, OSDI runtime |
+| 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, TR, AC, Nutmeg, Level 1 MOSFET |
+| 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` |
+| 2 — Photonic discipline | 🔜 next | First optical circuit: laser → waveguide → coupler → PD (see `.claude/memory/phase_2.md`) |
+| 3 — Python bindings | 📋 planned | PyO3 API, numpy bridge, Jupyter workflow (see `.claude/memory/phase_3.md`) |
+| 4 — Differentiable sim | 📋 planned | Adjoint-method gradients, inverse design (see `.claude/memory/phase_4.md`) |
+| 5 — PDK integration | 📋 planned | SiEPIC + GF45SPCLO, gdsfactory (see below) |
+| 6 — Model libraries | 📋 planned | BSIM4/PSP zoo + full SiPh model set (see below) |
+| 7 — Production features | 📋 planned | Monte Carlo, S-param import, HB, openEPDA (see below) |
 
 ---
 
@@ -656,14 +480,3 @@ Action items:
 | Language | C++ | C | Python/JAX | Rust |
 | Cost | ~$100k/seat/yr | Free | Free | Free |
 
----
-
-## Part 6 — Immediate Next Steps
-
-1. **Name the project** — working name `fairchild` used in this doc; decide before public repo creation.
-2. **Read VACASK source** (`arpadbuermen/VACASK` on Codeberg) — 1 week. Focus: OSDI runtime, Newton-Raphson, GEAR integrator. Take notes on what to port directly vs. redesign.
-3. **Read OpenVAF-Reloaded source** — 1 week. Focus: does the compiler strip discipline info? Can a custom optical discipline pass through to OSDI unmodified?
-4. **Stand up Cargo workspace** with stub crates.
-5. **First integration test target**: CMOS inverter transient via BSIM4 OSDI model.
-
-The architecture is designed to be buildable from the outside in: each phase produces a working, testable milestone before the next phase begins. Phase 0 is the falsifiability gate — if the OSDI runtime + basic solver can't simulate a CMOS inverter in 6 weeks, revise the plan before committing to subsequent phases.
