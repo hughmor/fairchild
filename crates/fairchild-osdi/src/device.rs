@@ -1,15 +1,17 @@
 //! OsdiDevice: wraps a loaded OsdiDescriptor and implements the Device trait.
 //!
-//! Uses the copy-based Jacobian path (write_jacobian_array_resist) rather than
-//! the pointer-aliasing optimisation (jacobian_ptr_resist_offset). The aliasing
-//! path requires MnaMatrix to have stable storage across NR iterations; the
-//! current Vec<Vec<f64>> layout reallocates every iteration. Upgrade to the
-//! aliasing path once MnaMatrix switches to a single contiguous buffer.
+//! Jacobian path: copy-based (write_jacobian_array_resist / write_jacobian_array_react).
+//! Reactive entries are identified by react_ptr_off != u32::MAX in jacobian_entries;
+//! write_jacobian_array_react writes values in that same traversal order.
+//!
+//! The aliasing path (load_jacobian_resist via jacobian_ptr_resist_offset) crashes
+//! with the OpenVAF-compiled nmos_l1/pmos_l1 models — it likely requires additional
+//! simulator-side initialization that we haven't determined. The copy path is sufficient.
 //!
 //! Safety invariant for load_residual / load_jacobian (&self):
-//!   The OSDI functions called (load_spice_rhs_dc, write_jacobian_array_resist)
+//!   The OSDI functions called (load_spice_rhs_*, write_jacobian_array_*)
 //!   MUST only READ from `inst` memory. Correctly implemented OSDI v0.4 models
-//!   satisfy this. If a model violates it, bump the trait methods to `&mut self`.
+//!   satisfy this.
 
 use std::os::raw::c_void;
 use std::sync::Arc;
@@ -37,8 +39,12 @@ pub struct OsdiDevice {
     instance: Vec<u64>,
     /// MNA solution-vector index for each OSDI terminal. None = ground.
     mna_nodes: Vec<NodeId>,
-    /// Solution vector from the last eval() call; forwarded as prev_solve.
+    /// Solution vector from the last eval() call; used as prev_solve in eval.
     x_cache: Vec<f64>,
+    /// Solution at the last committed (accepted) timestep; used as prev_solve in
+    /// load_spice_rhs_tran so reactive history is pinned to the accepted state.
+    /// Empty until commit_timestep() is first called.
+    x_tprev: Vec<f64>,
 }
 
 // SAFETY: descriptor is read-only after construction; Vec storage is thread-safe.
@@ -64,6 +70,7 @@ impl OsdiDevice {
             instance: vec![0u64; inst_u64s.max(1)],
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
+            x_tprev: Vec::new(),
         }
     }
 
@@ -85,6 +92,7 @@ impl OsdiDevice {
             instance: vec![0u64; inst_u64s.max(1)],
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
+            x_tprev: Vec::new(),
         })
     }
 
@@ -105,11 +113,9 @@ impl OsdiDevice {
         self.instance.as_ptr() as *mut c_void
     }
 
-    /// Test-only: expose raw pointers for diagnostic assertions.
-    #[cfg(test)]
-    pub fn inst_ptr_test(&self) -> *mut c_void { self.inst_ptr() }
-    #[cfg(test)]
-    pub fn model_ptr_test(&self) -> *mut c_void { self.model_ptr() }
+    /// Expose raw instance/model pointers for integration-test diagnostics.
+    pub fn inst_ptr_raw(&self) -> *mut c_void { self.inst_ptr() }
+    pub fn model_ptr_raw(&self) -> *mut c_void { self.model_ptr() }
 }
 
 impl Device for OsdiDevice {
@@ -270,10 +276,12 @@ impl Device for OsdiDevice {
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
         if let Some(f) = self.desc().load_spice_rhs_tran {
-            // Same guard buffer trick as load_residual: pad by 1 at the front so that
-            // OSDI's ldpsw sign-extension of UINT32_MAX → -1 reads/writes temp[0].
             let mut temp = vec![0.0f64; b.len() + 1];
-            let prev = unsafe { self.x_cache.as_ptr().add(1) as *mut f64 };
+            // Use x_tprev (previous accepted timestep) as the reactive history term.
+            // Fall back to x_cache (current iterate) when x_tprev is not yet populated
+            // (i.e., before the first commit_timestep call in the fixed-step path).
+            let prev_src = if self.x_tprev.is_empty() { &self.x_cache } else { &self.x_tprev };
+            let prev = unsafe { prev_src.as_ptr().add(1) as *mut f64 };
             unsafe {
                 f(self.inst_ptr(), self.model_ptr(), temp.as_mut_ptr().add(1), prev, alpha);
             }
@@ -286,10 +294,12 @@ impl Device for OsdiDevice {
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
-        // Resistive part is the same as DC.
+        // Resistive part (same as DC).
         self.load_jacobian(mat);
 
-        // Reactive part: stamp alpha * C/h entries from write_jacobian_array_react.
+        // Reactive part: stamp alpha * C entries.
+        // write_jacobian_array_react writes n_react values in the traversal order of
+        // jacobian_entries where react_ptr_off != u32::MAX. We match that order.
         let desc = self.desc();
         let n_react = desc.num_reactive_jacobian_entries as usize;
         if n_react == 0 {
@@ -304,21 +314,38 @@ impl Device for OsdiDevice {
         unsafe { f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr()); }
 
         let n_total = desc.num_jacobian_entries as usize;
-        let n_resist = desc.num_resistive_jacobian_entries as usize;
         let entries = unsafe {
             std::slice::from_raw_parts(desc.jacobian_entries, n_total)
         };
 
-        for (i, entry) in entries.iter().skip(n_resist).take(n_react).enumerate() {
+        // Walk all entries; for each one with a reactive pointer (react_ptr_off != MAX),
+        // consume the next value from jac_buf in order.
+        let mut react_idx = 0;
+        for entry in entries.iter() {
+            if entry.react_ptr_off == u32::MAX {
+                continue;
+            }
+            if react_idx >= n_react {
+                break;
+            }
             let osdi_r = entry.nodes.node_1 as usize;
             let osdi_c = entry.nodes.node_2 as usize;
             if let (Some(mr), Some(mc)) = (
                 self.mna_nodes.get(osdi_r).copied().flatten(),
                 self.mna_nodes.get(osdi_c).copied().flatten(),
             ) {
-                mat.a[mr][mc] += alpha * jac_buf[i];
+                mat.a[mr][mc] += alpha * jac_buf[react_idx];
             }
+            react_idx += 1;
         }
+    }
+
+    fn commit_timestep(&mut self, x: &[f64]) {
+        // Snapshot x (with guard element prepended) into x_tprev.
+        // The guard at x_tprev[0] = 0.0 handles the OSDI ground-sentinel (-1 index).
+        self.x_tprev.resize(x.len() + 1, 0.0);
+        self.x_tprev[0] = 0.0;
+        self.x_tprev[1..].copy_from_slice(x);
     }
 }
 

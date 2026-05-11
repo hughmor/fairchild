@@ -117,6 +117,20 @@ PULSE(<v0> <v1> <td> <tr> <tf> <pw> <per>)
 
 The waveform is piecewise-linear. The DC operating point uses `v0`.
 
+### PWL
+```
+PWL(<t0> <v0> <t1> <v1> ...)
+```
+
+Piecewise-linear waveform defined by (time, value) pairs. Time values must be in ascending
+order. Before `t0` the waveform holds `v0`; after the last point it holds the last value.
+
+```spice
+V1  in 0  PWL(0 0  1u 5  2u 5  3u 0)
+```
+
+The DC operating point uses the value at `t = t0`.
+
 ---
 
 ## 4. Model Cards
@@ -174,6 +188,27 @@ Example:
 ```
 .tran 10n 1u     * 10 ns step, 1 µs total
 ```
+
+### AC Sweep
+```
+.ac  DEC|OCT|LIN  <points>  <fstart>  <fstop>
+```
+
+Small-signal AC sweep around the DC operating point.
+
+| Variation | Meaning |
+|-----------|---------|
+| `DEC` | Logarithmic; `points` per decade |
+| `OCT` | Logarithmic; `points` per octave |
+| `LIN` | Linear; `points` total across `[fstart, fstop]` |
+
+Example:
+```
+.ac dec 20 1 100k    * 20 points/decade from 1 Hz to 100 kHz
+```
+
+AC sweep can also be specified entirely via CLI flags (see Section 6), which override any
+`.ac` directive in the netlist.
 
 ---
 
@@ -369,10 +404,9 @@ module name exported by the compiled model.
 openvaf bsim4.va -o bsim4.osdi
 ```
 
-### Current OSDI limitations
+### OSDI transient simulations
 
-- Reactive (capacitive) Jacobian terms from OSDI models are not yet stamped correctly.
-  This means `.tran` simulations with OSDI MOSFET models may accumulate numerical drift.
-  See `docs/osdi-reactive-jacobian-findings.md` for the root cause and fix plan.
-- Built-in MOSFET Level 1 is the recommended path for NMOS/PMOS until the OSDI reactive
-  Jacobian is resolved.
+OSDI device models (e.g., BSIM4, PSP compiled via OpenVAF-Reloaded) are fully supported
+in both DC and transient analyses. Reactive (capacitive) Jacobian entries are stamped
+correctly via the `write_jacobian_array_react` copy path with `alpha = 1/h` scaling.
+The variable-step solver respects OSDI reactive contributions at realistic step sizes.

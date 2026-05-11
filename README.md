@@ -2,7 +2,7 @@
 
 A SPICE-compatible analog circuit simulator written in Rust.
 
-**Status**: Phase 1 complete — production-quality solver hardening underway.  
+**Status**: Phase 1.5 complete — full transient solver with variable-step control and OSDI reactive Jacobian support.  
 **Goal**: First open-source time-domain electro-optic co-simulator (see [PLAN.md](PLAN.md)).
 
 ---
@@ -11,8 +11,8 @@ A SPICE-compatible analog circuit simulator written in Rust.
 
 | Category | What's implemented |
 |---|---|
-| **Elements** | R, L, C, V (DC + PULSE), I (DC + PULSE), Diode, MOSFET (Level 1 NMOS/PMOS) |
-| **Analyses** | DC operating point (`.op`), transient (`.tran`), small-signal AC (CLI flag) |
+| **Elements** | R, L, C, V (DC + PULSE + PWL), I (DC + PULSE + PWL), Diode, MOSFET (Level 1 NMOS/PMOS) |
+| **Analyses** | DC operating point (`.op`), transient (`.tran`), small-signal AC (`.ac` or CLI flags) |
 | **DC solver** | Newton-Raphson with GMIN stepping + source stepping homotopy |
 | **Transient** | Fixed-step Backward Euler / Trapezoidal Rule; variable-step BE+LTE |
 | **Device models** | Shockley diode; MOSFET Shichman-Hodges (Level 1) with body effect |
@@ -41,7 +41,10 @@ cargo build --release
 # Nutmeg rawfile output (ngspice-compatible)
 ./target/release/fairchild -f examples/rc_step.sp --format nutmeg -o rc_step.raw
 
-# AC sweep (CLI flags; .ac parser directive coming in Phase 2)
+# AC sweep via .ac directive in netlist
+./target/release/fairchild -f examples/rlc_resonator.sp
+
+# AC sweep via CLI flags (overrides netlist)
 ./target/release/fairchild -f examples/rlc_resonator.sp --ac-start 100 --ac-stop 100k --ac-points 30
 ```
 
@@ -137,7 +140,7 @@ crates/
   fairchild-osdi/     # OSDI v0.4 runtime (dlopen, OpenVAF model loading)
 examples/             # Ready-to-run SPICE netlists
 scripts/              # benchmark.py, compare_ngspice.py
-docs/                 # user-guide.md, OSDI investigation notes
+docs/                 # user-guide.md, comparison plots
 ```
 
 ---
@@ -146,8 +149,8 @@ docs/                 # user-guide.md, OSDI investigation notes
 
 See [PLAN.md](PLAN.md) for the full phased plan.
 
-- **Phase 1.5** (current): Documentation, CLI, examples, codebase cleanup.
-- **Phase 2**: Photonic discipline — first optical circuit (CW laser → waveguide → photodetector).
+- **Phase 1.5** ✅ complete: Documentation, CLI, examples, validation, OSDI reactive Jacobian fix.
+- **Phase 2** (next): Photonic discipline — first optical circuit (CW laser → waveguide → photodetector).
 - **Phase 3**: Python bindings (PyO3).
 - **Phase 4**: Differentiable simulation — adjoint-method gradients.
 

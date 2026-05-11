@@ -317,6 +317,11 @@ fn tran_nr_with_registry_mode(
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
 
+    // Seed x_tprev from DC OP so reactive history is defined before the first step.
+    for dev in &mut devices {
+        dev.commit_timestep(&x);
+    }
+
     // Reactive companion state seeded from the DC OP.
     let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x, mode);
 
@@ -338,13 +343,14 @@ fn tran_nr_with_registry_mode(
     let mut first_tr = true;
     loop {
         // --- NR loop for this time step ---
+        let alpha = 1.0 / step;
         for _iter in 0..MAX_ITER {
             let mut mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
 
             for dev in &mut devices {
                 dev.eval(&x, EvalFlags::tran(), &ctx);
-                dev.load_residual_tran(&mut mat.b, 1.0);
-                dev.load_jacobian_tran(&mut mat, 1.0);
+                dev.load_residual_tran(&mut mat.b, alpha);
+                dev.load_jacobian_tran(&mut mat, alpha);
             }
 
             for i in 0..topo.n_nodes() {
@@ -375,6 +381,10 @@ fn tran_nr_with_registry_mode(
         }
 
         push_timepoint(&mut result, t, &topo, &x);
+
+        for dev in &mut devices {
+            dev.commit_timestep(&x);
+        }
 
         if t >= stop { break; }
         advance_companions(netlist, &topo, step, &x, &mut cap_state, &mut ind_state, mode, first_tr);
