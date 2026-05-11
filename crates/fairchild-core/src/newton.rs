@@ -38,6 +38,38 @@ impl NrResult {
         self.topo.node_index.iter().map(|(name, &i)| (name.as_str(), self.x[i]))
     }
 
+    /// Write the DC operating point as an ngspice-compatible Nutmeg ASCII rawfile.
+    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
+        let n_nodes = self.topo.n_nodes();
+        let n_vars = n_nodes + self.topo.vsrc_index.len();
+        writeln!(w, "Title: {title}")?;
+        writeln!(w, "Plotname: Operating Point")?;
+        writeln!(w, "Flags: real")?;
+        writeln!(w, "No. Variables: {n_vars}")?;
+        writeln!(w, "No. Points: 1")?;
+        writeln!(w, "Variables:")?;
+        for (idx, name) in self.topo.node_index.keys().enumerate() {
+            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
+        }
+        for (i, name) in self.topo.vsrc_index.keys().enumerate() {
+            writeln!(w, "\t{}\ti({name})\tcurrent", n_nodes + i)?;
+        }
+        writeln!(w, "Values:")?;
+        let mut first = true;
+        for &idx in self.topo.node_index.values() {
+            if first {
+                writeln!(w, " 0\t{:.6e}", self.x[idx])?;
+                first = false;
+            } else {
+                writeln!(w, "\t{:.6e}", self.x[idx])?;
+            }
+        }
+        for &idx in self.topo.vsrc_index.values() {
+            writeln!(w, "\t{:.6e}", self.x[n_nodes + idx])?;
+        }
+        Ok(())
+    }
+
     /// Write DC operating point as a two-row CSV (header + one data row).
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
         write!(w, "analysis")?;
@@ -318,5 +350,20 @@ mod tests {
         assert!(s.contains("dc_op"), "should have dc_op row: {s}");
         // V(out) should be ~1.0 V (voltage divider).
         assert!(s.contains("1.000000e0") || s.contains("1.000000e+0"), "V(out)≈1V missing: {s}");
+    }
+
+    #[test]
+    fn write_nutmeg_dc_op() {
+        let net = parse_spice(
+            "* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n",
+        ).unwrap();
+        let r = dc_op_nr(&net).unwrap();
+        let mut buf = Vec::new();
+        r.write_nutmeg(&mut buf, "divider test").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Plotname: Operating Point"), "plotname: {s}");
+        assert!(s.contains("Flags: real"), "flags: {s}");
+        assert!(s.contains("v(out)\tvoltage"), "v(out): {s}");
+        assert!(s.contains("No. Points: 1"), "single point: {s}");
     }
 }

@@ -50,6 +50,34 @@ impl AcResult {
         Some(im.atan2(re).to_degrees())
     }
 
+    /// Write the AC sweep as an ngspice-compatible Nutmeg ASCII rawfile.
+    ///
+    /// Complex values are written as `<re>,<im>` per ngspice convention.
+    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
+        let n_vars = 1 + self.voltages.len();
+        let n_pts = self.freq.len();
+        writeln!(w, "Title: {title}")?;
+        writeln!(w, "Plotname: AC Analysis")?;
+        writeln!(w, "Flags: complex")?;
+        writeln!(w, "No. Variables: {n_vars}")?;
+        writeln!(w, "No. Points: {n_pts}")?;
+        writeln!(w, "Variables:")?;
+        writeln!(w, "\t0\tfrequency\tfrequency")?;
+        for (i, name) in self.voltages.keys().enumerate() {
+            writeln!(w, "\t{}\tv({name})\tvoltage", i + 1)?;
+        }
+        writeln!(w, "Values:")?;
+        for (fi, &f) in self.freq.iter().enumerate() {
+            // Frequency is always real; write as real,0 per ngspice complex convention.
+            writeln!(w, " {fi}\t{f:.6e},0")?;
+            for v in self.voltages.values() {
+                let (re, im) = v[fi];
+                writeln!(w, "\t{re:.6e},{im:.6e}")?;
+            }
+        }
+        Ok(())
+    }
+
     /// Write a CSV with columns: freq_hz, mag_V(<node>), phase_deg_V(<node>), ...
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
         write!(w, "freq_hz")?;
@@ -355,5 +383,26 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.starts_with("freq_hz"), "header: {s}");
         assert!(s.contains("mag_V(out)"), "should have V(out): {s}");
+    }
+
+    #[test]
+    fn write_nutmeg_ac() {
+        let net = parse_spice(
+            "* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n",
+        ).unwrap();
+        let registry = DeviceRegistry::new();
+        let freqs = freq_decade(1e3, 1e6, 5);
+        let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
+        let mut buf = Vec::new();
+        result.write_nutmeg(&mut buf, "RC test").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Plotname: AC Analysis"), "plotname: {s}");
+        assert!(s.contains("Flags: complex"), "flags: {s}");
+        assert!(s.contains("frequency\tfrequency"), "freq var: {s}");
+        assert!(s.contains("v(out)\tvoltage"), "v(out): {s}");
+        assert!(s.contains("Values:"), "values: {s}");
+        // Complex values should contain a comma separator.
+        let values_section = s.split("Values:").nth(1).unwrap();
+        assert!(values_section.contains(','), "complex pairs should use comma: {s}");
     }
 }

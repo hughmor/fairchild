@@ -15,4 +15,8 @@ pub use error::SimError;
 pub use models::ShockleyDiode;
 pub use newton::{dc_op_nr, dc_op_nr_with_registry, NrResult};
 pub use solver::{dc_op, OpResult};
-pub use tran::{run_tran, tran_nr, tran_nr_with_registry, TranResult};
+pub use tran::{
+    run_tran, run_tran_tr,
+    tran_nr, tran_nr_tr, tran_nr_with_registry, tran_nr_with_registry_tr,
+    IntegratorMode, TranResult,
+};

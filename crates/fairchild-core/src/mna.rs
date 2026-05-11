@@ -288,6 +288,59 @@ pub fn ind_companion(inductance: f64, h: f64, i_prev: f64) -> (f64, f64) {
     (g, i_prev)
 }
 
+/// Trapezoidal Rule (TR) companion initial state for a capacitor.
+/// G_eq = 2C/h.  I_hist = G_eq * V_prev (assumes I_C(0) = 0 at DC OP).
+pub fn cap_companion_tr(capacitance: f64, h: f64, v_prev: f64) -> (f64, f64) {
+    let g = 2.0 * capacitance / h;
+    (g, g * v_prev)
+}
+
+/// Advance the TR capacitor companion after a solved timestep.
+///
+/// Given the stored state `(G_eq, I_hist_old)` and the new capacitor voltage `v_c_new`,
+/// returns the companion for the *next* step.
+/// Derivation: I_hist_new = 2·G_eq·V_C_new − I_hist_old.
+pub fn cap_companion_tr_advance(g_eq: f64, i_hist_old: f64, v_c_new: f64) -> (f64, f64) {
+    (g_eq, 2.0 * g_eq * v_c_new - i_hist_old)
+}
+
+/// Transition a capacitor companion from BE→TR after the first BE step.
+///
+/// The BE companion `(g_eq_be, i_hist_be)` encodes G_be = C/h, I_hist_be = C/h·V_C_prev.
+/// After solving for v_c_new, the capacitor current was I_C = G_be·V_C_new − I_hist_be.
+/// Returns the TR companion for the *next* step with G_eq = 2·G_be.
+pub fn cap_companion_be_to_tr(g_eq_be: f64, i_hist_be: f64, v_c_new: f64) -> (f64, f64) {
+    let i_c = g_eq_be * v_c_new - i_hist_be;
+    let g_eq_tr = 2.0 * g_eq_be;
+    (g_eq_tr, g_eq_tr * v_c_new + i_c)
+}
+
+/// Trapezoidal Rule companion initial state for an inductor.
+/// G_eq = h/(2L).  I_hist = I_L_prev (= 0 when starting from DC OP).
+pub fn ind_companion_tr(inductance: f64, h: f64, i_prev: f64) -> (f64, f64) {
+    let g = h / (2.0 * inductance);
+    (g, i_prev)
+}
+
+/// Advance the TR inductor companion after a solved timestep.
+///
+/// Given the stored state `(G_eq, I_hist_old)` and new inductor voltage `v_l_new`,
+/// returns the companion for the next step.
+/// Derivation: I_hist_new = 2·G_eq·V_L_new + I_hist_old.
+pub fn ind_companion_tr_advance(g_eq: f64, i_hist_old: f64, v_l_new: f64) -> (f64, f64) {
+    (g_eq, 2.0 * g_eq * v_l_new + i_hist_old)
+}
+
+/// Transition an inductor companion from BE→TR after the first BE step.
+///
+/// The inductor current during the BE step was I_L = G_be·V_L_new + I_hist_be.
+/// Returns the TR companion for the next step with G_eq = G_be/2.
+pub fn ind_companion_be_to_tr(g_eq_be: f64, i_hist_be: f64, v_l_new: f64) -> (f64, f64) {
+    let i_l = g_eq_be * v_l_new + i_hist_be;
+    let g_eq_tr = g_eq_be / 2.0;
+    (g_eq_tr, i_l + g_eq_tr * v_l_new)
+}
+
 // ---------------------------------------------------------------------------
 // Legacy compatibility wrapper used by DC solver and existing tests
 // ---------------------------------------------------------------------------
