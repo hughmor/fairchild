@@ -17,6 +17,7 @@ pub use newton::{dc_op_nr, dc_op_nr_with_registry, NrResult};
 pub use solver::{dc_op, OpResult};
 pub use tran::{
     run_tran, run_tran_tr,
-    tran_nr, tran_nr_tr, tran_nr_with_registry, tran_nr_with_registry_tr,
+    tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry, tran_nr_with_registry_tr,
+    tran_nr_with_registry_var,
     IntegratorMode, TranResult,
 };

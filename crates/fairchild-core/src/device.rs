@@ -78,4 +78,10 @@ pub trait Device: Send + Sync {
     /// Transient Jacobian: stamp resistive + α·reactive conductances.
     /// Default falls back to DC Jacobian.
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+
+    /// Record the current solution as the previous-timestep reference for reactive terms.
+    ///
+    /// Called once per accepted timestep in the variable-step integrator.
+    /// Default is a no-op (correct for resistive-only and built-in devices).
+    fn commit_timestep(&mut self, _x: &[f64]) {}
 }

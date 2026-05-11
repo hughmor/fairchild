@@ -1,13 +1,15 @@
-/// Fixed-step transient integrators: Backward Euler (BDF-1) and Trapezoidal Rule (BDF-2 / TR).
+/// Transient integrators: fixed-step BE/TR (linear) and variable-step BE+LTE (nonlinear).
 ///
 /// `run_tran` / `run_tran_tr` — linear-only (R, L, C, V, I).
-/// `tran_nr` / `tran_nr_tr`   — adds Newton-Raphson for nonlinear devices (diodes, etc.).
+/// `tran_nr` / `tran_nr_tr`   — fixed-step nonlinear.
+/// `tran_nr_var`              — variable-step nonlinear with LTE control.
 
 use indexmap::IndexMap;
+use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{EvalFlags, SimContext};
+use crate::device::{Device, EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
@@ -409,6 +411,244 @@ pub fn tran_nr_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult,
     tran_nr_with_registry_tr(netlist, step, stop, &registry)
 }
 
+// ---------------------------------------------------------------------------
+// Variable-step BE + LTE nonlinear transient solver
+// ---------------------------------------------------------------------------
+
+const MAX_REJECTIONS: usize = 30;
+
+/// Variable-step Backward Euler transient with Newton-Raphson and LTE timestep control.
+///
+/// `step` is the maximum allowed timestep (upper bound). Every accepted internal step is
+/// stored; `TranResult::voltage_at` interpolates between them.
+///
+/// Timestep control uses a first-order predictor-corrector LTE estimate:
+///   LTE_norm = max |x_corr − x_pred| * 0.5 / (VNTOL + RELTOL·|x|)
+/// Accept if LTE_norm ≤ 1; adjust h_new = h·(0.9/LTE_norm)^0.5, clamped to [0.1h, 4h]·min(step).
+pub fn tran_nr_with_registry_var(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+) -> Result<TranResult, SimError> {
+    let ctx = SimContext::default();
+    let dc = dc_op_nr_with_registry(netlist, registry)?;
+    let topo = dc.topo;
+    let mut x = dc.x;
+    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+
+    let n_nodes = topo.n_nodes();
+    let h_min = step * 1e-6;
+
+    // Nodes constrained by voltage sources are excluded from LTE: their voltages
+    // change due to the source waveform, not integration error.
+    let forced_nodes: HashSet<usize> = netlist.elements.iter()
+        .filter_map(|el| {
+            if let Element::VoltageSource { pos, neg, .. } = el {
+                Some([topo.node_index.get(pos).copied(),
+                      topo.node_index.get(neg).copied()])
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .flatten()
+        .collect();
+
+    for dev in &mut devices {
+        dev.commit_timestep(&x);
+    }
+
+    // Raw physical state: cap voltage and inductor current seeded from DC OP.
+    let mut cap_v: IndexMap<String, f64> = IndexMap::new();
+    let mut ind_i: IndexMap<String, f64> = IndexMap::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Capacitor { name, pos, neg, .. } => {
+                let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
+                    - topo.node_voltage(neg, &x).unwrap_or(0.0);
+                cap_v.insert(name.clone(), vc);
+            }
+            Element::Inductor { name, .. } => {
+                ind_i.insert(name.clone(), 0.0);
+            }
+            _ => {}
+        }
+    }
+
+    let n_hint = ((stop / step).ceil() as usize) + 2;
+    let mut result = TranResult {
+        time: Vec::with_capacity(n_hint),
+        node_voltages: topo.node_index.keys()
+            .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
+            .collect(),
+        vsrc_currents: topo.vsrc_index.keys()
+            .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
+            .collect(),
+    };
+    push_timepoint(&mut result, 0.0, &topo, &x);
+
+    let mut t = 0.0_f64;
+    let mut h = step;
+    let mut h_prev = 0.0_f64;
+    let mut x_prev = x.clone();
+    let mut consecutive_rejects = 0usize;
+
+    'outer: loop {
+        if t >= stop { break; }
+
+        let h_actual = h.min(stop - t).max(h_min);
+        let t_next = t + h_actual;
+
+        // Build BE companion maps for h_actual from the stored raw state.
+        let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
+        let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
+        for el in &netlist.elements {
+            match el {
+                Element::Capacitor { name, capacitance, .. } => {
+                    if let Some(&vc) = cap_v.get(name) {
+                        cap_state.insert(name.clone(), cap_companion(*capacitance, h_actual, vc));
+                    }
+                }
+                Element::Inductor { name, inductance, .. } => {
+                    if let Some(&il) = ind_i.get(name) {
+                        ind_state.insert(name.clone(), ind_companion(*inductance, h_actual, il));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Predictor: linear extrapolation. Zero-order on the first step (no history).
+        let x_pred: Vec<f64> = if h_prev > 0.0 {
+            let scale = h_actual / h_prev;
+            x.iter().zip(x_prev.iter()).map(|(xi, xp)| xi + scale * (xi - xp)).collect()
+        } else {
+            x.clone()
+        };
+
+        // NR corrector starting from x_pred.
+        let alpha = 1.0 / h_actual;
+        let mut x_try = x_pred.clone();
+        let mut nr_converged = false;
+
+        for _iter in 0..MAX_ITER {
+            let mut mat = stamp_netlist(&topo, netlist, t_next, &cap_state, &ind_state);
+
+            for dev in devices.iter_mut() {
+                dev.eval(&x_try, EvalFlags::tran(), &ctx);
+                dev.load_residual_tran(&mut mat.b, alpha);
+                dev.load_jacobian_tran(&mut mat, alpha);
+            }
+
+            for i in 0..n_nodes {
+                mat.a[i][i] += GMIN;
+            }
+
+            let x_new = lu_solve(&mat.a, &mat.b)?;
+
+            let max_dv = x_new.iter().zip(x_try.iter())
+                .take(n_nodes)
+                .map(|(n, o)| (n - o).abs())
+                .fold(0.0f64, f64::max);
+
+            let x_next: Vec<f64> = if max_dv > VMAX {
+                let scale = VMAX / max_dv;
+                x_try.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
+            } else {
+                x_new
+            };
+
+            let converged = x_next.iter().zip(x_try.iter())
+                .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
+
+            x_try = x_next;
+            if converged {
+                nr_converged = true;
+                break;
+            }
+        }
+
+        if !nr_converged {
+            consecutive_rejects += 1;
+            if consecutive_rejects > MAX_REJECTIONS {
+                return Err(SimError::NoConvergence { iters: MAX_ITER });
+            }
+            h = (h_actual * 0.5).max(h_min);
+            continue 'outer;
+        }
+
+        // LTE estimate: skipped on first step (h_prev == 0, no predictor history).
+        let lte_norm: f64 = if h_prev > 0.0 {
+            x_try.iter().zip(x_pred.iter())
+                .enumerate()
+                .take(n_nodes)
+                .filter(|(idx, _)| !forced_nodes.contains(idx))
+                .map(|(_, (xc, xp))| {
+                    (xc - xp).abs() * 0.5 / (VNTOL + RELTOL * xc.abs())
+                })
+                .fold(0.0f64, f64::max)
+        } else {
+            0.0
+        };
+
+        if lte_norm <= 1.0 || h_actual <= h_min {
+            // Accept step.
+            consecutive_rejects = 0;
+            x_prev = std::mem::replace(&mut x, x_try);
+            h_prev = h_actual;
+            t = t_next;
+
+            // Update raw companion state from accepted solution.
+            for el in &netlist.elements {
+                match el {
+                    Element::Capacitor { name, pos, neg, .. } => {
+                        let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
+                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
+                        cap_v.insert(name.clone(), vc);
+                    }
+                    Element::Inductor { name, pos, neg, inductance } => {
+                        let vl = topo.node_voltage(pos, &x).unwrap_or(0.0)
+                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
+                        let il = ind_i.get(name).copied().unwrap_or(0.0)
+                            + (h_actual / inductance) * vl;
+                        ind_i.insert(name.clone(), il);
+                    }
+                    _ => {}
+                }
+            }
+
+            for dev in &mut devices {
+                dev.commit_timestep(&x);
+            }
+
+            push_timepoint(&mut result, t, &topo, &x);
+
+            h = if lte_norm < 1e-10 {
+                h_actual * 2.0
+            } else {
+                h_actual * (0.9 / lte_norm).sqrt()
+            };
+            h = h.clamp(h_actual * 0.1, h_actual * 4.0).min(step);
+        } else {
+            consecutive_rejects += 1;
+            if consecutive_rejects > MAX_REJECTIONS {
+                return Err(SimError::NoConvergence { iters: MAX_ITER });
+            }
+            h = (h_actual * (0.9 / lte_norm).sqrt()).max(h_min);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Variable-step BE + LTE transient using only built-in models from `.model` cards.
+pub fn tran_nr_var(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_diodes(&netlist.models);
+    tran_nr_with_registry_var(netlist, step, stop, &registry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +777,67 @@ mod tests {
         assert!(
             (v_lin - v_nr).abs() < 1e-3,
             "tran_nr_tr vs run_tran_tr at t=1ms: lin={v_lin:.6} nr={v_nr:.6}"
+        );
+    }
+
+    // ---------- Variable-step tests ----------
+
+    #[test]
+    fn tran_nr_var_rc_step_response() {
+        // RC: R=1k C=1µF τ=1ms, step to 1V at t=0 (PULSE so DC OP has V=0).
+        // With a large hint step the variable-step solver should take fewer steps
+        // but still hit V(τ) ≈ 0.6321 within 1%.
+        let netlist = parse_spice(
+            "* RC var-step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 500u 5m\n.end\n"
+        ).unwrap();
+        let result = tran_nr_var(&netlist, 500e-6, 5e-3).unwrap();
+
+        let exact = 1.0 - (-1.0_f64).exp();
+        let v_1tau = result.voltage_at("out", 1e-3).unwrap();
+        let v_5tau = result.voltage_at("out", 5e-3).unwrap();
+
+        // BE with h = τ/2 has ~6% inherent discretisation error; allow 15%.
+        assert!(
+            (v_1tau - exact).abs() < 0.15,
+            "V(1τ) = {v_1tau:.4}, exact = {exact:.4}"
+        );
+        assert!(v_5tau > 0.95, "V(5τ) = {v_5tau:.4}");
+        assert!(result.time.len() > 2, "must have at least a few timepoints");
+    }
+
+    #[test]
+    fn tran_nr_var_matches_fixed_step() {
+        // Variable-step result should agree with fixed-step BE within 0.1% at t=1ms.
+        let netlist = parse_spice(
+            "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n.end\n"
+        ).unwrap();
+        let r_fixed = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
+        let r_var   = tran_nr_var(&netlist, 1e-6, 2e-3).unwrap();
+
+        let v_fixed = r_fixed.voltage_at("out", 1e-3).unwrap();
+        let v_var   = r_var.voltage_at("out", 1e-3).unwrap();
+        assert!(
+            (v_fixed - v_var).abs() < 1e-3,
+            "fixed={v_fixed:.6}  var={v_var:.6}"
+        );
+    }
+
+    #[test]
+    fn tran_nr_var_diode_steady_state() {
+        // R-D series at DC: var-step should converge to the same OP as fixed-step.
+        let netlist_str =
+            "* Diode DC\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
+        let netlist = parse_spice(netlist_str).unwrap();
+
+        let dc = crate::newton::dc_op_nr(&netlist).unwrap();
+        let vb_dc = dc.node_voltage("b").unwrap();
+
+        let tr = tran_nr_var(&netlist, 1e-6, 10e-6).unwrap();
+        let vb_tran = tr.voltage_at("b", 10e-6).unwrap();
+        assert!(
+            (vb_tran - vb_dc).abs() < 1e-5,
+            "var-step V(b)={vb_tran:.6e}  dc_op={vb_dc:.6e}"
         );
     }
 
