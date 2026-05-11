@@ -111,14 +111,20 @@ pub(crate) fn build_devices(
                 let neg: NodeId = topo.node_index.get(cathode).copied();
                 devices.push(factory(&[pos, neg], ctx));
             }
-            Element::Mosfet { drain, gate, source, bulk, model_name, .. } => {
-                let factory = registry.get(model_name)
-                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+            Element::Mosfet { drain, gate, source, bulk, model_name, params, .. } => {
                 let d: NodeId = topo.node_index.get(drain).copied();
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                devices.push(factory(&[d, g, s, b], ctx));
+                // Try the MOSFET-specific path first (built-in Level 1).
+                if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
+                    devices.push(dev);
+                } else {
+                    // Fall back to the generic factory (OSDI or user-registered).
+                    let factory = registry.get(model_name)
+                        .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                    devices.push(factory(&[d, g, s, b], ctx));
+                }
             }
             _ => {}
         }
@@ -280,6 +286,7 @@ pub fn dc_op_nr_with_registry(
 pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
+    registry.register_builtin_mosfets(&netlist.models);
     dc_op_nr_with_registry(netlist, &registry)
 }
 

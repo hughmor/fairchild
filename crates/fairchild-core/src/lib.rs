@@ -12,7 +12,7 @@ pub use ac::{ac_analysis, freq_decade, freq_linear, AcResult};
 pub use device::{Device, EvalFlags, NodeId, SimContext};
 pub use device_registry::DeviceRegistry;
 pub use error::SimError;
-pub use models::ShockleyDiode;
+pub use models::{Mosfet1, ShockleyDiode};
 pub use newton::{dc_op_nr, dc_op_nr_with_registry, NrResult};
 pub use solver::{dc_op, OpResult};
 pub use tran::{

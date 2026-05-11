@@ -389,6 +389,7 @@ fn tran_nr_with_registry_mode(
 pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
+    registry.register_builtin_mosfets(&netlist.models);
     tran_nr_with_registry(netlist, step, stop, &registry)
 }
 
@@ -408,6 +409,7 @@ pub fn tran_nr_with_registry_tr(
 pub fn tran_nr_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
+    registry.register_builtin_mosfets(&netlist.models);
     tran_nr_with_registry_tr(netlist, step, stop, &registry)
 }
 
@@ -646,6 +648,7 @@ pub fn tran_nr_with_registry_var(
 pub fn tran_nr_var(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
+    registry.register_builtin_mosfets(&netlist.models);
     tran_nr_with_registry_var(netlist, step, stop, &registry)
 }
 
