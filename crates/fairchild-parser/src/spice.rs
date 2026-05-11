@@ -1,4 +1,4 @@
-use crate::{Analysis, Element, ModelCard, Netlist, ParseError, Waveform};
+use crate::{AcVariation, Analysis, Element, ModelCard, Netlist, ParseError, Waveform};
 
 /// Parse a SPICE netlist from a string.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
@@ -24,6 +24,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             netlist.analyses.push(Analysis::Op);
         } else if lc.starts_with(".tran") {
             netlist.analyses.push(parse_tran(&lc, *raw_lineno)?);
+        } else if lc.starts_with(".ac") {
+            netlist.analyses.push(parse_ac(&lc, *raw_lineno)?);
         } else if lc.starts_with(".model") {
             if let Some(card) = parse_model(&lc, *raw_lineno)? {
                 netlist.models.push(card);
@@ -54,6 +56,34 @@ fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
         step: parse_value(tokens[1], lineno)?,
         stop: parse_value(tokens[2], lineno)?,
     })
+}
+
+/// Parse `.ac DEC|OCT|LIN <points> <fstart> <fstop>` directive.
+fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 5 {
+        return Err(ParseError::FieldCount {
+            expected: "≥5 (.ac DEC|OCT|LIN points fstart fstop)",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    let variation = match tokens[1] {
+        "dec" => AcVariation::Dec,
+        "oct" => AcVariation::Oct,
+        "lin" => AcVariation::Lin,
+        other => return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!("unknown AC variation '{other}'; expected dec, oct, or lin"),
+        }),
+    };
+    let points = tokens[2].parse::<usize>().map_err(|_| ParseError::Syntax {
+        line: lineno,
+        msg: format!("invalid point count '{}'", tokens[2]),
+    })?;
+    let fstart = parse_value(tokens[3], lineno)?;
+    let fstop = parse_value(tokens[4], lineno)?;
+    Ok(Analysis::Ac { variation, points, fstart, fstop })
 }
 
 /// Canonicalise a node name: lowercase; "gnd" → "0".
@@ -241,6 +271,10 @@ fn parse_waveform(tokens: &[&str], lineno: usize) -> Result<Waveform, ParseError
         return parse_pulse(&rest_lc, lineno);
     }
 
+    if rest_lc.starts_with("pwl") {
+        return parse_pwl(&rest_lc, lineno);
+    }
+
     // DC value: either "DC value" or just "value"
     let tok = tokens[3].to_lowercase();
     if tok == "dc" {
@@ -286,6 +320,40 @@ fn parse_pulse(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
         pw:  get(5, f64::INFINITY)?,
         per: get(6, f64::INFINITY)?,
     })
+}
+
+/// Parse `PWL(t0 v0 t1 v1 ...)` into a `Waveform::Pwl`.
+/// Also accepts the space-separated form without parentheses after `PWL `.
+fn parse_pwl(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    // Find the argument list: either parenthesised or bare after "pwl ".
+    let inner = if let Some(start) = s.find('(') {
+        let end = s.rfind(')').ok_or_else(|| ParseError::Syntax {
+            line: lineno,
+            msg: "PWL: missing ')'".into(),
+        })?;
+        &s[start + 1..end]
+    } else {
+        s.strip_prefix("pwl").unwrap_or("").trim()
+    };
+
+    let values: Vec<f64> = inner
+        .split_whitespace()
+        .map(|tok| parse_value(tok, lineno))
+        .collect::<Result<_, _>>()?;
+
+    if values.len() < 2 || values.len() % 2 != 0 {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!("PWL requires an even number of values (t v pairs), got {}", values.len()),
+        });
+    }
+
+    let points = values
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
+
+    Ok(Waveform::Pwl { points })
 }
 
 /// Join continuation lines (starting with `+`) and return (original_lineno, joined_line) pairs.
@@ -408,5 +476,58 @@ mod tests {
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         assert!((w.at(1e-9) - 1.0).abs() < 1e-6); // fully risen
         assert!((w.at(0.5e-9) - 0.5).abs() < 1e-6); // mid-rise
+    }
+
+    #[test]
+    fn parse_pwl_waveform() {
+        let input = "* PWL\nV1 a 0 PWL(0 0 1u 5 2u 5 3u 0)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        if let Element::VoltageSource { waveform: Waveform::Pwl { points }, .. } = &netlist.elements[0] {
+            assert_eq!(points.len(), 4);
+            assert!((points[0].0 - 0.0).abs() < 1e-15);
+            assert!((points[0].1 - 0.0).abs() < 1e-15);
+            assert!((points[1].0 - 1e-6).abs() < 1e-18);
+            assert!((points[1].1 - 5.0).abs() < 1e-12);
+        } else {
+            panic!("expected PWL VoltageSource");
+        }
+    }
+
+    #[test]
+    fn pwl_waveform_at() {
+        let w = Waveform::Pwl { points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)] };
+        assert!((w.at(0.0) - 0.0).abs() < 1e-12);
+        assert!((w.at(0.5e-6) - 2.5).abs() < 1e-9);   // mid-ramp
+        assert!((w.at(1.5e-6) - 5.0).abs() < 1e-9);   // flat region
+        assert!((w.at(2.5e-6) - 2.5).abs() < 1e-9);   // falling ramp
+        assert!((w.at(4e-6) - 0.0).abs() < 1e-12);    // after last point
+    }
+
+    #[test]
+    fn parse_ac_directive() {
+        let input = "* RC lowpass\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 20 1 100k\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.analyses[0] {
+            Analysis::Ac { variation, points, fstart, fstop } => {
+                assert_eq!(*variation, crate::AcVariation::Dec);
+                assert_eq!(*points, 20);
+                assert!((fstart - 1.0).abs() < 1e-12);
+                assert!((fstop - 1e5).abs() < 1e-6);
+            }
+            _ => panic!("expected Ac analysis"),
+        }
+    }
+
+    #[test]
+    fn parse_ac_lin() {
+        let input = "* test\nV1 in 0 DC 1\n.ac lin 100 1k 10k\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.analyses[0] {
+            Analysis::Ac { variation, points, .. } => {
+                assert_eq!(*variation, crate::AcVariation::Lin);
+                assert_eq!(*points, 100);
+            }
+            _ => panic!("expected Ac analysis"),
+        }
     }
 }

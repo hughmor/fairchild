@@ -8,7 +8,7 @@ pub mod newton;
 pub mod solver;
 pub mod tran;
 
-pub use ac::{ac_analysis, freq_decade, freq_linear, AcResult};
+pub use ac::{ac_analysis, freq_decade, freq_linear, freq_oct, AcResult};
 pub use device::{Device, EvalFlags, NodeId, SimContext};
 pub use device_registry::DeviceRegistry;
 pub use error::SimError;

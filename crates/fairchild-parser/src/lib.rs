@@ -32,6 +32,10 @@ pub enum Waveform {
         pw: f64,
         per: f64,
     },
+    /// PWL(t0 v0 t1 v1 ...) — piecewise-linear; points must be sorted by time.
+    Pwl {
+        points: Vec<(f64, f64)>,
+    },
 }
 
 impl Waveform {
@@ -40,6 +44,7 @@ impl Waveform {
         match self {
             Waveform::Dc(v) => *v,
             Waveform::Pulse { v0, .. } => *v0,
+            Waveform::Pwl { points } => points.first().map(|(_, v)| *v).unwrap_or(0.0),
         }
     }
 
@@ -62,6 +67,23 @@ impl Waveform {
                 } else {
                     *v0
                 }
+            }
+            Waveform::Pwl { points } => {
+                if points.is_empty() {
+                    return 0.0;
+                }
+                if t <= points[0].0 {
+                    return points[0].1;
+                }
+                if t >= points[points.len() - 1].0 {
+                    return points[points.len() - 1].1;
+                }
+                // Binary search for the segment containing t.
+                let idx = points.partition_point(|(pt, _)| *pt <= t);
+                let (t0, v0) = points[idx - 1];
+                let (t1, v1) = points[idx];
+                let frac = (t - t0) / (t1 - t0);
+                v0 + (v1 - v0) * frac
             }
         }
     }
@@ -125,9 +147,22 @@ pub struct ModelCard {
     pub params: Vec<(String, f64)>,
 }
 
+/// Frequency spacing for AC sweep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AcVariation {
+    /// Points per decade (logarithmic).
+    Dec,
+    /// Points per octave (logarithmic).
+    Oct,
+    /// Total points (linear).
+    Lin,
+}
+
 /// A requested simulation analysis.
 #[derive(Debug, Clone)]
 pub enum Analysis {
     Op,
     Tran { step: f64, stop: f64 },
+    /// `.ac DEC|OCT|LIN <points> <fstart> <fstop>`
+    Ac { variation: AcVariation, points: usize, fstart: f64, fstop: f64 },
 }

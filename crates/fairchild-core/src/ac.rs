@@ -123,6 +123,20 @@ pub fn freq_linear(start_hz: f64, stop_hz: f64, n_points: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Generate logarithmically spaced frequency points.
+///
+/// `points_per_octave` — number of points per octave (2× interval).
+pub fn freq_oct(start_hz: f64, stop_hz: f64, points_per_octave: usize) -> Vec<f64> {
+    let log2_start = start_hz.log2();
+    let log2_stop = stop_hz.log2();
+    let n_octaves = log2_stop - log2_start;
+    let n = ((n_octaves * points_per_octave as f64).ceil() as usize).max(2);
+    (0..=n)
+        .map(|i| 2f64.powf(log2_start + (log2_stop - log2_start) * i as f64 / n as f64))
+        .filter(|&f| f <= stop_hz * 1.0001)
+        .collect()
+}
+
 /// Run a small-signal AC sweep.
 ///
 /// `ac_source` — name of the voltage source to use as the AC stimulus (amplitude 1 V,

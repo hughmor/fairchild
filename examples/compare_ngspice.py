@@ -73,7 +73,10 @@ def run_fairchild(binary: Path, netlist: Path) -> dict[str, list[float]]:
     data: dict[str, list[float]] = {}
     for row in reader:
         for k, v in row.items():
-            data.setdefault(k.lower(), []).append(float(v))
+            try:
+                data.setdefault(k.lower(), []).append(float(v))
+            except ValueError:
+                pass  # skip label columns like "analysis"
     return data
 
 
@@ -193,10 +196,9 @@ def run_ngspice_op(netlist: Path, nodes: list[str]) -> dict[str, float]:
 # Example definitions
 # ---------------------------------------------------------------------------
 
-EXAMPLES = [
+TRAN_EXAMPLES = [
     {
         "netlist": "rc_step.sp",
-        "type": "tran",
         "node": "v(out)",
         "step": 50e-6,
         "stop": 5e-3,
@@ -208,7 +210,6 @@ EXAMPLES = [
     },
     {
         "netlist": "rlc_resonator.sp",
-        "type": "tran",
         "node": "v(n2)",
         "step": 10e-6,
         "stop": 1e-3,
@@ -219,8 +220,18 @@ EXAMPLES = [
         "plot": "rlc_resonator_comparison.png",
     },
     {
+        "netlist": "diode_rectifier.sp",
+        "node": "v(out)",
+        "step": 10e-9,
+        "stop": 3e-6,
+        "title": "Half-Wave Diode Rectifier (3 µs)",
+        "xlabel": "Time (µs)",
+        "ylabel": "Voltage (V)",
+        "xscale": 1e6,
+        "plot": "diode_rectifier_comparison.png",
+    },
+    {
         "netlist": "cmos_inverter.sp",
-        "type": "tran",
         "node": "v(out)",
         "step": 1e-9,
         "stop": 120e-9,
@@ -229,6 +240,16 @@ EXAMPLES = [
         "ylabel": "Voltage (V)",
         "xscale": 1e9,
         "plot": "cmos_inverter_comparison.png",
+    },
+]
+
+DC_EXAMPLES = [
+    {
+        "netlist": "nmos_dc_sweep.sp",
+        "nodes": ["v(d)", "v(g)", "v(vdd)"],
+        "labels": ["V(d)", "V(g)", "V(vdd)"],
+        "title": "NMOS DC Operating Point",
+        "plot": "nmos_dc_comparison.png",
     },
 ]
 
@@ -249,12 +270,11 @@ def main():
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    for ex in EXAMPLES:
+    for ex in TRAN_EXAMPLES:
         netlist = EXAMPLES_DIR / ex["netlist"]
         node = ex["node"]
         print(f"Running {ex['netlist']} ({node}) ...")
 
-        # Run both simulators
         fc_data = run_fairchild(binary, netlist)
         ng_data = run_ngspice_tran(netlist, node, ex["step"], ex["stop"])
 
@@ -273,7 +293,6 @@ def main():
         if ng_t.size == 0:
             print(f"  [warning] ngspice returned no data for {node}")
 
-        # Plot
         scale = ex["xscale"]
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(fc_t * scale, fc_v, label="fairchild", linewidth=2, color="#2196F3")
@@ -288,6 +307,45 @@ def main():
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
 
+        out_path = PLOTS_DIR / ex["plot"]
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  saved → {out_path.relative_to(REPO_ROOT)}")
+
+    for ex in DC_EXAMPLES:
+        netlist = EXAMPLES_DIR / ex["netlist"]
+        nodes = ex["nodes"]
+        labels = ex["labels"]
+        print(f"Running {ex['netlist']} (DC op, nodes: {nodes}) ...")
+
+        fc_data = run_fairchild(binary, netlist)
+        ng_vals = run_ngspice_op(netlist, nodes)
+
+        fc_vals = [fc_data.get(n, [np.nan])[0] for n in nodes]
+        ng_vals_list = [ng_vals.get(n, np.nan) for n in nodes]
+
+        x = np.arange(len(labels))
+        width = 0.35
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bars_fc = ax.bar(x - width / 2, fc_vals, width, label="fairchild", color="#2196F3")
+        bars_ng = ax.bar(x + width / 2, ng_vals_list, width, label="ngspice",
+                         color="#F44336", alpha=0.85)
+
+        ax.set_ylabel("Voltage (V)")
+        ax.set_title(ex["title"])
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.legend()
+        ax.grid(True, axis="y", alpha=0.3)
+
+        for bar in list(bars_fc) + list(bars_ng):
+            h = bar.get_height()
+            if not np.isnan(h):
+                ax.annotate(f"{h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, h),
+                            xytext=(0, 3), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=8)
+
+        fig.tight_layout()
         out_path = PLOTS_DIR / ex["plot"]
         fig.savefig(out_path, dpi=150)
         plt.close(fig)

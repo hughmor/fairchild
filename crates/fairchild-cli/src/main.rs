@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use fairchild_core::{ac_analysis, dc_op_nr, freq_decade, tran_nr_tr, DeviceRegistry};
-use fairchild_parser::{parse_spice, Analysis};
+use fairchild_core::{ac_analysis, dc_op_nr, freq_decade, freq_linear, freq_oct, tran_nr_tr, DeviceRegistry};
+use fairchild_parser::{parse_spice, AcVariation, Analysis};
 
 #[derive(Parser)]
 #[command(name = "fairchild", about = "SPICE-compatible analog circuit simulator")]
@@ -21,18 +21,6 @@ struct Cli {
     /// Output file (default: stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
-
-    /// AC sweep: start frequency in Hz (requires --ac-stop and --ac-points)
-    #[arg(long)]
-    ac_start: Option<f64>,
-
-    /// AC sweep: stop frequency in Hz
-    #[arg(long)]
-    ac_stop: Option<f64>,
-
-    /// AC sweep: points per decade
-    #[arg(long, default_value = "20")]
-    ac_points: usize,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -96,26 +84,28 @@ fn main() {
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                 ran_something = true;
             }
+            Analysis::Ac { variation, points, fstart, fstop } => {
+                let freqs = match variation {
+                    AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
+                    AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
+                    AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
+                };
+                let registry = DeviceRegistry::default();
+                let result = ac_analysis(&netlist, &freqs, None, &registry).unwrap_or_else(|e| {
+                    eprintln!("error: AC analysis failed: {e}");
+                    std::process::exit(1);
+                });
+                match cli.format {
+                    Format::Csv => result.write_csv(&mut w),
+                    Format::Nutmeg => result.write_nutmeg(&mut w, &title),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
         }
-    }
-
-    // Optional AC sweep from command-line flags (parser doesn't yet have .ac directive).
-    if let (Some(start), Some(stop)) = (cli.ac_start, cli.ac_stop) {
-        let freqs = freq_decade(start, stop, cli.ac_points);
-        let registry = DeviceRegistry::default();
-        let result = ac_analysis(&netlist, &freqs, None, &registry).unwrap_or_else(|e| {
-            eprintln!("error: AC analysis failed: {e}");
-            std::process::exit(1);
-        });
-        match cli.format {
-            Format::Csv => result.write_csv(&mut w),
-            Format::Nutmeg => result.write_nutmeg(&mut w, &title),
-        }
-        .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-        ran_something = true;
     }
 
     if !ran_something {
-        eprintln!("warning: no analyses found in netlist (add .op or .tran)");
+        eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");
     }
 }

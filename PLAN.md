@@ -381,6 +381,14 @@ Clean up technical debt, produce documentation, validate publicly against ngspic
   - OSDI reactive Jacobian fix — see `docs/osdi-reactive-jacobian-findings.md` for root
     cause and fix approach (flat-buffer aliasing path via `load_jacobian_tran`).
   - `@cross` event detection (zero-crossing refinement).
+  - `.ac` parser directive — currently AC analysis requires `--ac-start`/`--ac-stop` CLI
+    flags; the parser should recognise `.ac dec <pts> <fstart> <fstop>` so netlists are
+    self-describing. Also fix the `no analyses found` warning to mention `.ac`.
+  - PWL source — piecewise-linear voltage/current waveform syntax in the parser:
+    `V1 in 0 PWL(0 0 1u 5 2u 5 3u 0)`. Required for arbitrary stimulus waveforms and
+    as the foundation for the Phase 3 numpy waveform bridge.
+  - `@cross` event detection (zero-crossing refinement) — deferred to end of Phase 2;
+    not required for photonic or analog correctness at this stage.
 
 ---
 
@@ -422,6 +430,10 @@ enddiscipline
 - Connection rules: optical ports connect only to optical ports; electrical to electrical.
 - Mixed-domain components (modulator, photodetector) have both disciplines.
 
+**`@cross` event detection** (deferred from Phase 1.5): zero-crossing step refinement for
+Verilog-A `@cross` events. Required for accurate digital-input edges driving EO modulators.
+Implement after the first optical circuit is working.
+
 **Milestone**: Transient simulation of ring resonator modulation; compare transfer function against coupled-mode theory analytical solution. Pass/fail criterion: resonance wavelength within 0.1 nm.
 
 ---
@@ -451,6 +463,25 @@ result.eye_diagram("V(data_out)", ui=1/64e9)
 - NumPy array bridge via `numpy` + `pyo3-numpy`.
 - Async simulation: non-blocking `.run_async()` returning a `Future`.
 - Jupyter demo notebook: SiPh transceiver, eye diagram, power spectrum.
+
+**Numpy waveform input (Phase 3 priority):**
+
+A first-class interface for injecting externally generated waveforms as circuit stimuli — the primary use case is driving a fairchild simulation with a numpy-generated bit pattern, channel response, or measured waveform without needing to manually serialise to PWL netlist syntax.
+
+```python
+import fairchild as fc
+import numpy as np
+
+t = np.linspace(0, 10e-9, 1000)
+v_in = np.where((t % 1e-9) < 0.5e-9, 1.8, 0.0)   # 1 Gbps PRBS
+
+ckt = fc.Circuit()
+ckt.load("modulator.sp")
+ckt.set_source("VIN", fc.WaveformSource(t, v_in))   # overrides netlist waveform
+result = ckt.run(analysis="tran", stop=10e-9)
+```
+
+Implementation: `WaveformSource(t, v)` converts the numpy arrays to an internal PWL representation at the Rust boundary (sorted breakpoints, linear interpolation). The existing PWL source infrastructure (Phase 1.5) handles it from there — no special Python-only code path in the solver.
 
 ---
 
@@ -527,9 +558,36 @@ analyses:
 
 ---
 
-### Phase 6: Advanced Photonic Model Library (Months 6–10)
+### Phase 6: Advanced Model Libraries (Months 6–10)
 
-**Goal**: Complete SiPh transceiver model library.
+**Goal**: Complete SiPh transceiver model library and a curated advanced electronic transistor zoo.
+
+**Advanced electronic transistor models:**
+
+The built-in Rust models (Level 1 MOSFET, Shockley diode) are sufficient for functional
+testing. For accurate mixed-signal and SiPh driver circuit simulation, industry-standard
+compact models are needed. All of these exist as open Verilog-A sources and compile to
+OSDI via OpenVAF-Reloaded without simulator modification — the work here is tooling and
+validation, not new solver code.
+
+| Model | Source | Notes |
+|-------|--------|-------|
+| BSIM3v3.4 | UC Berkeley (public domain) | Workhorse for 180–90 nm nodes; already compilable in Phase 0 demo |
+| BSIM4.8 | UC Berkeley (public domain) | Gold standard 90 nm → 28 nm |
+| BSIMSOI 4.6 | UC Berkeley | SOI CMOS; relevant for GF45SPCLO |
+| PSP 103.8 | NXP / Philips (public) | High-accuracy surface-potential model |
+| HiSIM2 | Hiroshima Univ. (public) | Global standard in Japan; STARC PDK baseline |
+| MOSFET Level 2/3 | SPICE heritage | Implement natively in Rust for legacy netlist compat |
+
+Action items:
+- `scripts/build_model_zoo.sh` — downloads `.va` sources, compiles with OpenVAF, deposits
+  `.osdi` files in `model-zoo/`. CI caches compiled artifacts keyed on VA file hash.
+- Golden regression tests for each model: compare DC sweep and transient against ngspice
+  using the same `.osdi` or equivalent (ngspice ships BSIM4 natively).
+- Level 2/3 MOSFET as Rust-native built-in (backward compat with 1970s-era netlists that
+  specify `LEVEL=2`).
+
+**SiPh model library (original Phase 6 content — see below):**
 
 **Passive models (Verilog-A):**
 - `waveguide.va`: propagation loss, group index, dispersion (ng, GVD)

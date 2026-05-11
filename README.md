@@ -115,13 +115,15 @@ cargo test
 
 ---
 
-## Benchmarks
+## Benchmark Results
 
-Run against ngspice (requires `cargo build --release` and ngspice on PATH):
-
-```bash
-python scripts/benchmark.py
-```
+| Circuit | fairchild | ngspice | Speedup | fairchild RSS | ngspice RSS |
+| --- | --- | --- | --- | --- | --- |
+| RC step (1k/1µF, 5ms tran) | 3.2 ms | 11.2 ms | 3.4× | 2.6 MB | 9.5 MB |
+| RLC resonator (1ms tran) | 3.0 ms | 11.4 ms | 3.8× | 9.5 MB | 9.5 MB |
+| Diode rectifier (3µs tran) | 3.1 ms | 11.0 ms | 3.5× | 9.5 MB | 9.5 MB |
+| CMOS inverter (120ns tran) | 3.0 ms | 10.9 ms | 3.6× | 9.5 MB | 9.5 MB |
+| NMOS DC op | 2.7 ms | 11.3 ms | 4.1× | 9.5 MB | 9.8 MB |
 
 ---
 

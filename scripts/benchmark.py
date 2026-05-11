@@ -29,6 +29,7 @@ EXAMPLES_DIR = REPO_ROOT / "examples"
 NETLISTS = [
     ("RC step (1k/1µF, 5ms tran)",   "rc_step.sp"),
     ("RLC resonator (1ms tran)",       "rlc_resonator.sp"),
+    ("Diode rectifier (3µs tran)",     "diode_rectifier.sp"),
     ("CMOS inverter (120ns tran)",     "cmos_inverter.sp"),
     ("NMOS DC op",                     "nmos_dc_sweep.sp"),
 ]
