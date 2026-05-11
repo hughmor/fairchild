@@ -530,4 +530,61 @@ mod tests {
             _ => panic!("expected Ac analysis"),
         }
     }
+
+    // ---------- next_breakpoint tests ----------
+
+    #[test]
+    fn pulse_next_breakpoint_before_td() {
+        // t < td → next breakpoint is td
+        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 1e-6, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 10e-6 };
+        let bp = w.next_breakpoint(0.0).unwrap();
+        assert!((bp - 1e-6).abs() < 1e-18, "expected td=1µs, got {bp}");
+    }
+
+    #[test]
+    fn pulse_next_breakpoint_at_period_boundary() {
+        // t exactly at start of a period → next breakpoint is td + tr (end of rise)
+        let td = 0.0_f64;
+        let tr = 100e-9_f64;
+        let pw = 5e-6_f64;
+        let tf = 100e-9_f64;
+        let per = 10e-6_f64;
+        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td, tr, tf, pw, per };
+        // t = td + 1*per: start of second period
+        let t = td + per;
+        let bp = w.next_breakpoint(t).unwrap();
+        assert!((bp - (t + tr)).abs() < 1e-18, "expected t+tr={}, got {bp}", t + tr);
+    }
+
+    #[test]
+    fn pulse_next_breakpoint_mid_rise() {
+        // t mid-rise → next breakpoint is td + tr
+        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 10e-6 };
+        let bp = w.next_breakpoint(50e-9).unwrap();
+        assert!((bp - 100e-9).abs() < 1e-18, "expected 100ns, got {bp}");
+    }
+
+    #[test]
+    fn pulse_next_breakpoint_no_repeat_exhausted() {
+        // per = 0 and past all breakpoints → None
+        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 0.0 };
+        let after_all = 100e-9 + 5e-6 + 100e-9 + 1e-9; // past td+tr+pw+tf
+        assert!(w.next_breakpoint(after_all).is_none(), "expected None after last breakpoint");
+    }
+
+    #[test]
+    fn pwl_next_breakpoint() {
+        let w = Waveform::Pwl { points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)] };
+        assert!((w.next_breakpoint(-1.0).unwrap() - 0.0).abs() < 1e-18);
+        assert!((w.next_breakpoint(0.0).unwrap() - 1e-6).abs() < 1e-18);
+        assert!((w.next_breakpoint(1e-6).unwrap() - 2e-6).abs() < 1e-18);
+        assert!(w.next_breakpoint(3e-6).is_none(), "past last point");
+    }
+
+    #[test]
+    fn dc_waveform_no_breakpoints() {
+        let w = Waveform::Dc(5.0);
+        assert!(w.next_breakpoint(0.0).is_none());
+        assert!(w.next_breakpoint(1e6).is_none());
+    }
 }

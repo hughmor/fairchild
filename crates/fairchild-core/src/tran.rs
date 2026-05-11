@@ -499,7 +499,22 @@ pub fn tran_nr_with_registry_var(
     'outer: loop {
         if t >= stop { break; }
 
-        let h_actual = h.min(stop - t).max(h_min);
+        // Clamp h to the next waveform slope discontinuity so we always land on it.
+        let next_bp: Option<f64> = netlist.elements.iter()
+            .filter_map(|el| match el {
+                Element::VoltageSource { waveform, .. } |
+                Element::CurrentSource { waveform, .. } => waveform.next_breakpoint(t),
+                _ => None,
+            })
+            .reduce(f64::min);
+        let mut h_want = h.min(stop - t);
+        if let Some(bp) = next_bp {
+            let to_bp = bp - t;
+            if to_bp > h_min {
+                h_want = h_want.min(to_bp);
+            }
+        }
+        let h_actual = h_want.max(h_min);
         let t_next = t + h_actual;
 
         // Build BE companion maps for h_actual from the stored raw state.
@@ -841,6 +856,26 @@ mod tests {
         assert!(
             (vb_tran - vb_dc).abs() < 1e-5,
             "var-step V(b)={vb_tran:.6e}  dc_op={vb_dc:.6e}"
+        );
+    }
+
+    #[test]
+    fn tran_nr_var_breakpoint_landing() {
+        // PULSE with tr=100ns, step=5µs (step >> tr). Without breakpoint insertion the
+        // variable-step solver can skip over the rise edge entirely; with it, the solver
+        // must land at td+tr and the plateau voltage V(out) at that time must be ≈ v1=5V.
+        //
+        // Circuit: V1 → R1 → out (no reactive element so V(out) = V1 instantly).
+        let netlist = parse_spice(
+            "* breakpoint test\nV1 in 0 PULSE(0 5 1u 100n 100n 5u 10u)\nR1 in out 1\n.tran 5u 20u\n.end\n"
+        ).unwrap();
+        let result = tran_nr_var(&netlist, 5e-6, 20e-6).unwrap();
+
+        // At t = td + tr = 1.1µs the source should be fully risen; V(out) ≈ 5V.
+        let v_post_rise = result.voltage_at("out", 1.1e-6).unwrap();
+        assert!(
+            (v_post_rise - 5.0).abs() < 0.01,
+            "V(out) at t=1.1µs should be ≈5V after rise; got {v_post_rise:.4}"
         );
     }
 

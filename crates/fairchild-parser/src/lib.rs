@@ -48,6 +48,38 @@ impl Waveform {
         }
     }
 
+    /// Next time strictly after `t` at which this waveform has a slope discontinuity.
+    ///
+    /// Returns `None` for smooth (DC) waveforms or when all breakpoints are in the past.
+    pub fn next_breakpoint(&self, t: f64) -> Option<f64> {
+        match self {
+            Waveform::Dc(_) => None,
+            Waveform::Pulse { td, tr, tf, pw, per, .. } => {
+                if t < *td {
+                    return Some(*td);
+                }
+                // Offsets from the start of a period where slope changes.
+                let offsets: [f64; 4] = [0.0, *tr, tr + pw, tr + pw + tf];
+                if *per <= 0.0 {
+                    return offsets.iter()
+                        .map(|b| td + b)
+                        .filter(|&bp| bp > t)
+                        .reduce(f64::min);
+                }
+                let phase = (t - td) % per;
+                let base = t - phase; // start of current period
+                offsets.iter()
+                    .map(|b| base + b)
+                    .chain(std::iter::once(base + per))
+                    .filter(|&bp| bp > t)
+                    .reduce(f64::min)
+            }
+            Waveform::Pwl { points } => {
+                points.iter().map(|(pt, _)| *pt).find(|&pt| pt > t)
+            }
+        }
+    }
+
     /// Value at time t (seconds).
     pub fn at(&self, t: f64) -> f64 {
         match self {
