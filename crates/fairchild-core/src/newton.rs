@@ -5,7 +5,7 @@ use fairchild_parser::{Element, Netlist};
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist, CircuitTopology};
+use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::solver::lu_solve;
 
 /// SPICE-standard convergence tolerances.
@@ -36,6 +36,27 @@ impl NrResult {
 
     pub fn all_voltages(&self) -> impl Iterator<Item = (&str, f64)> {
         self.topo.node_index.iter().map(|(name, &i)| (name.as_str(), self.x[i]))
+    }
+
+    /// Write DC operating point as a two-row CSV (header + one data row).
+    pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
+        write!(w, "analysis")?;
+        for name in self.topo.node_index.keys() {
+            write!(w, ",V({name})")?;
+        }
+        let n_nodes = self.topo.n_nodes();
+        for name in self.topo.vsrc_index.keys() {
+            write!(w, ",I({name})")?;
+        }
+        writeln!(w)?;
+        write!(w, "dc_op")?;
+        for &idx in self.topo.node_index.values() {
+            write!(w, ",{:.6e}", self.x[idx])?;
+        }
+        for &idx in self.topo.vsrc_index.values() {
+            write!(w, ",{:.6e}", self.x[n_nodes + idx])?;
+        }
+        writeln!(w)
     }
 }
 
@@ -73,39 +94,39 @@ pub(crate) fn build_devices(
     Ok(devices)
 }
 
-/// DC operating-point with a pre-built registry (supports OSDI and built-in models).
-pub fn dc_op_nr_with_registry(
+/// Core Newton-Raphson loop at a fixed source scale and gmin.
+///
+/// `source_scale` ∈ [0,1]: scales all independent source amplitudes.
+/// `gmin_extra`: extra diagonal conductance added to every node (for GMIN stepping).
+/// Returns Ok(x) if converged within MAX_ITER, Err if not.
+fn nr_inner(
+    topo: &CircuitTopology,
     netlist: &Netlist,
-    registry: &DeviceRegistry,
-) -> Result<NrResult, SimError> {
-    let ctx = SimContext::default();
-    let topo = CircuitTopology::build(netlist);
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+    mut x: Vec<f64>,
+    source_scale: f64,
+    gmin_extra: f64,
+) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let n_nodes = topo.n_nodes();
 
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
-    let mut x = vec![0.0f64; topo.size];
+    for _ in 0..MAX_ITER {
+        let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
 
-    for iter in 0..MAX_ITER {
-        let mut mat = stamp_netlist(&topo, netlist, 0.0, &empty, &empty);
-
-        for dev in &mut devices {
-            dev.eval(&x, EvalFlags::dc(), &ctx);
+        for dev in devices.iter_mut() {
+            dev.eval(&x, EvalFlags::dc(), ctx);
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
 
-        // GMIN: add a small conductance to each node diagonal to prevent
-        // near-singular matrices when all devices have tiny conductance (e.g.
-        // a diode at Vd=0 has gd ≈ Is/Vt ≈ 4e-13 S ≪ GMIN).
-        for i in 0..topo.n_nodes() {
-            mat.a[i][i] += GMIN;
+        for i in 0..n_nodes {
+            mat.a[i][i] += GMIN + gmin_extra;
         }
 
         let x_new = lu_solve(&mat.a, &mat.b)?;
 
-        let max_dv = x_new.iter()
-            .zip(x.iter())
-            .take(topo.n_nodes())
+        let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs())
             .fold(0.0f64, f64::max);
 
@@ -116,18 +137,111 @@ pub fn dc_op_nr_with_registry(
             x_new
         };
 
-        let converged = x_next.iter()
-            .zip(x.iter())
+        let converged = x_next.iter().zip(x.iter())
             .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
 
         x = x_next;
-
         if converged {
-            return Ok(NrResult { topo, x, iters: iter + 1 });
+            return Ok(x);
         }
     }
-
     Err(SimError::NoConvergence { iters: MAX_ITER })
+}
+
+/// Source-stepping homotopy: ramp sources from 0 → full value in at most `n_steps` increments.
+///
+/// Returns Ok(x) at full source values if the homotopy converges; Err if it can't even
+/// converge with tiny source steps.
+fn source_stepping(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+    x0: Vec<f64>,
+) -> Result<Vec<f64>, SimError> {
+    let mut x = x0;
+    let mut scale = 0.0_f64;
+    let mut ds = 0.1_f64;
+    let min_ds = 1e-6_f64;
+
+    while scale < 1.0 {
+        let next = (scale + ds).min(1.0);
+        match nr_inner(topo, netlist, devices, ctx, x.clone(), next, 0.0) {
+            Ok(x_new) => {
+                x = x_new;
+                scale = next;
+                ds = (ds * 2.0).min(0.2);
+            }
+            Err(_) => {
+                ds *= 0.5;
+                if ds < min_ds {
+                    return Err(SimError::NoConvergence { iters: MAX_ITER });
+                }
+            }
+        }
+    }
+    Ok(x)
+}
+
+/// GMIN stepping: add a large artificial conductance to all nodes, solve, then ramp it
+/// down to the standard GMIN over logarithmic steps.
+fn gmin_stepping(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+) -> Result<Vec<f64>, SimError> {
+    let mut gmin_extra = 1.0_f64;  // Start at 1 S (≈ 1 Ω across every node)
+    let target = GMIN;
+    let mut x = vec![0.0f64; topo.size];
+
+    // Ramp down GMIN from 1 S to GMIN over ~12 decades in steps of ÷10.
+    loop {
+        match nr_inner(topo, netlist, devices, ctx, x.clone(), 1.0, gmin_extra) {
+            Ok(x_new) => {
+                x = x_new;
+                if gmin_extra <= target { break; }
+                gmin_extra = (gmin_extra * 0.1).max(target);
+            }
+            Err(_) => {
+                return Err(SimError::NoConvergence { iters: MAX_ITER });
+            }
+        }
+    }
+    Ok(x)
+}
+
+/// DC operating-point with a pre-built registry (supports OSDI and built-in models).
+///
+/// Convergence strategy (in order):
+///   1. Direct Newton-Raphson from x=0.
+///   2. Source stepping: ramp sources from 0 → full value.
+///   3. GMIN stepping: add large diagonal conductance, ramp to standard GMIN.
+pub fn dc_op_nr_with_registry(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+) -> Result<NrResult, SimError> {
+    let ctx = SimContext::default();
+    let topo = CircuitTopology::build(netlist);
+
+    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let x0 = vec![0.0f64; topo.size];
+
+    // Strategy 1: direct NR.
+    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, x0.clone(), 1.0, 0.0) {
+        return Ok(NrResult { topo, x, iters: 1 });
+    }
+
+    // Strategy 2: source stepping.
+    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, x0) {
+        return Ok(NrResult { topo, x, iters: 2 });
+    }
+
+    // Strategy 3: GMIN stepping.
+    match gmin_stepping(&topo, netlist, &mut devices, &ctx) {
+        Ok(x) => Ok(NrResult { topo, x, iters: 3 }),
+        Err(e) => Err(e),
+    }
 }
 
 /// DC operating-point using only built-in models from `.model` cards.
@@ -183,12 +297,26 @@ mod tests {
         ).unwrap();
         let r = dc_op_nr(&net).unwrap();
         let vb = r.node_voltage("b").unwrap();
-        // Sanity: voltage at diode anode should be in a forward-bias range.
         assert!(vb > 0.5 && vb < 0.8, "V(b) out of expected range: {vb}");
-        // KCL: (5 - vb)/10k ≈ Is*(exp(vb/Vt)-1)
         let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
         let ir = (5.0 - vb) / 10e3;
         let id = 1e-14 * ((vb / vt).exp() - 1.0);
         assert!((ir - id).abs() < 1e-8, "KCL error: ir={ir:.4e} id={id:.4e}");
+    }
+
+    #[test]
+    fn write_csv_dc_op() {
+        let net = parse_spice(
+            "* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n",
+        ).unwrap();
+        let r = dc_op_nr(&net).unwrap();
+        let mut buf = Vec::new();
+        r.write_csv(&mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.starts_with("analysis,"), "header: {s}");
+        assert!(s.contains("V(out)"), "should contain V(out): {s}");
+        assert!(s.contains("dc_op"), "should have dc_op row: {s}");
+        // V(out) should be ~1.0 V (voltage divider).
+        assert!(s.contains("1.000000e0") || s.contains("1.000000e+0"), "V(out)≈1V missing: {s}");
     }
 }

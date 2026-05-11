@@ -37,6 +37,34 @@ impl TranResult {
         let i_series = self.vsrc_currents.get(vsrc_name)?;
         interp(&self.time, i_series, t)
     }
+
+    /// Write all waveforms to CSV.
+    ///
+    /// Columns: `time`, then `V(<node>)` for every node, then `I(<vsrc>)` for every
+    /// voltage source. Values are written in scientific notation.
+    pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
+        // Header
+        write!(w, "time")?;
+        for name in self.node_voltages.keys() {
+            write!(w, ",V({name})")?;
+        }
+        for name in self.vsrc_currents.keys() {
+            write!(w, ",I({name})")?;
+        }
+        writeln!(w)?;
+        // Rows
+        for (ti, &t) in self.time.iter().enumerate() {
+            write!(w, "{t:.6e}")?;
+            for v in self.node_voltages.values() {
+                write!(w, ",{:.6e}", v[ti])?;
+            }
+            for i in self.vsrc_currents.values() {
+                write!(w, ",{:.6e}", i[ti])?;
+            }
+            writeln!(w)?;
+        }
+        Ok(())
+    }
 }
 
 fn interp(xs: &[f64], ys: &[f64], x: f64) -> Option<f64> {

@@ -66,6 +66,51 @@ impl MnaMatrix {
 // DC stamp (time-independent elements, or companion equivalents for C/L)
 // ---------------------------------------------------------------------------
 
+/// Like `stamp_netlist` but scales all independent source amplitudes by `source_scale`.
+///
+/// Used by source-stepping homotopy: call with source_scale ∈ [0,1] to ramp
+/// voltage/current sources from zero to their nominal values.
+pub fn stamp_netlist_scaled(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    source_scale: f64,
+    cap_state: &IndexMap<String, (f64, f64)>,
+    ind_state: &IndexMap<String, (f64, f64)>,
+) -> MnaMatrix {
+    let mut mat = stamp_netlist(topo, netlist, 0.0, cap_state, ind_state);
+    if (source_scale - 1.0).abs() < 1e-15 {
+        return mat;
+    }
+    // Re-scale source contributions: voltage sources stamp into b[vi], current sources into b[node].
+    // Rather than re-stamping from scratch, rescale: b[vi] already has waveform.at(0) from
+    // stamp_netlist (t=0 = DC value). We just scale b entries for source rows.
+    let n_nodes = topo.n_nodes();
+    for (name, &vi_idx) in &topo.vsrc_index {
+        let vi = n_nodes + vi_idx;
+        // Find the source's waveform value and rescale.
+        if let Some(el) = netlist.elements.iter().find(|e| {
+            matches!(e, Element::VoltageSource { name: n, .. } if n == name)
+        }) {
+            if let Element::VoltageSource { waveform, .. } = el {
+                let v_full = waveform.at(0.0);
+                // The stamp put v_full into b[vi]; replace with v_full * source_scale.
+                mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
+            }
+        }
+    }
+    for el in &netlist.elements {
+        if let Element::CurrentSource { pos, neg, waveform, .. } = el {
+            let i_full = waveform.at(0.0);
+            if i_full == 0.0 { continue; }
+            let delta = i_full * (source_scale - 1.0);
+            // stamp_current_source: b[pos] -= i, b[neg] += i. Scale correction = delta.
+            if let Some(&p) = topo.node_index.get(pos) { mat.b[p] -= delta; }
+            if let Some(&n) = topo.node_index.get(neg) { mat.b[n] += delta; }
+        }
+    }
+    mat
+}
+
 /// Stamp the full MNA system for DC operating-point or a single transient step.
 ///
 /// `t`           — current simulation time (used for PULSE sources)
