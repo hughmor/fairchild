@@ -167,7 +167,8 @@ and branch currents.
 ```
 .tran  <step>  <stop>
 ```
-Integrate from t=0 to t=`stop` with initial step `step`. Uses Backward Euler (BE) by default.
+Integrate from t=0 to t=`stop` with timestep `step`. Uses Backward Euler for the first
+step then Trapezoidal Rule for all subsequent steps (BE+TR, order 2).
 
 Example:
 ```

@@ -78,6 +78,30 @@ python examples/compare_ngspice.py --release
 
 ---
 
+## Comparison with ngspice
+
+fairchild results (solid blue) vs ngspice (dashed red) on three example circuits:
+
+**RC Step Response** — 1 kΩ / 1 µF, τ = 1 ms
+
+![RC step response](docs/plots/rc_step_comparison.png)
+
+**RLC Resonator** — series R=10 Ω, L=1 mH, C=1 µF, f₀ ≈ 5 kHz
+
+![RLC resonator](docs/plots/rlc_resonator_comparison.png)
+
+**CMOS Inverter** — Level 1 NMOS + PMOS (Shichman-Hodges), VDD = 3.3 V
+
+![CMOS inverter](docs/plots/cmos_inverter_comparison.png)
+
+Generate these plots yourself (requires ngspice and matplotlib):
+
+```bash
+python3 examples/compare_ngspice.py
+```
+
+---
+
 ## Validation Against ngspice
 
 All golden tests in `crates/fairchild-core/tests/` compare fairchild against ngspice

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use fairchild_core::{ac_analysis, dc_op_nr, freq_decade, tran_nr, DeviceRegistry};
+use fairchild_core::{ac_analysis, dc_op_nr, freq_decade, tran_nr_tr, DeviceRegistry};
 use fairchild_parser::{parse_spice, Analysis};
 
 #[derive(Parser)]
@@ -85,7 +85,7 @@ fn main() {
                 ran_something = true;
             }
             Analysis::Tran { step, stop } => {
-                let result = tran_nr(&netlist, *step, *stop).unwrap_or_else(|e| {
+                let result = tran_nr_tr(&netlist, *step, *stop).unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });
