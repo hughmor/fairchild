@@ -348,6 +348,42 @@ This is the "if this can't work in 6 weeks the plan is fiction" milestone.
 
 ---
 
+### Phase 1.5: Consolidation & Ecosystem (before Phase 2)
+
+**Goal**: Make the simulator usable and presentable before adding photonic complexity.
+Clean up technical debt, produce documentation, validate publicly against ngspice.
+
+**Documentation**
+- GitHub README: feature list, quickstart, architecture diagram, benchmark results.
+- User guide (`docs/user-guide.md`): theory of operation for each solver, convergence
+  knobs, waveform syntax, analysis types, output formats.
+
+**CLI (`fairchild-cli`)**
+- Accept `-f netlist.sp` and run all analyses present in the netlist (`.op`, `.tran`, `.ac`).
+- Emit CSV to stdout by default; `--format nutmeg` for ngspice-compatible rawfile output.
+- `--output <file>` flag.
+
+**Examples & Validation**
+- 5 non-trivial circuits spanning DC, transient, and AC: voltage divider, RC step,
+  RLC resonator, CMOS inverter, diode rectifier.
+- Python scripts (`examples/`) that run both fairchild CLI and ngspice, overlay results,
+  and save comparison PNGs for the README.
+
+**Benchmarking**
+- Measure wall-clock time and peak RSS for fairchild vs. ngspice on the same netlists.
+- `scripts/benchmark.py` — tabulates results; output goes into README.
+
+**Codebase audit & cleanup**
+- ✅ Removed `MnaSystem` legacy wrapper; migrated `ngspice_golden.rs` to `dc_op_nr`.
+- ✅ Fixed all compiler warnings (unused import `Device`, unused assignment `x` in tran.rs).
+- Remaining Phase 1 loose ends:
+  - PULSE breakpoint insertion in `tran_nr_with_registry_var` (branch: `pulse-breakpoints`).
+  - OSDI reactive Jacobian fix — see `docs/osdi-reactive-jacobian-findings.md` for root
+    cause and fix approach (flat-buffer aliasing path via `load_jacobian_tran`).
+  - `@cross` event detection (zero-crossing refinement).
+
+---
+
 ### Phase 2: Photonic Discipline & First Optical Simulation (Months 2–5)
 
 **Goal**: First working optical circuit — CW laser → waveguide → coupler → photodetector.

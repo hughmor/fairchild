@@ -341,62 +341,20 @@ pub fn ind_companion_be_to_tr(g_eq_be: f64, i_hist_be: f64, v_l_new: f64) -> (f6
     (g_eq_tr, i_l + g_eq_tr * v_l_new)
 }
 
-// ---------------------------------------------------------------------------
-// Legacy compatibility wrapper used by DC solver and existing tests
-// ---------------------------------------------------------------------------
-
-/// Simple DC-only MNA system (no C/L companion, sources at DC value).
-pub struct MnaSystem {
-    pub a: Vec<Vec<f64>>,
-    pub b: Vec<f64>,
-    pub node_index: IndexMap<String, usize>,
-    pub vsrc_index: IndexMap<String, usize>,
-    pub size: usize,
-}
-
-impl MnaSystem {
-    pub fn build(netlist: &Netlist) -> Result<MnaSystem, SimError> {
-        let topo = CircuitTopology::build(netlist);
-        let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-        let mat = stamp_netlist(&topo, netlist, 0.0, &empty, &empty);
-        Ok(MnaSystem {
-            a: mat.a,
-            b: mat.b,
-            node_index: topo.node_index,
-            vsrc_index: topo.vsrc_index,
-            size: topo.size,
-        })
-    }
-
-    pub fn node_voltage(&self, node: &str, x: &[f64]) -> Result<f64, SimError> {
-        if node == "0" || node == "gnd" { return Ok(0.0); }
-        self.node_index.get(node)
-            .map(|&i| x[i])
-            .ok_or_else(|| SimError::UnknownNode(node.to_string()))
-    }
-
-    pub fn vsrc_current(&self, vsrc_name: &str, x: &[f64]) -> Result<f64, SimError> {
-        let n_nodes = self.node_index.len();
-        self.vsrc_index.get(vsrc_name)
-            .map(|&i| x[n_nodes + i])
-            .ok_or_else(|| SimError::UnknownNode(vsrc_name.to_string()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
 
     #[test]
-    fn voltage_divider_matrix_size() {
+    fn voltage_divider_topology_size() {
         let net = parse_spice(
             "* divider\nV1 in 0 1.0\nR1 in mid 1000\nR2 mid 0 1000\n.op\n.end\n",
         )
         .unwrap();
-        let sys = MnaSystem::build(&net).unwrap();
+        let topo = CircuitTopology::build(&net);
         // 2 nodes (in, mid) + 1 vsource = 3×3
-        assert_eq!(sys.size, 3);
+        assert_eq!(topo.size, 3);
     }
 
     #[test]

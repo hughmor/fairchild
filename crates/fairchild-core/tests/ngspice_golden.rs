@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 
-use fairchild_core::dc_op;
+use fairchild_core::dc_op_nr;
 use fairchild_parser::parse_spice;
 
 // Tolerance: max(absolute floor, relative fraction of the expected value).
@@ -119,7 +119,7 @@ fn parse_ngspice_print(output: &str) -> Option<HashMap<String, f64>> {
 
 fn fairchild_op(netlist_str: &str) -> HashMap<String, f64> {
     let netlist = parse_spice(netlist_str).expect("parse failed");
-    let result = dc_op(&netlist).expect("DC solve failed");
+    let result = dc_op_nr(&netlist).expect("DC solve failed");
     let mut map = HashMap::new();
     for (name, v) in result.all_voltages() {
         map.insert(format!("v({name})"), v);

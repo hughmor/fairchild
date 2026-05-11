@@ -14,7 +14,7 @@ pub use device_registry::DeviceRegistry;
 pub use error::SimError;
 pub use models::{Mosfet1, ShockleyDiode};
 pub use newton::{dc_op_nr, dc_op_nr_with_registry, NrResult};
-pub use solver::{dc_op, OpResult};
+pub use solver::lu_solve;
 pub use tran::{
     run_tran, run_tran_tr,
     tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry, tran_nr_with_registry_tr,

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, SimContext};
+use crate::device::{EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
@@ -171,7 +171,7 @@ fn run_tran_mode(
     let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x0, mode);
 
     let mut t = step;
-    let mut x = x0;
+    let mut x;
     let mut first_tr = true;
     loop {
         let mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);

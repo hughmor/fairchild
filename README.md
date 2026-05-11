@@ -1,0 +1,132 @@
+# fairchild
+
+A SPICE-compatible analog circuit simulator written in Rust.
+
+**Status**: Phase 1 complete — production-quality solver hardening underway.  
+**Goal**: First open-source time-domain electro-optic co-simulator (see [PLAN.md](PLAN.md)).
+
+---
+
+## Features
+
+| Category | What's implemented |
+|---|---|
+| **Elements** | R, L, C, V (DC + PULSE), I (DC + PULSE), Diode, MOSFET (Level 1 NMOS/PMOS) |
+| **Analyses** | DC operating point (`.op`), transient (`.tran`), small-signal AC (CLI flag) |
+| **DC solver** | Newton-Raphson with GMIN stepping + source stepping homotopy |
+| **Transient** | Fixed-step Backward Euler / Trapezoidal Rule; variable-step BE+LTE |
+| **Device models** | Shockley diode; MOSFET Shichman-Hodges (Level 1) with body effect |
+| **OSDI** | Runtime loading of OpenVAF-compiled `.osdi` shared libraries (BSIM4, PSP…) |
+| **Output** | CSV (stdout), Nutmeg rawfile (ngspice-compatible) |
+
+---
+
+## Quickstart
+
+### Build
+
+```bash
+cargo build --release
+```
+
+### Run a simulation
+
+```bash
+# DC operating point
+./target/release/fairchild -f examples/nmos_dc_sweep.sp
+
+# Transient
+./target/release/fairchild -f examples/rc_step.sp
+
+# Nutmeg rawfile output (ngspice-compatible)
+./target/release/fairchild -f examples/rc_step.sp --format nutmeg -o rc_step.raw
+
+# AC sweep (CLI flags; .ac parser directive coming in Phase 2)
+./target/release/fairchild -f examples/rlc_resonator.sp --ac-start 100 --ac-stop 100k --ac-points 30
+```
+
+### Example output (RC step)
+
+```
+time,V(in),V(out),I(v1)
+0.000000e0,0.000000e0,0.000000e0,0.000000e0
+5.000000e-5,1.000000e0,4.876000e-2,-9.512000e-1
+...
+```
+
+---
+
+## Example Circuits
+
+The `examples/` directory contains ready-to-run SPICE netlists:
+
+| File | Description |
+|------|-------------|
+| `rc_step.sp` | RC step response (τ = 1 ms) |
+| `rlc_resonator.sp` | RLC series resonator (f₀ ≈ 5 kHz) |
+| `diode_rectifier.sp` | Half-wave rectifier |
+| `cmos_inverter.sp` | CMOS inverter (NMOS + PMOS Level 1) |
+| `nmos_dc_sweep.sp` | NMOS resistive-load DC operating point |
+
+### Compare with ngspice
+
+```bash
+pip install matplotlib numpy
+python examples/compare_ngspice.py --release
+# Plots saved to docs/plots/
+```
+
+---
+
+## Validation Against ngspice
+
+All golden tests in `crates/fairchild-core/tests/` compare fairchild against ngspice
+automatically when ngspice is on PATH. Tests skip (not fail) when ngspice is absent.
+
+Tolerances: 10 ppm relative / 1 nV absolute for linear circuits; 0.2% for MOSFET Level 1.
+
+```bash
+cargo test
+```
+
+---
+
+## Benchmarks
+
+Run against ngspice (requires `cargo build --release` and ngspice on PATH):
+
+```bash
+python scripts/benchmark.py
+```
+
+---
+
+## Project Structure
+
+```
+crates/
+  fairchild-core/     # DAE solver, MNA, Newton-Raphson, transient, AC
+  fairchild-parser/   # SPICE netlist parser
+  fairchild-cli/      # Command-line interface (fairchild binary)
+  fairchild-osdi/     # OSDI v0.4 runtime (dlopen, OpenVAF model loading)
+examples/             # Ready-to-run SPICE netlists
+scripts/              # benchmark.py, compare_ngspice.py
+docs/                 # user-guide.md, OSDI investigation notes
+```
+
+---
+
+## Roadmap
+
+See [PLAN.md](PLAN.md) for the full phased plan.
+
+- **Phase 1.5** (current): Documentation, CLI, examples, codebase cleanup.
+- **Phase 2**: Photonic discipline — first optical circuit (CW laser → waveguide → photodetector).
+- **Phase 3**: Python bindings (PyO3).
+- **Phase 4**: Differentiable simulation — adjoint-method gradients.
+
+---
+
+## License
+
+MIT
