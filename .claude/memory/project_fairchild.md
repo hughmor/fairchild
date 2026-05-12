@@ -15,7 +15,7 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 0 — Foundation | ✅ done | Cargo workspace, MNA, Newton-Raphson, SPICE parser, OSDI runtime |
 | 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, Trapezoidal Rule, AC, Nutmeg output, Level 1 MOSFET, Shockley diode |
 | 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` directive |
-| 2 — Photonic discipline | ✅ done | See `phase_2.md` |
+| 2 — Photonic discipline | 🔄 in progress | 3/4 ring resonator tests pass; sweep assertions need 2-line fix — see `phase_2.md` |
 | 3 — Python bindings | 📋 planned | See `phase_3.md` |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
