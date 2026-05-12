@@ -4,7 +4,7 @@
 
 **Milestone**: Transient simulation of ring resonator modulation; resonance wavelength within 0.1 nm of coupled-mode theory analytical solution.
 
-**Status**: 🔄 In progress — 3 of 4 ring resonator tests pass; sweep test assertions need one more fix
+**Status**: ✅ Complete (2026-05-12)
 
 ---
 
@@ -138,15 +138,17 @@ apparent T_min ≈ 0.930 (7% dip), so 2.5% is a safe conservative threshold.
 
 ---
 
-## Next steps for next session
+## Deliverables
 
-1. Fix `ring_resonator_wavelength_sweep` assertions as described above.
-2. Verify sweep test passes end-to-end.
-3. Add `examples/ring_resonator_sweep.sp` SPICE netlist for the sweep.
-4. Add `scripts/plot_ring_sweep.py` to plot V(ph_a) vs wavelength alongside
-   CMT transmission curve. The sweep test already writes CSV to a temp path —
-   the example should write it to `examples/ring_resonator_sweep.csv`.
-5. Commit and update phase status to ✅.
+- `crates/fairchild-osdi/tests/ring_resonator.rs` — 4 tests (3 diagnostic + sweep)
+- `examples/ring_resonator_sweep.sp` — SPICE netlist for the full ring circuit
+- `scripts/plot_ring_sweep.py` — plots V(ph_a) vs λ alongside CMT curve; reads CSV from test
+
+Run the full example:
+```bash
+cargo test -p fairchild-osdi --test ring_resonator ring_resonator_wavelength_sweep
+python3 scripts/plot_ring_sweep.py /tmp/ring_resonator_sweep.csv
+```
 
 ---
 
