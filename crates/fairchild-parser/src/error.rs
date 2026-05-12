@@ -11,3 +11,11 @@ pub enum ParseError {
     #[error("invalid number '{value}' on line {line}: {source}")]
     BadNumber { value: String, line: usize, source: std::num::ParseFloatError },
 }
+
+/// Discipline mismatch detected during elaboration.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("discipline mismatch: {element} connects electrical element to optical net '{net}'")]
+pub struct DisciplineError {
+    pub element: String,
+    pub net: String,
+}
