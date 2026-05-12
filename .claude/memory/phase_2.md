@@ -162,8 +162,28 @@ python3 scripts/plot_ring_sweep.py /tmp/ring_resonator_sweep.csv
 
 WDM: each channel = separate `(o_re, o_im)` port pair with its own `ω₀_k`.
 
-## Signal representation
+## Signal representation (3-wire, completed 2026-05-12)
 
-Per optical port pair: two MNA nodes `(o_re, o_im)` = complex SVEA envelope `A(t)` in √W.
-Photonic models stamp amplitude/phase contributions into those rows.
-Carrier `ω₀` is passed via `SimContext`; models compute `β(ω₀)`, coupling ratios, etc.
+Per optical port: **three** MNA nodes `(o_re, o_im, o_lambda)`:
+- `o_re`, `o_im` = complex SVEA envelope `A(t)` in √W
+- `o_lambda` = wavelength in µm (nodal voltage), shared across all devices on the same optical bus
+
+All three wires use the single `optical` discipline (`Ophase`/`Oamp` accessors). The lambda wire stores µm using the same Norton-equivalent pattern.
+
+**All lambda terminals of every device in a ring share the same `wl` net.** The `.optical` directive in the SPICE netlist declares all optical nodes (amplitude + lambda) together.
+
+---
+
+## OpenVAF quirks (critical — affects all VA model compilation)
+
+### Quirk 1: same `units` string → internal flow nodes
+When `Optical_Amplitude` (flow) and `Optical_Phase` (potential) both have `units = "sqrt(W)"`, OpenVAF generates internal flow nodes (`is_flow=true`) for every port of the discipline. These appear as `num_nodes > num_terminals` in the OSDI descriptor. The internal nodes cause Jacobian singularities: the Schur-reduced diagonal J[0][0] = 0, only GMIN remains, and NR fails to converge.
+
+**Fix**: give the two natures different `units` strings. In `optical.vams`, `Optical_Phase` has `units = "rad"` — different from `Optical_Amplitude`'s `"sqrt(W)"`. This prevents flow-node generation.
+
+### Quirk 2: bootstrap guard must cover VMAX ramp
+The NR solver (newton.rs) clamps per-iteration voltage changes to `VMAX = 0.5`. The `wl` node target is ~1.55 µm, so NR ramps it: 0 → 0.5 → 1.0 → 1.5 → 1.55 µm over ~4 iterations. A guard of `if (wl_nm < 100.0)` only catches V_wl=0; intermediate steps (0.5 µm = 500 nm) bypass it and compute wrong propagation phases in the waveguide.
+
+**Fix**: `if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;` — the parameter value is used until V_wl reaches 99% of target (~1.535 µm). Only at the final converged value does the guard deactivate.
+
+Both fixes are in all 4 VA models (`cw_laser.va`, `waveguide.va`, `directional_coupler.va`, `photodetector.va`).

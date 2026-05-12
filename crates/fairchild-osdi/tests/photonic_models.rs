@@ -49,8 +49,8 @@ fn cw_laser_descriptor_sanity() {
     let name = unsafe { CStr::from_ptr(d.name) }.to_str().unwrap();
     assert_eq!(name, "cw_laser");
 
-    // 2 external terminals (out_re, out_im).
-    assert_eq!(d.num_terminals, 2, "expected 2 terminals");
+    // 3 external terminals (out_re, out_im, out_lambda).
+    assert_eq!(d.num_terminals, 3, "expected 3 terminals");
     // At least 3 declared parameters (power_mW, phi_0_deg, wavelength_nm).
     assert!(d.num_params >= 3, "expected ≥3 params, got {}", d.num_params);
 
@@ -70,8 +70,8 @@ fn waveguide_descriptor_sanity() {
     let name = unsafe { CStr::from_ptr(d.name) }.to_str().unwrap();
     assert_eq!(name, "waveguide");
 
-    // 4 external terminals: in_re, in_im, out_re, out_im.
-    assert_eq!(d.num_terminals, 4, "expected 4 terminals");
+    // 6 external terminals: in_re, in_im, in_lambda, out_re, out_im, out_lambda.
+    assert_eq!(d.num_terminals, 6, "expected 6 terminals");
     assert!(d.num_params >= 4, "expected ≥4 params, got {}", d.num_params);
 
     println!(
@@ -90,8 +90,8 @@ fn directional_coupler_descriptor_sanity() {
     let name = unsafe { CStr::from_ptr(d.name) }.to_str().unwrap();
     assert_eq!(name, "directional_coupler");
 
-    // 8 external terminals: 2 input pairs + 2 output pairs.
-    assert_eq!(d.num_terminals, 8, "expected 8 terminals");
+    // 12 external terminals: 4 ports × 3 wires (re, im, lambda).
+    assert_eq!(d.num_terminals, 12, "expected 12 terminals");
     assert!(d.num_params >= 4, "expected ≥4 params, got {}", d.num_params);
 
     println!(
@@ -110,8 +110,8 @@ fn photodetector_descriptor_sanity() {
     let name = unsafe { CStr::from_ptr(d.name) }.to_str().unwrap();
     assert_eq!(name, "photodetector");
 
-    // 4 external terminals: in_re, in_im (optical) + anode, cathode (electrical).
-    assert_eq!(d.num_terminals, 4, "expected 4 terminals");
+    // 5 external terminals: in_re, in_im, in_lambda (optical) + anode, cathode (electrical).
+    assert_eq!(d.num_terminals, 5, "expected 5 terminals");
     assert!(d.num_params >= 3, "expected ≥3 params, got {}", d.num_params);
 
     println!(
@@ -124,7 +124,7 @@ fn photodetector_descriptor_sanity() {
 
 /// CW laser (1 mW, 0° phase) stand-alone: Ophase output should equal sqrt(P).
 ///
-/// Circuit: Xlaser out_re out_im cw_laser
+/// Circuit: Xlaser out_re out_im wl cw_laser
 /// Expected (analytical):
 ///   V(out_re) = sqrt(1e-3) ≈ 0.031623  (real part of SVEA amplitude)
 ///   V(out_im) = 0.0                    (imaginary part)
@@ -135,8 +135,8 @@ fn cw_laser_dc_op_default_params() {
 
     let netlist = parse_spice(
         "* CW laser stand-alone DC OP\n\
-         Xlaser out_re out_im cw_laser\n\
-         .optical out_re out_im\n\
+         Xlaser out_re out_im wl cw_laser\n\
+         .optical out_re out_im wl\n\
          .op\n.end\n",
     ).unwrap();
 
@@ -173,8 +173,8 @@ fn cw_laser_dc_op_default_params() {
 /// Laser → photodetector → load resistor: photocurrent should match responsivity * power.
 ///
 /// Circuit:
-///   Xlaser  laser_re laser_im  cw_laser         (1 mW default)
-///   Xpd     laser_re laser_im  ph_a 0  photodetector  (R=1 A/W default)
+///   Xlaser  laser_re laser_im wl  cw_laser              (1 mW default)
+///   Xpd     laser_re laser_im wl  ph_a 0  photodetector (R=1 A/W default)
 ///   R_load  ph_a 0  1k
 ///
 /// Expected photocurrent: I_ph = 1.0 A/W * 1e-3 W = 1 mA
@@ -188,10 +188,10 @@ fn laser_photodetector_chain_dc_op() {
 
     let netlist = parse_spice(
         "* CW laser → photodetector → load\n\
-         Xlaser  laser_re laser_im              cw_laser\n\
-         Xpd     laser_re laser_im  ph_a 0      photodetector\n\
+         Xlaser  laser_re laser_im wl              cw_laser\n\
+         Xpd     laser_re laser_im wl  ph_a 0      photodetector\n\
          Rload   ph_a 0  1k\n\
-         .optical laser_re laser_im\n\
+         .optical laser_re laser_im wl\n\
          .op\n.end\n",
     ).unwrap();
 
@@ -240,11 +240,11 @@ fn laser_waveguide_photodetector_chain_dc_op() {
 
     let netlist = parse_spice(
         "* laser → waveguide (lossless) → PD → load\n\
-         Xlaser  laser_re laser_im                          cw_laser\n\
-         Xwg     laser_re laser_im  wg_out_re wg_out_im     waveguide\n\
-         Xpd     wg_out_re wg_out_im  ph_a 0                photodetector\n\
+         Xlaser  laser_re laser_im wl                              cw_laser\n\
+         Xwg     laser_re laser_im wl  wg_out_re wg_out_im wl     waveguide\n\
+         Xpd     wg_out_re wg_out_im wl  ph_a 0                   photodetector\n\
          Rload   ph_a 0  1k\n\
-         .optical laser_re laser_im wg_out_re wg_out_im\n\
+         .optical laser_re laser_im wg_out_re wg_out_im wl\n\
          .op\n.end\n",
     ).unwrap();
 

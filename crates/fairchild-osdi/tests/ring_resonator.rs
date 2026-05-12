@@ -53,20 +53,23 @@ fn skip_if_missing(path: &PathBuf) -> bool {
 }
 
 /// Build the ring resonator netlist string with given wavelength.
+///
+/// 3-wire topology: each optical port carries (re, im, lambda).
+/// All lambda terminals connect to the shared `wl` net; the laser drives it.
 fn ring_resonator_netlist(wavelength_nm: f64) -> String {
     format!(
         "* Ring resonator (wavelength {wavelength_nm:.3} nm)\n\
-         Xlaser     laser_re laser_im                                           cw_laser \
+         Xlaser     laser_re laser_im wl                                        cw_laser \
                power_mW={POWER_MW} wavelength_nm={wavelength_nm:.6}\n\
-         Xcoupler   laser_re laser_im  ring_fb_re ring_fb_im  \
-               through_re through_im  ring_in_re ring_in_im  directional_coupler \
+         Xcoupler   laser_re laser_im wl  ring_fb_re ring_fb_im wl  \
+               through_re through_im wl  ring_in_re ring_in_im wl  directional_coupler \
                kappa_0={KAPPA_0} wavelength_nm={wavelength_nm:.6}\n\
-         Xring      ring_in_re ring_in_im  ring_fb_re ring_fb_im  waveguide \
+         Xring      ring_in_re ring_in_im wl  ring_fb_re ring_fb_im wl  waveguide \
                L_um={L_RING_UM} n_g={N_G} alpha_dB_cm={ALPHA_DB_CM} wavelength_nm={wavelength_nm:.6}\n\
-         Xpd        through_re through_im  ph_a 0  photodetector\n\
+         Xpd        through_re through_im wl  ph_a 0  photodetector\n\
          Rload      ph_a 0  1k\n\
          .optical   laser_re laser_im  ring_in_re ring_in_im  ring_fb_re ring_fb_im  \
-               through_re through_im\n\
+               through_re through_im  wl\n\
          .op\n\
          .end\n"
     )
@@ -133,7 +136,7 @@ fn access_ptr_diagnostic() {
     let mut dev = OsdiDevice::from_library(Arc::clone(&lib), 0).expect("descriptor 0");
     let ctx = SimContext::default();
     dev.setup_model(&ctx);
-    dev.setup_instance(&[Some(0), Some(1)], &ctx);
+    dev.setup_instance(&[Some(0), Some(1), Some(2)], &ctx);
 
     let model_raw = dev.model_ptr_raw();
     let n_model_words = (model_size + 7) / 8;
@@ -169,6 +172,30 @@ fn access_ptr_diagnostic() {
         .map(|i| unsafe { *((model_raw as *const f64).add(i)) })
         .collect();
     eprintln!("Model buffer after set_real_param: {:?}", model_f64s);
+
+    // --- Node/Jacobian topology (cw_laser) ---
+    eprintln!("\nNode topology: num_nodes={}, num_terminals={}", desc.num_nodes, desc.num_terminals);
+    let n_nodes_total = desc.num_nodes as usize;
+    if !desc.nodes.is_null() {
+        let nodes = unsafe { std::slice::from_raw_parts(desc.nodes, n_nodes_total) };
+        for (i, node) in nodes.iter().enumerate() {
+            let name = if node.name.is_null() { "<null>" } else {
+                unsafe { std::ffi::CStr::from_ptr(node.name).to_str().unwrap_or("?") }
+            };
+            eprintln!("  node[{i}] name={name:20} is_flow={} resist_res_off={}", node.is_flow, node.resist_residual_off);
+        }
+    }
+
+    eprintln!("\nJacobian: num_jacobian_entries={}, num_resistive={}", desc.num_jacobian_entries, desc.num_resistive_jacobian_entries);
+    let n_jac = desc.num_jacobian_entries as usize;
+    let n_resist = desc.num_resistive_jacobian_entries as usize;
+    if !desc.jacobian_entries.is_null() && n_jac > 0 {
+        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_jac) };
+        for (i, e) in entries.iter().enumerate() {
+            let kind = if i < n_resist { "RESIST" } else { "REACT" };
+            eprintln!("  entry[{i}] {kind}: node_1={} node_2={} react_ptr_off={}", e.nodes.node_1, e.nodes.node_2, e.react_ptr_off);
+        }
+    }
 }
 
 /// Verify that set_real_param correctly updates a model parameter in the OSDI
@@ -184,10 +211,10 @@ fn set_real_param_verification() {
     lib.register_into(&mut registry);
 
     let netlist_str = "* laser set_real_param test\n\
-                       Xlaser laser_re laser_im cw_laser\n\
+                       Xlaser laser_re laser_im wl cw_laser\n\
                        Rre laser_re 0 1\n\
                        Rim laser_im 0 1\n\
-                       .optical laser_re laser_im\n\
+                       .optical laser_re laser_im wl\n\
                        .op\n\
                        .end\n";
     let netlist = parse_spice(netlist_str).expect("parse netlist");

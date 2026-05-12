@@ -1,25 +1,28 @@
 // Optical discipline for fairchild EO co-simulator.
 //
-// Signal representation: SVEA complex envelope A(t) in √W.
-//   flow    = Optical_Amplitude  (access: Oamp)  units: √W
-//   potential = Optical_Phase    (access: Ophase) units: rad
+// Used for ALL optical wires: amplitude (re/im) and wavelength (lambda).
+// The lambda wire stores wavelength in µm using the same Ophase/Oamp pattern.
 //
-// Carrier frequency ω₀ is NOT a nodal variable — it is passed via
-// SimContext.omega_0 and injected into OsdiSimParas before each eval.
-// Each optical port pair (o_re, o_im) maps to two MNA nodes in the solver.
+// Signal semantics:
+//   Ophase(port)    — READ potential (amplitude in √W, or wavelength in µm)
+//   Oamp(port)  <+  — WRITE flow contribution (Norton current source)
+//
+// Norton-equivalent pattern (never use Ophase(port) <+ on the LHS):
+//   Oamp(out) <+ G * (target - Ophase(out))   // output driver
+//   Oamp(in)  <+ 1e-12 * (-Ophase(in))        // high-impedance input shunt
 
 `ifndef OPTICAL_VAMS
 `define OPTICAL_VAMS
 
 nature Optical_Amplitude
     units   = "sqrt(W)";
-    access  = Oamp;
+    access  = Oamp;     // flow — Norton contribution (WRITE with <+ Oamp)
     abstol  = 1e-12;
 endnature
 
 nature Optical_Phase
-    units   = "rad";
-    access  = Ophase;
+    units   = "rad";    // must differ from Optical_Amplitude units to avoid OpenVAF flow-node generation
+    access  = Ophase;   // potential — amplitude value at node (READ with Ophase)
     abstol  = 1e-9;
 endnature
 

@@ -101,19 +101,21 @@ fn main() {
     }
 
     // ── Build base netlist (topology is wavelength-independent) ───────────────
+    // 3-wire topology: each optical port carries (re, im, lambda).
+    // All lambda terminals connect to the shared `wl` net; the laser drives it.
     let base_netlist_str = format!(
         "* Ring resonator sweep\n\
-         Xlaser    laser_re laser_im                                          cw_laser \
+         Xlaser    laser_re laser_im wl                                        cw_laser \
                power_mW={power_mw} wavelength_nm=1550.0\n\
-         Xcoupler  laser_re laser_im  ring_fb_re ring_fb_im  \
-               through_re through_im  ring_in_re ring_in_im  directional_coupler \
+         Xcoupler  laser_re laser_im wl  ring_fb_re ring_fb_im wl  \
+               through_re through_im wl  ring_in_re ring_in_im wl  directional_coupler \
                kappa_0={kappa_0} wavelength_nm=1550.0\n\
-         Xring     ring_in_re ring_in_im  ring_fb_re ring_fb_im  waveguide \
+         Xring     ring_in_re ring_in_im wl  ring_fb_re ring_fb_im wl  waveguide \
                L_um={l_ring_um} n_g={n_g} alpha_dB_cm={alpha_db_cm} wavelength_nm=1550.0\n\
-         Xpd       through_re through_im  ph_a 0  photodetector\n\
+         Xpd       through_re through_im wl  ph_a 0  photodetector\n\
          Rload     ph_a 0  {r_load}\n\
          .optical  laser_re laser_im  ring_in_re ring_in_im  ring_fb_re ring_fb_im  \
-               through_re through_im\n\
+               through_re through_im  wl\n\
          .op\n\
          .end\n"
     );

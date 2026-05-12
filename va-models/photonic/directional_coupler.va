@@ -1,46 +1,57 @@
 // Directional coupler — wavelength-dependent 2×2 evanescent coupler.
 //
-// Ports: two input complex field pairs, two output complex field pairs.
-//   a1 = (a1_re, a1_im): input port 1
-//   a2 = (a2_re, a2_im): input port 2
-//   b1 = (b1_re, b1_im): output port 1 (through)
-//   b2 = (b2_re, b2_im): output port 2 (cross)
+// 3-wire port representation (re, im, lambda) per optical port:
+//   a1 = (a1_re, a1_im, a1_lambda): input port 1
+//   a2 = (a2_re, a2_im, a2_lambda): input port 2
+//   b1 = (b1_re, b1_im, b1_lambda): output port 1 (through)
+//   b2 = (b2_re, b2_im, b2_lambda): output port 2 (cross)
 //
 // Transfer matrix (lossless symmetric coupler):
-//   b1 = sqrt(1-kappa) * a1 + j*sqrt(kappa) * a2
-//   b2 = j*sqrt(kappa) * a1 + sqrt(1-kappa) * a2
+//   b1 = sqrt(1-κ)·a1 + j·sqrt(κ)·a2
+//   b2 = j·sqrt(κ)·a1 + sqrt(1-κ)·a2
 //
-// In real/imaginary components:
-//   b1_re =  sqrt(1-kappa)*a1_re - sqrt(kappa)*a2_im
-//   b1_im =  sqrt(1-kappa)*a1_im + sqrt(kappa)*a2_re
-//   b2_re = -sqrt(kappa)*a1_im   + sqrt(1-kappa)*a2_re
-//   b2_im =  sqrt(kappa)*a1_re   + sqrt(1-kappa)*a2_im
+// Implementation: Norton-equivalent drive for outputs; high-impedance inputs.
+// Wavelength is read from Owl(a1_lambda); all lambda ports connect to same wl net.
 //
-// Implementation: Norton-equivalent drive for outputs; no potential contributions.
+// Parameters:
+//   kappa_0           — power cross-coupling fraction at design wavelength
+//   lambda_0_nm       — design wavelength for kappa (nm)
+//   dcoupling_dlambda — dispersion: dκ/dλ (1/nm)
+//   wavelength_nm     — NR bootstrap (nm); used when Owl(a1_lambda) < 1 nm
 
 `include "disciplines.vams"
 `include "constants.vams"
 `include "disciplines/optical.vams"
 
-module directional_coupler(a1_re, a1_im, a2_re, a2_im, b1_re, b1_im, b2_re, b2_im);
-    inout a1_re, a1_im, a2_re, a2_im;
-    inout b1_re, b1_im, b2_re, b2_im;
-    optical a1_re, a1_im, a2_re, a2_im;
-    optical b1_re, b1_im, b2_re, b2_im;
+module directional_coupler(a1_re, a1_im, a1_lambda,
+                            a2_re, a2_im, a2_lambda,
+                            b1_re, b1_im, b1_lambda,
+                            b2_re, b2_im, b2_lambda);
+    inout a1_re, a1_im, a1_lambda;
+    inout a2_re, a2_im, a2_lambda;
+    inout b1_re, b1_im, b1_lambda;
+    inout b2_re, b2_im, b2_lambda;
+    optical a1_re, a1_im, a1_lambda, a2_re, a2_im, a2_lambda,
+            b1_re, b1_im, b1_lambda, b2_re, b2_im, b2_lambda;
 
     parameter real kappa_0           = 0.5    from [0:1];
     parameter real lambda_0_nm       = 1550.0 from (0:inf);
     parameter real dcoupling_dlambda = 0.0;
     parameter real wavelength_nm     = 1550.0 from (0:inf);
 
-    real kappa, sq_t, sq_k, G_drv;
+    real wl_nm, kappa, sq_t, sq_k, G_drv;
     real a1r, a1i, a2r, a2i;
     real b1r_tgt, b1i_tgt, b2r_tgt, b2i_tgt;
 
     analog begin
         G_drv = 1.0e6;
 
-        kappa = kappa_0 + dcoupling_dlambda * (wavelength_nm - lambda_0_nm);
+        // Read wavelength from lambda port (stored in µm).
+        // Bootstrap guard: use the parameter until V_wl is within 1% of the target.
+        wl_nm = Ophase(a1_lambda) * 1e3;   // µm → nm
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        kappa = kappa_0 + dcoupling_dlambda * (wl_nm - lambda_0_nm);
         if (kappa < 0.0) kappa = 0.0;
         if (kappa > 1.0) kappa = 1.0;
 
@@ -55,16 +66,24 @@ module directional_coupler(a1_re, a1_im, a2_re, a2_im, b1_re, b1_im, b2_re, b2_i
         b2r_tgt = -sq_k * a1i + sq_t * a2r;
         b2i_tgt =  sq_k * a1r + sq_t * a2i;
 
-        // Norton drive for output ports
+        // Norton drive for output amplitude ports
         Oamp(b1_re) <+ G_drv * (b1r_tgt - Ophase(b1_re));
         Oamp(b1_im) <+ G_drv * (b1i_tgt - Ophase(b1_im));
         Oamp(b2_re) <+ G_drv * (b2r_tgt - Ophase(b2_re));
         Oamp(b2_im) <+ G_drv * (b2i_tgt - Ophase(b2_im));
 
-        // Input ports: tiny shunt to keep them in the Jacobian
+        // Input amplitude: high-impedance shunt
         Oamp(a1_re) <+ 1e-12 * (-Ophase(a1_re));
         Oamp(a1_im) <+ 1e-12 * (-Ophase(a1_im));
         Oamp(a2_re) <+ 1e-12 * (-Ophase(a2_re));
         Oamp(a2_im) <+ 1e-12 * (-Ophase(a2_im));
+
+        // Lambda: output followers (stamps cancel on shared wl net)
+        Oamp(b1_lambda) <+ G_drv * (Ophase(a1_lambda) - Ophase(b1_lambda));
+        Oamp(b2_lambda) <+ G_drv * (Ophase(a2_lambda) - Ophase(b2_lambda));
+
+        // Input lambda: high-impedance shunt
+        Oamp(a1_lambda) <+ 1e-12 * (-Ophase(a1_lambda));
+        Oamp(a2_lambda) <+ 1e-12 * (-Ophase(a2_lambda));
     end
 endmodule
