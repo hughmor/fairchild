@@ -10,24 +10,28 @@ set -e
 
 OPENVAF="${OPENVAF:-openvaf-r}"
 OUTDIR="build"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 mkdir -p "$OUTDIR"
 
 compile() {
     local src="$1"
-    local name="$(basename "$src" .va)"
+    local name
+    name="$(basename "$src" .va)"
     echo "Compiling $src..."
-    "$OPENVAF" "$src" -o "$OUTDIR/$name.osdi"
+    # -I "$SCRIPT_DIR" ensures `include "disciplines/optical.vams" resolves from va-models/
+    "$OPENVAF" -I "$SCRIPT_DIR" "$src" -o "$OUTDIR/$name.osdi"
 }
 
-# Electrical models
-compile diode_shockley.va
-compile nmos_l1.va
-compile pmos_l1.va
+# Electronic models
+compile electronic/diode_shockley.va
+compile electronic/nmos_l1.va
+compile electronic/pmos_l1.va
 
-# Phase 2 photonic models
-compile cw_laser.va
-compile waveguide.va
-compile directional_coupler.va
-compile photodetector.va
+# Photonic models (Phase 2+)
+compile photonic/cw_laser.va
+compile photonic/waveguide.va
+compile photonic/directional_coupler.va
+compile photonic/photodetector.va
 
 echo "Done. Outputs in $OUTDIR/"

@@ -96,7 +96,8 @@ ax.legend()
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
 
-out = pathlib.Path("examples/ring_resonator_sweep.png")
+_repo_root = pathlib.Path(__file__).parent.parent.parent
+out = _repo_root / "docs" / "plots" / "ring_resonator_sweep.png"
 fig.savefig(out, dpi=150)
 print(f"\nPlot saved to {out}")
 plt.show()

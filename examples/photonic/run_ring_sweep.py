@@ -7,21 +7,21 @@ parameters, then plots V(ph_a) vs wavelength alongside the CMT analytical
 transmission curve.
 
 Usage:
-    python scripts/run_ring_sweep.py [options]
+    python examples/photonic/run_ring_sweep.py [options]
 
 Examples:
     # Default parameters (100 µm ring, kappa=0.1)
-    python scripts/run_ring_sweep.py
+    python examples/photonic/run_ring_sweep.py
 
     # High-Q ring: larger radius, lower coupling
-    python scripts/run_ring_sweep.py --kappa 0.02 --L-um 500 --n-points 201
+    python examples/photonic/run_ring_sweep.py --kappa 0.02 --L-um 500 --n-points 201
 
     # Compare two coupling strengths side by side
-    python scripts/run_ring_sweep.py --kappa 0.05 --wl-center 1550
-    python scripts/run_ring_sweep.py --kappa 0.20 --wl-center 1550
+    python examples/photonic/run_ring_sweep.py --kappa 0.05 --wl-center 1550
+    python examples/photonic/run_ring_sweep.py --kappa 0.20 --wl-center 1550
 
     # Lossless ring
-    python scripts/run_ring_sweep.py --alpha 0.0
+    python examples/photonic/run_ring_sweep.py --alpha 0.0
 
 Requirements:
     - Compiled va-models (run `cd va-models && make` first)
@@ -38,7 +38,7 @@ import sys
 import tempfile
 
 # Repository root (two levels up from scripts/)
-REPO_ROOT = pathlib.Path(__file__).parent.parent
+REPO_ROOT = pathlib.Path(__file__).parent.parent.parent  # photonic/ -> examples/ -> repo root
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def parse_args():

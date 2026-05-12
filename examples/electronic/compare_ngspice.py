@@ -26,8 +26,8 @@ import matplotlib
 matplotlib.use("Agg")  # headless — save to file
 import matplotlib.pyplot as plt
 
-REPO_ROOT = Path(__file__).parent.parent
-EXAMPLES_DIR = REPO_ROOT / "examples"
+REPO_ROOT = Path(__file__).parent.parent.parent  # electronic/ -> examples/ -> repo root
+EXAMPLES_DIR = Path(__file__).parent             # netlists live alongside this script
 PLOTS_DIR = REPO_ROOT / "docs" / "plots"
 
 # SPICE SI suffix → multiplier
