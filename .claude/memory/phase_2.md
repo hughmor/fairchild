@@ -51,7 +51,22 @@ Validate/adapt these for our optical discipline:
 
 Add to `fairchild-parser`: discipline tracking per net; emit error on optical↔electrical mismatch. Mixed-domain components (modulator, photodetector) declare both.
 
-### Step 5: `@cross` event detection (deferred from Phase 1.5)
+### Step 5: Verilog-A model golden tests
+
+ngspice cannot simulate `.va` natively (ADMS is fragile and not our target).
+**Reference simulator for `.va` models: VACASK** (or Xyce with ADMS-compiled models).
+
+Test strategy for OSDI-compiled VA models:
+- Compile `.va` with OpenVAF-Reloaded → load via OSDI → run DC sweep / transient
+- Compare voltage/current output against VACASK running the same `.va` netlist
+- For photonic models where no VACASK reference exists: validate against coupled-mode theory
+  or waveguide analytical expressions (document this explicitly — these are not "golden" tests
+  in the regression sense, but physics checks)
+
+Each VA model in `va-models/` should have a paired test in `crates/fairchild-osdi/tests/`
+following the pattern in `osdi_dc_op.rs`.
+
+### Step 6: `@cross` event detection (deferred from Phase 1.5)
 
 Zero-crossing step refinement. Implement after first optical circuit is working.
 

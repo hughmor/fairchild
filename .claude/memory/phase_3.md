@@ -33,6 +33,23 @@ result = ckt.run(analysis="tran", stop=10e-9)
 
 `WaveformSource(t, v)` converts to internal PWL at the Rust boundary — the Phase 1.5 PWL infrastructure handles the rest. No Python-only solver code path.
 
+## Parametric sweep API
+
+Run a parameter sweep with parallel independent simulations:
+
+```python
+results = ckt.sweep("R1.resistance", [1e3, 2e3, 5e3, 10e3], analysis="tran", stop=10e-9)
+# returns list of SimResults, one per parameter value
+```
+
+Rust-side design:
+- `run_sweep(netlist, param_name, values: Vec<f64>) -> Vec<TranResult>` in fairchild-core
+- Parallelised with `rayon` (independent per-point; `Device: Send + Sync` already guaranteed)
+- Sweepable: element values (R, L, C), `.model` params (IS, N, VTO, KP), source amplitudes
+- CLI: `--sweep "R1.resistance=1k,2k,5k,10k"` → one CSV column-group per sweep point
+
+This is also a prerequisite for Phase 4 inverse design: the sweep loop feeds the adjoint.
+
 ## Implementation
 
 Crate: `fairchild-py` (PyO3 + pyo3-numpy)

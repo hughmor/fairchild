@@ -2,59 +2,108 @@ use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 /// Small conductance added to every p-n junction for numerical conditioning.
-/// ngspice default is 1e-12 S.
 const GMIN: f64 = 1e-12;
 
-/// Shockley ideal-diode model: Id = Is * (exp(Vd / (N·Vt)) − 1).
+/// SPICE Shockley diode model.
 ///
-/// Implements `Device` with pnjlim voltage limiting for Newton-Raphson convergence.
+/// DC: Id = Is * (exp(Vd_j / (N·Vt)) − 1), with RS series resistance.
+/// Transient: depletion capacitance Cj(V) and transit-time diffusion charge TT·Id.
+///
+/// All SPICE Level-1 diode parameters are accepted from `.model` cards.
+/// Unrecognised parameters (BV, IBV, EG, XTI, …) emit a warning via the registry.
 pub struct ShockleyDiode {
-    // --- model params (set at construction, finalised in setup_model) ---
+    // Model parameters
     is: f64,    // saturation current (A)
     n: f64,     // ideality factor
-    vcrit: f64, // pnjlim critical voltage (computed from Is and Vt in setup_model)
+    rs: f64,    // series resistance (Ω)
+    cjo: f64,   // zero-bias junction capacitance (F)
+    vj: f64,    // junction built-in potential (V)
+    mj: f64,    // grading coefficient
+    fc: f64,    // forward-bias depletion-cap coefficient
+    tt: f64,    // transit time (s)
+    vcrit: f64, // pnjlim critical voltage (derived from Is, Vt)
 
-    // --- instance bindings (set in setup_instance) ---
+    // Terminal bindings
     anode: NodeId,
     cathode: NodeId,
 
-    // --- eval state ---
-    vd_prev: f64, // operating-point Vd from the last eval (pnjlim "old" value)
-    gd: f64,      // Norton conductance cached by eval
-    jeq: f64,     // Norton current source: Id(vd_lim) - gd * vd_lim
+    // NR state (updated by every eval)
+    vd_prev: f64,        // junction Vd from last eval — pnjlim "old" reference
+    id_junction: f64,    // Id through the Shockley junction (before RS drop)
+    gd_junction: f64,    // dId/dVd at the junction
+    gd_eff: f64,         // effective terminal conductance = gd_j / (1 + gd_j·RS)
+    jeq_eff: f64,        // effective Norton source at terminal pair
+    vd_j_eval: f64,      // junction voltage at last eval (used by commit_timestep)
+    cj_total: f64,       // Cj_depl(Vd_j) + TT·gd_junction (0.0 when DC)
+    q_at_vd_j: f64,      // Q_total(Vd_j) at current NR iterate (0.0 when DC)
+
+    // Reactive history (updated by commit_timestep, read by load_*_tran)
+    q_tprev: f64,        // Q_total at last accepted timestep
 }
 
 impl ShockleyDiode {
-    /// Construct with explicit Is and N. Call `setup_model` before first `eval`.
+    /// Construct with explicit model parameters. Call `setup_model` before first `eval`.
     pub fn new(is: f64, n: f64) -> Self {
         ShockleyDiode {
             is,
             n,
+            rs: 0.0,
+            cjo: 0.0,
+            vj: 1.0,
+            mj: 0.5,
+            fc: 0.5,
+            tt: 0.0,
             vcrit: 0.0,
             anode: None,
             cathode: None,
             vd_prev: 0.0,
-            gd: GMIN,
-            jeq: 0.0,
+            id_junction: 0.0,
+            gd_junction: GMIN,
+            gd_eff: GMIN,
+            jeq_eff: 0.0,
+            vd_j_eval: 0.0,
+            cj_total: 0.0,
+            q_at_vd_j: 0.0,
+            q_tprev: 0.0,
         }
     }
 
-    /// Build from a list of model-card key=value pairs.
-    /// Unrecognised keys are silently ignored; missing keys keep defaults.
-    pub fn from_params(params: &[(String, f64)]) -> Self {
+    /// Build from a model-card key=value list.
+    /// Returns the device and any unrecognised param names (warned by the registry).
+    pub fn from_params(params: &[(String, f64)]) -> (Self, Vec<String>) {
         let mut is = 1e-14;
         let mut n = 1.0;
+        let mut rs = 0.0_f64;
+        let mut cjo = 0.0_f64;
+        let mut vj = 1.0_f64;
+        let mut mj = 0.5_f64;
+        let mut fc = 0.5_f64;
+        let mut tt = 0.0_f64;
+        let mut unknown = Vec::new();
         for (k, v) in params {
             match k.as_str() {
-                "is" => is = *v,
-                "n"  => n  = *v,
-                _ => {}
+                "is"           => is  = *v,
+                "n"            => n   = *v,
+                "rs"           => rs  = *v,
+                "cjo" | "cj0" => cjo = *v,
+                "vj"           => vj  = *v,
+                "m" | "mj"    => mj  = *v,
+                "fc"           => fc  = *v,
+                "tt"           => tt  = *v,
+                _              => unknown.push(k.clone()),
             }
         }
-        Self::new(is, n)
+        let mut d = Self::new(is, n);
+        d.rs = rs;
+        d.cjo = cjo;
+        d.vj = vj;
+        d.mj = mj;
+        d.fc = fc;
+        d.tt = tt;
+        (d, unknown)
     }
 
-    /// SPICE pnjlim: logarithmically compress the voltage step when Vd > vcrit.
+    /// SPICE pnjlim: logarithmically compress large voltage steps.
     fn pnjlim(&self, vnew: f64, vold: f64, vt: f64) -> f64 {
         if vnew > self.vcrit && (vnew - vold).abs() > 2.0 * vt {
             if vnew > vold {
@@ -66,14 +115,74 @@ impl ShockleyDiode {
             vnew
         }
     }
+
+    /// SPICE depletion capacitance Cj(V).
+    ///
+    /// Below FC·VJ: Cj = CJO·(1 − V/VJ)^(−MJ).
+    /// At and above FC·VJ: linear extrapolation to avoid singularity.
+    fn cj_depl(&self, v: f64) -> f64 {
+        if self.cjo == 0.0 {
+            return 0.0;
+        }
+        let fc_vj = self.fc * self.vj;
+        if v < fc_vj {
+            self.cjo * (1.0 - v / self.vj).powf(-self.mj)
+        } else {
+            let k = (1.0 - self.fc).powf(1.0 + self.mj);
+            self.cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj)
+        }
+    }
+
+    /// Charge integral Q(V) = ∫₀ᵛ Cj_depl dV (depletion charge only).
+    fn q_depl(&self, v: f64) -> f64 {
+        if self.cjo == 0.0 {
+            return 0.0;
+        }
+        let fc_vj = self.fc * self.vj;
+        if v < fc_vj {
+            let x = 1.0 - v / self.vj;
+            self.cjo * self.vj / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
+        } else {
+            // Charge at the FC·VJ boundary
+            let x_fc = 1.0 - self.fc;
+            let q_fc = self.cjo * self.vj / (1.0 - self.mj)
+                * (1.0 - x_fc.powf(1.0 - self.mj));
+            let k = x_fc.powf(1.0 + self.mj);
+            let f2 = 1.0 - self.fc * (1.0 + self.mj);
+            let dv = v - fc_vj;
+            q_fc + self.cjo / k * (f2 * dv + self.mj / (2.0 * self.vj) * (v * v - fc_vj * fc_vj))
+        }
+    }
+
+    /// Total charge Q_total(Vd_j) = Q_depl(Vd_j) + TT·Id(Vd_j).
+    fn q_total(&self, vd_j: f64, id: f64) -> f64 {
+        self.q_depl(vd_j) + self.tt * id
+    }
+
+    /// Stamp a conductance across (anode, cathode) into the Jacobian.
+    fn stamp_g(&self, mat: &mut MnaMatrix, g: f64) {
+        if let Some(ai) = self.anode {
+            mat.a[ai][ai] += g;
+            if let Some(ki) = self.cathode {
+                mat.a[ai][ki] -= g;
+            }
+        }
+        if let Some(ki) = self.cathode {
+            mat.a[ki][ki] += g;
+            if let Some(ai) = self.anode {
+                mat.a[ki][ai] -= g;
+            }
+        }
+    }
 }
 
 impl Device for ShockleyDiode {
-    fn num_terminals(&self) -> usize { 2 }
+    fn num_terminals(&self) -> usize {
+        2
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         let vt = ctx.vt();
-        // vcrit = Vt * ln(Vt / (√2 · Is))
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
     }
 
@@ -83,41 +192,82 @@ impl Device for ShockleyDiode {
         self.cathode = terminals[1];
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let v_a = self.anode.map_or(0.0, |i| x[i]);
         let v_k = self.cathode.map_or(0.0, |i| x[i]);
-        let vd_circuit = v_a - v_k;
+        let vd_terminal = v_a - v_k;
 
         let vt = ctx.vt();
-        let vd = self.pnjlim(vd_circuit, self.vd_prev, vt);
-        self.vd_prev = vd;
+
+        // Junction voltage: iterate RS drop using Id from previous NR step.
+        let vd_j_raw = vd_terminal - self.id_junction * self.rs;
+        let vd_j = self.pnjlim(vd_j_raw, self.vd_prev, vt);
+        self.vd_prev = vd_j;
+        self.vd_j_eval = vd_j;
 
         let nvt = self.n * vt;
-        let exp_term = (vd / nvt).exp();
-        let id = self.is * (exp_term - 1.0);
-        self.gd  = self.is * exp_term / nvt + GMIN;
-        self.jeq = id - self.gd * vd;
+        let exp_term = (vd_j / nvt).exp();
+        self.id_junction = self.is * (exp_term - 1.0);
+        self.gd_junction = self.is * exp_term / nvt + GMIN;
+
+        // Norton equivalent at the terminal pair, accounting for RS.
+        // Derivation: linearise Id(Vd_j) and Vd_j = Vd_term - Id·RS simultaneously.
+        //   gd_eff = gd_j / (1 + gd_j·RS)
+        //   jeq_eff = (Id - gd_j·Vd_j) / (1 + gd_j·RS)
+        let denom = 1.0 + self.gd_junction * self.rs;
+        self.gd_eff  = self.gd_junction / denom;
+        self.jeq_eff = (self.id_junction - self.gd_junction * vd_j) / denom;
+
+        if flags.transient {
+            self.cj_total  = self.cj_depl(vd_j) + self.tt * self.gd_junction;
+            self.q_at_vd_j = self.q_total(vd_j, self.id_junction);
+        } else {
+            self.cj_total  = 0.0;
+            self.q_at_vd_j = 0.0;
+        }
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        // Norton current: Jeq flows from anode to cathode through companion source.
-        if let Some(a) = self.anode   { b[a] -= self.jeq; }
-        if let Some(k) = self.cathode { b[k] += self.jeq; }
+        if let Some(a) = self.anode   { b[a] -= self.jeq_eff; }
+        if let Some(k) = self.cathode { b[k] += self.jeq_eff; }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let a = self.anode;
-        let k = self.cathode;
-        let g = self.gd;
-        // Conductance gd between anode and cathode (same stamp as a resistor).
-        if let Some(ai) = a {
-            mat.a[ai][ai] += g;
-            if let Some(ki) = k { mat.a[ai][ki] -= g; }
+        self.stamp_g(mat, self.gd_eff);
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        self.load_residual(b);
+        if self.cj_total == 0.0 {
+            return;
         }
-        if let Some(ki) = k {
-            mat.a[ki][ki] += g;
-            if let Some(ai) = a { mat.a[ki][ai] -= g; }
+        // BE companion history current for the nonlinear junction cap.
+        // Derivation (matches linear cap_companion sign convention):
+        //   i_hist_stamp = alpha · (Cj·Vd_j + Q_tprev − Q(Vd_j))
+        //   stamped as current source from cathode → anode (b[anode] += i_hist)
+        let i_hist = alpha * (self.cj_total * self.vd_j_eval + self.q_tprev - self.q_at_vd_j);
+        if let Some(a) = self.anode   { b[a] += i_hist; }
+        if let Some(k) = self.cathode { b[k] -= i_hist; }
+    }
+
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        self.load_jacobian(mat);
+        if self.cj_total == 0.0 {
+            return;
         }
+        self.stamp_g(mat, alpha * self.cj_total);
+    }
+
+    fn commit_timestep(&mut self, x: &[f64]) {
+        let va = self.anode.map_or(0.0, |i| x[i]);
+        let vk = self.cathode.map_or(0.0, |i| x[i]);
+        let vd_terminal = va - vk;
+        // Use cached id_junction for RS correction; correct when called after eval.
+        // On the first call (DC init, before any eval), id_junction=0 → vd_j ≈ vd_terminal.
+        let vd_j = vd_terminal - self.id_junction * self.rs;
+        // Update pnjlim reference so the next timestep's first NR iter starts unlimted.
+        self.vd_prev = vd_j;
+        self.q_tprev = self.q_total(vd_j, self.id_junction);
     }
 }
 
@@ -126,68 +276,116 @@ mod tests {
     use super::*;
     use crate::device::EvalFlags;
 
-    fn ctx() -> SimContext { SimContext::default() }
+    fn ctx() -> SimContext {
+        SimContext::default()
+    }
+
+    fn make_diode(is: f64, n: f64) -> ShockleyDiode {
+        let mut d = ShockleyDiode::new(is, n);
+        d.setup_model(&ctx());
+        d.setup_instance(&[Some(0), None], &ctx());
+        d
+    }
 
     #[test]
     fn shockley_at_zero() {
-        // At Vd=0, Id=0 and gd=Is/Vt + GMIN.
-        let mut d = ShockleyDiode::new(1e-14, 1.0);
-        d.setup_model(&ctx());
-        d.setup_instance(&[Some(0), None], &ctx());
+        let mut d = make_diode(1e-14, 1.0);
         let x = [0.0f64];
         d.eval(&x, EvalFlags::dc(), &ctx());
         let vt = ctx().vt();
         let expected_gd = 1e-14 / vt + GMIN;
-        assert!((d.gd - expected_gd).abs() < 1e-18, "gd at Vd=0: got {:.4e}", d.gd);
-        // Jeq = Id - gd*Vd = 0 - 0 = 0
-        assert!(d.jeq.abs() < 1e-30, "jeq at Vd=0: got {:.4e}", d.jeq);
+        assert!((d.gd_eff - expected_gd).abs() < 1e-18, "gd at Vd=0: {:.4e}", d.gd_eff);
+        assert!(d.jeq_eff.abs() < 1e-30, "jeq at Vd=0: {:.4e}", d.jeq_eff);
     }
 
     #[test]
     fn shockley_forward_bias() {
-        // At Vd=0.6V: Id ≈ Is·exp(Vd/Vt)
         let is = 1e-14;
-        let mut d = ShockleyDiode::new(is, 1.0);
-        d.setup_model(&ctx());
-        d.setup_instance(&[Some(0), None], &ctx());
+        let mut d = make_diode(is, 1.0);
         let vt = ctx().vt();
         let vd = 0.6;
-        // Drive vd_prev to 0.6 so pnjlim doesn't limit (previous step already there).
         d.vd_prev = vd;
         let x = [vd];
         d.eval(&x, EvalFlags::dc(), &ctx());
         let id_expected = is * ((vd / vt).exp() - 1.0);
         let gd_expected = is * (vd / vt).exp() / vt + GMIN;
         let jeq_expected = id_expected - gd_expected * vd;
-        assert!((d.gd - gd_expected).abs() / gd_expected < 1e-9, "gd mismatch");
-        assert!((d.jeq - jeq_expected).abs() / jeq_expected.abs() < 1e-9, "jeq mismatch");
+        assert!((d.gd_eff - gd_expected).abs() / gd_expected < 1e-9, "gd mismatch");
+        assert!((d.jeq_eff - jeq_expected).abs() / jeq_expected.abs() < 1e-9, "jeq mismatch");
     }
 
     #[test]
-    fn load_residual_stamps_into_b() {
+    fn rs_reduces_effective_conductance() {
+        let is = 1e-14;
+        let mut d = ShockleyDiode::new(is, 1.0);
+        d.rs = 1.0; // 1 Ω series resistance
+        d.setup_model(&ctx());
+        d.setup_instance(&[Some(0), None], &ctx());
+        d.vd_prev = 0.6;
+        let x = [0.6];
+        d.eval(&x, EvalFlags::dc(), &ctx());
+        // gd_eff < gd_junction
+        assert!(d.gd_eff < d.gd_junction, "RS should reduce effective conductance");
+        let expected_gd_eff = d.gd_junction / (1.0 + d.gd_junction * 1.0);
+        assert!((d.gd_eff - expected_gd_eff).abs() / expected_gd_eff < 1e-9, "gd_eff formula");
+    }
+
+    #[test]
+    fn cjo_stamps_capacitive_conductance() {
+        let mut d = ShockleyDiode::new(1e-14, 1.0);
+        d.cjo = 4e-12; // 4 pF
+        d.setup_model(&ctx());
+        d.setup_instance(&[Some(0), Some(1)], &ctx());
+        d.vd_prev = 0.0;
+        let x = [0.0, 0.0];
+        d.eval(&x, EvalFlags::tran(), &ctx());
+        // At V=0: Cj = CJO (no voltage across the junction)
+        let alpha = 1e8; // 1/h where h = 10 ns
+        let mut mat = MnaMatrix { a: vec![vec![0.0; 2]; 2], b: vec![0.0; 2] };
+        d.load_jacobian_tran(&mut mat, alpha);
+        let g_cap_expected = alpha * 4e-12; // Cj(0) * alpha
+        // Conductance stamp: a[0][0] includes gd_eff + g_cap; a[0][1] = -(gd_eff + g_cap)
+        let g_total = d.gd_eff + g_cap_expected;
+        assert!((mat.a[0][0] - g_total).abs() / g_total < 1e-6, "Jacobian stamp");
+    }
+
+    #[test]
+    fn load_residual_stamps_correctly() {
         let is = 1e-14;
         let mut d = ShockleyDiode::new(is, 1.0);
         d.setup_model(&ctx());
-        // anode=node 0, cathode=node 1
         d.setup_instance(&[Some(0), Some(1)], &ctx());
         d.vd_prev = 0.6;
         let x = [0.6, 0.0];
         d.eval(&x, EvalFlags::dc(), &ctx());
         let mut b = [0.0f64; 2];
         d.load_residual(&mut b);
-        // b[anode] -= jeq, b[cathode] += jeq
-        assert!((b[0] + d.jeq).abs() < 1e-30, "b[anode] should be -jeq");
-        assert!((b[1] - d.jeq).abs() < 1e-30, "b[cathode] should be +jeq");
+        assert!((b[0] + d.jeq_eff).abs() < 1e-30, "b[anode] should be -jeq_eff");
+        assert!((b[1] - d.jeq_eff).abs() < 1e-30, "b[cathode] should be +jeq_eff");
     }
 
     #[test]
     fn pnjlim_compresses_large_steps() {
-        let mut d = ShockleyDiode::new(1e-14, 1.0);
-        d.setup_model(&ctx());
+        let mut d = make_diode(1e-14, 1.0);
         let vt = ctx().vt();
-        // From 0 to 10V: should be compressed to around vcrit + small.
         let limited = d.pnjlim(10.0, 0.0, vt);
         assert!(limited < 1.0, "pnjlim should limit large step: got {limited}");
         assert!(limited > 0.0, "pnjlim result should be positive");
+    }
+
+    #[test]
+    fn q_depl_at_zero_is_zero() {
+        let mut d = ShockleyDiode::new(1e-14, 1.0);
+        d.cjo = 4e-12;
+        assert!(d.q_depl(0.0).abs() < 1e-30, "Q(0) should be 0");
+    }
+
+    #[test]
+    fn q_depl_increases_with_forward_bias() {
+        let mut d = ShockleyDiode::new(1e-14, 1.0);
+        d.cjo = 4e-12;
+        let q0 = d.q_depl(0.0);
+        let q1 = d.q_depl(0.3);
+        assert!(q1 > q0, "Q should increase with forward bias");
     }
 }

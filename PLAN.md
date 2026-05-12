@@ -308,10 +308,10 @@ Detailed plans for active and upcoming phases are in `.claude/memory/`. This sec
 | 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, TR, AC, Nutmeg, Level 1 MOSFET |
 | 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` |
 | 2 — Photonic discipline | 🔜 next | First optical circuit: laser → waveguide → coupler → PD (see `.claude/memory/phase_2.md`) |
-| 3 — Python bindings | 📋 planned | PyO3 API, numpy bridge, Jupyter workflow (see `.claude/memory/phase_3.md`) |
+| 3 — Python bindings | 📋 planned | PyO3 API, numpy bridge, Jupyter workflow, parametric sweep API (see `.claude/memory/phase_3.md`) |
 | 4 — Differentiable sim | 📋 planned | Adjoint-method gradients, inverse design (see `.claude/memory/phase_4.md`) |
 | 5 — PDK integration | 📋 planned | SiEPIC + GF45SPCLO, gdsfactory (see below) |
-| 6 — Model libraries | 📋 planned | BSIM4/PSP zoo + full SiPh model set (see below) |
+| 6 — Model libraries | 📋 planned | BSIM4/PSP zoo + full SiPh model set; VA→Rust transpiler (see below) |
 | 7 — Production features | 📋 planned | Monte Carlo, S-param import, HB, openEPDA (see below) |
 
 ---
@@ -387,6 +387,24 @@ Action items:
   using the same `.osdi` or equivalent (ngspice ships BSIM4 natively).
 - Level 2/3 MOSFET as Rust-native built-in (backward compat with 1970s-era netlists that
   specify `LEVEL=2`).
+
+**Verilog-A → Rust transpiler:**
+
+OSDI compilation (`.va` → `.osdi` shared library) is the primary path for user-provided
+compact models. A transpiler that emits a Rust `impl Device` from a `.va` source is a
+distinct, valuable goal — it is not a gimmick — with these concrete benefits:
+- No `dlopen` at runtime: statically linked, faster cold-start, no ABI versioning issues
+- Native gradient propagation through the device equations (no OSDI boundary for adjoint)
+- Community `.va` files become first-class contributors rather than black-box plugins
+
+The work is well-scoped because OpenVAF's front-end is open Rust: we can reuse its parser
+and AST rather than writing a new one. The transpilation target is the `Device` trait
+(`crates/fairchild-core/src/device.rs`); `ShockleyDiode` and `Mosfet1` are the reference
+implementations to guide output format. Jacobian generation via `enzyme-rs` or symbolic
+differentiation of the emitted Rust avoids hand-writing `dI/dV` for each model.
+
+Dependencies: requires Phase 4 (differentiable sim) to stabilise first, since the Jacobian
+emission strategy depends on which AD approach we adopt there.
 
 **SiPh model library (original Phase 6 content — see below):**
 

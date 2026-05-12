@@ -44,14 +44,15 @@ pub struct Mosfet1 {
 }
 
 impl Mosfet1 {
-    /// Construct from model-card parameters (common to all instances of this model).
+    /// Construct from model-card parameters. Returns the device and any unrecognised param names.
     /// `is_pmos`: true for a PMOS model card (`PMOS`).
-    pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> Self {
+    pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
         let mut vto    = if is_pmos { -0.7 } else { 0.7 };
         let mut kp     = 2e-5;
         let mut lambda = 0.0;
         let mut gamma  = 0.0;
         let mut phi    = 0.6;
+        let mut unknown = Vec::new();
         for (k, v) in params {
             match k.to_lowercase().as_str() {
                 "vto" | "vth0" | "vtho" => vto    = *v,
@@ -59,17 +60,17 @@ impl Mosfet1 {
                 "lambda"                => lambda = *v,
                 "gamma"                 => gamma  = *v,
                 "phi"                   => phi    = *v,
-                _ => {}
+                _ => unknown.push(k.clone()),
             }
         }
-        Mosfet1 {
+        let dev = Mosfet1 {
             vto,
             kp,
             lambda,
             gamma,
             phi,
             polarity: if is_pmos { -1.0 } else { 1.0 },
-            w_over_l: 1.0, // overwritten by set_instance_params
+            w_over_l: 1.0,
             drain:  None,
             gate:   None,
             source: None,
@@ -78,21 +79,24 @@ impl Mosfet1 {
             gds:  GMIN,
             gmbs: 0.0,
             jeq:  0.0,
-        }
+        };
+        (dev, unknown)
     }
 
-    /// Apply instance parameters (W, L) read from the `M` card.
-    pub fn set_instance_params(&mut self, params: &[(String, f64)]) {
+    /// Apply instance parameters (W, L). Returns any unrecognised param names.
+    pub fn set_instance_params(&mut self, params: &[(String, f64)]) -> Vec<String> {
         let mut w = 1e-4;
         let mut l = 1e-4;
+        let mut unknown = Vec::new();
         for (k, v) in params {
             match k.to_lowercase().as_str() {
                 "w" => w = *v,
                 "l" => l = *v,
-                _ => {}
+                _ => unknown.push(k.clone()),
             }
         }
         self.w_over_l = w / l;
+        unknown
     }
 }
 
@@ -218,7 +222,7 @@ mod tests {
     fn ctx() -> SimContext { SimContext::default() }
 
     fn nmos(vto: f64, kp: f64, w_over_l: f64) -> Mosfet1 {
-        let mut m = Mosfet1::from_model_params(false, &[
+        let (mut m, _) = Mosfet1::from_model_params(false, &[
             ("vto".into(), vto),
             ("kp".into(), kp),
         ]);
@@ -284,7 +288,7 @@ mod tests {
         // IDS_eff = 0.5*KP*(W/L)*(2-1)^2 = 0.5*100e-6*10*1 = 500µA.
         // Real IDS = -1 * 500µA = -500µA (current flows S→D, from VS=2 to VD=0).
         let kp = 100e-6;
-        let mut m = Mosfet1::from_model_params(true, &[
+        let (mut m, _) = Mosfet1::from_model_params(true, &[
             ("vto".into(), -1.0),
             ("kp".into(), kp),
         ]);
@@ -312,7 +316,7 @@ mod tests {
         // Use lambda=0.05 so gds is real (not just GMIN), making the FD comparison meaningful.
         let kp = 100e-6;
         let eps = 1e-6;
-        let mut m = Mosfet1::from_model_params(false, &[
+        let (mut m, _) = Mosfet1::from_model_params(false, &[
             ("vto".into(), 1.0),
             ("kp".into(), kp),
             ("lambda".into(), 0.05),

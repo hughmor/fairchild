@@ -43,11 +43,20 @@ impl DeviceRegistry {
                 continue;
             }
             let params: Vec<(String, f64)> = card.params.clone();
+            // Warn once per model card about params that aren't yet implemented.
+            let (_, unknown) = ShockleyDiode::from_params(&params);
+            if !unknown.is_empty() {
+                eprintln!(
+                    "warning: diode model '{}' params not yet implemented (using defaults): {}",
+                    card.name,
+                    unknown.join(", ")
+                );
+            }
             self.register(card.name.clone(), move |terminals, ctx| {
-                let mut dev = Box::new(ShockleyDiode::from_params(&params));
+                let (mut dev, _) = ShockleyDiode::from_params(&params);
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
-                dev
+                Box::new(dev)
             });
         }
     }
@@ -64,6 +73,15 @@ impl DeviceRegistry {
                 "pmos" => true,
                 _ => continue,
             };
+            // Warn once per model card about unrecognised params.
+            let (_, unknown) = Mosfet1::from_model_params(is_pmos, &card.params);
+            if !unknown.is_empty() {
+                eprintln!(
+                    "warning: MOSFET model '{}' params not yet implemented (using defaults): {}",
+                    card.name,
+                    unknown.join(", ")
+                );
+            }
             self.mosfet_cards.insert(
                 card.name.clone(),
                 (is_pmos, card.params.clone()),
@@ -80,7 +98,7 @@ impl DeviceRegistry {
         ctx: &SimContext,
     ) -> Option<Box<dyn Device>> {
         let (is_pmos, model_params) = self.mosfet_cards.get(model_name)?;
-        let mut dev = Mosfet1::from_model_params(*is_pmos, model_params);
+        let (mut dev, _) = Mosfet1::from_model_params(*is_pmos, model_params);
         dev.set_instance_params(instance_params);
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
