@@ -1,8 +1,8 @@
 // Directional coupler — wavelength-dependent 2×2 evanescent coupler.
 //
 // Ports: two input complex field pairs, two output complex field pairs.
-//   a1 = (a1_re, a1_im): input port 1  (through arm)
-//   a2 = (a2_re, a2_im): input port 2  (cross arm)
+//   a1 = (a1_re, a1_im): input port 1
+//   a2 = (a2_re, a2_im): input port 2
 //   b1 = (b1_re, b1_im): output port 1 (through)
 //   b2 = (b2_re, b2_im): output port 2 (cross)
 //
@@ -10,17 +10,13 @@
 //   b1 = sqrt(1-kappa) * a1 + j*sqrt(kappa) * a2
 //   b2 = j*sqrt(kappa) * a1 + sqrt(1-kappa) * a2
 //
-// In real/imaginary:
+// In real/imaginary components:
 //   b1_re =  sqrt(1-kappa)*a1_re - sqrt(kappa)*a2_im
 //   b1_im =  sqrt(1-kappa)*a1_im + sqrt(kappa)*a2_re
 //   b2_re = -sqrt(kappa)*a1_im   + sqrt(1-kappa)*a2_re
 //   b2_im =  sqrt(kappa)*a1_re   + sqrt(1-kappa)*a2_im
 //
-// Parameters:
-//   kappa_0       — power coupling ratio at lambda_0 [0, 1]
-//   lambda_0_nm   — design wavelength for kappa_0
-//   dcoupling_dlambda — d(kappa)/d(lambda) in 1/nm (wavelength sensitivity)
-//   wavelength_nm — operating wavelength
+// Implementation: Norton-equivalent drive for outputs; no potential contributions.
 
 `include "disciplines.vams"
 `include "constants.vams"
@@ -32,34 +28,43 @@ module directional_coupler(a1_re, a1_im, a2_re, a2_im, b1_re, b1_im, b2_re, b2_i
     optical a1_re, a1_im, a2_re, a2_im;
     optical b1_re, b1_im, b2_re, b2_im;
 
-    parameter real kappa_0            = 0.5   from [0:1];   // power coupling at lambda_0
-    parameter real lambda_0_nm        = 1550.0 from (0:inf);
-    parameter real dcoupling_dlambda  = 0.0;                // sensitivity (1/nm)
-    parameter real wavelength_nm      = 1550.0 from (0:inf);
+    parameter real kappa_0           = 0.5    from [0:1];
+    parameter real lambda_0_nm       = 1550.0 from (0:inf);
+    parameter real dcoupling_dlambda = 0.0;
+    parameter real wavelength_nm     = 1550.0 from (0:inf);
 
-    real kappa, sq_t, sq_k;
+    real kappa, sq_t, sq_k, G_drv;
     real a1r, a1i, a2r, a2i;
+    real b1r_tgt, b1i_tgt, b2r_tgt, b2i_tgt;
 
     analog begin
-        // Wavelength-dependent coupling ratio (linear model, clamped to [0,1])
+        G_drv = 1.0e6;
+
         kappa = kappa_0 + dcoupling_dlambda * (wavelength_nm - lambda_0_nm);
         if (kappa < 0.0) kappa = 0.0;
         if (kappa > 1.0) kappa = 1.0;
 
-        sq_t = sqrt(1.0 - kappa);  // through amplitude coefficient
-        sq_k = sqrt(kappa);        // cross amplitude coefficient (90° phase shift)
+        sq_t = sqrt(1.0 - kappa);
+        sq_k = sqrt(kappa);
 
         a1r = Ophase(a1_re);  a1i = Ophase(a1_im);
         a2r = Ophase(a2_re);  a2i = Ophase(a2_im);
 
-        // Drive output port fields
-        Ophase(b1_re) <+ sq_t * a1r - sq_k * a2i;
-        Ophase(b1_im) <+ sq_t * a1i + sq_k * a2r;
-        Ophase(b2_re) <+ -sq_k * a1i + sq_t * a2r;
-        Ophase(b2_im) <+  sq_k * a1r + sq_t * a2i;
+        b1r_tgt =  sq_t * a1r - sq_k * a2i;
+        b1i_tgt =  sq_t * a1i + sq_k * a2r;
+        b2r_tgt = -sq_k * a1i + sq_t * a2r;
+        b2i_tgt =  sq_k * a1r + sq_t * a2i;
 
-        // Input ports are high-impedance
-        Oamp(a1_re) <+ 0.0;  Oamp(a1_im) <+ 0.0;
-        Oamp(a2_re) <+ 0.0;  Oamp(a2_im) <+ 0.0;
+        // Norton drive for output ports
+        Oamp(b1_re) <+ G_drv * (b1r_tgt - Ophase(b1_re));
+        Oamp(b1_im) <+ G_drv * (b1i_tgt - Ophase(b1_im));
+        Oamp(b2_re) <+ G_drv * (b2r_tgt - Ophase(b2_re));
+        Oamp(b2_im) <+ G_drv * (b2i_tgt - Ophase(b2_im));
+
+        // Input ports: tiny shunt to keep them in the Jacobian
+        Oamp(a1_re) <+ 1e-12 * (-Ophase(a1_re));
+        Oamp(a1_im) <+ 1e-12 * (-Ophase(a1_im));
+        Oamp(a2_re) <+ 1e-12 * (-Ophase(a2_re));
+        Oamp(a2_im) <+ 1e-12 * (-Ophase(a2_im));
     end
 endmodule

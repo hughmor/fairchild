@@ -126,6 +126,14 @@ pub(crate) fn build_devices(
                     devices.push(factory(&[d, g, s, b], ctx));
                 }
             }
+            Element::XOsdi { nets, model_name, .. } => {
+                let factory = registry.get(model_name)
+                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                let terminals: Vec<NodeId> = nets.iter()
+                    .map(|net| topo.node_index.get(net).copied())
+                    .collect();
+                devices.push(factory(&terminals, ctx));
+            }
             _ => {}
         }
     }

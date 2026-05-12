@@ -1,14 +1,18 @@
 // Straight optical waveguide — propagation loss + phase shift.
 //
 // Signal-flow model (unidirectional): reads in_re/in_im (high-impedance),
-// drives out_re/out_im via Ophase contributions.
+// drives out_re/out_im via Norton-equivalent current sources.
 //
-// Physics: A_out = A_in * exp(-alpha_dB_cm * L_um * 1e-4 / (2*8.686)) * exp(-j * beta * L_um * 1e-6)
-//   where beta = 2*pi*n_g / lambda_nm * 1e9
+// No potential contributions → no internal nodes in OSDI.
+//
+// Physics: A_out = A_in * exp(-alpha_lin * L / 2) * exp(-j * beta * L)
+//   beta = 2*pi*n_g / lambda_nm * 1e9 (rad/m)
+//   A_out_re = T * (A_in_re * cos(phi) + A_in_im * sin(phi))
+//   A_out_im = T * (-A_in_re * sin(phi) + A_in_im * cos(phi))
 //
 // Parameters:
 //   L_um         — waveguide length in micrometers
-//   n_g          — group index (default 4.2 for Si at 1550 nm)
+//   n_g          — group index
 //   alpha_dB_cm  — propagation loss in dB/cm
 //   wavelength_nm — design wavelength for beta calculation
 
@@ -20,36 +24,33 @@ module waveguide(in_re, in_im, out_re, out_im);
     inout in_re, in_im, out_re, out_im;
     optical in_re, in_im, out_re, out_im;
 
-    parameter real L_um          = 100.0  from (0:inf);  // length (um)
-    parameter real n_g           = 4.2    from (0:inf);  // group index
-    parameter real alpha_dB_cm   = 2.0    from [0:inf);  // loss (dB/cm)
-    parameter real wavelength_nm = 1550.0 from (0:inf);  // design wavelength (nm)
+    parameter real L_um          = 100.0  from (0:inf);
+    parameter real n_g           = 4.2    from (0:inf);
+    parameter real alpha_dB_cm   = 2.0    from [0:inf);
+    parameter real wavelength_nm = 1550.0 from (0:inf);
 
-    real beta, phi_prop, alpha_lin, T_amp;
-    real in_re_val, in_im_val;
+    real beta, phi_prop, alpha_lin, T_amp, G_drv;
+    real target_re, target_im;
 
     analog begin
-        // Propagation constant beta (rad/m), phase accumulated over L_um
+        G_drv = 1.0e6;
+
         beta     = 2.0 * `M_PI * n_g / (wavelength_nm * 1e-9);
         phi_prop = beta * (L_um * 1e-6);
 
-        // Amplitude transmission: exp(-alpha/2 * L)
-        // alpha (Np/m) = alpha_dB_cm * 1e2 / (20 * log10(e)) = alpha_dB_cm * 1e2 / 8.6859
-        alpha_lin = alpha_dB_cm * 1e2 / 8.6859;  // Np/m
+        alpha_lin = alpha_dB_cm * 1e2 / 8.6859;  // convert dB/cm → Np/m
         T_amp     = exp(-alpha_lin * (L_um * 1e-6) / 2.0);
 
-        in_re_val = Ophase(in_re);
-        in_im_val = Ophase(in_im);
+        // Target output field (complex rotation + attenuation)
+        target_re = T_amp * ( Ophase(in_re) * cos(phi_prop) + Ophase(in_im) * sin(phi_prop));
+        target_im = T_amp * (-Ophase(in_re) * sin(phi_prop) + Ophase(in_im) * cos(phi_prop));
 
-        // Rotate complex field by -phi_prop and attenuate:
-        //   A_out = T * exp(-j*phi) * A_in
-        //   A_out_re = T*(A_in_re*cos(phi) + A_in_im*sin(phi))
-        //   A_out_im = T*(-A_in_re*sin(phi) + A_in_im*cos(phi))
-        Ophase(out_re) <+ T_amp * ( in_re_val * cos(phi_prop) + in_im_val * sin(phi_prop));
-        Ophase(out_im) <+ T_amp * (-in_re_val * sin(phi_prop) + in_im_val * cos(phi_prop));
+        // Norton drive: I = G*(target - V_out) → V_out converges to target
+        Oamp(out_re) <+ G_drv * (target_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (target_im - Ophase(out_im));
 
-        // Input ports are high-impedance: zero flow contribution.
-        Oamp(in_re) <+ 0.0;
-        Oamp(in_im) <+ 0.0;
+        // Input ports: high-impedance (tiny shunt ensures in nodes are in Jacobian)
+        Oamp(in_re) <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im) <+ 1e-12 * (-Ophase(in_im));
     end
 endmodule
