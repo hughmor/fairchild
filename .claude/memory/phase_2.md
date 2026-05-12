@@ -4,13 +4,13 @@
 
 **Milestone**: Transient simulation of ring resonator modulation; resonance wavelength within 0.1 nm of coupled-mode theory analytical solution.
 
-**Status**: 🔜 Not started
+**Status**: ✅ Complete (2026-05-12)
 
 ---
 
 ## Steps
 
-### Step 1: OpenVAF extension validation (critical path)
+### Step 1: OpenVAF extension validation (critical path) ✅
 
 Verify OpenVAF-Reloaded handles a custom `optical` discipline without modification.
 
@@ -20,7 +20,7 @@ Verify OpenVAF-Reloaded handles a custom `optical` discipline without modificati
 
 Action: compile a minimal `.va` with `optical` discipline and verify the OSDI output loads.
 
-### Step 2: Optical discipline definition
+### Step 2: Optical discipline definition ✅
 
 File: `va-models/disciplines/optical.vams`
 
@@ -37,7 +37,7 @@ discipline optical
 enddiscipline
 ```
 
-### Step 3: Port keikawa model library
+### Step 3: Port keikawa model library ✅
 
 Source: `keikawa/Verilog-A-photonic-model-library`
 
@@ -47,11 +47,11 @@ Validate/adapt these for our optical discipline:
 - `cw_laser.va` — CW output with power, RIN noise, linewidth
 - `photodetector.va` — responsivity, bandwidth, shot noise
 
-### Step 4: Discipline checking in elaborator
+### Step 4: Discipline checking in elaborator ✅
 
 Add to `fairchild-parser`: discipline tracking per net; emit error on optical↔electrical mismatch. Mixed-domain components (modulator, photodetector) declare both.
 
-### Step 5: Verilog-A model golden tests
+### Step 5: Verilog-A model golden tests ✅
 
 ngspice cannot simulate `.va` natively (ADMS is fragile and not our target).
 **Reference simulator for `.va` models: VACASK** (or Xyce with ADMS-compiled models).
@@ -69,6 +69,14 @@ following the pattern in `osdi_dc_op.rs`.
 ### Step 6: `@cross` event detection (deferred from Phase 1.5)
 
 Zero-crossing step refinement. Implement after first optical circuit is working.
+
+---
+
+## Implementation notes (learned during Phase 2)
+
+**Norton-equivalent only**: VA models MUST use `Oamp(p) <+` flow contributions, never `Ophase(p) <+` potential contributions. Potential contributions add internal branch-variable nodes in OpenVAF's OSDI output (`num_nodes > num_terminals`), which the runtime doesn't allocate. Use Norton equivalent: `Oamp(out) <+ G*(target - Ophase(out))` with `G = 1e6`. This also means input ports that only read their voltage (high-impedance) should have a tiny shunt: `Oamp(in) <+ 1e-12 * (-Ophase(in))` to ensure the node appears in the Jacobian.
+
+**XOsdi in SPICE**: `X<name> net0 ... netN model_name [key=val ...]`. Nets map to OSDI terminal indices in declaration order. Discipline checking via `.optical net1 net2 ...` + `check_disciplines()`. Build the XOsdi model library path with `.osdi <path>` before the X instance.
 
 ---
 
