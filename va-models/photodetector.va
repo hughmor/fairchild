@@ -1,0 +1,52 @@
+// PIN photodetector — converts optical power to photocurrent.
+//
+// Mixed-domain: optical input (in_re, in_im) + electrical output (anode, cathode).
+//
+// Physics:
+//   P_opt  = |A|^2 = in_re^2 + in_im^2      (optical power in W)
+//   I_ph   = responsivity * P_opt            (photocurrent in A)
+//   I_dark = I_dark_A (constant reverse dark current)
+//
+// The photocurrent flows from cathode to anode (reverse-biased convention).
+// A shunt resistance R_shunt models the junction impedance.
+//
+// Parameters:
+//   responsivity  — A/W at operating wavelength
+//   I_dark_A      — dark current (A)
+//   R_shunt       — shunt resistance (Ohm); models bandwidth limit + junction leakage
+//   wavelength_nm — operating wavelength (informational; responsivity is constant)
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module photodetector(in_re, in_im, anode, cathode);
+    inout in_re, in_im;
+    inout anode, cathode;
+    optical  in_re, in_im;
+    electrical anode, cathode;
+
+    parameter real responsivity  = 1.0   from (0:inf);  // A/W
+    parameter real I_dark_A      = 1e-9  from [0:inf);  // dark current (A)
+    parameter real R_shunt       = 1e6   from (0:inf);  // shunt resistance (Ohm)
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real P_opt, I_ph, Vj;
+
+    analog begin
+        P_opt = Ophase(in_re) * Ophase(in_re) + Ophase(in_im) * Ophase(in_im);
+        I_ph  = responsivity * P_opt + I_dark_A;
+
+        Vj = V(anode, cathode);
+
+        // Photocurrent (flows cathode → anode in conventional current sense)
+        I(anode, cathode) <+ -I_ph;
+
+        // Shunt resistance across junction
+        I(anode, cathode) <+ Vj / R_shunt;
+
+        // Optical input ports are high-impedance
+        Oamp(in_re) <+ 0.0;
+        Oamp(in_im) <+ 0.0;
+    end
+endmodule

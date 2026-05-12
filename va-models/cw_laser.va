@@ -1,0 +1,37 @@
+// CW laser source — injects a constant complex SVEA field at its output pair.
+//
+// Signal representation: two optical ports per channel.
+//   out_re: Re(A), out_im: Im(A)  — complex envelope in sqrt(W)
+//
+// The laser drives Ophase (potential = field amplitude) at each output port.
+// No input ports — the output is purely source-driven.
+//
+// Parameters:
+//   power_mW     — output power in mW
+//   phi_0_deg    — initial phase offset in degrees
+//   wavelength_nm — carrier wavelength (sets omega_0 in SimContext)
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module cw_laser(out_re, out_im);
+    inout out_re, out_im;
+    optical out_re, out_im;
+
+    parameter real power_mW      = 1.0   from (0:inf);  // output power (mW)
+    parameter real phi_0_deg     = 0.0;                 // initial phase (degrees)
+    parameter real wavelength_nm = 1550.0 from (0:inf); // carrier wavelength (nm)
+
+    real A_out, phi0;
+
+    analog begin
+        A_out = sqrt(power_mW * 1e-3);      // SVEA amplitude in sqrt(W)
+        phi0  = phi_0_deg * `M_PI / 180.0;
+
+        // Drive the complex field at the output ports (Ophase = potential).
+        // Analogous to an ideal voltage source in the electrical domain.
+        Ophase(out_re) <+ A_out * cos(phi0);
+        Ophase(out_im) <+ A_out * sin(phi0);
+    end
+endmodule

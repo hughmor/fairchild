@@ -1,0 +1,31 @@
+// Optical discipline for fairchild EO co-simulator.
+//
+// Signal representation: SVEA complex envelope A(t) in √W.
+//   flow    = Optical_Amplitude  (access: Oamp)  units: √W
+//   potential = Optical_Phase    (access: Ophase) units: rad
+//
+// Carrier frequency ω₀ is NOT a nodal variable — it is passed via
+// SimContext.omega_0 and injected into OsdiSimParas before each eval.
+// Each optical port pair (o_re, o_im) maps to two MNA nodes in the solver.
+
+`ifndef OPTICAL_VAMS
+`define OPTICAL_VAMS
+
+nature Optical_Amplitude
+    units   = "sqrt(W)";
+    access  = Oamp;
+    abstol  = 1e-12;
+endnature
+
+nature Optical_Phase
+    units   = "rad";
+    access  = Ophase;
+    abstol  = 1e-9;
+endnature
+
+discipline optical
+    potential Optical_Phase;
+    flow      Optical_Amplitude;
+enddiscipline
+
+`endif // OPTICAL_VAMS
