@@ -1,0 +1,29 @@
+// Minimal test: custom optical discipline to probe OpenVAF-Reloaded behavior.
+// Does NOT include disciplines.vams — defines its own optical discipline.
+// If OpenVAF compiles this cleanly, no fork is needed.
+
+nature Optical_Amplitude
+    units = "sqrt(W)";
+    access = Oamp;
+    abstol = 1e-12;
+endnature
+
+nature Optical_Phase
+    units = "rad";
+    access = Ophase;
+    abstol = 1e-9;
+endnature
+
+discipline optical
+    potential Optical_Phase;
+    flow Optical_Amplitude;
+enddiscipline
+
+module optical_wire(p, n);
+    inout p, n;
+    optical p, n;
+
+    analog begin
+        Oamp(p, n) <+ 0.0;
+    end
+endmodule
