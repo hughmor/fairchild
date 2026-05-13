@@ -1,14 +1,28 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 
-use fairchild_core::{ac_analysis, dc_op_nr, freq_decade, freq_linear, freq_oct, tran_nr_tr, DeviceRegistry};
-use fairchild_parser::{parse_spice, AcVariation, Analysis};
+use fairchild_core::{
+    ac_analysis, dc_op_nr_with_registry, freq_decade, freq_linear, freq_oct,
+    tran_nr_with_registry_tr, DeviceRegistry,
+};
+use fairchild_osdi::OsdiLibrary;
+use fairchild_parser::{check_disciplines, parse_spice, AcVariation, Analysis, Element, Netlist};
 
 #[derive(Parser)]
-#[command(name = "fairchild", about = "SPICE-compatible analog circuit simulator")]
+#[command(
+    name = "fairchild",
+    version,
+    about = "Open-source time-domain electro-optic circuit simulator",
+    long_about = "Fairchild simulates analog circuits containing both electronic and photonic \
+                  components in the same Newton-Raphson loop.  Supports DC, transient, and \
+                  small-signal AC analyses; loads Verilog-A models compiled with OpenVAF \
+                  via the OSDI v0.4 interface."
+)]
 struct Cli {
     /// Input SPICE netlist file
     #[arg(short, long)]
@@ -21,6 +35,39 @@ struct Cli {
     /// Output file (default: stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Comma-separated list of signals to include in output.
+    /// Example: --probe "V(out),V(in),I(V1)"
+    /// Applies to CSV output only; nutmeg always outputs all signals.
+    #[arg(long, value_name = "SIGNAL,...")]
+    probe: Option<String>,
+
+    /// Override a circuit parameter.  Format: ELEMENT.PARAM=VALUE
+    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2e3"
+    /// Can be specified multiple times.
+    #[arg(long = "param", value_name = "ELEMENT.PARAM=VALUE")]
+    params: Vec<String>,
+
+    /// Parse and discipline-check the netlist, then exit without simulating.
+    /// Exit code 0 if valid, 1 if any errors found.
+    #[arg(long)]
+    check: bool,
+
+    /// List node names parsed from the netlist, then exit.
+    #[arg(long)]
+    list_nodes: bool,
+
+    /// List model cards (.model statements) parsed from the netlist, then exit.
+    #[arg(long)]
+    list_models: bool,
+
+    /// Print simulation progress and iteration counts.
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Suppress all warning messages.
+    #[arg(long, short)]
+    quiet: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -28,6 +75,174 @@ enum Format {
     Csv,
     Nutmeg,
 }
+
+// ── Parameter override helpers ─────────────────────────────────────────────
+
+/// Apply CLI `--param` overrides to a netlist in-place.
+///
+/// Format: "ELEMENT.PARAM=VALUE" (case-insensitive element and param names).
+/// Supports XOsdi elements, Resistor, Capacitor, Inductor.
+fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
+    for raw in overrides {
+        let (lhs, rhs) = match raw.split_once('=') {
+            Some(pair) => pair,
+            None => {
+                if !quiet { eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM=VALUE, skipping"); }
+                continue;
+            }
+        };
+        let value: f64 = match rhs.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                if !quiet { eprintln!("warning: --param '{raw}': cannot parse value '{rhs}', skipping"); }
+                continue;
+            }
+        };
+        let (elem_name, param_name) = match lhs.split_once('.') {
+            Some(pair) => pair,
+            None => {
+                if !quiet { eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM, skipping"); }
+                continue;
+            }
+        };
+        let elem_name_lc  = elem_name.to_lowercase();
+        let param_name_lc = param_name.to_lowercase();
+
+        let mut applied = false;
+        for el in &mut netlist.elements {
+            match el {
+                Element::XOsdi { name, params, .. } if name.to_lowercase() == elem_name_lc => {
+                    if let Some(slot) = params.iter_mut().find(|(k, _)| k.to_lowercase() == param_name_lc) {
+                        slot.1 = value;
+                    } else {
+                        params.push((param_name_lc.clone(), value));
+                    }
+                    applied = true;
+                    break;
+                }
+                Element::Resistor { name, resistance, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "resistance" || param_name_lc == "value" || param_name_lc == "r") =>
+                {
+                    *resistance = value;
+                    applied = true;
+                    break;
+                }
+                Element::Capacitor { name, capacitance, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "capacitance" || param_name_lc == "value" || param_name_lc == "c") =>
+                {
+                    *capacitance = value;
+                    applied = true;
+                    break;
+                }
+                Element::Inductor { name, inductance, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "inductance" || param_name_lc == "value" || param_name_lc == "l") =>
+                {
+                    *inductance = value;
+                    applied = true;
+                    break;
+                }
+                Element::VoltageSource { name, waveform, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "v") =>
+                {
+                    *waveform = fairchild_parser::Waveform::Dc(value);
+                    applied = true;
+                    break;
+                }
+                Element::CurrentSource { name, waveform, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "i") =>
+                {
+                    *waveform = fairchild_parser::Waveform::Dc(value);
+                    applied = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !applied && !quiet {
+            eprintln!("warning: --param '{raw}': element '{elem_name}' not found or param not applicable");
+        }
+    }
+}
+
+// ── Probe / column filtering ───────────────────────────────────────────────
+
+/// Parse a comma-separated probe string into normalised signal names.
+fn parse_probe(s: &str) -> Vec<String> {
+    s.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
+}
+
+/// Filter a CSV string to keep only the header columns that match `probes`.
+///
+/// Column names are lowercased before matching.  The first column (analysis /
+/// time) is always kept.  Returns the full CSV if `probes` is empty.
+fn filter_csv(csv: &str, probes: &[String]) -> String {
+    if probes.is_empty() {
+        return csv.to_string();
+    }
+    let mut out = String::new();
+    let mut keep_cols: Option<Vec<usize>> = None;
+
+    for line in csv.lines() {
+        if keep_cols.is_none() {
+            // Header row — determine which columns to keep
+            let headers: Vec<&str> = line.split(',').collect();
+            let cols: Vec<usize> = headers
+                .iter()
+                .enumerate()
+                .filter(|(i, h)| *i == 0 || probes.iter().any(|p| p == &h.to_lowercase()))
+                .map(|(i, _)| i)
+                .collect();
+            // Emit filtered header
+            let header_out: Vec<&str> = cols.iter().map(|&i| headers[i]).collect();
+            out.push_str(&header_out.join(","));
+            out.push('\n');
+            keep_cols = Some(cols);
+        } else {
+            let cols = keep_cols.as_ref().unwrap();
+            let fields: Vec<&str> = line.split(',').collect();
+            let row: Vec<&str> = cols.iter().filter_map(|&i| fields.get(i).copied()).collect();
+            out.push_str(&row.join(","));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// ── OSDI registry builder ─────────────────────────────────────────────────
+
+/// Load built-in models + any OSDI shared libraries listed in the netlist.
+/// Relative `.osdi` paths are resolved against `netlist_dir`.
+fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, _quiet: bool) -> DeviceRegistry {
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_diodes(&netlist.models);
+    registry.register_builtin_mosfets(&netlist.models);
+
+    for osdi_path in &netlist.osdi_paths {
+        let path = if std::path::Path::new(osdi_path).is_absolute() {
+            PathBuf::from(osdi_path)
+        } else if let Some(dir) = netlist_dir {
+            dir.join(osdi_path)
+        } else {
+            PathBuf::from(osdi_path)
+        };
+
+        let lib = unsafe { OsdiLibrary::open(&path) }.unwrap_or_else(|e| {
+            eprintln!("error: cannot load OSDI library '{}': {e}", path.display());
+            std::process::exit(1);
+        });
+        let lib = Arc::new(lib);
+        lib.register_into(&mut registry);
+    }
+
+    registry
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
@@ -37,12 +252,69 @@ fn main() {
         std::process::exit(1);
     });
 
-    let netlist = parse_spice(&src).unwrap_or_else(|e| {
+    let mut netlist = parse_spice(&src).unwrap_or_else(|e| {
         eprintln!("error: parse failed: {e}");
         std::process::exit(1);
     });
 
+    // Apply --param overrides before any structural checks
+    if !cli.params.is_empty() {
+        apply_params(&mut netlist, &cli.params, cli.quiet);
+    }
+
+    // Discipline check (always performed; emits errors + exits on failure)
+    if let Err(e) = check_disciplines(&netlist) {
+        eprintln!("error: discipline mismatch: {e}");
+        std::process::exit(1);
+    }
+
+    // --check: validate only
+    if cli.check {
+        if !cli.quiet {
+            let n_el = netlist.elements.len();
+            let n_an = netlist.analyses.len();
+            eprintln!("ok: {} element(s), {} analysis/analyses, disciplines clean", n_el, n_an);
+        }
+        std::process::exit(0);
+    }
+
+    // --list-nodes: enumerate nodes and exit
+    if cli.list_nodes {
+        // Build a registry for the netlist_dir (needed to load OSDI libs for topology)
+        let netlist_dir_tmp = cli.file.parent().map(|p| p.to_path_buf());
+        let reg_tmp = build_registry(&netlist, netlist_dir_tmp.as_ref(), cli.quiet);
+        let result = dc_op_nr_with_registry(&netlist, &reg_tmp).unwrap_or_else(|e| {
+            eprintln!("error: cannot build topology: {e}");
+            std::process::exit(1);
+        });
+        let mut nodes: Vec<&str> = result.topo.node_index.keys().map(|s| s.as_str()).collect();
+        nodes.sort_unstable();
+        for n in nodes { println!("V({n})"); }
+        for n in result.topo.vsrc_index.keys() { println!("I({n})"); }
+        std::process::exit(0);
+    }
+
+    // --list-models: print model cards
+    if cli.list_models {
+        if netlist.models.is_empty() {
+            println!("(no .model cards found)");
+        }
+        for m in &netlist.models {
+            let params: Vec<String> = m.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            println!(".model {} {} {}", m.name, m.kind, params.join(" "));
+        }
+        for path in &netlist.osdi_paths {
+            println!(".osdi {path}");
+        }
+        std::process::exit(0);
+    }
+
     let title = netlist.title.clone();
+    let probe_list: Vec<String> = cli.probe.as_deref().map(parse_probe).unwrap_or_default();
+
+    // Build device registry: built-in models + OSDI shared libraries
+    let netlist_dir = cli.file.parent().map(|p| p.to_path_buf());
+    let registry = build_registry(&netlist, netlist_dir.as_ref(), cli.quiet);
 
     let writer: Box<dyn Write> = match &cli.output {
         Some(path) => {
@@ -61,51 +333,91 @@ fn main() {
     for analysis in &netlist.analyses {
         match analysis {
             Analysis::Op => {
-                let result = dc_op_nr(&netlist).unwrap_or_else(|e| {
+                if cli.verbose { eprintln!("info: running DC operating-point analysis..."); }
+                let t0 = Instant::now();
+                let result = dc_op_nr_with_registry(&netlist, &registry).unwrap_or_else(|e| {
                     eprintln!("error: DC op failed: {e}");
                     std::process::exit(1);
                 });
-                match cli.format {
-                    Format::Csv => result.write_csv(&mut w),
-                    Format::Nutmeg => result.write_nutmeg(&mut w, &title),
+                if cli.verbose {
+                    eprintln!("info: DC op converged in {} iteration(s) [{:.1} ms]",
+                        result.iters, t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                match cli.format {
+                    Format::Csv => {
+                        let mut buf = Vec::new();
+                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv(&csv, &probe_list);
+                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Format::Nutmeg => {
+                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
                 ran_something = true;
             }
+
             Analysis::Tran { step, stop } => {
-                let result = tran_nr_tr(&netlist, *step, *stop).unwrap_or_else(|e| {
+                if cli.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e})..."); }
+                let t0 = Instant::now();
+                let result = tran_nr_with_registry_tr(&netlist, *step, *stop, &registry).unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });
-                match cli.format {
-                    Format::Csv => result.write_csv(&mut w),
-                    Format::Nutmeg => result.write_nutmeg(&mut w, &title),
+                if cli.verbose {
+                    eprintln!("info: transient complete: {} time-points [{:.1} ms]",
+                        result.time.len(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                match cli.format {
+                    Format::Csv => {
+                        let mut buf = Vec::new();
+                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv(&csv, &probe_list);
+                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Format::Nutmeg => {
+                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
                 ran_something = true;
             }
+
             Analysis::Ac { variation, points, fstart, fstop } => {
+                if cli.verbose { eprintln!("info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."); }
+                let t0 = Instant::now();
                 let freqs = match variation {
                     AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
                     AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
                     AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
                 };
-                let registry = DeviceRegistry::default();
                 let result = ac_analysis(&netlist, &freqs, None, &registry).unwrap_or_else(|e| {
                     eprintln!("error: AC analysis failed: {e}");
                     std::process::exit(1);
                 });
-                match cli.format {
-                    Format::Csv => result.write_csv(&mut w),
-                    Format::Nutmeg => result.write_nutmeg(&mut w, &title),
+                if cli.verbose {
+                    eprintln!("info: AC analysis complete: {} frequency points [{:.1} ms]",
+                        freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                match cli.format {
+                    Format::Csv => {
+                        let mut buf = Vec::new();
+                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv(&csv, &probe_list);
+                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Format::Nutmeg => {
+                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
                 ran_something = true;
             }
         }
     }
 
-    if !ran_something {
+    if !ran_something && !cli.quiet {
         eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");
     }
 }

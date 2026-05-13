@@ -20,6 +20,12 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 
         if lc == ".end" || lc.starts_with(".ends") {
             break;
+        } else if lc.starts_with(".optical") {
+            // Must come before ".op" check — `.optical` starts with `.op`.
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            for tok in &tokens[1..] {
+                netlist.optical_nets.push(canon_node(tok));
+            }
         } else if lc.starts_with(".op") {
             netlist.analyses.push(Analysis::Op);
         } else if lc.starts_with(".tran") {
@@ -221,6 +227,44 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 params,
             })
         }
+        'x' => {
+            // X<name> <net0> ... <netN-1> <model_name> [key=val ...]
+            // The last non-key=val token before any `key=val` tokens is the model name.
+            if tokens.len() < 3 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥3 (Xname net0 ... model_name)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            // Split tokens[1..] into positional (nets + model) and key=val params.
+            let mut positional: Vec<&str> = Vec::new();
+            let mut params: Vec<(String, f64)> = Vec::new();
+            for tok in &tokens[1..] {
+                if tok.contains('=') {
+                    if let Some((k, v)) = tok.split_once('=') {
+                        if let Ok(val) = parse_value(v, lineno) {
+                            params.push((k.to_lowercase(), val));
+                        }
+                    }
+                } else {
+                    positional.push(tok);
+                }
+            }
+            if positional.len() < 2 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥2 positional (at least one net + model_name)",
+                    got: positional.len(),
+                    line: lineno,
+                });
+            }
+            let model_name = positional.last().unwrap().to_lowercase();
+            let nets: Vec<String> = positional[..positional.len() - 1]
+                .iter()
+                .map(|s| canon_node(s))
+                .collect();
+            Ok(Element::XOsdi { name, nets, model_name, params })
+        }
         _ => Err(ParseError::UnknownElement { letter, line: lineno }),
     }
 }
@@ -356,16 +400,40 @@ fn parse_pwl(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
     Ok(Waveform::Pwl { points })
 }
 
-/// Join continuation lines (starting with `+`) and return (original_lineno, joined_line) pairs.
+/// Join continuation lines and return `(original_lineno, joined_line)` pairs.
+///
+/// Two continuation conventions are supported:
+/// - **SPICE standard**: a `+` at the start of a line appends to the previous.
+/// - **Backslash**: a `\` at the *end* of a line signals that the next line
+///   (leading whitespace stripped) is appended to it.
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();
     for (i, raw) in input.lines().enumerate() {
         let lineno = i + 1;
         let trimmed = raw.trim_start();
+
+        // SPICE `+` continuation: append to previous logical line.
         if trimmed.starts_with('+') {
             if let Some(last) = result.last_mut() {
                 last.1.push(' ');
                 last.1.push_str(trimmed[1..].trim());
+            }
+            continue;
+        }
+
+        // Backslash continuation: previous logical line ends with `\`.
+        let prev_ends_backslash = result
+            .last()
+            .map(|(_, s)| s.trim_end().ends_with('\\'))
+            .unwrap_or(false);
+
+        if prev_ends_backslash {
+            if let Some(last) = result.last_mut() {
+                // Strip trailing backslash + whitespace, then append this line.
+                let without_bs = last.1.trim_end().trim_end_matches('\\').trim_end().to_string();
+                last.1 = without_bs;
+                last.1.push(' ');
+                last.1.push_str(trimmed);
             }
         } else {
             result.push((lineno, raw.to_string()));
@@ -586,5 +654,73 @@ mod tests {
         let w = Waveform::Dc(5.0);
         assert!(w.next_breakpoint(0.0).is_none());
         assert!(w.next_breakpoint(1e6).is_none());
+    }
+
+    // --------- XOsdi element and discipline-checking tests ---------
+
+    #[test]
+    fn parse_xosdi_element() {
+        let input = "* photonic test\n\
+                     Xlaser laser_re laser_im cw_laser power_mW=1.0\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.elements.len(), 1);
+        if let Element::XOsdi { name, nets, model_name, params } = &netlist.elements[0] {
+            assert_eq!(name, "xlaser");
+            assert_eq!(nets, &["laser_re", "laser_im"]);
+            assert_eq!(model_name, "cw_laser");
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].0, "power_mw");
+            assert!((params[0].1 - 1.0).abs() < 1e-12);
+        } else {
+            panic!("expected XOsdi element");
+        }
+    }
+
+    #[test]
+    fn parse_optical_directive() {
+        let input = "* photonic test\n\
+                     .optical laser_re laser_im wg_out_re wg_out_im\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.optical_nets, vec!["laser_re", "laser_im", "wg_out_re", "wg_out_im"]);
+    }
+
+    #[test]
+    fn discipline_check_clean() {
+        use crate::check_disciplines;
+        let input = "* clean photonic circuit\n\
+                     .optical laser_re laser_im\n\
+                     Xlaser laser_re laser_im cw_laser\n\
+                     R1 vdd 0 1k\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert!(check_disciplines(&netlist).is_ok());
+    }
+
+    #[test]
+    fn discipline_check_mismatch_resistor_on_optical_net() {
+        use crate::{check_disciplines, DisciplineError};
+        let input = "* BAD: resistor connected to optical net\n\
+                     .optical laser_re laser_im\n\
+                     R1 laser_re laser_im 50\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let err = check_disciplines(&netlist).unwrap_err();
+        assert!(matches!(err, DisciplineError { .. }));
+        assert_eq!(err.net, "laser_re");
+    }
+
+    #[test]
+    fn discipline_check_xosdi_mixed_domain_allowed() {
+        use crate::check_disciplines;
+        // Photodetector: optical in, electrical out — should NOT error
+        let input = "* mixed-domain OK\n\
+                     .optical opt_re opt_im\n\
+                     Xpd opt_re opt_im ph_a ph_k photodetector\n\
+                     R1 ph_a 0 1k\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert!(check_disciplines(&netlist).is_ok());
     }
 }

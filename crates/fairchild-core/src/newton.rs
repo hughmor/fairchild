@@ -95,7 +95,7 @@ impl NrResult {
 /// Build device instances from the Diode elements in a netlist via the registry.
 ///
 /// Called by both `dc_op_nr` and `tran_nr`.
-pub(crate) fn build_devices(
+pub fn build_devices(
     netlist: &Netlist,
     topo: &CircuitTopology,
     ctx: &SimContext,
@@ -125,6 +125,27 @@ pub(crate) fn build_devices(
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     devices.push(factory(&[d, g, s, b], ctx));
                 }
+            }
+            Element::XOsdi { nets, model_name, params, .. } => {
+                let factory = registry.get(model_name)
+                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                let terminals: Vec<NodeId> = nets.iter()
+                    .map(|net| topo.node_index.get(net).copied())
+                    .collect();
+                let mut dev = factory(&terminals, ctx);
+                // Warn if net count doesn't match model's expected terminal count.
+                let expected = dev.num_terminals();
+                if terminals.len() != expected {
+                    eprintln!(
+                        "warning: XOsdi '{model_name}': netlist provides {} net(s) but model \
+                         expects {expected} terminal(s); extra terminals default to ground",
+                        terminals.len()
+                    );
+                }
+                for (name, value) in params {
+                    dev.set_real_param(name, *value);
+                }
+                devices.push(dev);
             }
             _ => {}
         }
@@ -278,6 +299,35 @@ pub fn dc_op_nr_with_registry(
     // Strategy 3: GMIN stepping.
     match gmin_stepping(&topo, netlist, &mut devices, &ctx) {
         Ok(x) => Ok(NrResult { topo, x, iters: 3 }),
+        Err(e) => Err(e),
+    }
+}
+
+/// DC operating-point with pre-built devices (for sweeps / parametric analysis).
+///
+/// Unlike `dc_op_nr_with_registry`, this does NOT rebuild devices from the netlist.
+/// The caller is responsible for constructing devices and setting any parameters
+/// (e.g., wavelength_nm for optical devices) before calling this function.
+///
+/// `topo` must have been built from the same `netlist` that was used to create the devices.
+pub fn dc_op_nr_with_devices(
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    devices: &mut Vec<Box<dyn Device>>,
+    ctx: &SimContext,
+) -> Result<NrResult, SimError> {
+    let x0 = vec![0.0f64; topo.size];
+
+    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, x0.clone(), 1.0, 0.0) {
+        return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
+    }
+
+    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, x0) {
+        return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
+    }
+
+    match gmin_stepping(topo, netlist, devices, ctx) {
+        Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
         Err(e) => Err(e),
     }
 }

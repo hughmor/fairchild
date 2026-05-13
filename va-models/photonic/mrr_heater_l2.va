@@ -1,0 +1,107 @@
+// N-doped heater-integrated MRR — Level 2 (external T_node, RC thermal dynamics)
+//
+// Extends mrr_heater_l1 by externalising the thermal network into a T_node port,
+// exactly as thermo_phase_shifter_l2 does.  This allows:
+//   - First-order RC thermal dynamics (via external Rth + Cth to ground)
+//   - Thermal crosstalk modelling (shared T_node between adjacent rings)
+//   - Substrate heat-spreading via ladder networks
+//
+// The model injects Joule power P = V²/R_heater as a current source into T_node.
+// The voltage on T_node equals the temperature rise ΔT (K).
+//
+// Example netlist:
+//   Xring  in_re in_im in_lam  out_re out_im out_lam  hp hn  T_dev  mrr_heater_l2
+//   Rth    T_dev 0  30000     ; 30 kΩ → 30 kK/W thermal resistance
+//   Cth    T_dev 0  1e-6      ; 1 µF → τ_th = 30 ms
+//   Vheater hp hn  DC 3.0     ; 3 V heater
+//
+// Free-carrier absorption from N-doping is captured in alpha_dB_cm.
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input
+//   out_re, out_im, out_lambda — optical through-port
+//   heat_p, heat_n             — heater electrical terminals
+//   T_node                     — thermal node (V = ΔT in K)
+//
+// Parameters:
+//   kappa_0, L_ring_um, n_g, alpha_dB_cm — ring geometry (alpha incl. N-doping FCA)
+//   R_heater    — N-doped waveguide resistance (Ω)
+//   dn_dT       — thermo-optic coefficient (K⁻¹); Si +1.86e-4
+//   wavelength_nm — design wavelength (nm); NR bootstrap
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mrr_heater_l2(in_re, in_im, in_lambda,
+                      out_re, out_im, out_lambda,
+                      heat_p, heat_n, T_node);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout heat_p, heat_n, T_node;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical heat_p, heat_n, T_node;
+
+    parameter real kappa_0      = 0.1     from [0:1];
+    parameter real L_ring_um    = 100.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 10.0    from [0:inf);   // elevated for N-doping
+    parameter real R_heater     = 500.0   from (0:inf);
+    parameter real dn_dT        = 1.86e-4 from (0:inf);
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_rt, dphi_therm, a_rt, r, kappa;
+    real alpha_lin, c, s, denom_sq, T_re, T_im;
+    real E_in_re, E_in_im, E_out_re, E_out_im;
+    real V_heat, P_heat, dT, dn, G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        phi_rt = 2.0 * `M_PI * n_g * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Temperature from external thermal network (V = ΔT in K)
+        dT   = V(T_node);
+        dn   = dn_dT * dT;
+        dphi_therm = 2.0 * `M_PI * dn * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+        phi_rt     = phi_rt + dphi_therm;
+
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        a_rt = exp(-alpha_lin * (L_ring_um * 1e-6));
+
+        kappa = kappa_0;
+        r     = sqrt(1.0 - kappa);
+
+        c        = a_rt * cos(phi_rt);
+        s        = a_rt * sin(phi_rt);
+        denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
+
+        T_re = ((r - c) * (1.0 - r * c) - r * s * s) / denom_sq;
+        T_im = -s * kappa / denom_sq;
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        E_out_re = T_re * E_in_re - T_im * E_in_im;
+        E_out_im = T_re * E_in_im + T_im * E_in_re;
+
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        V_heat = V(heat_p, heat_n);
+        I(heat_p, heat_n) <+ V_heat / R_heater;
+
+        // Inject Joule power into thermal network
+        P_heat = V_heat * V_heat / R_heater;
+        I(T_node) <+ -P_heat;
+    end
+endmodule

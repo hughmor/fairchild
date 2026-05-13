@@ -1,0 +1,5 @@
+# Allow pyo3 0.22 to build against Python 3.14 via the stable ABI.
+# PyO3 0.22 only supports up to Python 3.13 in its version check, but the
+# stable ABI (abi3) is forward-compatible so this is safe.
+[env]
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"

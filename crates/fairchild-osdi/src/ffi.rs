@@ -36,6 +36,10 @@ pub const PARA_KIND_MODEL: u32 = 0 << 30;
 pub const PARA_KIND_INST: u32 = 1 << 30;
 pub const PARA_KIND_OPVAR: u32 = 2 << 30;
 
+// Access flags for the `access` function pointer
+pub const ACCESS_FLAG_READ: u32 = 0;
+pub const ACCESS_FLAG_SET: u32 = 1;
+
 // ---------------------------------------------------------------------------
 // Simple structs
 // ---------------------------------------------------------------------------

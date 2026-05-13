@@ -10,4 +10,5 @@ path = "src/main.rs"
 [dependencies]
 fairchild-core   = { workspace = true }
 fairchild-parser = { workspace = true }
+fairchild-osdi   = { workspace = true }
 clap             = { workspace = true }

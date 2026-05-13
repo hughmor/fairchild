@@ -1,0 +1,119 @@
+// MRR electro-optic modulator — Level 1 (CMT quasi-static, linear PN phase)
+//
+// Single-bus all-pass ring resonator with a PN junction embedded in the ring
+// waveguide.  Implements the static coupled-mode-theory (CMT) transfer function:
+//
+//   T = (r − a·e^{jφ}) / (1 − r·a·e^{jφ})
+//
+// where
+//   r     = sqrt(1 − kappa_0)           coupling field transmission coefficient
+//   a     = exp(−α·L_ring)              round-trip field amplitude (≤1)
+//   φ_rt  = 2π·n_g·L_ring/λ + Δφ_PN   round-trip phase (rad)
+//   Δφ_PN = π·(V_pn − V_ref)/Vpi_rt    linear PN phase (L1 heuristic)
+//
+// This is an all-pass configuration: only the through port is present.
+// The resonance depth (extinction) at the through port is determined by
+// the ratio r/a (critical coupling at r=a, over- and under-coupling otherwise).
+//
+// Voltage-tuning shifts φ_rt, moving the resonance in wavelength.  The tuning
+// efficiency is:  Δλ_res/ΔV = Vpi_rt × FSR / π (nm/V at the linear operating
+// point), where FSR = λ²/(n_g·L_ring).
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input  (3-wire)
+//   out_re, out_im, out_lambda — through-port output (3-wire)
+//   anode, cathode             — PN junction bias (electrical)
+//
+// Level hierarchy:
+//   L1 (this file): linear Δφ(V), no PN junction I–V, no free-carrier loss
+//   L2: Soref–Bennett plasma dispersion + Shockley I–V + depletion Cj
+//   L3: TPA self-heating (temperature port) + photocarrier generation
+//
+// Parameters:
+//   kappa_0     — power coupling coefficient at the directional coupler (0–1)
+//   L_ring_um   — ring circumference (µm)
+//   n_g         — waveguide group index
+//   alpha_dB_cm — round-trip propagation loss (dB/cm)
+//   Vpi_rt      — voltage (V) for a π round-trip phase shift (sign: +V → +Δφ)
+//                 Typical Si carrier-depletion, L=100 µm: 100–300 V (large!)
+//                 Use smaller values for shorter or more efficient junctions.
+//   V_ref       — PN junction voltage at which Δφ_PN = 0; usually 0 V
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mrr_modulator_l1(in_re, in_im, in_lambda,
+                         out_re, out_im, out_lambda,
+                         anode, cathode);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout anode, cathode;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical anode, cathode;
+
+    parameter real kappa_0      = 0.1    from [0:1];
+    parameter real L_ring_um    = 100.0  from (0:inf);
+    parameter real n_g          = 4.2    from (0:inf);
+    parameter real alpha_dB_cm  = 2.0    from [0:inf);
+    parameter real Vpi_rt       = 10.0   from (0:inf);   // V; π round-trip shift
+    parameter real V_ref        = 0.0;
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_rt, dphi_pn, a_rt, r, kappa;
+    real alpha_lin, c, s, denom_sq, T_re, T_im;
+    real E_in_re, E_in_im, E_out_re, E_out_im, V_pn, G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base round-trip phase (propagation only)
+        phi_rt = 2.0 * `M_PI * n_g * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+
+        // PN voltage → round-trip phase shift (L1 linear)
+        V_pn   = V(anode, cathode);
+        dphi_pn = `M_PI * (V_pn - V_ref) / Vpi_rt;
+        phi_rt  = phi_rt + dphi_pn;
+
+        // Round-trip field amplitude (includes full circumference loss)
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        a_rt = exp(-alpha_lin * (L_ring_um * 1e-6));
+
+        kappa = kappa_0;
+        r = sqrt(1.0 - kappa);
+
+        // CMT through-port transfer function:
+        //   T = [(r−c)(1−rc) − rs²] / D  +  j[−s·κ / D]
+        //   D = 1 − 2rc + r²a²
+        // where c = a·cos(φ), s = a·sin(φ)
+        c        = a_rt * cos(phi_rt);
+        s        = a_rt * sin(phi_rt);
+        denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
+
+        T_re = ((r - c) * (1.0 - r * c) - r * s * s) / denom_sq;
+        T_im = -s * kappa / denom_sq;
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        // E_out = T × E_in  (complex multiplication)
+        E_out_re = T_re * E_in_re - T_im * E_in_im;
+        E_out_im = T_re * E_in_im + T_im * E_in_re;
+
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        // PN junction (L1): no real diode current; tiny leak for conditioning
+        I(anode, cathode) <+ (V_pn - V_ref) * 1e-12;
+    end
+endmodule

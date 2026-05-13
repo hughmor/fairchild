@@ -15,7 +15,7 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 0 — Foundation | ✅ done | Cargo workspace, MNA, Newton-Raphson, SPICE parser, OSDI runtime |
 | 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, Trapezoidal Rule, AC, Nutmeg output, Level 1 MOSFET, Shockley diode |
 | 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` directive |
-| 2 — Photonic discipline | 🔜 next | See `phase_2.md` |
+| 2 — Photonic discipline | ✅ done | Ring resonator sweep validated against CMT (Δλ=0.02 nm); example + plot script in repo |
 | 3 — Python bindings | 📋 planned | See `phase_3.md` |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
@@ -48,7 +48,11 @@ crates/
 
 **Reactive history (`x_tprev`)** — `OsdiDevice` holds `x_tprev` (solution at last accepted timestep). `commit_timestep(x)` snapshots it. `load_residual_tran` passes `x_tprev[1..]` as `prev_solve` to `load_spice_rhs_tran`. The `[0]` guard element (=0.0) handles OSDI's ground sentinel (UINT32_MAX → -1 index).
 
-**Optical discipline (Phase 2)** — SVEA two-wire convention: `(o_re, o_im)` complex envelope per port, maps to two MNA nodes. Carrier frequency `ω₀` is a `SimContext` parameter, not a nodal variable.
+**Optical discipline (Phase 2)** — 3-wire convention: `(o_re, o_im, o_lambda)` per optical port. All three use the single `optical` discipline (`Ophase`/`Oamp`). `o_lambda` stores wavelength in µm. All lambda terminals on the same optical bus share one `wl` net. Declared via `.optical` SPICE directive (no separate `.optical_lambda`). CRITICAL: `Optical_Phase` nature must have `units = "rad"` (different from `Optical_Amplitude`'s `"sqrt(W)"`) — same units triggers OpenVAF flow-node generation and NR divergence.
+
+**Norton-equivalent optical models** — VA models MUST use flow contributions (Oamp) only, never potential contributions (Ophase<+). Potential contributions add internal OSDI branch nodes that the runtime doesn't allocate (confirmed: Ophase<+ on a port adds internal nodes, causing `num_nodes > num_terminals`). Use Norton equivalent: `Oamp(p) <+ G*(target - Ophase(p))` with G=1e6.
+
+**XOsdi element** — SPICE `X<name> net0 ... netN model_name [key=val ...]` syntax for arbitrary-port OSDI instances. Parsed in fairchild-parser. Discipline checking via `.optical net1 net2...` directive + `check_disciplines()` (no separate `.optical_lambda` — lambda wires are declared in `.optical` alongside amplitude wires). XOsdi devices instantiated in `build_devices()` (newton.rs) by model name lookup.
 
 ---
 

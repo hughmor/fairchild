@@ -1,14 +1,14 @@
 mod error;
 mod spice;
 
-pub use error::ParseError;
+pub use error::{DisciplineError, ParseError};
 pub use spice::parse_spice;
 
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
 pub type NodeName = String;
 
 /// A parsed circuit netlist.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Netlist {
     pub title: String,
     pub elements: Vec<Element>,
@@ -16,6 +16,8 @@ pub struct Netlist {
     pub models: Vec<ModelCard>,
     /// Paths from `.osdi <path>` directives — OSDI shared libraries to load.
     pub osdi_paths: Vec<String>,
+    /// Net names declared as optical via `.optical <net> ...` directive.
+    pub optical_nets: Vec<String>,
 }
 
 /// Waveform specification for independent sources.
@@ -169,6 +171,14 @@ pub enum Element {
         model_name: String,
         params: Vec<(String, f64)>,
     },
+    /// Generic OSDI instance: `X<name> <net0> <net1> ... <model_name> [param=value ...]`
+    /// Port order matches terminal order in the OSDI descriptor.
+    XOsdi {
+        name: String,
+        nets: Vec<NodeName>,
+        model_name: String,
+        params: Vec<(String, f64)>,
+    },
 }
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.
@@ -188,6 +198,52 @@ pub enum AcVariation {
     Oct,
     /// Total points (linear).
     Lin,
+}
+
+/// Check for optical↔electrical discipline mismatches in the netlist.
+///
+/// Any net declared via `.optical` is flagged if it is also connected to a
+/// purely-electrical element (R, L, C, V, I, D, M).  Mixed-domain elements
+/// (XOsdi) may legitimately connect optical nets to electrical ones and are
+/// not checked here.
+///
+/// Returns the first mismatch found, or `Ok(())` if the netlist is clean.
+pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
+    use std::collections::HashSet;
+
+    let optical: HashSet<&str> = netlist.optical_nets.iter().map(|s| s.as_str()).collect();
+    if optical.is_empty() {
+        return Ok(());
+    }
+
+    let check = |element_name: &str, net: &str| -> Result<(), DisciplineError> {
+        if optical.contains(net) {
+            Err(DisciplineError {
+                element: element_name.to_string(),
+                net: net.to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    };
+
+    for el in &netlist.elements {
+        match el {
+            Element::Resistor  { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::Capacitor { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::Inductor  { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::VoltageSource { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::CurrentSource { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::Diode  { name, anode, cathode, .. } => { check(name, anode)?; check(name, cathode)?; }
+            Element::Mosfet { name, drain, gate, source, bulk, .. } => {
+                check(name, drain)?; check(name, gate)?;
+                check(name, source)?; check(name, bulk)?;
+            }
+            // XOsdi is intentionally not checked: mixed-domain connections are valid.
+            Element::XOsdi { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// A requested simulation analysis.

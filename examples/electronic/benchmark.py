@@ -23,8 +23,8 @@ import tempfile
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parent.parent
-EXAMPLES_DIR = REPO_ROOT / "examples"
+REPO_ROOT = Path(__file__).parent.parent.parent  # electronic/ -> examples/ -> repo root
+EXAMPLES_DIR = Path(__file__).parent             # netlists live alongside this script
 
 NETLISTS = [
     ("RC step (1k/1µF, 5ms tran)",   "rc_step.sp"),

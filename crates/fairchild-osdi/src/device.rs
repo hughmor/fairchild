@@ -13,6 +13,7 @@
 //!   MUST only READ from `inst` memory. Correctly implemented OSDI v0.4 models
 //!   satisfy this.
 
+use std::ffi::CStr;
 use std::os::raw::c_void;
 use std::sync::Arc;
 
@@ -20,10 +21,11 @@ use fairchild_core::device::{Device, EvalFlags, NodeId, SimContext};
 use fairchild_core::mna::MnaMatrix;
 
 use crate::ffi::{
-    OsdiDescriptor, OsdiInitInfo, OsdiSimInfo, OsdiSimParas,
+    OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas,
     ANALYSIS_DC, ANALYSIS_TRAN,
     CALC_RESIST_JACOBIAN, CALC_RESIST_RESIDUAL,
     CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL,
+    PARA_KIND_MODEL, PARA_KIND_INST,
 };
 use crate::loader::OsdiLibrary;
 
@@ -116,6 +118,32 @@ impl OsdiDevice {
     /// Expose raw instance/model pointers for integration-test diagnostics.
     pub fn inst_ptr_raw(&self) -> *mut c_void { self.inst_ptr() }
     pub fn model_ptr_raw(&self) -> *mut c_void { self.model_ptr() }
+
+    /// Read a model param's current value via access(READ), and report the pointer
+    /// offset from model_ptr.  Returns (value, byte_offset_from_model_base) or None.
+    pub fn probe_model_param(&self, name: &str) -> Option<(f64, isize)> {
+        use crate::ffi::{ACCESS_FLAG_READ, PARA_KIND_MODEL};
+        let desc = self.desc();
+        let access_fn = desc.access?;
+        let n_total = desc.num_params as usize;
+        let n_inst  = desc.num_instance_params as usize;
+        if n_total == 0 || desc.param_opvar.is_null() { return None; }
+        let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
+        // Use absolute index i (not relative j) — access() expects the absolute param_opvar index.
+        for i in n_inst..n_total {
+            if osdi_param_name_matches(&params[i], name) {
+                let id = PARA_KIND_MODEL | i as u32;
+                let ptr = unsafe {
+                    access_fn(std::ptr::null_mut(), self.model_ptr(), id, ACCESS_FLAG_READ)
+                };
+                if ptr.is_null() { return None; }
+                let value = unsafe { *(ptr as *const f64) };
+                let offset = unsafe { (ptr as *const u8).offset_from(self.model.as_ptr() as *const u8) };
+                return Some((value, offset));
+            }
+        }
+        None
+    }
 }
 
 impl Device for OsdiDevice {
@@ -347,11 +375,120 @@ impl Device for OsdiDevice {
         self.x_tprev[0] = 0.0;
         self.x_tprev[1..].copy_from_slice(x);
     }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        let desc = self.desc();
+        let access_fn = match desc.access {
+            Some(f) => f,
+            None => return false,
+        };
+        // param_opvar layout: [inst_params(0..n_inst) | model_params(n_inst..n_total) | opvars]
+        // The access() id is the ABSOLUTE param_opvar index (not relative within kind).
+        let n_total = desc.num_params as usize;
+        let n_inst  = desc.num_instance_params as usize;
+        if n_total == 0 || desc.param_opvar.is_null() {
+            return false;
+        }
+        let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
+
+        // Instance params: absolute indices 0..n_inst, kind = PARA_KIND_INST.
+        for i in 0..n_inst {
+            if osdi_param_name_matches(&params[i], name) {
+                let id = PARA_KIND_INST | i as u32;
+                let ptr = unsafe {
+                    access_fn(self.inst_ptr(), self.model_ptr(), id, crate::ffi::ACCESS_FLAG_SET)
+                };
+                if !ptr.is_null() {
+                    unsafe { *(ptr as *mut f64) = value; }
+                    return true;
+                }
+            }
+        }
+
+        // Model params: absolute indices n_inst..n_total, kind = PARA_KIND_MODEL.
+        for i in n_inst..n_total {
+            if osdi_param_name_matches(&params[i], name) {
+                let id = PARA_KIND_MODEL | i as u32;
+                let ptr = unsafe {
+                    access_fn(std::ptr::null_mut(), self.model_ptr(), id, crate::ffi::ACCESS_FLAG_SET)
+                };
+                if !ptr.is_null() {
+                    unsafe { *(ptr as *mut f64) = value; }
+                    // Re-run setup_instance so the instance struct picks up the new model value.
+                    // OpenVAF caches model-param-derived quantities in the instance during
+                    // setup_instance; eval() reads from instance, not directly from model.
+                    self.refresh_instance();
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+impl OsdiDevice {
+    /// Re-run the OSDI setup_instance call with the current mna_nodes and model state.
+    /// Required after writing a model param via access(SET) so that setup_instance can
+    /// propagate the new value into the instance struct where eval() reads it.
+    fn refresh_instance(&mut self) {
+        let node_mapping_offset = self.desc().node_mapping_offset as usize;
+        let setup_fn = self.desc().setup_instance;
+        let num_terminals = self.mna_nodes.len() as u32;
+        let temperature = SimContext::default().temperature;
+
+        let map_ptr = unsafe {
+            (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32
+        };
+        for (i, &node) in self.mna_nodes.iter().enumerate() {
+            unsafe {
+                *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
+            }
+        }
+
+        if let Some(f) = setup_fn {
+            let mut paras = null_sim_paras();
+            let mut res = OsdiInitInfo { flags: 0, num_errors: 0, errors: std::ptr::null_mut() };
+            unsafe {
+                f(
+                    std::ptr::null_mut(),
+                    self.inst_ptr(),
+                    self.model_ptr(),
+                    temperature,
+                    num_terminals,
+                    &mut paras,
+                    &mut res,
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Returns true if the primary name or any alias in `param` matches `target`.
+///
+/// OSDI convention: `name` is an array of `num_alias + 1` C-string pointers.
+/// `name[0]` is the primary name; `name[1..=num_alias]` are aliases.
+fn osdi_param_name_matches(param: &OsdiParamOpvar, target: &str) -> bool {
+    if param.name.is_null() {
+        return false;
+    }
+    let n = param.num_alias as usize + 1;  // primary + aliases
+    let names = unsafe { std::slice::from_raw_parts(param.name, n) };
+    for &name_ptr in names {
+        if name_ptr.is_null() {
+            continue;
+        }
+        let s = unsafe { CStr::from_ptr(name_ptr) };
+        if s.to_str().unwrap_or("") == target {
+            return true;
+        }
+    }
+    false
+}
 
 fn null_sim_paras() -> OsdiSimParas {
     OsdiSimParas {

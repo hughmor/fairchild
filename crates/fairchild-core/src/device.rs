@@ -84,4 +84,11 @@ pub trait Device: Send + Sync {
     /// Called once per accepted timestep in the variable-step integrator.
     /// Default is a no-op (correct for resistive-only and built-in devices).
     fn commit_timestep(&mut self, _x: &[f64]) {}
+
+    /// Set a named real-valued parameter on this device instance.
+    ///
+    /// Returns `true` if the parameter was found and set; `false` if not supported
+    /// or if `name` is not a parameter of this device (built-in devices return false
+    /// by default — their parameters are set at construction time).
+    fn set_real_param(&mut self, _name: &str, _value: f64) -> bool { false }
 }
