@@ -483,7 +483,7 @@ fn osdi_param_name_matches(param: &OsdiParamOpvar, target: &str) -> bool {
             continue;
         }
         let s = unsafe { CStr::from_ptr(name_ptr) };
-        if s.to_str().unwrap_or("") == target {
+        if s.to_str().unwrap_or("").eq_ignore_ascii_case(target) {
             return true;
         }
     }
