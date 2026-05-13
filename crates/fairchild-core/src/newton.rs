@@ -133,6 +133,15 @@ pub fn build_devices(
                     .map(|net| topo.node_index.get(net).copied())
                     .collect();
                 let mut dev = factory(&terminals, ctx);
+                // Warn if net count doesn't match model's expected terminal count.
+                let expected = dev.num_terminals();
+                if terminals.len() != expected {
+                    eprintln!(
+                        "warning: XOsdi '{model_name}': netlist provides {} net(s) but model \
+                         expects {expected} terminal(s); extra terminals default to ground",
+                        terminals.len()
+                    );
+                }
                 for (name, value) in params {
                     dev.set_real_param(name, *value);
                 }

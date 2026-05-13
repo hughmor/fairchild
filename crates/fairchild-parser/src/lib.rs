@@ -8,7 +8,7 @@ pub use spice::parse_spice;
 pub type NodeName = String;
 
 /// A parsed circuit netlist.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Netlist {
     pub title: String,
     pub elements: Vec<Element>,

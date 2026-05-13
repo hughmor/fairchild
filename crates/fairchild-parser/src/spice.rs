@@ -400,16 +400,40 @@ fn parse_pwl(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
     Ok(Waveform::Pwl { points })
 }
 
-/// Join continuation lines (starting with `+`) and return (original_lineno, joined_line) pairs.
+/// Join continuation lines and return `(original_lineno, joined_line)` pairs.
+///
+/// Two continuation conventions are supported:
+/// - **SPICE standard**: a `+` at the start of a line appends to the previous.
+/// - **Backslash**: a `\` at the *end* of a line signals that the next line
+///   (leading whitespace stripped) is appended to it.
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();
     for (i, raw) in input.lines().enumerate() {
         let lineno = i + 1;
         let trimmed = raw.trim_start();
+
+        // SPICE `+` continuation: append to previous logical line.
         if trimmed.starts_with('+') {
             if let Some(last) = result.last_mut() {
                 last.1.push(' ');
                 last.1.push_str(trimmed[1..].trim());
+            }
+            continue;
+        }
+
+        // Backslash continuation: previous logical line ends with `\`.
+        let prev_ends_backslash = result
+            .last()
+            .map(|(_, s)| s.trim_end().ends_with('\\'))
+            .unwrap_or(false);
+
+        if prev_ends_backslash {
+            if let Some(last) = result.last_mut() {
+                // Strip trailing backslash + whitespace, then append this line.
+                let without_bs = last.1.trim_end().trim_end_matches('\\').trim_end().to_string();
+                last.1 = without_bs;
+                last.1.push(' ');
+                last.1.push_str(trimmed);
             }
         } else {
             result.push((lineno, raw.to_string()));
