@@ -14,6 +14,7 @@
 8. [Solver Theory](#8-solver-theory)
 9. [Convergence Knobs](#9-convergence-knobs)
 10. [OSDI Model Loading](#10-osdi-model-loading)
+11. [Photonic Model Library](#11-photonic-model-library)
 
 ---
 
@@ -218,14 +219,31 @@ AC sweep can also be specified entirely via CLI flags (see Section 6), which ove
 fairchild [OPTIONS] --file <FILE>
 
 Options:
-  -f, --file <FILE>            Input SPICE netlist
-      --format <FORMAT>        csv (default) or nutmeg
-  -o, --output <FILE>          Output file (default: stdout)
-      --ac-start <FREQ>        AC sweep start frequency (Hz)
-      --ac-stop <FREQ>         AC sweep stop frequency (Hz)
-      --ac-points <N>          Points per decade [default: 20]
-  -h, --help                   Print help
+  -f, --file <FILE>                   Input SPICE netlist
+      --format <FORMAT>               csv (default) or nutmeg
+  -o, --output <FILE>                 Output file (default: stdout)
+      --probe <SIGNAL,...>            Comma-separated signals to include in CSV output
+                                      e.g. --probe "V(out),I(V1)"
+      --param <ELEMENT.PARAM=VALUE>   Override a circuit parameter (repeatable)
+                                      e.g. --param "Vbias.dc=-2.0" --param "Rload.value=2e3"
+      --check                         Parse + discipline-check only; exit 0 if valid
+      --list-nodes                    Print all node names then exit
+      --list-models                   Print .model cards + .osdi paths then exit
+  -v, --verbose                       Show iteration counts and timing
+  -q, --quiet                         Suppress all warnings
+  -h, --help                          Print help
 ```
+
+**--param** supported element types:
+
+| Element type | Accepted param names |
+|---|---|
+| `VoltageSource` (Vxxx) | `dc`, `value`, `v` |
+| `CurrentSource` (Ixxx) | `dc`, `value`, `i` |
+| `Resistor` (Rxxx) | `resistance`, `value`, `r` |
+| `Capacitor` (Cxxx) | `capacitance`, `value`, `c` |
+| `Inductor` (Lxxx) | `inductance`, `value`, `l` |
+| `XOsdi` (Xxxx) | any model parameter name |
 
 ### Examples
 
@@ -239,8 +257,19 @@ fairchild -f netlist.sp -o waveforms.csv
 # Nutmeg format (read back with ngspice or Python)
 fairchild -f netlist.sp --format nutmeg -o waveforms.raw
 
-# AC sweep from 1 Hz to 1 MHz
-fairchild -f netlist.sp --ac-start 1 --ac-stop 1e6
+# Filter output to selected signals
+fairchild -f netlist.sp --probe "V(ph_a),V(T_dev)"
+
+# Override bias voltage and coupling, verbose output
+fairchild -f mrr_modulator_dc.sp --param "Vbias.dc=-2.0" --param "Xmod.kappa_0=0.05" -v
+
+# Validate netlist (no simulation)
+fairchild -f netlist.sp --check
+
+# Voltage sweep in a shell loop
+for V in 0 -1 -2 -3 -4 -5; do
+  fairchild -f mrr_modulator_dc.sp --param "Vbias.dc=$V" --probe "V(ph_a)" -q | tail -1
+done
 ```
 
 ---
@@ -410,3 +439,31 @@ OSDI device models (e.g., BSIM4, PSP compiled via OpenVAF-Reloaded) are fully su
 in both DC and transient analyses. Reactive (capacitive) Jacobian entries are stamped
 correctly via the `write_jacobian_array_react` copy path with `alpha = 1/h` scaling.
 The variable-step solver respects OSDI reactive contributions at realistic step sizes.
+
+---
+
+## 11. Photonic Model Library
+
+Fairchild includes a full library of Verilog-A photonic device models spanning
+five device families at L1/L2/L3 abstraction levels:
+
+- **CW laser** (`cw_laser`) — drives 3-wire optical ports (re, im, lambda)
+- **PN junction phase shifters** (`pn_phase_shifter_l1/l2`) — carrier depletion modulation
+- **Thermo-optic phase shifters** (`thermo_phase_shifter_l1/l2`) — resistive heating with external thermal RC
+- **Photodetectors** (`photodetector`, `photodetector_l2`) — responsivity + bias-dependent Cj
+- **MRR modulators** (`mrr_modulator_l1/l2/l3`) — all-pass CMT ring + PN, Soref-Bennett, TPA
+- **N-doped heater MRR** (`mrr_heater_l1/l2`) — thermo-optic ring tuning
+
+For detailed usage, port conventions, parameter tables, and common pitfalls, see:
+
+**[docs/photonic_models.md](photonic_models.md)**
+
+### Quick start
+
+```bash
+cd va-models && ./build.sh          # compile all models to build/*.osdi
+cd examples/photonic
+fairchild -f mrr_modulator_dc.sp --probe "V(ph_a)" --verbose
+```
+
+See `examples/photonic/mrr_voltage_sweep.py` for a parametric voltage sweep.
