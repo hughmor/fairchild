@@ -1,0 +1,116 @@
+// N-doped heater-integrated MRR — Level 1 (CMT quasi-static, steady-state thermal)
+//
+// Single-bus all-pass ring resonator with an N-doped waveguide that doubles as a
+// resistive heater.  A current through the N-doped section Joule-heats the ring,
+// shifting its resonance wavelength via the thermo-optic effect.
+//
+// The N-doping provides tuning efficiency advantages over TiN/metal heaters
+// (closer thermal coupling to the optical mode) at the cost of higher propagation
+// loss from free-carrier absorption (FCA).
+//
+// Transfer function: same as mrr_modulator_l1 but with thermal phase shift:
+//
+//   φ_rt  = 2π·n_g·L_ring/λ + Δφ_thermal
+//   Δφ_thermal = 2π·(dn/dT)·ΔT·L_ring / λ
+//   ΔT    = P_heat · R_thermal   (steady-state)
+//   P_heat = V_heat² / R_heater  (Joule heating)
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input  (3-wire)
+//   out_re, out_im, out_lambda — through-port output (3-wire)
+//   heat_p, heat_n             — heater bias (electrical)
+//
+// Level hierarchy:
+//   L1 (this file): quasi-static ΔT, integrated R_thermal, no dynamics
+//   L2: external T_node port, first-order RC thermal dynamics
+//   L3: coupled thermal-optical with photocarrier generation from N-doping
+//
+// Parameters:
+//   kappa_0     — power coupling coefficient (0–1)
+//   L_ring_um   — ring circumference (µm)
+//   n_g         — group index
+//   alpha_dB_cm — propagation loss (dB/cm); N-doped waveguide: typically 5–20 dB/cm
+//                 (higher than undoped due to FCA from ~1e18 cm⁻³ donors)
+//   R_heater    — N-doped waveguide heater resistance (Ω)
+//   R_thermal   — integrated thermal resistance (K/W)
+//   dn_dT       — thermo-optic coefficient (K⁻¹); Si at 1550 nm: +1.86e-4
+//   wavelength_nm — design wavelength (nm); NR bootstrap
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mrr_heater_l1(in_re, in_im, in_lambda,
+                      out_re, out_im, out_lambda,
+                      heat_p, heat_n);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout heat_p, heat_n;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical heat_p, heat_n;
+
+    parameter real kappa_0      = 0.1     from [0:1];
+    parameter real L_ring_um    = 100.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 10.0    from [0:inf);   // elevated: N-doping FCA
+    parameter real R_heater     = 500.0   from (0:inf);   // Ω
+    parameter real R_thermal    = 30000.0 from (0:inf);   // K/W (good thermal contact)
+    parameter real dn_dT        = 1.86e-4 from (0:inf);   // K⁻¹
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_rt, dphi_therm, a_rt, r, kappa;
+    real alpha_lin, c, s, denom_sq, T_re, T_im;
+    real E_in_re, E_in_im, E_out_re, E_out_im;
+    real V_heat, P_heat, dT, dn, G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base round-trip phase
+        phi_rt = 2.0 * `M_PI * n_g * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Thermal phase shift (quasi-static)
+        V_heat = V(heat_p, heat_n);
+        P_heat = V_heat * V_heat / R_heater;
+        dT     = P_heat * R_thermal;
+        dn     = dn_dT * dT;
+        dphi_therm = 2.0 * `M_PI * dn * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+        phi_rt     = phi_rt + dphi_therm;
+
+        // Round-trip amplitude
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        a_rt = exp(-alpha_lin * (L_ring_um * 1e-6));
+
+        kappa = kappa_0;
+        r = sqrt(1.0 - kappa);
+
+        // CMT transfer function (same as mrr_modulator_l1)
+        c        = a_rt * cos(phi_rt);
+        s        = a_rt * sin(phi_rt);
+        denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
+
+        T_re = ((r - c) * (1.0 - r * c) - r * s * s) / denom_sq;
+        T_im = -s * kappa / denom_sq;
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        E_out_re = T_re * E_in_re - T_im * E_in_im;
+        E_out_im = T_re * E_in_im + T_im * E_in_re;
+
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        // N-doped waveguide heater: Ohmic
+        I(heat_p, heat_n) <+ V_heat / R_heater;
+    end
+endmodule

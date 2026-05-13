@@ -1,0 +1,98 @@
+// PN junction phase shifter — Level 1 (linear plasma dispersion, heuristic)
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input  (3-wire optical discipline)
+//   out_re, out_im, out_lambda — optical output (3-wire optical discipline)
+//   anode, cathode             — PN junction bias (electrical)
+//
+// Physics (L1 — linear approximation):
+//   phi_prop = 2π · n_g · L / λ             (waveguide propagation phase)
+//   Δφ_PN   = π · (V_pn − V_ref) · L / Vpi_L  (plasma dispersion, linearised)
+//   T_amp   = exp(−α · L / 2)               (field attenuation)
+//
+//   E_out = E_in · T_amp · exp[−j·(phi_prop + Δφ_PN)]
+//
+// Electrical port (L1): purely passive — a tiny leakage conductance holds the
+// node without injecting real PN junction current.  Use pn_phase_shifter_l2
+// for the Shockley I–V and depletion capacitance.
+//
+// Parameters:
+//   L_um        — length of PN-doped waveguide section (µm)
+//   n_g         — waveguide group index
+//   alpha_dB_cm — propagation loss (dB/cm); includes free-carrier absorption
+//                 from PN-junction doping (typically 2–5 dB/cm for Si)
+//   Vpi_L       — voltage–length product for π phase shift (V·cm)
+//                 Soref–Bennett: ~2–3 V·cm for Si carrier-depletion at 1550 nm
+//   V_ref       — junction voltage at which Δφ_PN = 0 (V); typically 0 V
+//   wavelength_nm — design wavelength (nm); used as NR bootstrap guard
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module pn_phase_shifter_l1(in_re, in_im, in_lambda,
+                            out_re, out_im, out_lambda,
+                            anode, cathode);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout anode, cathode;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical anode, cathode;
+
+    parameter real L_um         = 100.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 3.0     from [0:inf);  // includes doping FCA
+    parameter real Vpi_L        = 2.0     from (0:inf);  // V·cm
+    parameter real V_ref        = 0.0;
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_prop, dphi_pn, phi_total;
+    real alpha_lin, T_amp, G_drv, L_cm;
+    real E_in_re, E_in_im, E_out_re, E_out_im, V_pn;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        // Read wavelength from lambda port; bootstrap guard protects against
+        // NR ramp-up when wl_nm is far from the physical value.
+        wl_nm = Ophase(in_lambda) * 1e3;   // µm → nm
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Waveguide propagation phase
+        phi_prop = 2.0 * `M_PI * n_g * (L_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Plasma-dispersion phase shift (linear in V, Soref–Bennett L1)
+        V_pn = V(anode, cathode);
+        L_cm = L_um * 1e-4;
+        dphi_pn = `M_PI * (V_pn - V_ref) * L_cm / Vpi_L;
+
+        phi_total = phi_prop + dphi_pn;
+
+        // Propagation loss: α (Np/m) = dB/cm × 100 / (20 × log10(e))
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        T_amp = exp(-alpha_lin * (L_um * 1e-6) / 2.0);
+
+        // Input field
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        // Apply phase rotation and attenuation: E_out = T_amp × e^{−jφ} × E_in
+        E_out_re = T_amp * ( E_in_re * cos(phi_total) + E_in_im * sin(phi_total));
+        E_out_im = T_amp * (-E_in_re * sin(phi_total) + E_in_im * cos(phi_total));
+
+        // Norton drive for output amplitude ports
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        // High-impedance shunts for input amplitude and lambda ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        // Lambda: output follows input (stamps cancel on shared wl net)
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        // PN junction (L1): tiny leakage keeps the node well-conditioned.
+        I(anode, cathode) <+ (V_pn - V_ref) * 1e-12;
+    end
+endmodule

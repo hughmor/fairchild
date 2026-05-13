@@ -1,0 +1,96 @@
+// Thermo-optic phase shifter — Level 1 (steady-state, integrated thermal model)
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input  (3-wire optical discipline)
+//   out_re, out_im, out_lambda — optical output (3-wire optical discipline)
+//   heat_p, heat_n             — heater electrical terminals
+//
+// Physics (L1 — quasi-static, no thermal dynamics):
+//   V_heat  = V(heat_p, heat_n)
+//   P_heat  = V_heat² / R_heater          (Joule heating, W)
+//   ΔT      = P_heat · R_thermal           (steady-state temperature rise, K)
+//   Δn      = dn_dT · ΔT                  (thermo-optic index change)
+//   Δφ      = 2π · Δn · L / λ             (phase shift, rad)
+//   phi     = phi_prop + Δφ
+//
+//   I(heat_p, heat_n) = V_heat / R_heater  (resistive heater)
+//
+// No thermal time constant at L1 — use thermo_phase_shifter_l2 for
+// first-order RC thermal dynamics (requires external T_node in netlist).
+//
+// Parameters:
+//   L_um        — heated waveguide length (µm); also determines phase
+//   n_g         — waveguide group index
+//   alpha_dB_cm — propagation loss (dB/cm); typically higher near metal heater
+//   R_heater    — heater resistance (Ω); typical TiN: 200–2000 Ω
+//   R_thermal   — integrated steady-state thermal resistance (K/W)
+//                 Typical SiPh: 1e4–2e5 K/W depending on cladding
+//   dn_dT       — thermo-optic coefficient (K⁻¹)
+//                 Si: +1.86e-4, SiO₂: +1.1e-5
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module thermo_phase_shifter_l1(in_re, in_im, in_lambda,
+                                out_re, out_im, out_lambda,
+                                heat_p, heat_n);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout heat_p, heat_n;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical heat_p, heat_n;
+
+    parameter real L_um         = 100.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 2.5     from [0:inf);
+    parameter real R_heater     = 1000.0  from (0:inf);   // Ω
+    parameter real R_thermal    = 50000.0 from (0:inf);   // K/W
+    parameter real dn_dT        = 1.86e-4 from (0:inf);   // K⁻¹ (Si at 1550 nm)
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_prop, dphi_therm, phi_total;
+    real alpha_lin, T_amp, G_drv;
+    real E_in_re, E_in_im, E_out_re, E_out_im;
+    real V_heat, P_heat, dT, dn;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        phi_prop = 2.0 * `M_PI * n_g * (L_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Thermal physics (quasi-static)
+        V_heat = V(heat_p, heat_n);
+        P_heat = V_heat * V_heat / R_heater;
+        dT     = P_heat * R_thermal;
+        dn     = dn_dT * dT;
+        dphi_therm = 2.0 * `M_PI * dn * (L_um * 1e-6) / (wl_nm * 1e-9);
+
+        phi_total = phi_prop + dphi_therm;
+
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        T_amp     = exp(-alpha_lin * (L_um * 1e-6) / 2.0);
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        E_out_re = T_amp * ( E_in_re * cos(phi_total) + E_in_im * sin(phi_total));
+        E_out_im = T_amp * (-E_in_re * sin(phi_total) + E_in_im * cos(phi_total));
+
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        // Heater: Ohm's law (resistive element)
+        I(heat_p, heat_n) <+ V_heat / R_heater;
+    end
+endmodule

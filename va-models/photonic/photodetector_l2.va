@@ -1,0 +1,86 @@
+// PIN photodetector — Level 2 (bias-dependent junction capacitance)
+//
+// Extends the Level 1 model with a depletion capacitance that depends on
+// reverse-bias voltage, enabling accurate transient/AC simulation of
+// detector bandwidth limitations.
+//
+// Ports:
+//   in_re, in_im, in_lambda — optical input (3-wire optical discipline)
+//   anode, cathode          — electrical output
+//
+// Physics:
+//   P_opt  = |A|² = in_re² + in_im²             (optical power, W)
+//   I_ph   = responsivity · P_opt + I_dark_A     (photocurrent, A)
+//
+//   Junction capacitance (depletion approximation):
+//     V_cj   = clamp(V(anode,cathode), −∞, 0.99·Vbi)   (protect against fwd-bias blow-up)
+//     Cj(V)  = Cj0 / (1 − V_cj/Vbi)^mj
+//
+//     I_cap  = d[Cj(V)·V] / dt                         (via ddt() operator)
+//
+//   Shunt resistance R_shunt models parasitic junction leakage.
+//
+// Notes:
+//   - Photocurrent flows cathode → anode (reverse-biased convention).
+//   - For accurate charge storage, use Cj0 measured at V=0.
+//   - Transit-time bandwidth is a separate effect not modelled here; add a
+//     lumped R–C in the netlist if needed.
+//   - For shot noise or full carrier-dynamics see photodetector_l3.
+//
+// Parameters:
+//   responsivity  — A/W at operating wavelength
+//   I_dark_A      — dark current (A)
+//   R_shunt       — junction shunt resistance (Ω)
+//   Cj0           — zero-bias junction capacitance (F); typical Si/Ge PD: 10–200 fF
+//   Vbi           — built-in junction potential (V); Si: 0.7–1.1, Ge: 0.5–0.7
+//   mj            — grading coefficient; abrupt=0.5, graded=0.33
+//   wavelength_nm — operating wavelength for NR bootstrap guard
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module photodetector_l2(in_re, in_im, in_lambda, anode, cathode);
+    inout in_re, in_im, in_lambda;
+    inout anode, cathode;
+    optical    in_re, in_im, in_lambda;
+    electrical anode, cathode;
+
+    parameter real responsivity  = 1.0    from (0:inf);
+    parameter real I_dark_A      = 1e-9   from [0:inf);
+    parameter real R_shunt       = 1e6    from (0:inf);
+    parameter real Cj0           = 50e-15 from (0:inf);   // 50 fF zero-bias
+    parameter real Vbi           = 0.9    from (0:inf);   // V  built-in
+    parameter real mj            = 0.5    from (0:1];     // abrupt junction
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real P_opt, I_ph, Vj, V_cj, Cj;
+
+    analog begin
+        P_opt = Ophase(in_re) * Ophase(in_re) + Ophase(in_im) * Ophase(in_im);
+        I_ph  = responsivity * P_opt + I_dark_A;
+
+        Vj   = V(anode, cathode);
+
+        // Clamp voltage to prevent division-by-zero / blow-up in pow()
+        V_cj = Vj;
+        if (V_cj > 0.99 * Vbi) V_cj = 0.99 * Vbi;
+
+        Cj = Cj0 / pow(1.0 - V_cj / Vbi, mj);
+
+        // Photocurrent (cathode → anode)
+        I(anode, cathode) <+ -I_ph;
+
+        // Shunt resistance
+        I(anode, cathode) <+ Vj / R_shunt;
+
+        // Junction capacitance — reactive current via ddt() operator.
+        // The OSDI reactive Jacobian path handles d(Cj·V)/dV = Cj + V·dCj/dV.
+        I(anode, cathode) <+ ddt(Cj * Vj);
+
+        // High-impedance optical input shunts
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+    end
+endmodule

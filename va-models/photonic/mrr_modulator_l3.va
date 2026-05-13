@@ -1,0 +1,190 @@
+// MRR electro-optic modulator — Level 3 (TPA self-heating, photocarrier generation)
+//
+// Extends L2 with nonlinear optical effects relevant to high-power Si ring
+// resonators.  Two-photon absorption (TPA) heats the ring and generates free
+// carriers, both of which shift the resonance.  These effects are prominent
+// above ~1–10 mW intra-ring power in Si nanowires.
+//
+// Quasi-static approximation: the steady-state free-carrier density is computed
+// from the algebraic balance between TPA generation and recombination:
+//
+//   P_TPA    = β·L_eff·P_circ² / (2·A_eff²)       (W absorbed, total round-trip)
+//   N_fc     = (P_TPA·τ_fc) / (hν·V_mode)          (free-carrier density, cm⁻³)
+//   τ_fc     ≈ 10 ns (Si undoped), ~1 ns with reverse-biased PN junction
+//
+// The intra-ring circulating power P_circ is estimated from the CMT enhancement:
+//   P_circ = P_in · κ / D                 (D = |1 − r·a·e^{jφ}|²)
+// This is solved iteratively within the Newton–Raphson loop; the NR solver
+// handles the self-consistency automatically.
+//
+// Additional effects from TPA-generated carriers (on top of L2 PN-junction ΔN):
+//   Δα_tpa_fc = σ_e·N_fc + σ_h·N_fc     (FCA from hot carriers, cm⁻¹)
+//               ≈ (8.5e-18 + 6.0e-18)·N_fc   (Soref–Bennett, Si)
+//   Δn_tpa    = −8.8e-22·N_fc             (index shift, RIU)
+//
+// TPA self-heating is injected into an external T_node (same as L2 heater):
+//   I(T_node, 0) = −P_TPA    (current source in W; Rth·Cth network in netlist)
+//
+// Electrical port: same L2 Shockley diode + depletion Cj.
+// PN reverse bias reduces τ_fc (set tau_fc parameter accordingly).
+//
+// Ports:
+//   in_re, in_im, in_lambda    — optical input
+//   out_re, out_im, out_lambda — through-port output
+//   anode, cathode             — PN junction
+//   T_node                     — thermal node for TPA heat (V = ΔT in K)
+//
+// Parameters:
+//   kappa_0, L_ring_um, n_g, alpha_dB_cm, n_dep0, Vbi, mj, Cj0, IS, n_id
+//             — inherited from L2
+//   beta_tpa  — TPA coefficient (cm/GW); Si at 1550 nm: ~0.5–0.9
+//   A_eff_um2 — effective modal area (µm²); Si nanowire: 0.08–0.15
+//   tau_fc_ns — free-carrier lifetime (ns); undoped Si: ~10, PN-swept: ~1
+//   dn_dT     — thermo-optic coefficient (K⁻¹); for TPA heating feedback
+//   wavelength_nm — design wavelength; NR bootstrap
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mrr_modulator_l3(in_re, in_im, in_lambda,
+                         out_re, out_im, out_lambda,
+                         anode, cathode, T_node);
+    inout in_re, in_im, in_lambda;
+    inout out_re, out_im, out_lambda;
+    inout anode, cathode, T_node;
+    optical    in_re, in_im, in_lambda, out_re, out_im, out_lambda;
+    electrical anode, cathode, T_node;
+
+    parameter real kappa_0       = 0.1     from [0:1];
+    parameter real L_ring_um     = 100.0   from (0:inf);
+    parameter real n_g           = 4.2     from (0:inf);
+    parameter real alpha_dB_cm   = 2.0     from [0:inf);
+    parameter real n_dep0        = 5e16    from (0:inf);   // cm⁻³ PN depletion
+    parameter real Vbi           = 1.0     from (0:inf);
+    parameter real mj            = 0.5     from (0:1];
+    parameter real Cj0           = 50e-15  from (0:inf);
+    parameter real IS            = 1e-14   from (0:inf);
+    parameter real n_id          = 1.5;
+    parameter real beta_tpa      = 0.7     from [0:inf);   // cm/GW
+    parameter real A_eff_um2     = 0.1     from (0:inf);   // µm²
+    parameter real tau_fc_ns     = 10.0    from (0:inf);   // ns
+    parameter real dn_dT         = 1.86e-4 from (0:inf);   // K⁻¹
+    parameter real wavelength_nm  = 1550.0  from (0:inf);
+
+    real wl_nm, V_pn, V_cj, dN_pn, dn_pn, dalpha_pn;
+    real phi_rt, dphi_pn, a_rt, r, kappa;
+    real alpha_lin, alpha_total, c, s, denom_sq, T_re, T_im;
+    real E_in_re, E_in_im, E_out_re, E_out_im;
+    real Cj, Vt, tmp, G_drv;
+
+    // TPA variables
+    real P_in, D_circ, P_circ, beta_SI, A_eff_m2, L_ring_m;
+    real P_TPA, hnu, V_mode, N_fc;
+    real dalpha_tpa, dn_tpa;
+    real dT, dphi_therm;
+
+    analog begin
+        G_drv = 1.0e6;
+        Vt    = `P_K * 300.0 / `P_Q;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        phi_rt = 2.0 * `M_PI * n_g * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+
+        // ------- PN junction plasma dispersion (same as L2) --------
+        V_pn = V(anode, cathode);
+        tmp  = 1.0 - V_pn / Vbi;
+        if (tmp < 0.0) tmp = 0.0;
+        dN_pn     = n_dep0 * (1.0 - sqrt(tmp));
+        dn_pn     = -8.8e-22 * dN_pn - 8.5e-18 * pow(dN_pn, 0.8);
+        dalpha_pn = (8.5e-18 + 6.0e-18) * dN_pn;
+
+        dphi_pn = 2.0 * `M_PI * dn_pn * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+        phi_rt  = phi_rt + dphi_pn;
+
+        // ------- Thermal phase shift from TPA (via T_node) ---------
+        dT         = V(T_node);   // ΔT in K from external Rth/Cth network
+        dphi_therm = 2.0 * `M_PI * dn_dT * dT * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+        phi_rt     = phi_rt + dphi_therm;
+
+        // ------- Intra-ring circulating power estimate -------------
+        // First-pass a_rt using only waveguide and PN losses
+        alpha_lin   = alpha_dB_cm * 1e2 / 8.685889;
+        alpha_total = alpha_lin + dalpha_pn * 1e2;
+        a_rt = exp(-alpha_total * (L_ring_um * 1e-6));
+
+        kappa = kappa_0;
+        r     = sqrt(1.0 - kappa);
+
+        c        = a_rt * cos(phi_rt);
+        s        = a_rt * sin(phi_rt);
+        denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
+
+        // Circulating power = P_in × κ / |denom|²
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+        P_in    = E_in_re * E_in_re + E_in_im * E_in_im;
+        D_circ  = denom_sq;
+        if (D_circ < 1e-12) D_circ = 1e-12;   // guard against resonance blow-up
+        P_circ  = P_in * kappa / D_circ;
+
+        // ------- TPA: absorbed power and photocarrier generation ---
+        beta_SI  = beta_tpa * 1e-9;       // cm/GW → m/W (1e-9 * 1e9/1e0 ... )
+        // β (cm/GW) = β × 1e-2 m/cm × 1e-9 W/GW = β × 1e-11 m/W
+        beta_SI  = beta_tpa * 1e-11;      // m/W
+        A_eff_m2 = A_eff_um2 * 1e-12;     // µm² → m²
+        L_ring_m = L_ring_um * 1e-6;      // µm → m
+
+        // TPA power absorbed per pass: P_abs = β·L·P²/(2·A²)  [W]
+        // Factor of 2 from degenerate TPA cross-section convention
+        P_TPA = beta_SI * L_ring_m * P_circ * P_circ / (2.0 * A_eff_m2 * A_eff_m2);
+
+        // Quasi-static photocarrier density
+        // hν = h×c/λ; h×c = 1.98645e-25 J·m (avoids undefined `M_C macro)
+        hnu    = 1.98645e-25 / (wl_nm * 1e-9);   // photon energy (J)
+        V_mode = A_eff_m2 * L_ring_m;             // mode volume (m³)
+        N_fc   = (P_TPA * tau_fc_ns * 1e-9) / (hnu * V_mode);   // m⁻³
+        N_fc   = N_fc * 1e-6;                      // m⁻³ → cm⁻³
+
+        // FCA and dispersion from TPA-generated carriers
+        dalpha_tpa = (8.5e-18 + 6.0e-18) * N_fc;   // cm⁻¹
+        dn_tpa     = -8.8e-22 * N_fc;               // RIU
+
+        // Update round-trip phase and amplitude with TPA contributions
+        phi_rt      = phi_rt + 2.0 * `M_PI * dn_tpa * L_ring_m / (wl_nm * 1e-9);
+        alpha_total = alpha_total + dalpha_tpa * 1e2;
+        a_rt        = exp(-alpha_total * L_ring_m);
+
+        // Recompute CMT with updated parameters
+        c        = a_rt * cos(phi_rt);
+        s        = a_rt * sin(phi_rt);
+        denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
+
+        T_re = ((r - c) * (1.0 - r * c) - r * s * s) / denom_sq;
+        T_im = -s * kappa / denom_sq;
+
+        E_out_re = T_re * E_in_re - T_im * E_in_im;
+        E_out_im = T_re * E_in_im + T_im * E_in_re;
+
+        Oamp(out_re) <+ G_drv * (E_out_re - Ophase(out_re));
+        Oamp(out_im) <+ G_drv * (E_out_im - Ophase(out_im));
+
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        Oamp(out_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(out_lambda));
+
+        // PN junction I–V (L2 inherited)
+        I(anode, cathode) <+ IS * (exp(V_pn / (n_id * Vt)) - 1.0);
+        V_cj = V_pn;
+        if (V_cj > 0.99 * Vbi) V_cj = 0.99 * Vbi;
+        Cj = Cj0 / pow(1.0 - V_cj / Vbi, mj);
+        I(anode, cathode) <+ ddt(Cj * V_pn);
+
+        // Inject TPA heat into external thermal node
+        I(T_node) <+ -P_TPA;
+    end
+endmodule
