@@ -1,0 +1,136 @@
+// MZI electro-optic modulator — Level 1 (PN junction, linear phase, single-arm)
+//
+// Mach-Zehnder interferometer (MZI) with a 50:50 directional-coupler splitter
+// and combiner.  A single PN junction modulates arm 2; arm 1 is passive.
+//
+// The coupler matrix is [[1/√2, j/√2], [j/√2, 1/√2]].  With input only on
+// port 1, the two arms receive:
+//   arm1_in = (1/√2) · E_in            (real amplitude)
+//   arm2_in = (j/√2) · E_in            (90° phase lead)
+//
+// After propagation through each arm, the output coupler recombines:
+//   bar  port = (1/√2)·arm1_out + (j/√2)·arm2_out
+//   cross port = (j/√2)·arm1_out + (1/√2)·arm2_out
+//
+// Expanding fully for a single input E_in:
+//   E_bar_re   = 0.5·((c1−c2)·E_in_re − (s1−s2)·E_in_im)
+//   E_bar_im   = 0.5·((s1−s2)·E_in_re + (c1−c2)·E_in_im)
+//   E_cross_re = 0.5·(−(s1+s2)·E_in_re − (c1+c2)·E_in_im)
+//   E_cross_im = 0.5·((c1+c2)·E_in_re − (s1+s2)·E_in_im)
+//
+// where cN = T_amp·cos(phiN), sN = T_amp·sin(phiN)
+//
+// Phase convention:
+//   phi1 = 2π·n_g·L_arm/λ                     (passive arm)
+//   phi2 = phi1 + Δφ_PN                        (modulated arm)
+//   Δφ_PN = π·(V_pn−V_ref)·L_arm_cm / Vpi_L   (L1 linear model)
+//
+// At Δφ=0: cross port carries full input power; bar port is dark.
+// At Δφ=π: bar port carries full input power; cross port is dark.
+//
+// Ports:
+//   in_re, in_im, in_lambda         — optical input (3-wire)
+//   bar_re, bar_im, bar_lambda      — bar port output (3-wire)
+//   cross_re, cross_im, cross_lambda — cross port output (3-wire)
+//   anode, cathode                  — PN junction bias (electrical)
+//
+// Parameters:
+//   L_arm_um    — modulated arm length (µm); passive arm is the same length
+//   n_g         — waveguide group index
+//   alpha_dB_cm — propagation loss (dB/cm); same for both arms
+//   Vpi_L       — voltage–length product for π phase shift (V·cm)
+//   V_ref       — junction voltage at which Δφ_PN = 0 (V)
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+//
+// Usage example:
+//   Xmzi  in_re in_im in_lam  bar_re bar_im bar_lam  cross_re cross_im cross_lam
+//         anode cathode
+//         mzi_modulator_pn_l1
+//         .param L_arm_um=500 Vpi_L=2.0 V_ref=-2.0
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mzi_modulator_pn_l1(in_re, in_im, in_lambda,
+                            bar_re, bar_im, bar_lambda,
+                            cross_re, cross_im, cross_lambda,
+                            anode, cathode);
+    inout in_re, in_im, in_lambda;
+    inout bar_re, bar_im, bar_lambda;
+    inout cross_re, cross_im, cross_lambda;
+    inout anode, cathode;
+    optical    in_re, in_im, in_lambda;
+    optical    bar_re, bar_im, bar_lambda;
+    optical    cross_re, cross_im, cross_lambda;
+    electrical anode, cathode;
+
+    parameter real L_arm_um     = 500.0  from (0:inf);
+    parameter real n_g          = 4.2    from (0:inf);
+    parameter real alpha_dB_cm  = 3.0    from [0:inf);
+    parameter real Vpi_L        = 2.0    from (0:inf);   // V·cm
+    parameter real V_ref        = 0.0;
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, V_pn, L_cm, dphi_pn;
+    real phi_base, phi1, phi2, alpha_lin, T_amp;
+    real c1, s1, c2, s2;
+    real E_in_re, E_in_im;
+    real E_bar_re, E_bar_im, E_cross_re, E_cross_im;
+    real G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base propagation phase (same for both arms)
+        phi_base = 2.0 * `M_PI * n_g * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+
+        // PN phase shift on arm 2 (L1 linear, Soref–Bennett linearised)
+        V_pn   = V(anode, cathode);
+        L_cm   = L_arm_um * 1e-4;
+        dphi_pn = `M_PI * (V_pn - V_ref) * L_cm / Vpi_L;
+
+        phi1 = phi_base;            // passive arm: no modulation
+        phi2 = phi_base + dphi_pn;  // modulated arm
+
+        // Field amplitude transmission (same for both arms)
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;   // Np/m
+        T_amp = exp(-alpha_lin * (L_arm_um * 1e-6) / 2.0);
+
+        c1 = T_amp * cos(phi1);
+        s1 = T_amp * sin(phi1);
+        c2 = T_amp * cos(phi2);
+        s2 = T_amp * sin(phi2);
+
+        // Input fields
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        // 50:50 DC splitter + combiner (bar = 0 at Δφ=0; cross = full at Δφ=0)
+        E_bar_re   = 0.5 * ((c1 - c2) * E_in_re - (s1 - s2) * E_in_im);
+        E_bar_im   = 0.5 * ((s1 - s2) * E_in_re + (c1 - c2) * E_in_im);
+        E_cross_re = 0.5 * (-(s1 + s2) * E_in_re - (c1 + c2) * E_in_im);
+        E_cross_im = 0.5 * ( (c1 + c2) * E_in_re - (s1 + s2) * E_in_im);
+
+        // Norton drive for output ports
+        Oamp(bar_re)   <+ G_drv * (E_bar_re   - Ophase(bar_re));
+        Oamp(bar_im)   <+ G_drv * (E_bar_im   - Ophase(bar_im));
+        Oamp(cross_re) <+ G_drv * (E_cross_re - Ophase(cross_re));
+        Oamp(cross_im) <+ G_drv * (E_cross_im - Ophase(cross_im));
+
+        // High-impedance shunts on input ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        // Lambda: output ports follow input lambda
+        Oamp(bar_lambda)   <+ G_drv * (Ophase(in_lambda) - Ophase(bar_lambda));
+        Oamp(cross_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(cross_lambda));
+
+        // PN junction (L1): tiny leakage for node conditioning
+        I(anode, cathode) <+ (V_pn - V_ref) * 1e-12;
+    end
+endmodule

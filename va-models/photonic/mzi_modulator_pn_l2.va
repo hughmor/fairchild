@@ -1,0 +1,178 @@
+// MZI electro-optic modulator — Level 2 (push-pull PN junctions, Soref–Bennett,
+//                                        Shockley I–V, depletion Cj, FCA)
+//
+// Extends mzi_modulator_pn_l1 to a push-pull configuration: both MZI arms
+// have independent PN junctions (anode1/cathode1 for arm 1, anode2/cathode2
+// for arm 2).  Differential voltage drive (V1 = +V, V2 = −V) doubles the
+// modulation efficiency compared to single-arm drive.
+//
+// Each arm uses the full Soref–Bennett plasma dispersion model:
+//
+//   ΔN_N(V_N) = n_dep0·(1 − sqrt(max(1 − V_N/Vbi, 0)))   [cm⁻³]
+//   Δn_N      = −8.8e-22·ΔN_N − 8.5e-18·ΔN_N^0.8         [RIU]
+//   Δα_N      = (8.5e-18 + 6.0e-18)·ΔN_N                  [cm⁻¹]
+//
+// Each arm has its own FCA-adjusted field amplitude:
+//   α_total_N = α_wg + Δα_N·100                           [Np/m]
+//   T_amp_N   = exp(−α_total_N · L_arm / 2)               [field amplitude]
+//
+// Both arms contribute to the MZI output via the 50:50 coupler formula:
+//   phi_N = 2π·n_g·L_arm/λ + 2π·Δn_N·L_arm/λ
+//   c_N   = T_amp_N·cos(phi_N),  s_N = T_amp_N·sin(phi_N)
+//   E_bar_re   = 0.5·((c1−c2)·E_in_re − (s1−s2)·E_in_im)
+//   E_bar_im   = 0.5·((s1−s2)·E_in_re + (c1−c2)·E_in_im)
+//   E_cross_re = 0.5·(−(s1+s2)·E_in_re − (c1+c2)·E_in_im)
+//   E_cross_im = 0.5·((c1+c2)·E_in_re − (s1+s2)·E_in_im)
+//
+// Each junction has a Shockley I–V and depletion capacitance:
+//   I_diode_N = IS·(exp(V_N/(n_id·Vt)) − 1)
+//   I_cap_N   = ddt(Cj_N·V_N)
+//
+// Ports:
+//   in_re, in_im, in_lambda          — optical input (3-wire)
+//   bar_re, bar_im, bar_lambda       — bar port output (3-wire)
+//   cross_re, cross_im, cross_lambda — cross port output (3-wire)
+//   anode1, cathode1                 — arm 1 PN junction (electrical)
+//   anode2, cathode2                 — arm 2 PN junction (electrical)
+//
+// Parameters:
+//   L_arm_um    — arm length for both arms (µm)
+//   n_g         — waveguide group index
+//   alpha_dB_cm — intrinsic waveguide loss (dB/cm), excluding FCA
+//   n_dep0      — free-carrier density at V=0 (cm⁻³)
+//   Vbi         — built-in potential (V)
+//   mj          — grading coefficient (0.5 = abrupt)
+//   Cj0         — zero-bias junction capacitance (F)
+//   IS          — diode saturation current (A)
+//   n_id        — ideality factor
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+//
+// Usage example:
+//   Xmzi  in_re in_im in_lam  bar_re bar_im bar_lam  cross_re cross_im cross_lam
+//         anode1 cathode1  anode2 cathode2
+//         mzi_modulator_pn_l2
+//         .param L_arm_um=500 n_dep0=5e16 Vbi=1.0 Cj0=50e-15
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mzi_modulator_pn_l2(in_re, in_im, in_lambda,
+                            bar_re, bar_im, bar_lambda,
+                            cross_re, cross_im, cross_lambda,
+                            anode1, cathode1, anode2, cathode2);
+    inout in_re, in_im, in_lambda;
+    inout bar_re, bar_im, bar_lambda;
+    inout cross_re, cross_im, cross_lambda;
+    inout anode1, cathode1;
+    inout anode2, cathode2;
+    optical    in_re, in_im, in_lambda;
+    optical    bar_re, bar_im, bar_lambda;
+    optical    cross_re, cross_im, cross_lambda;
+    electrical anode1, cathode1;
+    electrical anode2, cathode2;
+
+    parameter real L_arm_um     = 500.0  from (0:inf);
+    parameter real n_g          = 4.2    from (0:inf);
+    parameter real alpha_dB_cm  = 3.0    from [0:inf);
+    parameter real n_dep0       = 5e16   from (0:inf);   // cm⁻³
+    parameter real Vbi          = 1.0    from (0:inf);
+    parameter real mj           = 0.5    from (0:1];
+    parameter real Cj0          = 50e-15 from (0:inf);   // F
+    parameter real IS           = 1e-14  from (0:inf);
+    parameter real n_id         = 1.5;
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    // Arm 1 variables
+    real V_pn1, tmp1, dN1, dn1, dalpha1, alpha_total1, T_amp1, dphi1, phi1, c1, s1;
+    real V_cj1, Cj1;
+    // Arm 2 variables
+    real V_pn2, tmp2, dN2, dn2, dalpha2, alpha_total2, T_amp2, dphi2, phi2, c2, s2;
+    real V_cj2, Cj2;
+    // Shared
+    real wl_nm, phi_base, alpha_lin, Vt, G_drv;
+    real E_in_re, E_in_im;
+    real E_bar_re, E_bar_im, E_cross_re, E_cross_im;
+
+    analog begin
+        G_drv = 1.0e6;
+        Vt    = `P_K * 300.0 / `P_Q;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base propagation phase (both arms same geometry)
+        phi_base  = 2.0 * `M_PI * n_g * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+
+        // ------- Arm 1 PN junction (Soref–Bennett) -------------------
+        V_pn1 = V(anode1, cathode1);
+        tmp1  = 1.0 - V_pn1 / Vbi;
+        if (tmp1 < 0.0) tmp1 = 0.0;
+        dN1      = n_dep0 * (1.0 - sqrt(tmp1));
+        dn1      = -8.8e-22 * dN1 - 8.5e-18 * pow(dN1, 0.8);
+        dalpha1  = (8.5e-18 + 6.0e-18) * dN1;   // cm⁻¹
+
+        dphi1       = 2.0 * `M_PI * dn1 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+        phi1        = phi_base + dphi1;
+        alpha_total1 = alpha_lin + dalpha1 * 1e2;   // Np/m
+        T_amp1      = exp(-alpha_total1 * (L_arm_um * 1e-6) / 2.0);
+
+        c1 = T_amp1 * cos(phi1);
+        s1 = T_amp1 * sin(phi1);
+
+        // ------- Arm 2 PN junction (Soref–Bennett) -------------------
+        V_pn2 = V(anode2, cathode2);
+        tmp2  = 1.0 - V_pn2 / Vbi;
+        if (tmp2 < 0.0) tmp2 = 0.0;
+        dN2      = n_dep0 * (1.0 - sqrt(tmp2));
+        dn2      = -8.8e-22 * dN2 - 8.5e-18 * pow(dN2, 0.8);
+        dalpha2  = (8.5e-18 + 6.0e-18) * dN2;
+
+        dphi2       = 2.0 * `M_PI * dn2 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+        phi2        = phi_base + dphi2;
+        alpha_total2 = alpha_lin + dalpha2 * 1e2;
+        T_amp2      = exp(-alpha_total2 * (L_arm_um * 1e-6) / 2.0);
+
+        c2 = T_amp2 * cos(phi2);
+        s2 = T_amp2 * sin(phi2);
+
+        // ------- MZI output fields (50:50 coupler) -------------------
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        E_bar_re   = 0.5 * ((c1 - c2) * E_in_re - (s1 - s2) * E_in_im);
+        E_bar_im   = 0.5 * ((s1 - s2) * E_in_re + (c1 - c2) * E_in_im);
+        E_cross_re = 0.5 * (-(s1 + s2) * E_in_re - (c1 + c2) * E_in_im);
+        E_cross_im = 0.5 * ( (c1 + c2) * E_in_re - (s1 + s2) * E_in_im);
+
+        // Norton drive for output ports
+        Oamp(bar_re)   <+ G_drv * (E_bar_re   - Ophase(bar_re));
+        Oamp(bar_im)   <+ G_drv * (E_bar_im   - Ophase(bar_im));
+        Oamp(cross_re) <+ G_drv * (E_cross_re - Ophase(cross_re));
+        Oamp(cross_im) <+ G_drv * (E_cross_im - Ophase(cross_im));
+
+        // High-impedance shunts on input ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        // Lambda: output ports follow input lambda
+        Oamp(bar_lambda)   <+ G_drv * (Ophase(in_lambda) - Ophase(bar_lambda));
+        Oamp(cross_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(cross_lambda));
+
+        // ------- Arm 1 junction I–V (Shockley + depletion Cj) -------
+        I(anode1, cathode1) <+ IS * (exp(V_pn1 / (n_id * Vt)) - 1.0);
+        V_cj1 = V_pn1;
+        if (V_cj1 > 0.99 * Vbi) V_cj1 = 0.99 * Vbi;
+        Cj1 = Cj0 / pow(1.0 - V_cj1 / Vbi, mj);
+        I(anode1, cathode1) <+ ddt(Cj1 * V_pn1);
+
+        // ------- Arm 2 junction I–V (Shockley + depletion Cj) -------
+        I(anode2, cathode2) <+ IS * (exp(V_pn2 / (n_id * Vt)) - 1.0);
+        V_cj2 = V_pn2;
+        if (V_cj2 > 0.99 * Vbi) V_cj2 = 0.99 * Vbi;
+        Cj2 = Cj0 / pow(1.0 - V_cj2 / Vbi, mj);
+        I(anode2, cathode2) <+ ddt(Cj2 * V_pn2);
+    end
+endmodule

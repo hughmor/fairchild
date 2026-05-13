@@ -1,0 +1,164 @@
+// MRR heater-tuned resonator — Level 2, Add-Drop configuration
+//                             (external T_node, RC thermal dynamics)
+//
+// Extends mrr_heater_l1_adddrop by externalising the thermal network into a
+// T_node port.  This allows the user to attach an arbitrary thermal network
+// (Rth, Cth, coupled thermal buses for crosstalk modelling) while this model
+// injects the Joule heating power as a current source.
+//
+//   V(T_node) = ΔT in Kelvin (set by external Rth to ground)
+//   I(T_node) ← −V²/R_heater   (Joule power injection, sign: positive into node)
+//
+// The thermo-optic phase shift uses the external ΔT directly:
+//   Δφ_thermal = 2π·(dn/dT)·V(T_node)·L_ring / λ
+//
+// Example netlist:
+//   Xring  in_re in_im in_lam  th_re th_im th_lam  dp_re dp_im dp_lam
+//          ad_re ad_im ad_lam  hp hn  T_dev
+//          mrr_heater_l2_adddrop
+//   Rth    T_dev 0  30000     ; 30 kΩ → 30 kK/W
+//   Cth    T_dev 0  1e-6      ; 1 µF → τ_th = 30 ms
+//   Vheat  hp hn  DC 3.0      ; 3 V → P = 18 mW → ΔT = 540 K (illustrative)
+//
+// Ports:
+//   in_re, in_im, in_lambda         — input bus (3-wire optical)
+//   th_re, th_im, th_lambda         — through port (3-wire optical)
+//   dp_re, dp_im, dp_lambda         — drop port (3-wire optical)
+//   ad_re, ad_im, ad_lambda         — add port (3-wire optical, input)
+//   heat_p, heat_n                  — heater electrical terminals
+//   T_node                          — thermal node (V = ΔT in K, electrical)
+//
+// Parameters:
+//   kappa_1, kappa_2  — power coupling coefficients
+//   L_ring_um         — ring circumference (µm)
+//   n_g               — group index
+//   alpha_dB_cm       — propagation loss (dB/cm); elevated for N-doping FCA
+//   R_heater          — heater resistance (Ω)
+//   dn_dT             — thermo-optic coefficient (K⁻¹); Si: +1.86e-4
+//   wavelength_nm     — design wavelength (nm); NR bootstrap guard
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mrr_heater_l2_adddrop(in_re, in_im, in_lambda,
+                              th_re, th_im, th_lambda,
+                              dp_re, dp_im, dp_lambda,
+                              ad_re, ad_im, ad_lambda,
+                              heat_p, heat_n, T_node);
+    inout in_re, in_im, in_lambda;
+    inout th_re, th_im, th_lambda;
+    inout dp_re, dp_im, dp_lambda;
+    inout ad_re, ad_im, ad_lambda;
+    inout heat_p, heat_n, T_node;
+    optical    in_re, in_im, in_lambda;
+    optical    th_re, th_im, th_lambda;
+    optical    dp_re, dp_im, dp_lambda;
+    optical    ad_re, ad_im, ad_lambda;
+    electrical heat_p, heat_n, T_node;
+
+    parameter real kappa_1      = 0.1     from [0:1];
+    parameter real kappa_2      = 0.1     from [0:1];
+    parameter real L_ring_um    = 100.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 10.0    from [0:inf);
+    parameter real R_heater     = 500.0   from (0:inf);
+    parameter real dn_dT        = 1.86e-4 from (0:inf);
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_rt, phi_half, dphi_therm, alpha_lin;
+    real r1, t1, r2, t2, a_half;
+    real c_half, s_half, c_rt, s_rt, a_rt;
+    real denom_A, denom_B, denom_sq;
+    real N11_re, N11_im, N12_re, N12_im, N22_re, N22_im;
+    real T11_re, T11_im, T12_re, T12_im, T22_re, T22_im;
+    real E_in_re, E_in_im, E_ad_re, E_ad_im;
+    real E_th_re, E_th_im, E_dp_re, E_dp_im;
+    real V_heat, P_heat, dT, G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Coupler field coefficients
+        r1 = sqrt(1.0 - kappa_1);
+        t1 = sqrt(kappa_1);
+        r2 = sqrt(1.0 - kappa_2);
+        t2 = sqrt(kappa_2);
+
+        // Thermo-optic phase shift from external T_node (V = ΔT in K)
+        dT         = V(T_node);
+        dphi_therm = 2.0 * `M_PI * dn_dT * dT * (L_ring_um * 1e-6) / (wl_nm * 1e-9);
+
+        phi_rt = 2.0 * `M_PI * n_g * (L_ring_um * 1e-6) / (wl_nm * 1e-9) + dphi_therm;
+
+        // Half round-trip quantities
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        a_half    = exp(-alpha_lin * (L_ring_um * 1e-6) / 2.0);
+        phi_half  = phi_rt / 2.0;
+
+        c_half = a_half * cos(phi_half);
+        s_half = a_half * sin(phi_half);
+        c_rt   = c_half * c_half - s_half * s_half;
+        s_rt   = 2.0 * c_half * s_half;
+        a_rt   = a_half * a_half;
+
+        denom_A  = 1.0 - r1 * r2 * c_rt;
+        denom_B  = r1 * r2 * s_rt;
+        denom_sq = denom_A * denom_A + denom_B * denom_B;
+
+        N11_re = r1 - r2 * c_rt;      N11_im = -r2 * s_rt;
+        N12_re = -t1 * t2 * c_half;   N12_im = -t1 * t2 * s_half;
+        N22_re = r2 - r1 * c_rt;      N22_im = -r1 * s_rt;
+
+        T11_re = (N11_re * denom_A - N11_im * denom_B) / denom_sq;
+        T11_im = (N11_im * denom_A + N11_re * denom_B) / denom_sq;
+        T12_re = (N12_re * denom_A - N12_im * denom_B) / denom_sq;
+        T12_im = (N12_im * denom_A + N12_re * denom_B) / denom_sq;
+        T22_re = (N22_re * denom_A - N22_im * denom_B) / denom_sq;
+        T22_im = (N22_im * denom_A + N22_re * denom_B) / denom_sq;
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+        E_ad_re = Ophase(ad_re);
+        E_ad_im = Ophase(ad_im);
+
+        E_th_re = T11_re * E_in_re - T11_im * E_in_im
+                + T12_re * E_ad_re - T12_im * E_ad_im;
+        E_th_im = T11_im * E_in_re + T11_re * E_in_im
+                + T12_im * E_ad_re + T12_re * E_ad_im;
+
+        E_dp_re = T12_re * E_in_re - T12_im * E_in_im
+                + T22_re * E_ad_re - T22_im * E_ad_im;
+        E_dp_im = T12_im * E_in_re + T12_re * E_in_im
+                + T22_im * E_ad_re + T22_re * E_ad_im;
+
+        // Norton drive for output ports
+        Oamp(th_re) <+ G_drv * (E_th_re - Ophase(th_re));
+        Oamp(th_im) <+ G_drv * (E_th_im - Ophase(th_im));
+        Oamp(dp_re) <+ G_drv * (E_dp_re - Ophase(dp_re));
+        Oamp(dp_im) <+ G_drv * (E_dp_im - Ophase(dp_im));
+
+        // High-impedance shunts on input ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+        Oamp(ad_re)     <+ 1e-12 * (-Ophase(ad_re));
+        Oamp(ad_im)     <+ 1e-12 * (-Ophase(ad_im));
+        Oamp(ad_lambda) <+ 1e-12 * (-Ophase(ad_lambda));
+
+        // Lambda: output ports follow input lambda
+        Oamp(th_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(th_lambda));
+        Oamp(dp_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(dp_lambda));
+
+        // Heater resistance: Ohmic
+        V_heat = V(heat_p, heat_n);
+        I(heat_p, heat_n) <+ V_heat / R_heater;
+
+        // Inject Joule power into thermal network
+        P_heat = V_heat * V_heat / R_heater;
+        I(T_node) <+ -P_heat;
+    end
+endmodule

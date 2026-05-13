@@ -1,0 +1,153 @@
+// MZI thermo-optic modulator — Level 2 (dual-arm push-pull, external T_nodes)
+//
+// Extends mzi_modulator_thermo_l1 to a push-pull thermal configuration: both
+// MZI arms have independent heaters and external T_node thermal ports.  This
+// enables:
+//   - Push-pull drive (heat arm 1 and cool arm 2, or vice versa) for doubled
+//     phase modulation efficiency vs single-arm
+//   - First-order RC thermal dynamics (via external Rth + Cth to ground)
+//   - Thermal crosstalk modelling (shared T_nodes between adjacent devices)
+//   - Differential thermal biasing
+//
+// Each arm injects Joule power as a current source into its T_node:
+//   I(T_nodeN) ← −V_heatN² / R_heater   (power injection, N = 1 or 2)
+//   V(T_nodeN) = ΔT_N in K              (set by external Rth to ground)
+//
+// Phase shifts:
+//   dphi_N = 2π·(dn/dT)·V(T_nodeN)·L_arm / λ
+//   phi_N  = 2π·n_g·L_arm/λ + dphi_N
+//
+// For push-pull, connect:
+//   - One heater V source to heat_p1/heat_n1
+//   - Another V source to heat_p2/heat_n2
+//   - Rth1, Cth1 from T_node1 to ground
+//   - Rth2, Cth2 from T_node2 to ground
+//
+// The R_heater parameter is shared between both arms (assumes symmetric design).
+// For asymmetric arms, use two instances of mzi_modulator_thermo_l1 and combine.
+//
+// Ports:
+//   in_re, in_im, in_lambda          — optical input (3-wire)
+//   bar_re, bar_im, bar_lambda       — bar port output (3-wire)
+//   cross_re, cross_im, cross_lambda — cross port output (3-wire)
+//   heat_p1, heat_n1                 — arm 1 heater terminals (electrical)
+//   T_node1                          — arm 1 thermal node (V = ΔT in K)
+//   heat_p2, heat_n2                 — arm 2 heater terminals (electrical)
+//   T_node2                          — arm 2 thermal node (V = ΔT in K)
+//
+// Parameters:
+//   L_arm_um    — arm length for both arms (µm)
+//   n_g         — waveguide group index
+//   alpha_dB_cm — propagation loss (dB/cm); same for both arms
+//   R_heater    — heater resistance (Ω); same for both arms
+//   dn_dT       — thermo-optic coefficient (K⁻¹); Si: +1.86e-4
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+//
+// Usage example:
+//   Xmzi  in_re in_im in_lam  bar_re bar_im bar_lam  cross_re cross_im cross_lam
+//         hp1 hn1 T1  hp2 hn2 T2
+//         mzi_modulator_thermo_l2
+//   Rth1  T1 0  50000   ; 50 kK/W
+//   Cth1  T1 0  1e-6    ; τ₁ = 50 ms
+//   Rth2  T2 0  50000
+//   Cth2  T2 0  1e-6
+//   Vheat1 hp1 hn1  DC 1.0   ; push-pull: one arm +V, other arm −V (or 0)
+//   Vheat2 hp2 hn2  DC 0.0
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mzi_modulator_thermo_l2(in_re, in_im, in_lambda,
+                                bar_re, bar_im, bar_lambda,
+                                cross_re, cross_im, cross_lambda,
+                                heat_p1, heat_n1, T_node1,
+                                heat_p2, heat_n2, T_node2);
+    inout in_re, in_im, in_lambda;
+    inout bar_re, bar_im, bar_lambda;
+    inout cross_re, cross_im, cross_lambda;
+    inout heat_p1, heat_n1, T_node1;
+    inout heat_p2, heat_n2, T_node2;
+    optical    in_re, in_im, in_lambda;
+    optical    bar_re, bar_im, bar_lambda;
+    optical    cross_re, cross_im, cross_lambda;
+    electrical heat_p1, heat_n1, T_node1;
+    electrical heat_p2, heat_n2, T_node2;
+
+    parameter real L_arm_um     = 500.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 3.0     from [0:inf);
+    parameter real R_heater     = 1000.0  from (0:inf);   // Ω; same for both arms
+    parameter real dn_dT        = 1.86e-4 from (0:inf);   // K⁻¹
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_base, phi1, phi2, alpha_lin, T_amp;
+    real dT1, dT2, dphi1, dphi2;
+    real c1, s1, c2, s2;
+    real V_heat1, V_heat2;
+    real E_in_re, E_in_im;
+    real E_bar_re, E_bar_im, E_cross_re, E_cross_im;
+    real G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base propagation phase (both arms same geometry)
+        phi_base = 2.0 * `M_PI * n_g * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Thermo-optic phase shifts from external T_nodes (V = ΔT in K)
+        dT1   = V(T_node1);
+        dT2   = V(T_node2);
+        dphi1 = 2.0 * `M_PI * dn_dT * dT1 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+        dphi2 = 2.0 * `M_PI * dn_dT * dT2 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+
+        phi1 = phi_base + dphi1;
+        phi2 = phi_base + dphi2;
+
+        // Field amplitude (same for both arms, no FCA difference)
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        T_amp = exp(-alpha_lin * (L_arm_um * 1e-6) / 2.0);
+
+        c1 = T_amp * cos(phi1);
+        s1 = T_amp * sin(phi1);
+        c2 = T_amp * cos(phi2);
+        s2 = T_amp * sin(phi2);
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        // 50:50 coupler output
+        E_bar_re   = 0.5 * ((c1 - c2) * E_in_re - (s1 - s2) * E_in_im);
+        E_bar_im   = 0.5 * ((s1 - s2) * E_in_re + (c1 - c2) * E_in_im);
+        E_cross_re = 0.5 * (-(s1 + s2) * E_in_re - (c1 + c2) * E_in_im);
+        E_cross_im = 0.5 * ( (c1 + c2) * E_in_re - (s1 + s2) * E_in_im);
+
+        // Norton drive for output ports
+        Oamp(bar_re)   <+ G_drv * (E_bar_re   - Ophase(bar_re));
+        Oamp(bar_im)   <+ G_drv * (E_bar_im   - Ophase(bar_im));
+        Oamp(cross_re) <+ G_drv * (E_cross_re - Ophase(cross_re));
+        Oamp(cross_im) <+ G_drv * (E_cross_im - Ophase(cross_im));
+
+        // High-impedance shunts on input ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        // Lambda: output ports follow input lambda
+        Oamp(bar_lambda)   <+ G_drv * (Ophase(in_lambda) - Ophase(bar_lambda));
+        Oamp(cross_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(cross_lambda));
+
+        // Arm 1 heater resistance and Joule power injection
+        V_heat1 = V(heat_p1, heat_n1);
+        I(heat_p1, heat_n1) <+ V_heat1 / R_heater;
+        I(T_node1) <+ -(V_heat1 * V_heat1 / R_heater);
+
+        // Arm 2 heater resistance and Joule power injection
+        V_heat2 = V(heat_p2, heat_n2);
+        I(heat_p2, heat_n2) <+ V_heat2 / R_heater;
+        I(T_node2) <+ -(V_heat2 * V_heat2 / R_heater);
+    end
+endmodule

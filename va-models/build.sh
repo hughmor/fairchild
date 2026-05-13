@@ -78,4 +78,25 @@ compile photonic/mrr_heater_l1.va
 compile photonic/mrr_heater_l2.va
 
 echo ""
+echo "-- Add-drop MRR (PN junction) --"
+compile photonic/mrr_modulator_l1_adddrop.va
+compile photonic/mrr_modulator_l2_adddrop.va
+compile photonic/mrr_modulator_l3_adddrop.va
+
+echo ""
+echo "-- Add-drop MRR (heater-tuned) --"
+compile photonic/mrr_heater_l1_adddrop.va
+compile photonic/mrr_heater_l2_adddrop.va
+
+echo ""
+echo "-- MZI modulators (PN junction) --"
+compile photonic/mzi_modulator_pn_l1.va
+compile photonic/mzi_modulator_pn_l2.va
+
+echo ""
+echo "-- MZI modulators (thermo-optic) --"
+compile photonic/mzi_modulator_thermo_l1.va
+compile photonic/mzi_modulator_thermo_l2.va
+
+echo ""
 echo "Done. Outputs in $SCRIPT_DIR/$OUTDIR/"

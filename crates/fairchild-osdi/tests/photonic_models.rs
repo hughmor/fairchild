@@ -430,3 +430,131 @@ fn mrr_modulator_l1_off_resonance_energy_conservation() {
         assert!(v_ph > 0.0, "Negative V(ph_a) at Vbias={vbias}: {v_ph:.6}");
     }
 }
+
+// ─── MZI modulator PN L1 ─────────────────────────────────────────────────────
+
+/// MZI L1 at V=0: bar port dark, cross port bright.
+///
+/// At Δφ=0 (zero bias): P_bar=0, P_cross=T_amp²×P_in.
+/// With L_arm_um=10 and alpha_dB_cm=3: T_amp≈1, cross ≈ 1 mW.
+#[test]
+fn mzi_pn_l1_v0_cross_full() {
+    let laser_path = model_path("cw_laser");
+    let mzi_path   = model_path("mzi_modulator_pn_l1");
+    let pd_path    = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&mzi_path) || skip_if_missing(&pd_path) {
+        return;
+    }
+
+    let netlist = parse_spice(
+        "* MZI L1 — V=0, bar dark, cross bright\n\
+         Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0\n\
+         Xmzi    lre lim wl  bre bim blam  cre cim clam  vbias 0  mzi_modulator_pn_l1\n\
+         + L_arm_um=10.0 Vpi_L=0.05 V_ref=0.0 n_g=4.2 alpha_dB_cm=3.0 wavelength_nm=1550.0\n\
+         Xpd_bar   bre bim blam  ph_bar   0  photodetector  responsivity=1.0\n\
+         Xpd_cross cre cim clam  ph_cross 0  photodetector  responsivity=1.0\n\
+         Rbar    ph_bar   0  1k\n\
+         Rcross  ph_cross 0  1k\n\
+         Vbias   vbias 0  DC 0.0\n\
+         .optical  lre lim wl bre bim cre cim\n\
+         .op\n.end\n",
+    ).unwrap();
+
+    let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
+    let mzi_lib   = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
+    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+
+    let mut registry = DeviceRegistry::new();
+    laser_lib.register_into(&mut registry);
+    mzi_lib.register_into(&mut registry);
+    pd_lib.register_into(&mut registry);
+
+    let result = dc_op_nr_with_registry(&netlist, &registry)
+        .expect("DC OP failed for MZI L1 at V=0");
+
+    let v_bar   = result.node_voltage("ph_bar").unwrap();
+    let v_cross = result.node_voltage("ph_cross").unwrap();
+    println!("MZI(V=0): bar={v_bar:.6e}  cross={v_cross:.6e}");
+
+    // At V=0, Δφ=0: bar must be dark (< 1 mV)
+    assert!(v_bar < 1e-3, "MZI bar should be dark at V=0: V(ph_bar)={v_bar:.4}");
+    // Cross carries all power (> 0.98 V = 0.98 mW with 1 kΩ)
+    assert!(v_cross > 0.98, "MZI cross should be bright at V=0: V(ph_cross)={v_cross:.4}");
+    // Energy conservation
+    assert!(v_cross < 1.0, "MZI energy conservation violated: V(ph_cross)={v_cross:.4}");
+}
+
+/// MZI L1 full switching cycle: V=0, −Vpi/2, −Vpi, −2Vpi.
+///
+/// With L_arm_um=10 µm, Vpi_L=0.05 V·cm: L_cm=0.001, Vpi=50 V.
+///   V=0:    Δφ=0    → bar=0,    cross=full
+///   V=−25:  Δφ=−π/2 → 50:50 split
+///   V=−50:  Δφ=−π   → bar=full, cross=0
+///   V=−100: Δφ=−2π  → bar=0,    cross=full (same as V=0)
+#[test]
+fn mzi_pn_l1_switching_cycle() {
+    let laser_path = model_path("cw_laser");
+    let mzi_path   = model_path("mzi_modulator_pn_l1");
+    let pd_path    = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&mzi_path) || skip_if_missing(&pd_path) {
+        return;
+    }
+
+    let make_netlist = |vbias_v: f64| format!(
+        "* MZI L1 switching at V={vbias_v}\n\
+         Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0\n\
+         Xmzi    lre lim wl  bre bim blam  cre cim clam  vbias 0  mzi_modulator_pn_l1\n\
+         + L_arm_um=10.0 Vpi_L=0.05 V_ref=0.0 n_g=4.2 alpha_dB_cm=3.0 wavelength_nm=1550.0\n\
+         Xpd_bar   bre bim blam  ph_bar   0  photodetector  responsivity=1.0\n\
+         Xpd_cross cre cim clam  ph_cross 0  photodetector  responsivity=1.0\n\
+         Rbar    ph_bar   0  1k\n\
+         Rcross  ph_cross 0  1k\n\
+         Vbias   vbias 0  DC {vbias_v}\n\
+         .optical  lre lim wl bre bim cre cim\n\
+         .op\n.end\n"
+    );
+
+    let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
+    let mzi_lib   = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
+    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+
+    let mut registry = DeviceRegistry::new();
+    laser_lib.register_into(&mut registry);
+    mzi_lib.register_into(&mut registry);
+    pd_lib.register_into(&mut registry);
+
+    // V=0: bar=0, cross=full
+    let r0 = dc_op_nr_with_registry(&parse_spice(&make_netlist(0.0)).unwrap(), &registry).unwrap();
+    let (b0, c0) = (r0.node_voltage("ph_bar").unwrap(), r0.node_voltage("ph_cross").unwrap());
+    println!("V=0:   bar={b0:.4e}  cross={c0:.4e}");
+    assert!(b0 < 1e-3, "bar should be dark at V=0: {b0:.4}");
+    assert!(c0 > 0.98,  "cross should be bright at V=0: {c0:.4}");
+
+    // V=-25: 50:50 split (Δφ=−π/2)
+    let r25 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-25.0)).unwrap(), &registry).unwrap();
+    let (b25, c25) = (r25.node_voltage("ph_bar").unwrap(), r25.node_voltage("ph_cross").unwrap());
+    println!("V=-25: bar={b25:.4e}  cross={c25:.4e}");
+    assert!((b25 - c25).abs() < 0.01 * (b25 + c25),
+            "50:50 expected at V=-25V: bar={b25:.4} cross={c25:.4}");
+
+    // V=-50: bar=full, cross=0 (Δφ=−π)
+    let r50 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-50.0)).unwrap(), &registry).unwrap();
+    let (b50, c50) = (r50.node_voltage("ph_bar").unwrap(), r50.node_voltage("ph_cross").unwrap());
+    println!("V=-50: bar={b50:.4e}  cross={c50:.4e}");
+    assert!(b50 > 0.98,  "bar should be bright at V=-50V: {b50:.4}");
+    assert!(c50 < 1e-3, "cross should be dark at V=-50V: {c50:.4}");
+
+    // V=-100: back to bar=0, cross=full (Δφ=−2π)
+    let r100 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-100.0)).unwrap(), &registry).unwrap();
+    let (b100, c100) = (r100.node_voltage("ph_bar").unwrap(), r100.node_voltage("ph_cross").unwrap());
+    println!("V=-100: bar={b100:.4e}  cross={c100:.4e}");
+    assert!(b100 < 1e-3, "bar should be dark at V=-100V (Δφ=-2π): {b100:.4}");
+    assert!(c100 > 0.98,  "cross should be bright at V=-100V (Δφ=-2π): {c100:.4}");
+
+    // Energy conservation at all points
+    for (v, bar, cross) in [(-0.0, b0, c0), (-25.0, b25, c25), (-50.0, b50, c50), (-100.0, b100, c100)] {
+        let total = bar + cross;
+        assert!(total < 1.0, "Energy conservation violated at V={v}: bar+cross={total:.4}");
+        assert!(total > 0.98, "Unexpected loss at V={v}: bar+cross={total:.4}");
+    }
+}

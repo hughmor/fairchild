@@ -1,0 +1,134 @@
+// MZI thermo-optic modulator — Level 1 (single-arm heater, integrated thermal)
+//
+// Mach-Zehnder interferometer (MZI) with a single resistive heater on arm 2.
+// Arm 1 is a passive waveguide (propagation + loss only); arm 2 is the heated
+// arm.  Both use the same 50:50 directional-coupler splitter and combiner.
+//
+// The phase shift is induced by the thermo-optic effect:
+//   P_heat = V_heat² / R_heater          (Joule heating)
+//   ΔT     = P_heat · R_thermal          (quasi-static temperature rise)
+//   Δφ₂   = 2π·(dn/dT)·ΔT·L_arm / λ    (arm 2 thermo-optic phase)
+//
+// The L1 model integrates the thermal resistance (R_thermal) into the model,
+// making it purely quasi-static.  For transient or crosstalk simulations, use
+// mzi_modulator_thermo_l2 with external T_node thermal networks.
+//
+// MZI coupler formula (identical to mzi_modulator_pn_l1):
+//   phi1 = 2π·n_g·L_arm/λ              (passive arm)
+//   phi2 = phi1 + Δφ₂                  (heated arm)
+//   T_amp = exp(−α·L_arm/2)            (same for both arms)
+//   E_bar_re   = 0.5·((c1−c2)·E_in_re − (s1−s2)·E_in_im)
+//   E_cross_re = 0.5·(−(s1+s2)·E_in_re − (c1+c2)·E_in_im)
+//   (and imaginary parts analogously)
+//
+// At Δφ₂=0: cross port carries all power (dc operating point).
+// At Δφ₂=π: bar port carries all power (full modulation).
+//
+// Ports:
+//   in_re, in_im, in_lambda          — optical input (3-wire)
+//   bar_re, bar_im, bar_lambda       — bar port output (3-wire)
+//   cross_re, cross_im, cross_lambda — cross port output (3-wire)
+//   heat_p, heat_n                   — heater electrical terminals (arm 2)
+//
+// Parameters:
+//   L_arm_um    — arm length (µm); both arms equal
+//   n_g         — waveguide group index
+//   alpha_dB_cm — propagation loss (dB/cm); same for both arms
+//   R_heater    — heater resistance (Ω)
+//   R_thermal   — integrated thermal resistance (K/W)
+//   dn_dT       — thermo-optic coefficient (K⁻¹); Si: +1.86e-4
+//   wavelength_nm — design wavelength (nm); NR bootstrap guard
+//
+// Usage example:
+//   Xmzi  in_re in_im in_lam  bar_re bar_im bar_lam  cross_re cross_im cross_lam
+//         heat_p heat_n
+//         mzi_modulator_thermo_l1
+//         .param L_arm_um=500 R_heater=1000 R_thermal=50000
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "disciplines/optical.vams"
+
+module mzi_modulator_thermo_l1(in_re, in_im, in_lambda,
+                                bar_re, bar_im, bar_lambda,
+                                cross_re, cross_im, cross_lambda,
+                                heat_p, heat_n);
+    inout in_re, in_im, in_lambda;
+    inout bar_re, bar_im, bar_lambda;
+    inout cross_re, cross_im, cross_lambda;
+    inout heat_p, heat_n;
+    optical    in_re, in_im, in_lambda;
+    optical    bar_re, bar_im, bar_lambda;
+    optical    cross_re, cross_im, cross_lambda;
+    electrical heat_p, heat_n;
+
+    parameter real L_arm_um     = 500.0   from (0:inf);
+    parameter real n_g          = 4.2     from (0:inf);
+    parameter real alpha_dB_cm  = 3.0     from [0:inf);
+    parameter real R_heater     = 1000.0  from (0:inf);   // Ω
+    parameter real R_thermal    = 50000.0 from (0:inf);   // K/W
+    parameter real dn_dT        = 1.86e-4 from (0:inf);   // K⁻¹
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real wl_nm, phi_base, phi1, phi2, alpha_lin, T_amp;
+    real V_heat, P_heat, dT, dphi2;
+    real c1, s1, c2, s2;
+    real E_in_re, E_in_im;
+    real E_bar_re, E_bar_im, E_cross_re, E_cross_im;
+    real G_drv;
+
+    analog begin
+        G_drv = 1.0e6;
+
+        wl_nm = Ophase(in_lambda) * 1e3;
+        if (wl_nm < wavelength_nm * 0.99) wl_nm = wavelength_nm;
+
+        // Base propagation phase (same for both arms)
+        phi_base = 2.0 * `M_PI * n_g * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+
+        // Quasi-static thermal phase shift (arm 2 only)
+        V_heat = V(heat_p, heat_n);
+        P_heat = V_heat * V_heat / R_heater;
+        dT     = P_heat * R_thermal;
+        dphi2  = 2.0 * `M_PI * dn_dT * dT * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
+
+        phi1 = phi_base;           // passive arm: no thermal phase
+        phi2 = phi_base + dphi2;   // heated arm
+
+        // Field amplitude (same for both arms, no differential FCA)
+        alpha_lin = alpha_dB_cm * 1e2 / 8.685889;
+        T_amp = exp(-alpha_lin * (L_arm_um * 1e-6) / 2.0);
+
+        c1 = T_amp * cos(phi1);
+        s1 = T_amp * sin(phi1);
+        c2 = T_amp * cos(phi2);
+        s2 = T_amp * sin(phi2);
+
+        E_in_re = Ophase(in_re);
+        E_in_im = Ophase(in_im);
+
+        // 50:50 coupler output
+        E_bar_re   = 0.5 * ((c1 - c2) * E_in_re - (s1 - s2) * E_in_im);
+        E_bar_im   = 0.5 * ((s1 - s2) * E_in_re + (c1 - c2) * E_in_im);
+        E_cross_re = 0.5 * (-(s1 + s2) * E_in_re - (c1 + c2) * E_in_im);
+        E_cross_im = 0.5 * ( (c1 + c2) * E_in_re - (s1 + s2) * E_in_im);
+
+        // Norton drive for output ports
+        Oamp(bar_re)   <+ G_drv * (E_bar_re   - Ophase(bar_re));
+        Oamp(bar_im)   <+ G_drv * (E_bar_im   - Ophase(bar_im));
+        Oamp(cross_re) <+ G_drv * (E_cross_re - Ophase(cross_re));
+        Oamp(cross_im) <+ G_drv * (E_cross_im - Ophase(cross_im));
+
+        // High-impedance shunts on input ports
+        Oamp(in_re)     <+ 1e-12 * (-Ophase(in_re));
+        Oamp(in_im)     <+ 1e-12 * (-Ophase(in_im));
+        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
+
+        // Lambda: output ports follow input lambda
+        Oamp(bar_lambda)   <+ G_drv * (Ophase(in_lambda) - Ophase(bar_lambda));
+        Oamp(cross_lambda) <+ G_drv * (Ophase(in_lambda) - Ophase(cross_lambda));
+
+        // Heater resistance: Ohmic
+        I(heat_p, heat_n) <+ V_heat / R_heater;
+    end
+endmodule
