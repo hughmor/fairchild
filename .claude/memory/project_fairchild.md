@@ -18,6 +18,7 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 2 — Photonic discipline | ✅ done | Ring resonator sweep validated against CMT (Δλ=0.02 nm); example + plot script in repo |
 | 2.5 — Photonic model library | ✅ done | 20 models: PN PS L1/L2, thermo PS L1/L2, PD L2, MRR mod L1/L2/L3, heater MRR L1/L2, add-drop MRR (PN L1/L2/L3, heater L1/L2), MZI (PN L1/L2, thermo L1/L2) |
 | 3 — Python bindings | ✅ done | `fairchild-py`: Circuit/SimResult/WaveformSource, op/tran/AC, numpy arrays, maturin |
+| 3.5 — Parser improvements | ✅ done | `.subckt`/`.ends` two-pass flattening, `.param` global params, `{param}` substitution, unsupported-directive errors; branch `feature/subckt-support` |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
 
