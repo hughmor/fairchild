@@ -19,10 +19,10 @@
 * or invoke directly with a single wavelength:
 *   fairchild -f ring_resonator_sweep.sp
 
-.osdi ../va-models/build/cw_laser.osdi
-.osdi ../va-models/build/directional_coupler.osdi
-.osdi ../va-models/build/waveguide.osdi
-.osdi ../va-models/build/photodetector.osdi
+.osdi ../../va-models/build/cw_laser.osdi
+.osdi ../../va-models/build/directional_coupler.osdi
+.osdi ../../va-models/build/waveguide.osdi
+.osdi ../../va-models/build/photodetector.osdi
 
 Xlaser     laser_re laser_im                                           cw_laser \
            power_mW=1.0 wavelength_nm=1550.0
