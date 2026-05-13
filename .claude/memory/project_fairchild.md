@@ -16,7 +16,7 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, Trapezoidal Rule, AC, Nutmeg output, Level 1 MOSFET, Shockley diode |
 | 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` directive |
 | 2 — Photonic discipline | ✅ done | Ring resonator sweep validated against CMT (Δλ=0.02 nm); example + plot script in repo |
-| 2.5 — Photonic model library | ✅ done | 10 models: PN PS L1/L2, thermo PS L1/L2, PD L2, MRR mod L1/L2/L3, heater MRR L1/L2 |
+| 2.5 — Photonic model library | ✅ done | 20 models: PN PS L1/L2, thermo PS L1/L2, PD L2, MRR mod L1/L2/L3, heater MRR L1/L2, add-drop MRR (PN L1/L2/L3, heater L1/L2), MZI (PN L1/L2, thermo L1/L2) |
 | 3 — Python bindings | ✅ done | `fairchild-py`: Circuit/SimResult/WaveformSource, op/tran/AC, numpy arrays, maturin |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
@@ -55,6 +55,8 @@ crates/
 **Norton-equivalent optical models** — VA models MUST use flow contributions (Oamp) only, never potential contributions (Ophase<+). Potential contributions add internal OSDI branch nodes that the runtime doesn't allocate (confirmed: Ophase<+ on a port adds internal nodes, causing `num_nodes > num_terminals`). Use Norton equivalent: `Oamp(p) <+ G*(target - Ophase(p))` with G=1e6.
 
 **XOsdi element** — SPICE `X<name> net0 ... netN model_name [key=val ...]` syntax for arbitrary-port OSDI instances. Parsed in fairchild-parser. Discipline checking via `.optical net1 net2...` directive + `check_disciplines()` (no separate `.optical_lambda` — lambda wires are declared in `.optical` alongside amplitude wires). XOsdi devices instantiated in `build_devices()` (newton.rs) by model name lookup.
+
+**OSDI parameter matching** — `osdi_param_name_matches()` uses `eq_ignore_ascii_case` (case-insensitive). The SPICE parser lowercases all tokens, but Verilog-A identifiers preserve case (e.g. `Vpi_L`, `L_arm_um`). Without case-insensitive matching, any parameter with an uppercase letter is silently ignored and the model uses its default. Fixed in phase 2.5 session.
 
 ---
 
