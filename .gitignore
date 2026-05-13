@@ -6,3 +6,6 @@ Cargo.lock
 *.d
 .DS_Store
 /tmp/
+examples/*/*.png
+examples/*/*.csv
+__pycache__
