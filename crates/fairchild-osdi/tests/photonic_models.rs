@@ -333,9 +333,8 @@ fn pn_phase_shifter_l1_dc_op_zero_bias() {
 
 /// Laser → MRR modulator L1 at ring resonance → PD → load.
 ///
-/// At resonance the through-port power is reduced (undercoupled ring).
-/// With kappa=0.1, alpha=2 dB/cm, L=100 µm: r≈0.9487, a_rt≈0.994.
-/// T_power = ((r-a)/(1-r*a))² ≈ 0.64 → V(ph_a) ≈ 0.64 V.
+/// At resonance: T = (r−a)/(1−r·a).  r=sqrt(0.9)≈0.9487, a=exp(-23.03·100e-6)≈0.9977.
+/// T_res ≈ -0.9163 → |T|²≈0.8396 → V(ph_a) ≈ 0.8390 V.
 #[test]
 fn mrr_modulator_l1_resonance_dip() {
     let laser_path = model_path("cw_laser");
@@ -372,7 +371,62 @@ fn mrr_modulator_l1_resonance_dip() {
 
     let v_ph = result.node_voltage("ph_a").unwrap();
     println!("MRR(resonance, 0V): V(ph_a)={v_ph:.6e}");
-    // At resonance: through-port is reduced from 1.0 V (not full 100% transmission)
+    // At resonance: through-port is reduced from max transmission
     assert!(v_ph < 0.99, "Expected resonance dip: V(ph_a)={v_ph:.4} should be < 0.99 V");
     assert!(v_ph > 0.01, "Unexpectedly deep resonance: V(ph_a)={v_ph:.4}");
+    // Energy conservation: input is 1 mW → V(ph_a) ≤ 1mW × 999Ω = 0.999 V always
+    assert!(v_ph < 1.0, "Energy conservation violated: V(ph_a)={v_ph:.6} > 1 V");
+}
+
+// ─── Phase 2.5: MRR modulator L1 — energy conservation off resonance ─────────
+
+/// CMT transfer function sign correctness: off-resonance bias must not produce
+/// more output power than the input (the bug was T_re sign error giving |T|²>1).
+///
+/// At V=-0.25 V the ring is slightly detuned; through power rises toward 1 mW.
+/// At V=-2.5 V (π/4 detuning) through power ≈ 1 mW (near anti-resonance).
+/// In both cases V(ph_a) must stay below 0.999 V (= 1 mW × 999 Ω load).
+#[test]
+fn mrr_modulator_l1_off_resonance_energy_conservation() {
+    let laser_path = model_path("cw_laser");
+    let mrr_path   = model_path("mrr_modulator_l1");
+    let pd_path    = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&mrr_path) || skip_if_missing(&pd_path) {
+        return;
+    }
+
+    let base_netlist = |vbias_v: f64| format!(
+        "* MRR L1 energy conservation at V={vbias_v} V\n\
+         Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.12\n\
+         Xmod    lre lim wl  ore oim wl  vbias 0  mrr_modulator_l1\n\
+         + kappa_0=0.1 L_ring_um=100.0 n_g=4.2 alpha_dB_cm=2.0\n\
+         + Vpi_rt=10.0 V_ref=0.0 wavelength_nm=1544.12\n\
+         Xpd     ore oim wl  ph_a 0  photodetector  responsivity=1.0\n\
+         Rload   ph_a 0  1k\n\
+         Vbias   vbias 0  DC {vbias_v}\n\
+         .optical  lre lim wl ore oim\n\
+         .op\n.end\n"
+    );
+
+    let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
+    let mrr_lib   = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
+    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+
+    let mut registry = DeviceRegistry::new();
+    laser_lib.register_into(&mut registry);
+    mrr_lib.register_into(&mut registry);
+    pd_lib.register_into(&mut registry);
+
+    for vbias in [-0.25_f64, -1.0, -2.5, -5.0] {
+        let netlist = parse_spice(&base_netlist(vbias)).unwrap();
+        let result = dc_op_nr_with_registry(&netlist, &registry)
+            .expect("DC OP failed");
+        let v_ph = result.node_voltage("ph_a").unwrap();
+        println!("MRR(V={vbias:.2}): V(ph_a)={v_ph:.6e}");
+        assert!(
+            v_ph < 1.0,
+            "Energy conservation violated at Vbias={vbias}: V(ph_a)={v_ph:.6} ≥ 1 V"
+        );
+        assert!(v_ph > 0.0, "Negative V(ph_a) at Vbias={vbias}: {v_ph:.6}");
+    }
 }

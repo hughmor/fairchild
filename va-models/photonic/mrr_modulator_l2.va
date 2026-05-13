@@ -98,7 +98,7 @@ module mrr_modulator_l2(in_re, in_im, in_lambda,
         s        = a_rt * sin(phi_rt);
         denom_sq = 1.0 - 2.0 * r * c + r * r * a_rt * a_rt;
 
-        T_re = ((r - c) * (1.0 - r * c) - r * s * s) / denom_sq;
+        T_re = ((r - c) * (1.0 - r * c) + r * s * s) / denom_sq;
         T_im = -s * kappa / denom_sq;
 
         E_in_re = Ophase(in_re);
