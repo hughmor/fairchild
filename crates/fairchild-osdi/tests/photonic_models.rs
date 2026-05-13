@@ -276,3 +276,103 @@ fn laser_waveguide_photodetector_chain_dc_op() {
         (v_ph - expected).abs()
     );
 }
+
+// ─── Phase 2.5: PN phase shifter L1 ─────────────────────────────────────────
+
+/// Laser → PN phase shifter L1 (0 V bias) → PD → load.
+///
+/// At 0 V bias, Δφ = 0.  Through-power = input × amplitude_transmission².
+/// With L=500 µm, alpha=3 dB/cm (default): loss = 3*500e-4 dB = 0.015 dB ≈ 0.17%.
+#[test]
+fn pn_phase_shifter_l1_dc_op_zero_bias() {
+    let laser_path = model_path("cw_laser");
+    let pnps_path  = model_path("pn_phase_shifter_l1");
+    let pd_path    = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&pnps_path) || skip_if_missing(&pd_path) {
+        return;
+    }
+
+    let netlist = parse_spice(
+        "* laser → pn_phase_shifter_l1 (0V) → PD → load\n\
+         Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0\n\
+         Xpnps   lre lim wl  ore oim wl  vbias 0  pn_phase_shifter_l1\n\
+         Xpd     ore oim wl  ph_a 0  photodetector  responsivity=1.0\n\
+         Rload   ph_a 0  1k\n\
+         Vbias   vbias 0  DC 0.0\n\
+         .optical  lre lim wl ore oim\n\
+         .op\n.end\n",
+    ).unwrap();
+
+    let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
+    let pnps_lib  = Arc::new(unsafe { OsdiLibrary::open(&pnps_path) }.expect("dlopen pn_ps"));
+    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+
+    let mut registry = DeviceRegistry::new();
+    laser_lib.register_into(&mut registry);
+    pnps_lib.register_into(&mut registry);
+    pd_lib.register_into(&mut registry);
+
+    let result = dc_op_nr_with_registry(&netlist, &registry)
+        .expect("DC OP failed for laser→pn_ps→PD");
+
+    let v_ph = result.node_voltage("ph_a").unwrap();
+    // Default: L_um=100 µm, alpha_dB_cm=3.0
+    // alpha_lin = 3*100/8.686 = 34.54 Np/m  (power attenuation coefficient)
+    // T_amp = exp(-34.54 * 100e-6 / 2) → P_out = T_amp² = exp(-0.003454) ≈ 0.9966 mW
+    // V(ph_a) = 0.9966e-3 × (1k ∥ 1M) = 0.9966e-3 × 999 ≈ 0.9956 V
+    let expected = 0.9956_f64;
+    let tol = 0.002;
+    println!("pn_ps(0V)→PD: V(ph_a)={v_ph:.6e}  expected≈{expected:.6e}");
+    assert!(
+        (v_ph - expected).abs() < tol,
+        "V(ph_a)={v_ph:.6e} expected≈{expected:.6e} diff={:.3e}", (v_ph - expected).abs()
+    );
+}
+
+// ─── Phase 2.5: MRR modulator L1 — resonance dip ─────────────────────────────
+
+/// Laser → MRR modulator L1 at ring resonance → PD → load.
+///
+/// At resonance the through-port power is reduced (undercoupled ring).
+/// With kappa=0.1, alpha=2 dB/cm, L=100 µm: r≈0.9487, a_rt≈0.994.
+/// T_power = ((r-a)/(1-r*a))² ≈ 0.64 → V(ph_a) ≈ 0.64 V.
+#[test]
+fn mrr_modulator_l1_resonance_dip() {
+    let laser_path = model_path("cw_laser");
+    let mrr_path   = model_path("mrr_modulator_l1");
+    let pd_path    = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&mrr_path) || skip_if_missing(&pd_path) {
+        return;
+    }
+
+    let netlist = parse_spice(
+        "* laser → MRR L1 at resonance → PD → load\n\
+         Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.12\n\
+         Xmod    lre lim wl  ore oim wl  vbias 0  mrr_modulator_l1\n\
+         + kappa_0=0.1 L_ring_um=100.0 n_g=4.2 alpha_dB_cm=2.0\n\
+         + Vpi_rt=10.0 V_ref=0.0 wavelength_nm=1544.12\n\
+         Xpd     ore oim wl  ph_a 0  photodetector  responsivity=1.0\n\
+         Rload   ph_a 0  1k\n\
+         Vbias   vbias 0  DC 0.0\n\
+         .optical  lre lim wl ore oim\n\
+         .op\n.end\n",
+    ).unwrap();
+
+    let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
+    let mrr_lib   = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
+    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+
+    let mut registry = DeviceRegistry::new();
+    laser_lib.register_into(&mut registry);
+    mrr_lib.register_into(&mut registry);
+    pd_lib.register_into(&mut registry);
+
+    let result = dc_op_nr_with_registry(&netlist, &registry)
+        .expect("DC OP failed for laser→MRR→PD");
+
+    let v_ph = result.node_voltage("ph_a").unwrap();
+    println!("MRR(resonance, 0V): V(ph_a)={v_ph:.6e}");
+    // At resonance: through-port is reduced from 1.0 V (not full 100% transmission)
+    assert!(v_ph < 0.99, "Expected resonance dip: V(ph_a)={v_ph:.4} should be < 0.99 V");
+    assert!(v_ph > 0.01, "Unexpectedly deep resonance: V(ph_a)={v_ph:.4}");
+}
