@@ -16,7 +16,8 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 1 — Solver hardening | ✅ done | Homotopy, variable-step BE+LTE, Trapezoidal Rule, AC, Nutmeg output, Level 1 MOSFET, Shockley diode |
 | 1.5 — Consolidation | ✅ done | CLI, docs, examples, ngspice validation, OSDI reactive Jacobian fix, PWL, `.ac` directive |
 | 2 — Photonic discipline | ✅ done | Ring resonator sweep validated against CMT (Δλ=0.02 nm); example + plot script in repo |
-| 3 — Python bindings | 📋 planned | See `phase_3.md` |
+| 2.5 — Photonic model library | ✅ done | 10 models: PN PS L1/L2, thermo PS L1/L2, PD L2, MRR mod L1/L2/L3, heater MRR L1/L2 |
+| 3 — Python bindings | ✅ done | `fairchild-py`: Circuit/SimResult/WaveformSource, op/tran/AC, numpy arrays, maturin |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
 
@@ -28,8 +29,9 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 crates/
   fairchild-core/     # DAE solver, MNA, Newton-Raphson, transient (BE/TR/var-step), AC
   fairchild-parser/   # SPICE parser: R,L,C,V,I,M,D; DC/PULSE/PWL; .op/.tran/.ac/.model
-  fairchild-cli/      # Binary: -f netlist.sp, --format nutmeg, --output, --ac-* flags
+  fairchild-cli/      # Binary: -f netlist.sp, --format nutmeg, --probe, --param, --check
   fairchild-osdi/     # OSDI v0.4 runtime: dlopen, OsdiDevice wraps *const OsdiDescriptor
+  fairchild-py/       # PyO3 Python package: Circuit/SimResult/WaveformSource, maturin build
 ```
 
 ---
