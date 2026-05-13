@@ -2,7 +2,7 @@ mod error;
 mod spice;
 
 pub use error::{DisciplineError, ParseError};
-pub use spice::parse_spice;
+pub use spice::{parse_spice, parse_spice_file};
 
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
 pub type NodeName = String;

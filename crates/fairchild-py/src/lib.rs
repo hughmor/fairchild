@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use numpy::{PyArray1, PyReadonlyArray1};
 
-use fairchild_parser::{parse_spice, AcVariation, Element, Netlist, Waveform};
+use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 use fairchild_core::{
     ac_analysis, dc_op_nr_with_registry, freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_tr, AcResult, DeviceRegistry, NrResult, SimError, TranResult,
@@ -385,12 +385,11 @@ impl Circuit {
         }
     }
 
-    /// Load a SPICE netlist from `path`.
+    /// Load a SPICE netlist from `path`, resolving `.include` directives
+    /// relative to the file's parent directory.
     pub fn load(&mut self, path: &str) -> PyResult<()> {
         let p = PathBuf::from(path);
-        let src = std::fs::read_to_string(&p)
-            .map_err(|e| PyRuntimeError::new_err(format!("cannot read '{path}': {e}")))?;
-        let netlist = parse_spice(&src).map_err(parse_err)?;
+        let netlist = parse_spice_file(&p).map_err(parse_err)?;
         self.netlist_dir = p.parent().map(|d| d.to_path_buf());
         self.netlist = Some(netlist);
         Ok(())

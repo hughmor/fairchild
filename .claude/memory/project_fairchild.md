@@ -18,7 +18,8 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 2 — Photonic discipline | ✅ done | Ring resonator sweep validated against CMT (Δλ=0.02 nm); example + plot script in repo |
 | 2.5 — Photonic model library | ✅ done | 20 models: PN PS L1/L2, thermo PS L1/L2, PD L2, MRR mod L1/L2/L3, heater MRR L1/L2, add-drop MRR (PN L1/L2/L3, heater L1/L2), MZI (PN L1/L2, thermo L1/L2) |
 | 3 — Python bindings | ✅ done | `fairchild-py`: Circuit/SimResult/WaveformSource, op/tran/AC, numpy arrays, maturin |
-| 3.5 — Parser improvements | ✅ done | `.subckt`/`.ends` two-pass flattening, `.param` global params, `{param}` substitution, unsupported-directive errors; branch `feature/subckt-support` |
+| 3.5 — Parser improvements | ✅ done | `.subckt`/`.ends` two-pass flattening, `.param` global params, `{param}` substitution, `.include` pre-processing, unsupported-directive errors; branch `feature/subckt-support` |
+| 3.6 — Compound photonic subckts | ✅ done | All-pass MRR (PN+thermo) and add-drop MRR (PN) compound subckts verified; MZI subckts created but have known two-DC NR convergence bug (use monolithic .osdi models) |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
 
@@ -58,6 +59,10 @@ crates/
 **XOsdi element** — SPICE `X<name> net0 ... netN model_name [key=val ...]` syntax for arbitrary-port OSDI instances. Parsed in fairchild-parser. Discipline checking via `.optical net1 net2...` directive + `check_disciplines()` (no separate `.optical_lambda` — lambda wires are declared in `.optical` alongside amplitude wires). XOsdi devices instantiated in `build_devices()` (newton.rs) by model name lookup.
 
 **OSDI parameter matching** — `osdi_param_name_matches()` uses `eq_ignore_ascii_case` (case-insensitive). The SPICE parser lowercases all tokens, but Verilog-A identifiers preserve case (e.g. `Vpi_L`, `L_arm_um`). Without case-insensitive matching, any parameter with an uppercase letter is silently ignored and the model uses its default. Fixed in phase 2.5 session.
+
+**`.include` pre-processing** — `resolve_includes()` in `fairchild-parser/src/spice.rs` handles `.include "path"` before the logical-line tokenizer sees the input. Recursive includes supported (depth limit 16). CLI and Python bindings use `parse_spice_file(path)` which calls `resolve_includes` first; the raw `parse_spice(&str)` remains unchanged (no include support, for programmatic use). Relative paths resolved from the referencing file's parent directory.
+
+**Two-DC compound subckt NR bug** — A compound subckt where BOTH outputs of DC1 feed BOTH inputs of DC2 (i.e., DC1.b1→DC2.a1, DC1.b2→DC2.a2) causes NR divergence. This pattern appears in MZI modulators. Diagnostic confirmed the bug occurs even with kappa=0 (identity passthrough), ruling out coupler math. Root cause: suspected competing cross-Jacobian entries from the two OSDI instances on shared nodes. **Workaround: use monolithic `.osdi` MZI models** (mzi_modulator_pn_l1.osdi, mzi_modulator_thermo_l1.osdi). The compound `.spc` files (mzi_pn_l1.spc, mzi_thermo_l1.spc) are kept in the repo with warning banners. MRR subckts (DC + PS feedback) work correctly — the topology avoids the two-DC pattern.
 
 ---
 

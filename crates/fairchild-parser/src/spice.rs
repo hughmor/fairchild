@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use crate::{AcVariation, Analysis, Element, ModelCard, Netlist, ParseError, Waveform};
 
 // ─── internal types ──────────────────────────────────────────────────────────
@@ -408,6 +409,62 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     }
 
     Ok(netlist)
+}
+
+/// Recursively expand `.include "file"` lines, substituting them with file
+/// content.  `base_dir` is used to resolve relative paths.
+fn resolve_includes(
+    input:    &str,
+    base_dir: Option<&Path>,
+    depth:    usize,
+) -> Result<String, ParseError> {
+    if depth > 16 {
+        return Err(ParseError::Syntax {
+            line: 0,
+            msg: ".include nesting depth > 16 (circular include?)".into(),
+        });
+    }
+    let mut out = String::with_capacity(input.len());
+    for (i, raw) in input.lines().enumerate() {
+        let lineno = i + 1;
+        let lc = raw.trim().to_lowercase();
+        if lc.starts_with(".include") {
+            let tok: Vec<&str> = raw.trim().splitn(2, char::is_whitespace).collect();
+            if tok.len() < 2 {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: ".include requires a filename argument".into(),
+                });
+            }
+            let fname = tok[1].trim().trim_matches('"').trim_matches('\'');
+            let path: PathBuf = match base_dir {
+                Some(dir) => dir.join(fname),
+                None      => PathBuf::from(fname),
+            };
+            let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
+                line: lineno,
+                msg: format!(".include '{}': {e}", path.display()),
+            })?;
+            let inlined = resolve_includes(&content, path.parent(), depth + 1)?;
+            out.push_str(&inlined);
+            out.push('\n');
+        } else {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a SPICE netlist file, resolving `.include` directives relative to
+/// the file's parent directory.
+pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
+    let src = std::fs::read_to_string(path).map_err(|e| ParseError::Syntax {
+        line: 0,
+        msg: format!("cannot read '{}': {e}", path.display()),
+    })?;
+    let resolved = resolve_includes(&src, path.parent(), 0)?;
+    parse_spice(&resolved)
 }
 
 // ─── analysis directive parsers ───────────────────────────────────────────────

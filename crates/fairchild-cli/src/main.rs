@@ -11,7 +11,7 @@ use fairchild_core::{
     tran_nr_with_registry_tr, DeviceRegistry,
 };
 use fairchild_osdi::OsdiLibrary;
-use fairchild_parser::{check_disciplines, parse_spice, AcVariation, Analysis, Element, Netlist};
+use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist};
 
 #[derive(Parser)]
 #[command(
@@ -247,13 +247,8 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, _quiet: bool
 fn main() {
     let cli = Cli::parse();
 
-    let src = fs::read_to_string(&cli.file).unwrap_or_else(|e| {
-        eprintln!("error: cannot read {:?}: {e}", cli.file);
-        std::process::exit(1);
-    });
-
-    let mut netlist = parse_spice(&src).unwrap_or_else(|e| {
-        eprintln!("error: parse failed: {e}");
+    let mut netlist = parse_spice_file(&cli.file).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
         std::process::exit(1);
     });
 
