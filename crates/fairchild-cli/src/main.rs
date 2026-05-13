@@ -144,6 +144,22 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
                     applied = true;
                     break;
                 }
+                Element::VoltageSource { name, waveform, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "v") =>
+                {
+                    *waveform = fairchild_parser::Waveform::Dc(value);
+                    applied = true;
+                    break;
+                }
+                Element::CurrentSource { name, waveform, .. }
+                    if name.to_lowercase() == elem_name_lc
+                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "i") =>
+                {
+                    *waveform = fairchild_parser::Waveform::Dc(value);
+                    applied = true;
+                    break;
+                }
                 _ => {}
             }
         }
