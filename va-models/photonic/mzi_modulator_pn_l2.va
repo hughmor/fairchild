@@ -110,7 +110,7 @@ module mzi_modulator_pn_l2(in_re, in_im, in_lambda,
         tmp1  = 1.0 - V_pn1 / Vbi;
         if (tmp1 < 0.0) tmp1 = 0.0;
         dN1      = n_dep0 * (1.0 - sqrt(tmp1));
-        dn1      = -8.8e-22 * dN1 - 8.5e-18 * pow(dN1, 0.8);
+        dn1      = -8.8e-22 * dN1 - 8.5e-18 * (dN1 >= 0.0 ? pow(dN1, 0.8) : -pow(-dN1, 0.8));
         dalpha1  = (8.5e-18 + 6.0e-18) * dN1;   // cm⁻¹
 
         dphi1       = 2.0 * `M_PI * dn1 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);
@@ -126,7 +126,7 @@ module mzi_modulator_pn_l2(in_re, in_im, in_lambda,
         tmp2  = 1.0 - V_pn2 / Vbi;
         if (tmp2 < 0.0) tmp2 = 0.0;
         dN2      = n_dep0 * (1.0 - sqrt(tmp2));
-        dn2      = -8.8e-22 * dN2 - 8.5e-18 * pow(dN2, 0.8);
+        dn2      = -8.8e-22 * dN2 - 8.5e-18 * (dN2 >= 0.0 ? pow(dN2, 0.8) : -pow(-dN2, 0.8));
         dalpha2  = (8.5e-18 + 6.0e-18) * dN2;
 
         dphi2       = 2.0 * `M_PI * dn2 * (L_arm_um * 1e-6) / (wl_nm * 1e-9);

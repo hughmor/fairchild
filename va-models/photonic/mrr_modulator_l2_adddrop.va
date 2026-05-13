@@ -113,7 +113,7 @@ module mrr_modulator_l2_adddrop(in_re, in_im, in_lambda,
         tmp  = 1.0 - V_pn / Vbi;
         if (tmp < 0.0) tmp = 0.0;
         dN       = n_dep0 * (1.0 - sqrt(tmp));
-        dn_opt   = -8.8e-22 * dN - 8.5e-18 * pow(dN, 0.8);
+        dn_opt   = -8.8e-22 * dN - 8.5e-18 * (dN >= 0.0 ? pow(dN, 0.8) : -pow(-dN, 0.8));
         dalpha_fc = (8.5e-18 + 6.0e-18) * dN;   // cm⁻¹
 
         // Full round-trip phase

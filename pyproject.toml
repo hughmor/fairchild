@@ -9,6 +9,7 @@ description = "Open-source time-domain electro-optic circuit simulator"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 dependencies = ["numpy"]
+version = "0.1.0"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
