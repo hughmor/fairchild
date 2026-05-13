@@ -1,0 +1,15 @@
+[package]
+name = "fairchild-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fairchild"
+crate-type = ["cdylib"]
+
+[dependencies]
+fairchild-core   = { path = "../fairchild-core" }
+fairchild-parser = { path = "../fairchild-parser" }
+fairchild-osdi   = { path = "../fairchild-osdi" }
+pyo3             = { version = "0.22", features = ["extension-module"] }
+numpy            = "0.22"
