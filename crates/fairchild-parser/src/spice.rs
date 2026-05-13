@@ -356,11 +356,30 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 
         if lc == ".end" {
             break;
+        } else if lc.starts_with(".optical_bus") {
+            // .optical_bus N re_base im_base wl_base
+            // Declares an N-channel WDM optical bus, generating 3N net entries:
+            //   re_base_0 im_base_0 wl_base_0  re_base_1 im_base_1 wl_base_1  ...
+            // Must come before the ".optical" check.
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 5 {
+                if let Ok(n) = tokens[1].parse::<usize>() {
+                    let (rb, ib, wb) = (tokens[2], tokens[3], tokens[4]);
+                    for i in 0..n {
+                        netlist.optical_nets.push(canon_node(&format!("{rb}_{i}")));
+                        netlist.optical_nets.push(canon_node(&format!("{ib}_{i}")));
+                        netlist.optical_nets.push(canon_node(&format!("{wb}_{i}")));
+                    }
+                }
+            }
         } else if lc.starts_with(".optical") {
             // Must come before ".op" check.
+            // Supports bus-vector notation: .optical net[0..3] expands to net_0 net_1 net_2 net_3
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
             for tok in &tokens[1..] {
-                netlist.optical_nets.push(canon_node(tok));
+                for net in expand_bus_vectors(tok) {
+                    netlist.optical_nets.push(canon_node(&net));
+                }
             }
         } else if lc.starts_with(".op") {
             netlist.analyses.push(Analysis::Op);
@@ -549,6 +568,27 @@ fn parse_value(s: &str, lineno: usize) -> Result<f64, ParseError> {
     })
 }
 
+/// Expand a bus-vector token like `net[M..N]` into individual net names
+/// `net_M, net_{M+1}, ..., net_N` (inclusive, underscore-separated).
+/// If the token contains no `[M..N]` notation, returns the token unchanged
+/// in a single-element vec.
+fn expand_bus_vectors(token: &str) -> Vec<String> {
+    if let (Some(lb), Some(rb)) = (token.find('['), token.rfind(']')) {
+        if lb < rb {
+            let base      = &token[..lb];
+            let range_str = &token[lb + 1..rb];
+            if let Some((lo_s, hi_s)) = range_str.split_once("..") {
+                if let (Ok(lo), Ok(hi)) =
+                    (lo_s.trim().parse::<usize>(), hi_s.trim().parse::<usize>())
+                {
+                    return (lo..=hi).map(|i| format!("{}_{}", base, i)).collect();
+                }
+            }
+        }
+    }
+    vec![token.to_string()]
+}
+
 fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let name   = tokens[0].to_lowercase();
@@ -674,7 +714,8 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
             let model_name = positional.last().unwrap().to_lowercase();
             let nets: Vec<String> = positional[..positional.len() - 1]
                 .iter()
-                .map(|s| canon_node(s))
+                .flat_map(|s| expand_bus_vectors(s))
+                .map(|s| canon_node(&s))
                 .collect();
             Ok(Element::XOsdi { name, nets, model_name, params })
         }
@@ -1030,6 +1071,55 @@ mod tests {
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.optical_nets, vec!["laser_re", "laser_im", "wg_out_re", "wg_out_im"]);
+    }
+
+    #[test]
+    fn bus_vector_expansion_in_optical() {
+        // .optical with bus vector notation
+        let input = "* WDM test\n\
+                     .optical opt_re[0..2] opt_im[0..2] opt_wl[0..2]\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.optical_nets, vec![
+            "opt_re_0", "opt_re_1", "opt_re_2",
+            "opt_im_0", "opt_im_1", "opt_im_2",
+            "opt_wl_0", "opt_wl_1", "opt_wl_2",
+        ]);
+    }
+
+    #[test]
+    fn optical_bus_directive() {
+        // .optical_bus N re_base im_base wl_base
+        let input = "* WDM test\n\
+                     .optical_bus 3 ch_re ch_im ch_wl\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.optical_nets, vec![
+            "ch_re_0", "ch_im_0", "ch_wl_0",
+            "ch_re_1", "ch_im_1", "ch_wl_1",
+            "ch_re_2", "ch_im_2", "ch_wl_2",
+        ]);
+    }
+
+    #[test]
+    fn bus_vector_expansion_in_xosdi_nets() {
+        // X element with bus vector net arguments
+        let input = "* WDM xosdi test\n\
+                     .optical ch_re[0..1] ch_im[0..1] ch_wl[0..1]\n\
+                     Xmux ch_re[0..1] ch_im[0..1] ch_wl[0..1] out_re out_im out_wl wdm_mux2\n\
+                     .op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        if let Element::XOsdi { nets, model_name, .. } = &netlist.elements[0] {
+            assert_eq!(model_name, "wdm_mux2");
+            assert_eq!(nets, &[
+                "ch_re_0", "ch_re_1",
+                "ch_im_0", "ch_im_1",
+                "ch_wl_0", "ch_wl_1",
+                "out_re", "out_im", "out_wl",
+            ]);
+        } else {
+            panic!("expected XOsdi");
+        }
     }
 
     #[test]
