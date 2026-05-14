@@ -13,8 +13,9 @@ use numpy::{PyArray1, PyReadonlyArray1};
 
 use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 use fairchild_core::{
-    ac_analysis, dc_op_nr_with_registry, freq_decade, freq_linear, freq_oct,
-    tran_nr_with_registry_tr, AcResult, DeviceRegistry, NrResult, SimError, TranResult,
+    ac_analysis_opts, dc_op_nr_with_registry_opts, freq_decade, freq_linear, freq_oct,
+    tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
+    AcResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
 };
 use fairchild_osdi::OsdiLibrary;
 
@@ -424,10 +425,16 @@ impl Circuit {
     ///   analysis: `"op"` for DC, `"tran"` for transient, `"ac"` for AC sweep.
     ///
     ///   For `"tran"`: `stop` (s) and `step` (s) are required.
+    ///   Optional: `variable_step=True` enables LTE-controlled variable-step.
     ///
     ///   For `"ac"`: `fstart` (Hz), `fstop` (Hz), `points` (int, default 20),
     ///   `variation` (`"dec"`, `"oct"`, `"lin"`, default `"dec"`),
     ///   `src` (excitation source name, default `None` = first V source).
+    ///
+    ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
+    ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`, `method` (`"be"` or `"tr"`),
+    ///   `uic`, `temp` (°C).  These overlay any `.options` directives from the
+    ///   netlist.
     #[pyo3(signature = (analysis, **kwargs))]
     pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
         let netlist = self.netlist.as_ref()
@@ -438,20 +445,25 @@ impl Circuit {
         apply_source_overrides(&mut nl, &self.source_overrides);
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
+        let opts = build_sim_options(&nl, kwargs)?;
 
         match analysis.to_lowercase().as_str() {
             "op" | "dc" => {
-                let result = dc_op_nr_with_registry(&nl, &registry).map_err(sim_err)?;
+                let result = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
                 Ok(SimResult { inner: SimResultInner::Dc(result) })
             }
             "tran" | "transient" => {
-                let (stop, step) = parse_tran_kwargs(kwargs)?;
-                let result = tran_nr_with_registry_tr(&nl, step, stop, &registry).map_err(sim_err)?;
+                let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
+                let result = if variable_step {
+                    tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
+                } else {
+                    tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
+                }.map_err(sim_err)?;
                 Ok(SimResult { inner: SimResultInner::Tran(result) })
             }
             "ac" => {
                 let (freqs, src) = parse_ac_kwargs(kwargs)?;
-                let result = ac_analysis(&nl, &freqs, src.as_deref(), &registry).map_err(sim_err)?;
+                let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
                 Ok(SimResult { inner: SimResultInner::Ac(result) })
             }
             other => Err(PyRuntimeError::new_err(format!(
@@ -489,20 +501,25 @@ impl Circuit {
             apply_overrides(&mut nl, &sweep_override);
 
             let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
+            let opts = build_sim_options(&nl, kwargs)?;
 
             let result = match analysis.to_lowercase().as_str() {
                 "op" | "dc" => {
-                    let r = dc_op_nr_with_registry(&nl, &registry).map_err(sim_err)?;
+                    let r = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
                     SimResult { inner: SimResultInner::Dc(r) }
                 }
                 "tran" | "transient" => {
-                    let (stop, step) = parse_tran_kwargs(kwargs)?;
-                    let r = tran_nr_with_registry_tr(&nl, step, stop, &registry).map_err(sim_err)?;
+                    let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
+                    let r = if variable_step {
+                        tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
+                    } else {
+                        tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
+                    }.map_err(sim_err)?;
                     SimResult { inner: SimResultInner::Tran(r) }
                 }
                 "ac" => {
                     let (freqs, src) = parse_ac_kwargs(kwargs)?;
-                    let r = ac_analysis(&nl, &freqs, src.as_deref(), &registry).map_err(sim_err)?;
+                    let r = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
                     SimResult { inner: SimResultInner::Ac(r) }
                 }
                 other => {
@@ -571,18 +588,66 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
 // Helper: parse tran kwargs
 // ---------------------------------------------------------------------------
 
-fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)> {
+fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64, bool)> {
     let mut stop: Option<f64> = None;
     let mut step: Option<f64> = None;
+    let mut variable_step = false;
 
     if let Some(kw) = kwargs {
         if let Some(v) = kw.get_item("stop")? { stop = Some(v.extract::<f64>()?); }
         if let Some(v) = kw.get_item("step")? { step = Some(v.extract::<f64>()?); }
+        if let Some(v) = kw.get_item("variable_step")? {
+            variable_step = v.extract::<bool>()?;
+        }
     }
 
     let stop = stop.ok_or_else(|| PyRuntimeError::new_err("tran requires 'stop' kwarg (seconds)"))?;
     let step = step.ok_or_else(|| PyRuntimeError::new_err("tran requires 'step' kwarg (seconds)"))?;
-    Ok((stop, step))
+    Ok((stop, step, variable_step))
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build SimOptions from netlist + Python kwargs
+// ---------------------------------------------------------------------------
+
+/// Build a `SimOptions` by starting from the netlist's `.options` directives
+/// and overlaying any Python kwargs the user passed.  Kwargs that are not
+/// recognised as solver options are silently ignored (they may be analysis
+/// kwargs like `stop`/`step`/`fstart`).
+fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimOptions> {
+    let mut opts = SimOptions::from_netlist(netlist);
+    if let Some(kw) = kwargs {
+        // Map of Python kwarg name -> SimOptions key (most are identical).
+        const OPTION_KEYS: &[&str] = &[
+            "reltol", "abstol", "vntol", "vmax", "gmin",
+            "itl1", "itl4", "maxstep", "max_step", "gmin_max", "srcsteps",
+            "method", "uic", "temp",
+        ];
+        for key in OPTION_KEYS {
+            if let Some(v) = kw.get_item(key)? {
+                // Accept either a raw number or a string token.
+                let value_str: String = if let Ok(s) = v.extract::<String>() {
+                    s
+                } else if let Ok(f) = v.extract::<f64>() {
+                    format!("{f:e}")
+                } else if let Ok(i) = v.extract::<i64>() {
+                    i.to_string()
+                } else if let Ok(b) = v.extract::<bool>() {
+                    if b { "1".into() } else { "0".into() }
+                } else {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "kwarg '{key}': expected number, string, or bool"
+                    )));
+                };
+                if !opts.set(key, &value_str) {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "unknown solver option '{key}={value_str}'"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(opts)
 }
 
 // ---------------------------------------------------------------------------

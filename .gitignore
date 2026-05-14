@@ -9,3 +9,7 @@ Cargo.lock
 examples/*/*.png
 examples/*/*.csv
 __pycache__sotu.md
+
+# python bytecode
+__pycache__/
+*.pyc

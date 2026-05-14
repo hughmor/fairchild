@@ -7,8 +7,8 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 
 use fairchild_core::{
-    ac_analysis, dc_op_nr_with_registry, freq_decade, freq_linear, freq_oct,
-    tran_nr_with_registry_tr, DeviceRegistry,
+    ac_analysis_opts, dc_op_nr_with_registry_opts, freq_decade, freq_linear, freq_oct,
+    tran_nr_with_registry_opts, DeviceRegistry, SimOptions,
 };
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist};
@@ -68,6 +68,33 @@ struct Cli {
     /// Suppress all warning messages.
     #[arg(long, short)]
     quiet: bool,
+
+    // ── solver tuning knobs (overlay onto netlist `.options`) ────────────
+    /// Override an arbitrary solver option.  Format: KEY=VALUE.  Layered on
+    /// top of any `.options` directives in the netlist.  Can be repeated.
+    ///
+    /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
+    /// maxstep, gminmax, srcsteps, method (be|tr), uic, temp.
+    ///
+    /// Example: --opt reltol=1e-5 --opt method=be
+    #[arg(long = "opt", value_name = "KEY=VALUE")]
+    options: Vec<String>,
+
+    /// Convenience flag: relative Newton tolerance.
+    #[arg(long, value_name = "VALUE")]
+    reltol: Option<String>,
+
+    /// Convenience flag: minimum diagonal conductance (S).
+    #[arg(long, value_name = "VALUE")]
+    gmin: Option<String>,
+
+    /// Convenience flag: transient integration method ("be" or "tr").
+    #[arg(long, value_name = "be|tr")]
+    method: Option<String>,
+
+    /// Convenience flag: maximum transient step size (s).
+    #[arg(long = "maxstep", value_name = "VALUE")]
+    max_step: Option<String>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -213,6 +240,35 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
     out
 }
 
+// ── SimOptions builder: netlist .options + CLI flags ───────────────────────
+
+/// Build a `SimOptions` by starting from netlist `.options` and applying the
+/// CLI-specified overlays.  Unknown keys emit a warning (unless `--quiet`).
+fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
+    let mut opts = SimOptions::from_netlist(netlist);
+
+    let mut apply = |key: &str, value: &str| {
+        if !opts.set(key, value) && !cli.quiet {
+            eprintln!("warning: unknown solver option '{key}={value}'");
+        }
+    };
+
+    if let Some(v) = &cli.reltol   { apply("reltol",  v); }
+    if let Some(v) = &cli.gmin     { apply("gmin",    v); }
+    if let Some(v) = &cli.method   { apply("method",  v); }
+    if let Some(v) = &cli.max_step { apply("maxstep", v); }
+
+    for raw in &cli.options {
+        if let Some((k, v)) = raw.split_once('=') {
+            apply(k.trim(), v.trim().trim_matches('"').trim_matches('\''));
+        } else if !cli.quiet {
+            eprintln!("warning: --opt '{raw}': expected KEY=VALUE, skipping");
+        }
+    }
+
+    opts
+}
+
 // ── OSDI registry builder ─────────────────────────────────────────────────
 
 /// Load built-in models + any OSDI shared libraries listed in the netlist.
@@ -278,7 +334,8 @@ fn main() {
         // Build a registry for the netlist_dir (needed to load OSDI libs for topology)
         let netlist_dir_tmp = cli.file.parent().map(|p| p.to_path_buf());
         let reg_tmp = build_registry(&netlist, netlist_dir_tmp.as_ref(), cli.quiet);
-        let result = dc_op_nr_with_registry(&netlist, &reg_tmp).unwrap_or_else(|e| {
+        let opts_tmp = build_options(&netlist, &cli);
+        let result = dc_op_nr_with_registry_opts(&netlist, &reg_tmp, &opts_tmp).unwrap_or_else(|e| {
             eprintln!("error: cannot build topology: {e}");
             std::process::exit(1);
         });
@@ -311,6 +368,13 @@ fn main() {
     let netlist_dir = cli.file.parent().map(|p| p.to_path_buf());
     let registry = build_registry(&netlist, netlist_dir.as_ref(), cli.quiet);
 
+    // Merge netlist `.options` + CLI flag overrides into a single SimOptions.
+    let opts = build_options(&netlist, &cli);
+    if cli.verbose {
+        eprintln!("info: solver options: reltol={:e} gmin={:e} method={:?} itl1={} itl4={}",
+            opts.reltol, opts.gmin, opts.method, opts.itl1, opts.itl4);
+    }
+
     let writer: Box<dyn Write> = match &cli.output {
         Some(path) => {
             let f = fs::File::create(path).unwrap_or_else(|e| {
@@ -330,7 +394,7 @@ fn main() {
             Analysis::Op => {
                 if cli.verbose { eprintln!("info: running DC operating-point analysis..."); }
                 let t0 = Instant::now();
-                let result = dc_op_nr_with_registry(&netlist, &registry).unwrap_or_else(|e| {
+                let result = dc_op_nr_with_registry_opts(&netlist, &registry, &opts).unwrap_or_else(|e| {
                     eprintln!("error: DC op failed: {e}");
                     std::process::exit(1);
                 });
@@ -354,9 +418,9 @@ fn main() {
             }
 
             Analysis::Tran { step, stop } => {
-                if cli.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e})..."); }
+                if cli.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?})...", opts.method); }
                 let t0 = Instant::now();
-                let result = tran_nr_with_registry_tr(&netlist, *step, *stop, &registry).unwrap_or_else(|e| {
+                let result = tran_nr_with_registry_opts(&netlist, *step, *stop, &registry, &opts).unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });
@@ -387,7 +451,7 @@ fn main() {
                     AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
                     AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
                 };
-                let result = ac_analysis(&netlist, &freqs, None, &registry).unwrap_or_else(|e| {
+                let result = ac_analysis_opts(&netlist, &freqs, None, &registry, &opts).unwrap_or_else(|e| {
                     eprintln!("error: AC analysis failed: {e}");
                     std::process::exit(1);
                 });
