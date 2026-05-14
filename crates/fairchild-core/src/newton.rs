@@ -281,12 +281,16 @@ pub fn dc_op_nr_with_registry_opts(
     }
 }
 
-/// DC operating-point with default `SimOptions`.
+/// DC operating-point with options taken from any `.options` directives in
+/// the netlist (defaults where unspecified).
+///
+/// This is the recommended entry point for CLI/Python callers: it honours
+/// `.options reltol=… gmin=… method=…` automatically.
 pub fn dc_op_nr_with_registry(
     netlist: &Netlist,
     registry: &DeviceRegistry,
 ) -> Result<NrResult, SimError> {
-    dc_op_nr_with_registry_opts(netlist, registry, &SimOptions::default())
+    dc_op_nr_with_registry_opts(netlist, registry, &SimOptions::from_netlist(netlist))
 }
 
 /// DC operating-point with pre-built devices (for sweeps / parametric analysis).

@@ -317,9 +317,26 @@ fn is_silent_directive(lc: &str) -> bool {
         || lc.starts_with(".probe")
         || lc.starts_with(".measure")
         || lc.starts_with(".meas")
-        || lc.starts_with(".options")
-        || lc.starts_with(".option")
         || lc.starts_with(".backanno")
+}
+
+/// Parse `.options key=val key=val ...` into a list of `(key, value)` pairs.
+///
+/// Bare-flag tokens (no `=`) are stored as `("key", "1")` so `SimOptions::set`
+/// can treat them as boolean true.  Quoted values are stripped of surrounding
+/// quotes.  Returns an empty list for an empty directive line.
+fn parse_options_directive(line: &str) -> Vec<(String, String)> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mut pairs = Vec::new();
+    for tok in &tokens[1..] {
+        if let Some((k, v)) = tok.split_once('=') {
+            let v = v.trim_matches('"').trim_matches('\'');
+            pairs.push((k.to_lowercase(), v.to_string()));
+        } else if !tok.is_empty() {
+            pairs.push((tok.to_lowercase(), "1".to_string()));
+        }
+    }
+    pairs
 }
 
 // ─── public entry point ───────────────────────────────────────────────────────
@@ -381,6 +398,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                     netlist.optical_nets.push(canon_node(&net));
                 }
             }
+        } else if lc.starts_with(".options") || lc.starts_with(".option") {
+            netlist.options.extend(parse_options_directive(trimmed));
         } else if lc.starts_with(".op") {
             netlist.analyses.push(Analysis::Op);
         } else if lc.starts_with(".tran") {
@@ -1062,6 +1081,32 @@ mod tests {
         } else {
             panic!("expected XOsdi element");
         }
+    }
+
+    #[test]
+    fn parse_options_directive_stores_pairs() {
+        let input = "* opts\nV1 in 0 DC 1\nR1 in out 1k\n\
+                     .options reltol=1e-5 gmin=1p method=be\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.options.len(), 3);
+        assert_eq!(netlist.options[0], ("reltol".into(), "1e-5".into()));
+        assert_eq!(netlist.options[1], ("gmin".into(), "1p".into()));
+        assert_eq!(netlist.options[2], ("method".into(), "be".into()));
+    }
+
+    #[test]
+    fn parse_options_accumulates_across_lines() {
+        let input = "* opts\nV1 in 0 DC 1\n\
+                     .options reltol=1e-5\n.options vntol=1e-9 itl1=300\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.options.len(), 3);
+    }
+
+    #[test]
+    fn parse_options_bare_flag_is_true() {
+        let input = "* opts\nV1 in 0 DC 1\n.options uic\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.options, vec![("uic".into(), "1".into())]);
     }
 
     #[test]

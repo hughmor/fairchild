@@ -149,7 +149,7 @@ pub fn ac_analysis(
     ac_source: Option<&str>,
     registry: &DeviceRegistry,
 ) -> Result<AcResult, SimError> {
-    ac_analysis_opts(netlist, freqs, ac_source, registry, &SimOptions::default())
+    ac_analysis_opts(netlist, freqs, ac_source, registry, &SimOptions::from_netlist(netlist))
 }
 
 /// AC analysis with explicit `SimOptions`.

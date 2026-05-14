@@ -294,13 +294,15 @@ fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[
 // ---------------------------------------------------------------------------
 
 /// Fixed-step Backward Euler transient with Newton-Raphson and a pre-built device registry.
+///
+/// Honours `.options` directives from the netlist (but forces `method=be`).
 pub fn tran_nr_with_registry(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    let mut opts = SimOptions::default();
+    let mut opts = SimOptions::from_netlist(netlist);
     opts.method = IntegratorMode::BackwardEuler;
     tran_nr_with_registry_opts(netlist, step, stop, registry, &opts)
 }
@@ -416,13 +418,15 @@ pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, Si
 }
 
 /// Fixed-step Trapezoidal Rule transient with Newton-Raphson and a pre-built registry.
+///
+/// Honours `.options` directives from the netlist (but forces `method=tr`).
 pub fn tran_nr_with_registry_tr(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    let mut opts = SimOptions::default();
+    let mut opts = SimOptions::from_netlist(netlist);
     opts.method = IntegratorMode::Trapezoidal;
     tran_nr_with_registry_opts(netlist, step, stop, registry, &opts)
 }
@@ -440,13 +444,15 @@ pub fn tran_nr_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult,
 // ---------------------------------------------------------------------------
 
 /// Variable-step Backward Euler transient with Newton-Raphson and LTE timestep control.
+///
+/// Honours `.options` directives from the netlist.
 pub fn tran_nr_with_registry_var(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    tran_nr_with_registry_var_opts(netlist, step, stop, registry, &SimOptions::default())
+    tran_nr_with_registry_var_opts(netlist, step, stop, registry, &SimOptions::from_netlist(netlist))
 }
 
 /// Variable-step transient with explicit `SimOptions`.

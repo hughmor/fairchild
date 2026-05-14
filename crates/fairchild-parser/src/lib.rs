@@ -18,6 +18,10 @@ pub struct Netlist {
     pub osdi_paths: Vec<String>,
     /// Net names declared as optical via `.optical <net> ...` directive.
     pub optical_nets: Vec<String>,
+    /// Raw `KEY=VALUE` pairs from every `.options` directive in source order.
+    /// Values are stored as strings so the consumer (typically `SimOptions::set`)
+    /// can parse SPICE suffixes and method names appropriately.
+    pub options: Vec<(String, String)>,
 }
 
 /// Waveform specification for independent sources.

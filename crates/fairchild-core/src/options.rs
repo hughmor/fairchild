@@ -6,6 +6,8 @@
 //! and Python kwargs all merge into one of these and pass it into the analysis
 //! entry points.
 
+use fairchild_parser::Netlist;
+
 use crate::tran::IntegratorMode;
 
 /// Numerical options consumed by every analysis entry point.
@@ -83,6 +85,20 @@ impl Default for SimOptions {
 }
 
 impl SimOptions {
+    /// Construct options by starting from defaults and folding in every
+    /// `.options KEY=VAL` token parsed from the netlist.
+    ///
+    /// Unrecognised keys are silently dropped (the caller may collect them by
+    /// calling `set` directly).  Order of keys in the netlist is preserved, so
+    /// later `.options` lines override earlier ones — same semantics as ngspice.
+    pub fn from_netlist(netlist: &Netlist) -> Self {
+        let mut opts = SimOptions::default();
+        for (k, v) in &netlist.options {
+            opts.set(k, v);
+        }
+        opts
+    }
+
     /// Apply a single `.options KEY=VALUE` token, returning `true` if recognised.
     ///
     /// Used by the parser's `.options` directive and by the CLI's `--opt KEY=VAL`
@@ -193,5 +209,28 @@ mod tests {
         assert!(o.uic);
         assert!(o.set("uic", "0"));
         assert!(!o.uic);
+    }
+
+    #[test]
+    fn from_netlist_picks_up_options_directive() {
+        let net = fairchild_parser::parse_spice(
+            "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
+             .options reltol=1e-5 gmin=1p method=be itl1=300\n.op\n.end\n"
+        ).unwrap();
+        let o = SimOptions::from_netlist(&net);
+        assert!((o.reltol - 1e-5).abs() < 1e-18);
+        assert!((o.gmin - 1e-12).abs() < 1e-18);
+        assert_eq!(o.itl1, 300);
+        assert!(matches!(o.method, IntegratorMode::BackwardEuler));
+    }
+
+    #[test]
+    fn from_netlist_later_overrides_earlier() {
+        let net = fairchild_parser::parse_spice(
+            "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
+             .options reltol=1e-3\n.options reltol=1e-7\n.op\n.end\n"
+        ).unwrap();
+        let o = SimOptions::from_netlist(&net);
+        assert!((o.reltol - 1e-7).abs() < 1e-18, "expected last value, got {}", o.reltol);
     }
 }
