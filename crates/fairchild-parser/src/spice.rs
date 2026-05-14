@@ -800,6 +800,10 @@ fn parse_waveform(tokens: &[&str], lineno: usize) -> Result<Waveform, ParseError
 
     if rest_lc.starts_with("pulse") { return parse_pulse(&rest_lc, lineno); }
     if rest_lc.starts_with("pwl")   { return parse_pwl(&rest_lc, lineno); }
+    if rest_lc.starts_with("sin")   { return parse_sin(&rest_lc, lineno); }
+    if rest_lc.starts_with("exp")   { return parse_exp(&rest_lc, lineno); }
+    if rest_lc.starts_with("sffm")  { return parse_sffm(&rest_lc, lineno); }
+    if rest_lc.starts_with("am")    { return parse_am(&rest_lc, lineno); }
 
     let tok = tokens[3].to_lowercase();
     if tok == "dc" {
@@ -810,6 +814,93 @@ fn parse_waveform(tokens: &[&str], lineno: usize) -> Result<Waveform, ParseError
     } else {
         Ok(Waveform::Dc(parse_value(tokens[3], lineno)?))
     }
+}
+
+/// Extract the parenthesised parameter list `(p0 p1 ...)` after a waveform
+/// keyword, returning the tokens.  The keyword (e.g. `sin`, `exp`) precedes
+/// the parens; trailing tokens after `)` are discarded.
+fn parens_tokens<'a>(s: &'a str, kind: &str, lineno: usize) -> Result<Vec<&'a str>, ParseError> {
+    let start = s.find('(').ok_or_else(|| ParseError::Syntax {
+        line: lineno, msg: format!("{}: missing '('", kind.to_uppercase()) })?;
+    let end = s.rfind(')').ok_or_else(|| ParseError::Syntax {
+        line: lineno, msg: format!("{}: missing ')'", kind.to_uppercase()) })?;
+    Ok(s[start + 1..end].split_whitespace().collect())
+}
+
+fn parse_sin(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    let parts = parens_tokens(s, "sin", lineno)?;
+    let get = |i: usize, default: f64| -> Result<f64, ParseError> {
+        parts.get(i).map_or(Ok(default), |t| parse_value(t, lineno))
+    };
+    if parts.len() < 3 {
+        return Err(ParseError::FieldCount {
+            expected: "≥3 (SIN vo va freq …)", got: parts.len(), line: lineno });
+    }
+    Ok(Waveform::Sin {
+        vo:    get(0, 0.0)?,
+        va:    get(1, 0.0)?,
+        freq:  get(2, 0.0)?,
+        td:    get(3, 0.0)?,
+        theta: get(4, 0.0)?,
+        phase: get(5, 0.0)?,
+    })
+}
+
+fn parse_exp(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    let parts = parens_tokens(s, "exp", lineno)?;
+    let get = |i: usize, default: f64| -> Result<f64, ParseError> {
+        parts.get(i).map_or(Ok(default), |t| parse_value(t, lineno))
+    };
+    if parts.len() < 2 {
+        return Err(ParseError::FieldCount {
+            expected: "≥2 (EXP v1 v2 …)", got: parts.len(), line: lineno });
+    }
+    // ngspice defaults: td1=0, tau1=tstep, td2=td1+tstep, tau2=tstep.  We don't
+    // know tstep yet at parse time so substitute 0 / a small positive number;
+    // the user should pass them explicitly.
+    let v1 = get(0, 0.0)?;
+    let v2 = get(1, 0.0)?;
+    let td1 = get(2, 0.0)?;
+    let tau1 = get(3, 1e-9)?;
+    let td2 = get(4, td1 + tau1)?;
+    let tau2 = get(5, tau1)?;
+    Ok(Waveform::Exp { v1, v2, td1, tau1, td2, tau2 })
+}
+
+fn parse_sffm(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    let parts = parens_tokens(s, "sffm", lineno)?;
+    let get = |i: usize, default: f64| -> Result<f64, ParseError> {
+        parts.get(i).map_or(Ok(default), |t| parse_value(t, lineno))
+    };
+    if parts.len() < 5 {
+        return Err(ParseError::FieldCount {
+            expected: "5 (SFFM vo va fc mdi fs)", got: parts.len(), line: lineno });
+    }
+    Ok(Waveform::Sffm {
+        vo:  get(0, 0.0)?,
+        va:  get(1, 0.0)?,
+        fc:  get(2, 0.0)?,
+        mdi: get(3, 0.0)?,
+        fs:  get(4, 0.0)?,
+    })
+}
+
+fn parse_am(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
+    let parts = parens_tokens(s, "am", lineno)?;
+    let get = |i: usize, default: f64| -> Result<f64, ParseError> {
+        parts.get(i).map_or(Ok(default), |t| parse_value(t, lineno))
+    };
+    if parts.len() < 4 {
+        return Err(ParseError::FieldCount {
+            expected: "≥4 (AM va vo mf fc [td])", got: parts.len(), line: lineno });
+    }
+    Ok(Waveform::Am {
+        va: get(0, 0.0)?,
+        vo: get(1, 0.0)?,
+        mf: get(2, 0.0)?,
+        fc: get(3, 0.0)?,
+        td: get(4, 0.0)?,
+    })
 }
 
 fn parse_pulse(s: &str, lineno: usize) -> Result<Waveform, ParseError> {
@@ -1110,6 +1201,93 @@ mod tests {
         } else {
             panic!("expected XOsdi element");
         }
+    }
+
+    #[test]
+    fn parse_sin_waveform() {
+        let input = "* sin\nV1 a 0 SIN(0 1 1k 0 0 0)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.elements[0] {
+            Element::VoltageSource { waveform: Waveform::Sin { vo, va, freq, .. }, .. } => {
+                assert!((vo - 0.0).abs() < 1e-12);
+                assert!((va - 1.0).abs() < 1e-12);
+                assert!((freq - 1e3).abs() < 1e-6);
+            }
+            _ => panic!("expected SIN"),
+        }
+    }
+
+    #[test]
+    fn parse_exp_waveform() {
+        let input = "* exp\nV1 a 0 EXP(0 1 1u 1u 5u 1u)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.elements[0] {
+            Element::VoltageSource { waveform: Waveform::Exp { v1, v2, td1, tau1, td2, tau2 }, .. } => {
+                assert_eq!(*v1, 0.0);
+                assert!((v2 - 1.0).abs() < 1e-12);
+                assert!((td1 - 1e-6).abs() < 1e-12);
+                assert!((tau1 - 1e-6).abs() < 1e-12);
+                assert!((td2 - 5e-6).abs() < 1e-12);
+                assert!((tau2 - 1e-6).abs() < 1e-12);
+            }
+            _ => panic!("expected EXP"),
+        }
+    }
+
+    #[test]
+    fn parse_sffm_waveform() {
+        let input = "* sffm\nV1 a 0 SFFM(0 1 1k 5 100)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.elements[0] {
+            Element::VoltageSource { waveform: Waveform::Sffm { vo, va, fc, mdi, fs }, .. } => {
+                assert_eq!(*vo, 0.0);
+                assert!((va - 1.0).abs() < 1e-12);
+                assert!((fc - 1e3).abs() < 1e-6);
+                assert!((mdi - 5.0).abs() < 1e-12);
+                assert!((fs - 100.0).abs() < 1e-9);
+            }
+            _ => panic!("expected SFFM"),
+        }
+    }
+
+    #[test]
+    fn parse_am_waveform() {
+        let input = "* am\nV1 a 0 AM(1 0 100 1k 0)\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.elements[0] {
+            Element::VoltageSource { waveform: Waveform::Am { va, vo, mf, fc, td }, .. } => {
+                assert_eq!(*va, 1.0);
+                assert_eq!(*vo, 0.0);
+                assert!((mf - 100.0).abs() < 1e-9);
+                assert!((fc - 1e3).abs() < 1e-6);
+                assert!((td - 0.0).abs() < 1e-12);
+            }
+            _ => panic!("expected AM"),
+        }
+    }
+
+    #[test]
+    fn sin_at_zero_returns_vo() {
+        let w = Waveform::Sin { vo: 0.5, va: 1.0, freq: 1e3, td: 0.0, theta: 0.0, phase: 0.0 };
+        // sin(0) = 0 → vo
+        assert!((w.at(0.0) - 0.5).abs() < 1e-12);
+        // sin(π/2) at t = 0.25 ms with f=1kHz: sin(π/2)=1
+        assert!((w.at(0.25e-3) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sin_pre_delay_is_vo() {
+        let w = Waveform::Sin { vo: 0.5, va: 1.0, freq: 1e3, td: 1e-6, theta: 0.0, phase: 0.0 };
+        assert!((w.at(0.0) - 0.5).abs() < 1e-12);
+        assert!((w.at(0.5e-6) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exp_pre_td1_is_v1() {
+        let w = Waveform::Exp { v1: 0.0, v2: 1.0, td1: 1e-6, tau1: 1e-6, td2: 5e-6, tau2: 1e-6 };
+        assert!((w.at(0.0) - 0.0).abs() < 1e-12);
+        // At t=td1+tau1 the rise is (1-e^-1) = 0.6321
+        assert!((w.at(2e-6) - (1.0 - (-1.0_f64).exp())).abs() < 1e-9);
     }
 
     #[test]

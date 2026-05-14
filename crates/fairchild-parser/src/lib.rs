@@ -42,6 +42,49 @@ pub enum Waveform {
     Pwl {
         points: Vec<(f64, f64)>,
     },
+    /// SIN(vo va freq td theta phase) — damped sinusoid.
+    ///   v(t) = vo + va·exp(−(t−td)·theta)·sin(2π·freq·(t−td) + phase)  for t ≥ td
+    ///   v(t) = vo                                                       for t <  td
+    /// `phase` is in radians.
+    Sin {
+        vo:    f64,
+        va:    f64,
+        freq:  f64,
+        td:    f64,
+        theta: f64,
+        phase: f64,
+    },
+    /// EXP(v1 v2 td1 tau1 td2 tau2) — rising/falling exponentials.
+    ///   v(t) = v1 for t < td1
+    ///        = v1 + (v2−v1)·(1−exp(−(t−td1)/tau1))                                          for td1 ≤ t < td2
+    ///        = v1 + (v2−v1)·(1−exp(−(t−td1)/tau1)) + (v1−v2)·(1−exp(−(t−td2)/tau2))         for t ≥ td2
+    Exp {
+        v1:   f64,
+        v2:   f64,
+        td1:  f64,
+        tau1: f64,
+        td2:  f64,
+        tau2: f64,
+    },
+    /// SFFM(vo va fc mdi fs) — single-frequency FM.
+    ///   v(t) = vo + va·sin(2π·fc·t + mdi·sin(2π·fs·t))
+    Sffm {
+        vo:  f64,
+        va:  f64,
+        fc:  f64,
+        mdi: f64,
+        fs:  f64,
+    },
+    /// AM(va vo mf fc td) — amplitude-modulated sinusoid (ngspice form).
+    ///   v(t) = vo                                                         for t < td
+    ///   v(t) = va·sin(2π·mf·(t−td))·sin(2π·fc·(t−td)) + vo                for t ≥ td
+    Am {
+        va: f64,
+        vo: f64,
+        mf: f64,
+        fc: f64,
+        td: f64,
+    },
 }
 
 impl Waveform {
@@ -51,6 +94,12 @@ impl Waveform {
             Waveform::Dc(v) => *v,
             Waveform::Pulse { v0, .. } => *v0,
             Waveform::Pwl { points } => points.first().map(|(_, v)| *v).unwrap_or(0.0),
+            // All continuous shapes use their value at t=0 as the DC point.
+            // For SIN with td>0, this is just vo; for EXP, v1; etc.
+            Waveform::Sin  { vo, .. } => *vo,
+            Waveform::Exp  { v1, .. } => *v1,
+            Waveform::Sffm { vo, .. } => *vo,  // sin(0)=0 → vo dominates
+            Waveform::Am   { vo, .. } => *vo,
         }
     }
 
@@ -83,6 +132,17 @@ impl Waveform {
             Waveform::Pwl { points } => {
                 points.iter().map(|(pt, _)| *pt).find(|&pt| pt > t)
             }
+            Waveform::Sin { td, .. } | Waveform::Am { td, .. } => {
+                // Slope discontinuity at td (constant → oscillatory).
+                if t < *td { Some(*td) } else { None }
+            }
+            Waveform::Exp { td1, td2, .. } => {
+                if t < *td1 { Some(*td1) }
+                else if t < *td2 { Some(*td2) }
+                else { None }
+            }
+            // SFFM is smooth everywhere; let the LTE controller pick steps.
+            Waveform::Sffm { .. } => None,
         }
     }
 
@@ -122,6 +182,42 @@ impl Waveform {
                 let (t1, v1) = points[idx];
                 let frac = (t - t0) / (t1 - t0);
                 v0 + (v1 - v0) * frac
+            }
+            Waveform::Sin { vo, va, freq, td, theta, phase } => {
+                if t < *td {
+                    *vo
+                } else {
+                    let dt = t - td;
+                    let damp = if *theta > 0.0 { (-theta * dt).exp() } else { 1.0 };
+                    vo + va * damp * (2.0 * std::f64::consts::PI * freq * dt + phase).sin()
+                }
+            }
+            Waveform::Exp { v1, v2, td1, tau1, td2, tau2 } => {
+                if t < *td1 {
+                    *v1
+                } else {
+                    let rise = (v2 - v1) * (1.0 - (-(t - td1) / tau1).exp());
+                    if t < *td2 {
+                        v1 + rise
+                    } else {
+                        let fall = (v1 - v2) * (1.0 - (-(t - td2) / tau2).exp());
+                        v1 + rise + fall
+                    }
+                }
+            }
+            Waveform::Sffm { vo, va, fc, mdi, fs } => {
+                let mod_arg = 2.0 * std::f64::consts::PI * fs * t;
+                vo + va * (2.0 * std::f64::consts::PI * fc * t + mdi * mod_arg.sin()).sin()
+            }
+            Waveform::Am { va, vo, mf, fc, td } => {
+                if t < *td {
+                    *vo
+                } else {
+                    let dt = t - td;
+                    let m_lo = (2.0 * std::f64::consts::PI * mf * dt).sin();
+                    let m_hi = (2.0 * std::f64::consts::PI * fc * dt).sin();
+                    va * m_lo * m_hi + vo
+                }
             }
         }
     }
