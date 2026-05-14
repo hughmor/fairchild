@@ -13,9 +13,10 @@ use numpy::{PyArray1, PyReadonlyArray1};
 
 use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 use fairchild_core::{
-    ac_analysis_opts, dc_op_nr_with_registry_opts, freq_decade, freq_linear, freq_oct,
+    ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
+    freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
-    AcResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
+    AcResult, DcSweepResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
 };
 use fairchild_osdi::OsdiLibrary;
 
@@ -164,6 +165,7 @@ enum SimResultInner {
     Dc(NrResult),
     Tran(TranResult),
     Ac(AcResult),
+    DcSweep(DcSweepResult),
 }
 
 /// Result of a simulation run.
@@ -182,8 +184,8 @@ impl SimResult {
     /// 1-D numpy array of time points (empty for DC and AC).
     fn time<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         match &self.inner {
-            SimResultInner::Dc(_) | SimResultInner::Ac(_) => PyArray1::from_vec_bound(py, vec![]),
             SimResultInner::Tran(r) => PyArray1::from_vec_bound(py, r.time.clone()),
+            _ => PyArray1::from_vec_bound(py, vec![]),
         }
     }
 
@@ -191,6 +193,14 @@ impl SimResult {
     fn freq<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         match &self.inner {
             SimResultInner::Ac(r) => PyArray1::from_vec_bound(py, r.freq.clone()),
+            _ => PyArray1::from_vec_bound(py, vec![]),
+        }
+    }
+
+    /// 1-D numpy array of sweep values (only meaningful for DC sweeps).
+    fn sweep<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        match &self.inner {
+            SimResultInner::DcSweep(r) => PyArray1::from_vec_bound(py, r.outer.values.clone()),
             _ => PyArray1::from_vec_bound(py, vec![]),
         }
     }
@@ -213,6 +223,9 @@ impl SimResult {
             }
             SimResultInner::Ac(r) => {
                 self.get_ac_signal(py, &key_lc, r)
+            }
+            SimResultInner::DcSweep(r) => {
+                self.get_dc_sweep_signal(py, &key_lc, r)
             }
         }
     }
@@ -237,6 +250,13 @@ impl SimResult {
             SimResultInner::Ac(r) => {
                 r.voltages.keys().map(|n| format!("V({n})")).collect()
             }
+            SimResultInner::DcSweep(r) => {
+                let mut sigs: Vec<String> = r.node_voltages.keys()
+                    .map(|n| format!("V({n})"))
+                    .collect();
+                sigs.extend(r.vsrc_currents.keys().map(|n| format!("I({n})")));
+                sigs
+            }
         }
     }
 
@@ -251,6 +271,10 @@ impl SimResult {
     /// True if this is an AC sweep result.
     #[getter]
     fn is_ac(&self) -> bool { matches!(&self.inner, SimResultInner::Ac(_)) }
+
+    /// True if this is a DC sweep result.
+    #[getter]
+    fn is_dc_sweep(&self) -> bool { matches!(&self.inner, SimResultInner::DcSweep(_)) }
 }
 
 impl SimResult {
@@ -283,6 +307,31 @@ impl SimResult {
         if let Some(node) = key.strip_prefix("v(").and_then(|s| s.strip_suffix(')')) {
             if node == "0" || node == "gnd" {
                 return Ok(PyArray1::from_vec_bound(py, vec![0.0f64; r.time.len()]));
+            }
+            let series = r.node_voltages.get(node)
+                .ok_or_else(|| PyRuntimeError::new_err(format!("unknown node '{node}'")))?;
+            Ok(PyArray1::from_vec_bound(py, series.clone()))
+        } else if let Some(vsrc) = key.strip_prefix("i(").and_then(|s| s.strip_suffix(')')) {
+            let series = r.vsrc_currents.get(vsrc)
+                .ok_or_else(|| PyRuntimeError::new_err(format!("unknown vsrc '{vsrc}'")))?;
+            Ok(PyArray1::from_vec_bound(py, series.clone()))
+        } else {
+            Err(PyRuntimeError::new_err(format!(
+                "unrecognised signal key '{key}'; use 'V(node)' or 'I(vsrc)'"
+            )))
+        }
+    }
+
+    fn get_dc_sweep_signal<'py>(
+        &self,
+        py: Python<'py>,
+        key: &str,
+        r: &DcSweepResult,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        if let Some(node) = key.strip_prefix("v(").and_then(|s| s.strip_suffix(')')) {
+            if node == "0" || node == "gnd" {
+                let n = r.n_points();
+                return Ok(PyArray1::from_vec_bound(py, vec![0.0f64; n]));
             }
             let series = r.node_voltages.get(node)
                 .ok_or_else(|| PyRuntimeError::new_err(format!("unknown node '{node}'")))?;
@@ -447,7 +496,23 @@ impl Circuit {
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let opts = build_sim_options(&nl, kwargs)?;
 
-        match analysis.to_lowercase().as_str() {
+        let analysis_lc = analysis.to_lowercase();
+        // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
+        let is_dc_sweep = analysis_lc == "dc_sweep"
+            || (analysis_lc == "dc"
+                && kwargs.and_then(|kw| kw.get_item("src").ok().flatten()).is_some());
+
+        if is_dc_sweep {
+            let p = parse_dc_kwargs(kwargs)?;
+            let nested_arg = p.nested.as_ref()
+                .map(|(s, a, b, st)| (s.as_str(), *a, *b, *st));
+            let result = dc_sweep_with_registry_opts(
+                &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts
+            ).map_err(sim_err)?;
+            return Ok(SimResult { inner: SimResultInner::DcSweep(result) });
+        }
+
+        match analysis_lc.as_str() {
             "op" | "dc" => {
                 let result = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
                 Ok(SimResult { inner: SimResultInner::Dc(result) })
@@ -467,7 +532,7 @@ impl Circuit {
                 Ok(SimResult { inner: SimResultInner::Ac(result) })
             }
             other => Err(PyRuntimeError::new_err(format!(
-                "unknown analysis '{}'; use 'op', 'tran', or 'ac'",
+                "unknown analysis '{}'; use 'op', 'tran', 'ac', or 'dc_sweep'",
                 other
             ))),
         }
@@ -648,6 +713,48 @@ fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> P
         }
     }
     Ok(opts)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: parse dc-sweep kwargs
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct DcKwargs {
+    src:    String,
+    start:  f64,
+    stop:   f64,
+    step:   f64,
+    nested: Option<(String, f64, f64, f64)>,
+}
+
+fn parse_dc_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<DcKwargs> {
+    let kw = kwargs.ok_or_else(|| PyRuntimeError::new_err(
+        "dc requires src, start, stop, step kwargs"))?;
+
+    let get = |k: &str| -> PyResult<_> {
+        kw.get_item(k)?.ok_or_else(|| PyRuntimeError::new_err(
+            format!("dc requires '{k}' kwarg")))
+    };
+
+    let src   = get("src")?.extract::<String>()?;
+    let start = get("start")?.extract::<f64>()?;
+    let stop  = get("stop")?.extract::<f64>()?;
+    let step  = get("step")?.extract::<f64>()?;
+
+    // Optional nested second sweep: src2, start2, stop2, step2 (all four required if any).
+    let nested = match kw.get_item("src2")? {
+        Some(v) => {
+            let src2   = v.extract::<String>()?;
+            let start2 = get("start2")?.extract::<f64>()?;
+            let stop2  = get("stop2")?.extract::<f64>()?;
+            let step2  = get("step2")?.extract::<f64>()?;
+            Some((src2, start2, stop2, step2))
+        }
+        None => None,
+    };
+
+    Ok(DcKwargs { src, start, stop, step, nested })
 }
 
 // ---------------------------------------------------------------------------

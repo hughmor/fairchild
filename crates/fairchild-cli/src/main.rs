@@ -7,7 +7,8 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 
 use fairchild_core::{
-    ac_analysis_opts, dc_op_nr_with_registry_opts, freq_decade, freq_linear, freq_oct,
+    ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
+    freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_opts, DeviceRegistry, SimOptions,
 };
 use fairchild_osdi::OsdiLibrary;
@@ -427,6 +428,41 @@ fn main() {
                 if cli.verbose {
                     eprintln!("info: transient complete: {} time-points [{:.1} ms]",
                         result.time.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                match cli.format {
+                    Format::Csv => {
+                        let mut buf = Vec::new();
+                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv(&csv, &probe_list);
+                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Format::Nutmeg => {
+                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                ran_something = true;
+            }
+
+            Analysis::Dc { src, start, stop, step, nested } => {
+                if cli.verbose {
+                    let extra = match nested {
+                        Some(n) => format!(" × {} {}..{}", n.src, n.start, n.stop),
+                        None    => String::new(),
+                    };
+                    eprintln!("info: running DC sweep on {src} ({start}..{stop} step={step}){extra}...");
+                }
+                let t0 = Instant::now();
+                let nested_arg = nested.as_ref().map(|n| (n.src.as_str(), n.start, n.stop, n.step));
+                let result = dc_sweep_with_registry_opts(
+                    &netlist, src, *start, *stop, *step, nested_arg, &registry, &opts
+                ).unwrap_or_else(|e| {
+                    eprintln!("error: DC sweep failed: {e}");
+                    std::process::exit(1);
+                });
+                if cli.verbose {
+                    eprintln!("info: DC sweep complete: {} point(s) [{:.1} ms]",
+                        result.n_points(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
                 match cli.format {
                     Format::Csv => {

@@ -257,4 +257,24 @@ pub enum Analysis {
     Tran { step: f64, stop: f64 },
     /// `.ac DEC|OCT|LIN <points> <fstart> <fstop>`
     Ac { variation: AcVariation, points: usize, fstart: f64, fstop: f64 },
+    /// `.dc SRC START STOP STEP [SRC2 START2 STOP2 STEP2]`
+    ///
+    /// First sweep is the outer loop; optional nested sweep is the inner loop.
+    /// Source names are stored lowercased to match element naming.
+    Dc {
+        src: String,
+        start: f64,
+        stop: f64,
+        step: f64,
+        nested: Option<DcSweepSpec>,
+    },
+}
+
+/// One leg of a `.dc` sweep (the nested form's inner specification).
+#[derive(Debug, Clone)]
+pub struct DcSweepSpec {
+    pub src: String,
+    pub start: f64,
+    pub stop: f64,
+    pub step: f64,
 }

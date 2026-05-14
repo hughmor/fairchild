@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use crate::{AcVariation, Analysis, Element, ModelCard, Netlist, ParseError, Waveform};
+use crate::{AcVariation, Analysis, DcSweepSpec, Element, ModelCard, Netlist, ParseError, Waveform};
 
 // ─── internal types ──────────────────────────────────────────────────────────
 
@@ -406,6 +406,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             netlist.analyses.push(parse_tran(&lc, *lineno)?);
         } else if lc.starts_with(".ac") {
             netlist.analyses.push(parse_ac(&lc, *lineno)?);
+        } else if lc.starts_with(".dc") {
+            netlist.analyses.push(parse_dc(&lc, *lineno)?);
         } else if lc.starts_with(".model") {
             if let Some(card) = parse_model(&lc, *lineno)? {
                 netlist.models.push(card);
@@ -516,6 +518,33 @@ fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
         step: parse_value(tokens[1], lineno)?,
         stop: parse_value(tokens[2], lineno)?,
     })
+}
+
+/// Parse `.dc SRC START STOP STEP [SRC2 START2 STOP2 STEP2]`.
+fn parse_dc(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 5 {
+        return Err(ParseError::FieldCount {
+            expected: "≥5 (.dc SRC START STOP STEP)",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    let src   = tokens[1].to_lowercase();
+    let start = parse_value(tokens[2], lineno)?;
+    let stop  = parse_value(tokens[3], lineno)?;
+    let step  = parse_value(tokens[4], lineno)?;
+    let nested = if tokens.len() >= 9 {
+        Some(DcSweepSpec {
+            src:   tokens[5].to_lowercase(),
+            start: parse_value(tokens[6], lineno)?,
+            stop:  parse_value(tokens[7], lineno)?,
+            step:  parse_value(tokens[8], lineno)?,
+        })
+    } else {
+        None
+    };
+    Ok(Analysis::Dc { src, start, stop, step, nested })
 }
 
 fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
@@ -1084,6 +1113,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_dc_sweep_single() {
+        let input = "* dc\nV1 in 0 DC 0\nR1 in 0 1k\n.dc V1 0 5 0.1\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.analyses[0] {
+            Analysis::Dc { src, start, stop, step, nested } => {
+                assert_eq!(src, "v1");
+                assert!((start - 0.0).abs() < 1e-12);
+                assert!((stop - 5.0).abs() < 1e-12);
+                assert!((step - 0.1).abs() < 1e-12);
+                assert!(nested.is_none());
+            }
+            _ => panic!("expected Dc analysis"),
+        }
+    }
+
+    #[test]
+    fn parse_dc_sweep_nested() {
+        let input = "* dc 2d\nV1 in 0 DC 0\nV2 g 0 DC 0\n.dc V1 0 5 0.5 V2 0 2 0.5\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        match &netlist.analyses[0] {
+            Analysis::Dc { src, nested, .. } => {
+                assert_eq!(src, "v1");
+                let n = nested.as_ref().expect("nested sweep");
+                assert_eq!(n.src, "v2");
+                assert!((n.stop - 2.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Dc analysis"),
+        }
+    }
+
+    #[test]
     fn parse_options_directive_stores_pairs() {
         let input = "* opts\nV1 in 0 DC 1\nR1 in out 1k\n\
                      .options reltol=1e-5 gmin=1p method=be\n.op\n.end\n";
@@ -1390,11 +1450,13 @@ R1 a b 1k
 
     #[test]
     fn unsupported_directive_errors() {
+        // `.include` works via parse_spice_file (this raw parser would see the
+        // .include-resolved string).  `.dc`, `.options` are also supported.
+        // Anything still missing should error loudly so the user knows.
         let cases = [
-            "* test\nV1 a 0 DC 1\n.include \"other.sp\"\n.op\n.end\n",
             "* test\nV1 a 0 DC 1\n.ic V(a)=1\n.op\n.end\n",
             "* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n.end\n",
-            "* test\nV1 a 0 DC 1\n.dc V1 0 5 0.1\n.op\n.end\n",
+            "* test\nV1 a 0 DC 1\n.func myfn(x)=x*x\n.op\n.end\n",
         ];
         for netlist_str in &cases {
             let result = parse_spice(netlist_str);
