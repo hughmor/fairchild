@@ -8,6 +8,7 @@ use clap::{Parser, ValueEnum};
 
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
+    evaluate_measurements,
     freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_opts, DeviceRegistry, SimOptions,
 };
@@ -439,6 +440,13 @@ fn main() {
                     }
                     Format::Nutmeg => {
                         result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                // Evaluate `.measure` directives on the just-finished tran run.
+                if !netlist.measurements.is_empty() {
+                    let ms = evaluate_measurements(&netlist.measurements, &result);
+                    for m in ms {
+                        eprintln!("{:<24} = {:.6e}", m.name, m.value);
                     }
                 }
                 ran_something = true;

@@ -24,6 +24,9 @@ pub struct Netlist {
     /// Values are stored as strings so the consumer (typically `SimOptions::set`)
     /// can parse SPICE suffixes and method names appropriately.
     pub options: Vec<(String, String)>,
+    /// `.measure` directives — evaluated by the consumer (CLI / Python) on a
+    /// completed TranResult / SimResult.
+    pub measurements: Vec<Measurement>,
     /// `.ic V(node)=value …`: initial conditions for transient analysis.
     /// Applied at t=0 *only when* `UIC` is enabled (via `.tran … UIC` or
     /// `.options uic=1`).  Otherwise the DC operating point is used as t=0.
@@ -305,6 +308,40 @@ pub enum Element {
 /// Whether a B-element is a voltage or current source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BehavioralKind { Voltage, Current }
+
+/// A `.measure tran|dc|ac NAME …` directive.
+#[derive(Debug, Clone)]
+pub struct Measurement {
+    /// User-visible name (e.g. "tpd", "vmax").
+    pub name: String,
+    /// Analysis context — currently only `Tran` is honoured by the post-processor.
+    pub analysis: MeasAnalysis,
+    pub kind: MeasKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasAnalysis { Tran, Dc, Ac }
+
+/// What to compute.
+#[derive(Debug, Clone)]
+pub enum MeasKind {
+    /// FIND expr AT=t   — evaluate `expr` at time `t`.
+    FindAt    { expr: expr::Expr, at: f64 },
+    /// FIND expr WHEN cond — first time `cond` is true; report `expr` there.
+    FindWhen  { expr: expr::Expr, cond: expr::Expr, cross: usize },
+    /// Aggregate operation over [from, to].
+    Aggregate { op: MeasOp, expr: expr::Expr, from: Option<f64>, to: Option<f64> },
+    /// DERIV expr AT=t — numerical derivative at t.
+    DerivAt   { expr: expr::Expr, at: f64 },
+    /// TRIG cond1 [val=v1] [cross=n] TARG cond2 [val=v2] [cross=n] — delay measurement.
+    TrigTarg  {
+        trig_expr: expr::Expr, trig_val: f64, trig_cross: usize,
+        targ_expr: expr::Expr, targ_val: f64, targ_cross: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasOp { Max, Min, Avg, Rms, Pp, Integ }
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.
 #[derive(Debug, Clone)]

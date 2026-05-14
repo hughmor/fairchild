@@ -14,6 +14,7 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
+    evaluate_measurements,
     freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
     AcResult, DcSweepResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
@@ -177,6 +178,9 @@ enum SimResultInner {
 #[pyclass]
 pub struct SimResult {
     inner: SimResultInner,
+    /// `.measure` scalars produced from this run.  Empty for analyses that
+    /// don't support measurements (DC OP, AC, DC sweep).
+    measurements: Vec<(String, f64)>,
 }
 
 #[pymethods]
@@ -275,6 +279,18 @@ impl SimResult {
     /// True if this is a DC sweep result.
     #[getter]
     fn is_dc_sweep(&self) -> bool { matches!(&self.inner, SimResultInner::DcSweep(_)) }
+
+    /// Return all `.measure` scalar values produced from this run.
+    ///
+    /// Returns a Python dict mapping measurement name → value.  Empty for
+    /// analyses that don't support measurements (DC OP, AC, DC sweep).
+    fn measurements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new_bound(py);
+        for (k, v) in &self.measurements {
+            d.set_item(k, *v)?;
+        }
+        Ok(d)
+    }
 }
 
 impl SimResult {
@@ -509,13 +525,19 @@ impl Circuit {
             let result = dc_sweep_with_registry_opts(
                 &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts
             ).map_err(sim_err)?;
-            return Ok(SimResult { inner: SimResultInner::DcSweep(result) });
+            return Ok(SimResult {
+                inner: SimResultInner::DcSweep(result),
+                measurements: Vec::new(),
+            });
         }
 
         match analysis_lc.as_str() {
             "op" | "dc" => {
                 let result = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
-                Ok(SimResult { inner: SimResultInner::Dc(result) })
+                Ok(SimResult {
+                    inner: SimResultInner::Dc(result),
+                    measurements: Vec::new(),
+                })
             }
             "tran" | "transient" => {
                 let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
@@ -524,12 +546,14 @@ impl Circuit {
                 } else {
                     tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
                 }.map_err(sim_err)?;
-                Ok(SimResult { inner: SimResultInner::Tran(result) })
+                let measurements = evaluate_measurements(&nl.measurements, &result)
+                    .into_iter().map(|m| (m.name, m.value)).collect();
+                Ok(SimResult { inner: SimResultInner::Tran(result), measurements })
             }
             "ac" => {
                 let (freqs, src) = parse_ac_kwargs(kwargs)?;
                 let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
-                Ok(SimResult { inner: SimResultInner::Ac(result) })
+                Ok(SimResult { inner: SimResultInner::Ac(result), measurements: Vec::new() })
             }
             other => Err(PyRuntimeError::new_err(format!(
                 "unknown analysis '{}'; use 'op', 'tran', 'ac', or 'dc_sweep'",
@@ -571,7 +595,7 @@ impl Circuit {
             let result = match analysis.to_lowercase().as_str() {
                 "op" | "dc" => {
                     let r = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
-                    SimResult { inner: SimResultInner::Dc(r) }
+                    SimResult { inner: SimResultInner::Dc(r), measurements: Vec::new() }
                 }
                 "tran" | "transient" => {
                     let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
@@ -580,12 +604,14 @@ impl Circuit {
                     } else {
                         tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
                     }.map_err(sim_err)?;
-                    SimResult { inner: SimResultInner::Tran(r) }
+                    let measurements = evaluate_measurements(&nl.measurements, &r)
+                        .into_iter().map(|m| (m.name, m.value)).collect();
+                    SimResult { inner: SimResultInner::Tran(r), measurements }
                 }
                 "ac" => {
                     let (freqs, src) = parse_ac_kwargs(kwargs)?;
                     let r = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
-                    SimResult { inner: SimResultInner::Ac(r) }
+                    SimResult { inner: SimResultInner::Ac(r), measurements: Vec::new() }
                 }
                 other => {
                     return Err(PyRuntimeError::new_err(format!(
