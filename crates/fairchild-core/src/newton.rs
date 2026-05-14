@@ -250,10 +250,22 @@ fn gmin_stepping(
     Ok(x)
 }
 
+/// Build an initial `x` vector for DC NR, seeding from any `.nodeset` entries
+/// in the netlist.  Unknown nodes are silently ignored.
+fn build_x0_from_nodeset(netlist: &Netlist, topo: &CircuitTopology) -> Vec<f64> {
+    let mut x0 = vec![0.0f64; topo.size];
+    for (name, value) in &netlist.nodeset {
+        if let Some(&i) = topo.node_index.get(name) {
+            x0[i] = *value;
+        }
+    }
+    x0
+}
+
 /// DC operating-point with explicit `SimOptions`.
 ///
 /// Convergence strategy (in order):
-///   1. Direct Newton-Raphson from x=0 (or `.nodeset` seed when supported).
+///   1. Direct Newton-Raphson from the `.nodeset` seed (or x=0).
 ///   2. Source stepping: ramp sources from 0 → full value.
 ///   3. GMIN stepping: add large diagonal conductance, ramp to standard GMIN.
 pub fn dc_op_nr_with_registry_opts(
@@ -265,7 +277,7 @@ pub fn dc_op_nr_with_registry_opts(
     let topo = CircuitTopology::build(netlist);
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
-    let x0 = vec![0.0f64; topo.size];
+    let x0 = build_x0_from_nodeset(netlist, &topo);
 
     if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, x0.clone(), 1.0, 0.0) {
         return Ok(NrResult { topo, x, iters: 1 });

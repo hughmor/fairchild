@@ -322,13 +322,26 @@ pub fn tran_nr_with_registry_opts(
     let ctx = SimContext::default();
     let mode = opts.method;
 
-    let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-    let topo = dc.topo;
-    let mut x = dc.x;
+    // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
+    // Without UIC (the default): use DC OP as t=0 condition.
+    let (topo, mut x) = if opts.uic {
+        let topo = CircuitTopology::build(netlist);
+        let mut x = vec![0.0f64; topo.size];
+        for (name, value) in &netlist.ic {
+            if let Some(&i) = topo.node_index.get(name) {
+                x[i] = *value;
+            }
+        }
+        (topo, x)
+    } else {
+        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
+        (dc.topo, dc.x)
+    };
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
 
-    // Seed x_tprev from DC OP so reactive history is defined before the first step.
+    // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
+    // history is defined before the first step.
     for dev in &mut devices {
         dev.commit_timestep(&x);
     }
@@ -473,9 +486,19 @@ pub fn tran_nr_with_registry_var_opts(
 ) -> Result<TranResult, SimError> {
     let ctx = SimContext::default();
     let step = step.min(opts.max_step);
-    let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-    let topo = dc.topo;
-    let mut x = dc.x;
+    let (topo, mut x) = if opts.uic {
+        let topo = CircuitTopology::build(netlist);
+        let mut x = vec![0.0f64; topo.size];
+        for (name, value) in &netlist.ic {
+            if let Some(&i) = topo.node_index.get(name) {
+                x[i] = *value;
+            }
+        }
+        (topo, x)
+    } else {
+        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
+        (dc.topo, dc.x)
+    };
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
 
     let n_nodes = topo.n_nodes();
@@ -916,6 +939,41 @@ mod tests {
             (v_post_rise - 5.0).abs() < 0.01,
             "V(out) at t=1.1µs should be ≈5V after rise; got {v_post_rise:.4}"
         );
+    }
+
+    // ---------- .ic / .nodeset / UIC tests ----------
+
+    #[test]
+    fn uic_uses_ic_at_t0() {
+        // RC circuit with V1=0 at t=0 (then ramps to 1V via PULSE).  Without
+        // UIC, V(out) at t=0 is the DC OP = 0V.  With UIC and `.ic V(out)=0.5`,
+        // V(out) at t=0 should be 0.5V.
+        let net = fairchild_parser::parse_spice(
+            "* uic test\nV1 in 0 PULSE(0 1 1m 1n 1n 100m 200m)\n\
+             R1 in out 1k\nC1 out 0 1u\n\
+             .ic V(out)=0.5\n\
+             .options uic=1\n\
+             .tran 10u 100u\n.end\n"
+        ).unwrap();
+        let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
+        let v0 = r.voltage_at("out", 0.0).unwrap();
+        assert!((v0 - 0.5).abs() < 1e-6,
+            "UIC: V(out) at t=0 should equal .ic value (0.5), got {v0}");
+    }
+
+    #[test]
+    fn no_uic_starts_from_dc_op() {
+        // Without UIC the t=0 voltage comes from the DC OP, ignoring .ic.
+        let net = fairchild_parser::parse_spice(
+            "* no uic\nV1 in 0 PULSE(0 1 1m 1n 1n 100m 200m)\n\
+             R1 in out 1k\nC1 out 0 1u\n\
+             .ic V(out)=0.5\n\
+             .tran 10u 100u\n.end\n"
+        ).unwrap();
+        let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
+        let v0 = r.voltage_at("out", 0.0).unwrap();
+        assert!(v0.abs() < 1e-6,
+            "no UIC: V(out) at t=0 should be DC OP (0V), got {v0}");
     }
 
     #[test]

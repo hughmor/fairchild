@@ -320,6 +320,39 @@ fn is_silent_directive(lc: &str) -> bool {
         || lc.starts_with(".backanno")
 }
 
+/// Parse `.ic V(n1)=val V(n2)=val ...` or `.nodeset V(n)=val ...`.
+///
+/// Returns a `Vec<(node, value)>` (node name lowercased, "gnd" canonicalised).
+/// Tokens that don't match the `V(<name>)=<value>` shape are silently ignored
+/// (they're typically the leading `.ic`/`.nodeset` keyword itself).
+fn parse_node_assignments(line: &str) -> Result<Vec<(String, f64)>, ParseError> {
+    let raw: String = line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+    let mut out = Vec::new();
+
+    // Pre-process: collapse spaces around `=` and inside `V(…)` so we can
+    // tokenize on whitespace.
+    let cleaned: String = raw.replace(" =", "=").replace("= ", "=");
+
+    for tok in cleaned.split_whitespace() {
+        // Accept either V(name)=val or name=val (and case-insensitively v / V).
+        let (lhs, rhs) = match tok.split_once('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        let lhs_lc = lhs.to_lowercase();
+        let name = if let Some(inner) = lhs_lc.strip_prefix("v(").and_then(|s| s.strip_suffix(')')) {
+            inner.to_string()
+        } else {
+            lhs_lc.clone()
+        };
+        let value: f64 = parse_value(rhs, 0).unwrap_or_else(|_| {
+            rhs.parse::<f64>().unwrap_or(0.0)
+        });
+        out.push((canon_node(&name), value));
+    }
+    Ok(out)
+}
+
 /// Parse `.options key=val key=val ...` into a list of `(key, value)` pairs.
 ///
 /// Bare-flag tokens (no `=`) are stored as `("key", "1")` so `SimOptions::set`
@@ -417,6 +450,10 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             if tokens.len() >= 2 {
                 netlist.osdi_paths.push(tokens[1].to_string());
             }
+        } else if lc.starts_with(".ic") {
+            netlist.ic.extend(parse_node_assignments(trimmed)?);
+        } else if lc.starts_with(".nodeset") {
+            netlist.nodeset.extend(parse_node_assignments(trimmed)?);
         } else if lc.starts_with('.') {
             if !is_silent_directive(&lc) {
                 let directive = lc.split_whitespace().next().unwrap_or(&lc).to_string();
@@ -1628,11 +1665,7 @@ R1 a b 1k
 
     #[test]
     fn unsupported_directive_errors() {
-        // `.include` works via parse_spice_file (this raw parser would see the
-        // .include-resolved string).  `.dc`, `.options` are also supported.
-        // Anything still missing should error loudly so the user knows.
         let cases = [
-            "* test\nV1 a 0 DC 1\n.ic V(a)=1\n.op\n.end\n",
             "* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n.end\n",
             "* test\nV1 a 0 DC 1\n.func myfn(x)=x*x\n.op\n.end\n",
         ];
@@ -1643,6 +1676,28 @@ R1 a b 1k
                 "expected UnsupportedDirective for: {netlist_str}, got: {result:?}",
             );
         }
+    }
+
+    #[test]
+    fn parse_ic_directive() {
+        let input = "* ic\nV1 a 0 DC 1\nR1 a out 1k\nC1 out 0 1u\n\
+                     .ic V(out)=0.5 V(a)=1.0\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.ic.len(), 2);
+        // Lookup map by name.
+        let m: std::collections::HashMap<_, _> = netlist.ic.iter().cloned().collect();
+        assert!((m["out"] - 0.5).abs() < 1e-12);
+        assert!((m["a"] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parse_nodeset_directive() {
+        let input = "* nodeset\nV1 a 0 DC 1\nR1 a out 1k\n\
+                     .nodeset V(out)=0.7\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.nodeset.len(), 1);
+        assert_eq!(netlist.nodeset[0].0, "out");
+        assert!((netlist.nodeset[0].1 - 0.7).abs() < 1e-12);
     }
 
     #[test]

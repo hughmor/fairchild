@@ -22,6 +22,13 @@ pub struct Netlist {
     /// Values are stored as strings so the consumer (typically `SimOptions::set`)
     /// can parse SPICE suffixes and method names appropriately.
     pub options: Vec<(String, String)>,
+    /// `.ic V(node)=value …`: initial conditions for transient analysis.
+    /// Applied at t=0 *only when* `UIC` is enabled (via `.tran … UIC` or
+    /// `.options uic=1`).  Otherwise the DC operating point is used as t=0.
+    pub ic: Vec<(NodeName, f64)>,
+    /// `.nodeset V(node)=value …`: initial guess for the DC operating point
+    /// Newton-Raphson.  Always applied if present.
+    pub nodeset: Vec<(NodeName, f64)>,
 }
 
 /// Waveform specification for independent sources.
