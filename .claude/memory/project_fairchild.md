@@ -20,6 +20,7 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | 3 — Python bindings | ✅ done | `fairchild-py`: Circuit/SimResult/WaveformSource, op/tran/AC, numpy arrays, maturin |
 | 3.5 — Parser improvements | ✅ done | `.subckt`/`.ends` two-pass flattening, `.param` global params, `{param}` substitution, `.include` pre-processing, unsupported-directive errors; branch `feature/subckt-support` |
 | 3.6 — Compound photonic subckts | ✅ done | All-pass MRR (PN+thermo) and add-drop MRR (PN) compound subckts verified; MZI subckts created but have known two-DC NR convergence bug (use monolithic .osdi models) |
+| 3.7 — WDM Tier 2 + KiCAD integration | ✅ done | Bus vector expansion `net[M..N]`→`net_M..net_N`; `.optical_bus N re im wl`; `scripts/kicad_to_fairchild.py` post-processor; `kicad_integration.md` setup guide (not committed); 2-channel smoketest verified ✓ |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
 
@@ -63,6 +64,10 @@ crates/
 **`.include` pre-processing** — `resolve_includes()` in `fairchild-parser/src/spice.rs` handles `.include "path"` before the logical-line tokenizer sees the input. Recursive includes supported (depth limit 16). CLI and Python bindings use `parse_spice_file(path)` which calls `resolve_includes` first; the raw `parse_spice(&str)` remains unchanged (no include support, for programmatic use). Relative paths resolved from the referencing file's parent directory.
 
 **Two-DC compound subckt NR bug** — A compound subckt where BOTH outputs of DC1 feed BOTH inputs of DC2 (i.e., DC1.b1→DC2.a1, DC1.b2→DC2.a2) causes NR divergence. This pattern appears in MZI modulators. Diagnostic confirmed the bug occurs even with kappa=0 (identity passthrough), ruling out coupler math. Root cause: suspected competing cross-Jacobian entries from the two OSDI instances on shared nodes. **Workaround: use monolithic `.osdi` MZI models** (mzi_modulator_pn_l1.osdi, mzi_modulator_thermo_l1.osdi). The compound `.spc` files (mzi_pn_l1.spc, mzi_thermo_l1.spc) are kept in the repo with warning banners. MRR subckts (DC + PS feedback) work correctly — the topology avoids the two-DC pattern.
+
+**WDM bus vector expansion** — `net[M..N]` in X-element nets or `.optical` lists expands to `net_M, net_{M+1}, ..., net_N` (inclusive, `_`-separated). The `.optical_bus N re_base im_base wl_base` directive generates 3N channel-interleaved optical net entries. This is parser-level syntactic sugar only — existing VA models are still single-channel, with no cross-channel physics (XPM/FWM). `scripts/kicad_to_fairchild.py` auto-generates the wrapper netlist from a KiCAD SPICE export.
+
+**KiCAD integration** — `kicad_integration.md` (not committed, lives at repo root) is the setup guide for KiCAD symbol library + circuit creation. It was written referencing the old `Spice_*` property system; KiCAD 7+ uses the `Sim.*` namespace (`Sim.Device`, `Sim.Name`, `Sim.Pins`, `Sim.Params`). Needs verification against what user sees in KiCAD 10 Symbol Editor and possible doc update.
 
 ---
 
