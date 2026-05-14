@@ -160,6 +160,7 @@ pub fn ac_analysis_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<AcResult, SimError> {
+    crate::connectivity::check_connectivity(netlist)?;
     let ctx = SimContext::default();
     let topo = CircuitTopology::build(netlist);
     let n_nodes = topo.n_nodes();

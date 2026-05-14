@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
+use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
@@ -273,6 +274,7 @@ pub fn dc_op_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
+    check_connectivity(netlist)?;
     let ctx = SimContext::default();
     let topo = CircuitTopology::build(netlist);
 

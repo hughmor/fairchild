@@ -14,4 +14,6 @@ pub enum SimError {
     UnknownModel(String),
     #[error("Newton-Raphson did not converge after {iters} iterations")]
     NoConvergence { iters: usize },
+    #[error("floating node(s) detected: {} have no DC path to ground (R/L/V path). Add a series resistor or .nodeset.", nodes.join(", "))]
+    FloatingNodes { nodes: Vec<String> },
 }

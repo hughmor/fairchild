@@ -319,6 +319,7 @@ pub fn tran_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    crate::connectivity::check_connectivity(netlist)?;
     let ctx = SimContext::default();
     let mode = opts.method;
 
@@ -484,6 +485,7 @@ pub fn tran_nr_with_registry_var_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    crate::connectivity::check_connectivity(netlist)?;
     let ctx = SimContext::default();
     let step = step.min(opts.max_step);
     let (topo, mut x) = if opts.uic {
