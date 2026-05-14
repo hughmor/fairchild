@@ -1,0 +1,197 @@
+//! Solver tuning knobs.
+//!
+//! `SimOptions` is the single struct that owns every numerical parameter the
+//! solver consumes: tolerances, iteration limits, integration method, source-
+//! stepping parameters, etc.  CLI flags, the `.options` directive in a netlist,
+//! and Python kwargs all merge into one of these and pass it into the analysis
+//! entry points.
+
+use crate::tran::IntegratorMode;
+
+/// Numerical options consumed by every analysis entry point.
+///
+/// Defaults match the historic hardcoded SPICE-standard constants.  Override
+/// fields individually before passing to `dc_op_nr_with_options` /
+/// `tran_nr_with_options` / `ac_analysis_with_options`.
+#[derive(Debug, Clone)]
+pub struct SimOptions {
+    // ── convergence tolerances ─────────────────────────────────────────────
+    /// Relative tolerance on Newton update (typical 1e-3).
+    pub reltol: f64,
+    /// Absolute current tolerance (A); used by current-domain residuals.
+    pub abstol: f64,
+    /// Absolute node-voltage tolerance (V); convergence floor for voltage NR.
+    pub vntol: f64,
+    /// Maximum allowed |Δv| per NR iteration before damping (V).
+    pub vmax: f64,
+    /// Minimum conductance added to every diagonal entry (S).
+    pub gmin: f64,
+
+    // ── iteration limits ────────────────────────────────────────────────────
+    /// Max NR iterations per DC-OP solve (ngspice ITL1).
+    pub itl1: usize,
+    /// Max NR iterations per transient timestep (ngspice ITL4).
+    pub itl4: usize,
+    /// Max rejected transient steps before bailing (no ngspice equivalent).
+    pub max_rejections: usize,
+
+    // ── transient integration ──────────────────────────────────────────────
+    /// Integration method.  `BackwardEuler` is unconditionally stable;
+    /// `Trapezoidal` is second-order but can ring on discontinuities.
+    pub method: IntegratorMode,
+    /// Maximum allowed step size (s).  `f64::INFINITY` means "use whatever the
+    /// solver decides up to the .tran step argument."
+    pub max_step: f64,
+
+    // ── convergence aids ───────────────────────────────────────────────────
+    /// Initial extra GMIN added during GMIN-stepping (S).
+    pub gmin_max: f64,
+    /// Number of source-stepping increments to try before giving up.
+    pub srcsteps: usize,
+
+    // ── environment ────────────────────────────────────────────────────────
+    /// Circuit temperature (K).  Currently informational; future device models
+    /// will read it for thermal voltage etc.
+    pub temp_k: f64,
+
+    // ── transient initial conditions ───────────────────────────────────────
+    /// If true, skip the DC operating point at t=0 and instead seed every
+    /// node voltage from `.ic` directives (zero where unspecified).  Equivalent
+    /// to the `UIC` keyword on a `.tran` line.
+    pub uic: bool,
+}
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        SimOptions {
+            reltol:         1e-3,
+            abstol:         1e-12,
+            vntol:          1e-6,
+            vmax:           0.5,
+            gmin:           1e-12,
+            itl1:           150,
+            itl4:           150,
+            max_rejections: 30,
+            method:         IntegratorMode::Trapezoidal,
+            max_step:       f64::INFINITY,
+            gmin_max:       1.0,
+            srcsteps:       10,
+            temp_k:         300.15,
+            uic:            false,
+        }
+    }
+}
+
+impl SimOptions {
+    /// Apply a single `.options KEY=VALUE` token, returning `true` if recognised.
+    ///
+    /// Used by the parser's `.options` directive and by the CLI's `--opt KEY=VAL`
+    /// flag.  Unrecognised keys return `false` so the caller can warn.
+    pub fn set(&mut self, key: &str, value: &str) -> bool {
+        let key_lc = key.to_lowercase();
+        match key_lc.as_str() {
+            "reltol"  => self.reltol  = parse_num(value).unwrap_or(self.reltol),
+            "abstol"  => self.abstol  = parse_num(value).unwrap_or(self.abstol),
+            "vntol"   => self.vntol   = parse_num(value).unwrap_or(self.vntol),
+            "vmax"    => self.vmax    = parse_num(value).unwrap_or(self.vmax),
+            "gmin"    => self.gmin    = parse_num(value).unwrap_or(self.gmin),
+            "itl1"    => self.itl1    = parse_int(value).unwrap_or(self.itl1),
+            "itl4"    => self.itl4    = parse_int(value).unwrap_or(self.itl4),
+            "maxstep" | "max_step" => self.max_step = parse_num(value).unwrap_or(self.max_step),
+            "gmin_max" | "gminmax" => self.gmin_max = parse_num(value).unwrap_or(self.gmin_max),
+            "srcsteps" | "srcmax"  => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
+            "temp"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "tnom"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "max_rejections" => self.max_rejections = parse_int(value).unwrap_or(self.max_rejections),
+            "method" => {
+                match value.to_lowercase().as_str() {
+                    "be" | "backwardeuler" | "gear1" => self.method = IntegratorMode::BackwardEuler,
+                    "tr" | "trap" | "trapezoidal"    => self.method = IntegratorMode::Trapezoidal,
+                    _ => return false,
+                }
+            }
+            "uic" => {
+                self.uic = matches!(value.to_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on");
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Parse a SPICE-style number with optional suffix (k, meg, m, u, n, p, f).
+fn parse_num(s: &str) -> Option<f64> {
+    let s_lc = s.to_lowercase();
+    let (num, mult) = if let Some(n) = s_lc.strip_suffix("meg") { (n, 1e6) }
+        else if let Some(n) = s_lc.strip_suffix('k') { (n, 1e3) }
+        else if let Some(n) = s_lc.strip_suffix('m') { (n, 1e-3) }
+        else if let Some(n) = s_lc.strip_suffix('u') { (n, 1e-6) }
+        else if let Some(n) = s_lc.strip_suffix('n') { (n, 1e-9) }
+        else if let Some(n) = s_lc.strip_suffix('p') { (n, 1e-12) }
+        else if let Some(n) = s_lc.strip_suffix('f') { (n, 1e-15) }
+        else { (s_lc.as_str(), 1.0) };
+    num.parse::<f64>().ok().map(|v| v * mult)
+}
+
+fn parse_int(s: &str) -> Option<usize> {
+    s.parse::<usize>().ok().or_else(|| parse_num(s).map(|v| v as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_legacy_constants() {
+        let o = SimOptions::default();
+        assert_eq!(o.reltol, 1e-3);
+        assert_eq!(o.vntol, 1e-6);
+        assert_eq!(o.vmax, 0.5);
+        assert_eq!(o.gmin, 1e-12);
+        assert_eq!(o.itl1, 150);
+        assert!(matches!(o.method, IntegratorMode::Trapezoidal));
+    }
+
+    #[test]
+    fn set_recognised_key() {
+        let mut o = SimOptions::default();
+        assert!(o.set("reltol", "1e-5"));
+        assert_eq!(o.reltol, 1e-5);
+        assert!(o.set("gmin", "1p"));
+        assert!((o.gmin - 1e-12).abs() < 1e-18);
+        assert!(o.set("itl1", "300"));
+        assert_eq!(o.itl1, 300);
+    }
+
+    #[test]
+    fn set_method() {
+        let mut o = SimOptions::default();
+        assert!(o.set("method", "be"));
+        assert!(matches!(o.method, IntegratorMode::BackwardEuler));
+        assert!(o.set("method", "tr"));
+        assert!(matches!(o.method, IntegratorMode::Trapezoidal));
+    }
+
+    #[test]
+    fn unknown_key_returns_false() {
+        let mut o = SimOptions::default();
+        assert!(!o.set("not_a_key", "1"));
+    }
+
+    #[test]
+    fn temp_converts_celsius_to_kelvin() {
+        let mut o = SimOptions::default();
+        assert!(o.set("temp", "27"));
+        assert!((o.temp_k - 300.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uic_flag() {
+        let mut o = SimOptions::default();
+        assert!(o.set("uic", "1"));
+        assert!(o.uic);
+        assert!(o.set("uic", "0"));
+        assert!(!o.uic);
+    }
+}

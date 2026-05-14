@@ -23,7 +23,8 @@ use fairchild_parser::{Element, Netlist};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
-use crate::newton::{build_devices, GMIN};
+use crate::newton::build_devices;
+use crate::options::SimOptions;
 use crate::device::{Device, EvalFlags, SimContext};
 use crate::solver::lu_solve;
 
@@ -148,6 +149,17 @@ pub fn ac_analysis(
     ac_source: Option<&str>,
     registry: &DeviceRegistry,
 ) -> Result<AcResult, SimError> {
+    ac_analysis_opts(netlist, freqs, ac_source, registry, &SimOptions::default())
+}
+
+/// AC analysis with explicit `SimOptions`.
+pub fn ac_analysis_opts(
+    netlist: &Netlist,
+    freqs: &[f64],
+    ac_source: Option<&str>,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+) -> Result<AcResult, SimError> {
     let ctx = SimContext::default();
     let topo = CircuitTopology::build(netlist);
     let n_nodes = topo.n_nodes();
@@ -156,7 +168,7 @@ pub fn ac_analysis(
 
     // --- DC operating point ---
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
-    let x0 = dc_op(&topo, netlist, &mut devices, &ctx)?;
+    let x0 = dc_op(&topo, netlist, &mut devices, &ctx, opts)?;
 
     // --- Small-signal G matrix (real, from DC Jacobian at x0) ---
     // Re-stamp the linear passive network.
@@ -176,7 +188,7 @@ pub fn ac_analysis(
     }
     // GMIN
     for i in 0..n_nodes {
-        g_mat[i][i] += GMIN;
+        g_mat[i][i] += opts.gmin;
     }
 
     // --- Capacitance matrix C (purely imaginary part of Y) ---
@@ -263,12 +275,13 @@ fn dc_op(
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
+    opts: &SimOptions,
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
     let mut x = vec![0.0f64; topo.size];
 
-    for _ in 0..crate::newton::MAX_ITER {
+    for _ in 0..opts.itl1 {
         let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
         for dev in devices.iter_mut() {
             dev.eval(&x, EvalFlags::dc(), ctx);
@@ -276,21 +289,21 @@ fn dc_op(
             dev.load_jacobian(&mut mat);
         }
         for i in 0..n_nodes {
-            mat.a[i][i] += GMIN;
+            mat.a[i][i] += opts.gmin;
         }
         let x_new = lu_solve(&mat.a, &mat.b)?;
         let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs()).fold(0.0f64, f64::max);
-        let x_next: Vec<f64> = if max_dv > crate::newton::VMAX {
-            let scale = crate::newton::VMAX / max_dv;
+        let x_next: Vec<f64> = if max_dv > opts.vmax {
+            let scale = opts.vmax / max_dv;
             x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
         } else { x_new };
         let converged = x_next.iter().zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < crate::newton::VNTOL + crate::newton::RELTOL * n.abs());
+            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
         x = x_next;
         if converged { return Ok(x); }
     }
-    Err(SimError::NoConvergence { iters: crate::newton::MAX_ITER })
+    Err(SimError::NoConvergence { iters: opts.itl1 })
 }
 
 /// Stamp a 2-terminal passive element value into a matrix (G or C).

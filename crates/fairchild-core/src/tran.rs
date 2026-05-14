@@ -17,7 +17,8 @@ use crate::mna::{
     ind_companion, ind_companion_be_to_tr, ind_companion_tr_advance,
     stamp_netlist, CircuitTopology,
 };
-use crate::newton::{build_devices, dc_op_nr_with_registry, GMIN, VMAX, VNTOL, RELTOL, MAX_ITER};
+use crate::newton::{build_devices, dc_op_nr_with_registry_opts};
+use crate::options::SimOptions;
 use crate::solver::lu_solve;
 
 /// Transient integration method.
@@ -299,19 +300,27 @@ pub fn tran_nr_with_registry(
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    tran_nr_with_registry_mode(netlist, step, stop, registry, IntegratorMode::BackwardEuler)
+    let mut opts = SimOptions::default();
+    opts.method = IntegratorMode::BackwardEuler;
+    tran_nr_with_registry_opts(netlist, step, stop, registry, &opts)
 }
 
-fn tran_nr_with_registry_mode(
+/// Fixed-step transient with explicit `SimOptions`.
+///
+/// The integration method (`BackwardEuler` or `Trapezoidal`) comes from
+/// `opts.method`.  Tolerances, max NR iterations, gmin, vmax, etc. all read
+/// from `opts`.
+pub fn tran_nr_with_registry_opts(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
-    mode: IntegratorMode,
+    opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
     let ctx = SimContext::default();
+    let mode = opts.method;
 
-    let dc = dc_op_nr_with_registry(netlist, registry)?;
+    let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
     let topo = dc.topo;
     let mut x = dc.x;
 
@@ -321,6 +330,9 @@ fn tran_nr_with_registry_mode(
     for dev in &mut devices {
         dev.commit_timestep(&x);
     }
+
+    // Honour opts.max_step as an upper bound on the step size.
+    let step = step.min(opts.max_step);
 
     // Reactive companion state seeded from the DC OP.
     let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x, mode);
@@ -344,7 +356,7 @@ fn tran_nr_with_registry_mode(
     loop {
         // --- NR loop for this time step ---
         let alpha = 1.0 / step;
-        for _iter in 0..MAX_ITER {
+        for _iter in 0..opts.itl4 {
             let mut mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
 
             for dev in &mut devices {
@@ -354,7 +366,7 @@ fn tran_nr_with_registry_mode(
             }
 
             for i in 0..topo.n_nodes() {
-                mat.a[i][i] += GMIN;
+                mat.a[i][i] += opts.gmin;
             }
 
             let x_new = lu_solve(&mat.a, &mat.b)?;
@@ -365,8 +377,8 @@ fn tran_nr_with_registry_mode(
                 .map(|(n, o)| (n - o).abs())
                 .fold(0.0f64, f64::max);
 
-            let x_next: Vec<f64> = if max_dv > VMAX {
-                let scale = VMAX / max_dv;
+            let x_next: Vec<f64> = if max_dv > opts.vmax {
+                let scale = opts.vmax / max_dv;
                 x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
             } else {
                 x_new
@@ -374,7 +386,7 @@ fn tran_nr_with_registry_mode(
 
             let converged = x_next.iter()
                 .zip(x.iter())
-                .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
+                .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
             x = x_next;
             if converged { break; }
@@ -404,15 +416,15 @@ pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, Si
 }
 
 /// Fixed-step Trapezoidal Rule transient with Newton-Raphson and a pre-built registry.
-///
-/// Second-order accurate; same interface as `tran_nr_with_registry` but using TR integration.
 pub fn tran_nr_with_registry_tr(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    tran_nr_with_registry_mode(netlist, step, stop, registry, IntegratorMode::Trapezoidal)
+    let mut opts = SimOptions::default();
+    opts.method = IntegratorMode::Trapezoidal;
+    tran_nr_with_registry_opts(netlist, step, stop, registry, &opts)
 }
 
 /// Fixed-step Trapezoidal Rule transient using only built-in models from `.model` cards.
@@ -427,24 +439,35 @@ pub fn tran_nr_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult,
 // Variable-step BE + LTE nonlinear transient solver
 // ---------------------------------------------------------------------------
 
-const MAX_REJECTIONS: usize = 30;
-
 /// Variable-step Backward Euler transient with Newton-Raphson and LTE timestep control.
-///
-/// `step` is the maximum allowed timestep (upper bound). Every accepted internal step is
-/// stored; `TranResult::voltage_at` interpolates between them.
-///
-/// Timestep control uses a first-order predictor-corrector LTE estimate:
-///   LTE_norm = max |x_corr − x_pred| * 0.5 / (VNTOL + RELTOL·|x|)
-/// Accept if LTE_norm ≤ 1; adjust h_new = h·(0.9/LTE_norm)^0.5, clamped to [0.1h, 4h]·min(step).
 pub fn tran_nr_with_registry_var(
     netlist: &Netlist,
     step: f64,
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
+    tran_nr_with_registry_var_opts(netlist, step, stop, registry, &SimOptions::default())
+}
+
+/// Variable-step transient with explicit `SimOptions`.
+///
+/// `step` is the maximum allowed timestep (upper bound, further capped by
+/// `opts.max_step`).  Every accepted internal step is stored;
+/// `TranResult::voltage_at` interpolates between them.
+///
+/// Timestep control uses a first-order predictor-corrector LTE estimate:
+///   LTE_norm = max |x_corr − x_pred| * 0.5 / (vntol + reltol·|x|)
+/// Accept if LTE_norm ≤ 1; adjust h_new = h·(0.9/LTE_norm)^0.5, clamped to [0.1h, 4h]·min(step).
+pub fn tran_nr_with_registry_var_opts(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+) -> Result<TranResult, SimError> {
     let ctx = SimContext::default();
-    let dc = dc_op_nr_with_registry(netlist, registry)?;
+    let step = step.min(opts.max_step);
+    let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
     let topo = dc.topo;
     let mut x = dc.x;
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
@@ -559,7 +582,7 @@ pub fn tran_nr_with_registry_var(
         let mut x_try = x_pred.clone();
         let mut nr_converged = false;
 
-        for _iter in 0..MAX_ITER {
+        for _iter in 0..opts.itl4 {
             let mut mat = stamp_netlist(&topo, netlist, t_next, &cap_state, &ind_state);
 
             for dev in devices.iter_mut() {
@@ -569,7 +592,7 @@ pub fn tran_nr_with_registry_var(
             }
 
             for i in 0..n_nodes {
-                mat.a[i][i] += GMIN;
+                mat.a[i][i] += opts.gmin;
             }
 
             let x_new = lu_solve(&mat.a, &mat.b)?;
@@ -579,15 +602,15 @@ pub fn tran_nr_with_registry_var(
                 .map(|(n, o)| (n - o).abs())
                 .fold(0.0f64, f64::max);
 
-            let x_next: Vec<f64> = if max_dv > VMAX {
-                let scale = VMAX / max_dv;
+            let x_next: Vec<f64> = if max_dv > opts.vmax {
+                let scale = opts.vmax / max_dv;
                 x_try.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
             } else {
                 x_new
             };
 
             let converged = x_next.iter().zip(x_try.iter())
-                .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
+                .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
             x_try = x_next;
             if converged {
@@ -598,8 +621,8 @@ pub fn tran_nr_with_registry_var(
 
         if !nr_converged {
             consecutive_rejects += 1;
-            if consecutive_rejects > MAX_REJECTIONS {
-                return Err(SimError::NoConvergence { iters: MAX_ITER });
+            if consecutive_rejects > opts.max_rejections {
+                return Err(SimError::NoConvergence { iters: opts.itl4 });
             }
             h = (h_actual * 0.5).max(h_min);
             continue 'outer;
@@ -612,7 +635,7 @@ pub fn tran_nr_with_registry_var(
                 .take(n_nodes)
                 .filter(|(idx, _)| !forced_nodes.contains(idx))
                 .map(|(_, (xc, xp))| {
-                    (xc - xp).abs() * 0.5 / (VNTOL + RELTOL * xc.abs())
+                    (xc - xp).abs() * 0.5 / (opts.vntol + opts.reltol * xc.abs())
                 })
                 .fold(0.0f64, f64::max)
         } else {
@@ -659,8 +682,8 @@ pub fn tran_nr_with_registry_var(
             h = h.clamp(h_actual * 0.1, h_actual * 4.0).min(step);
         } else {
             consecutive_rejects += 1;
-            if consecutive_rejects > MAX_REJECTIONS {
-                return Err(SimError::NoConvergence { iters: MAX_ITER });
+            if consecutive_rejects > opts.max_rejections {
+                return Err(SimError::NoConvergence { iters: opts.itl4 });
             }
             h = (h_actual * (0.9 / lte_norm).sqrt()).max(h_min);
         }

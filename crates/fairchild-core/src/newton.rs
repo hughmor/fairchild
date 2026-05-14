@@ -6,17 +6,8 @@ use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
+use crate::options::SimOptions;
 use crate::solver::lu_solve;
-
-/// SPICE-standard convergence tolerances.
-pub(crate) const VNTOL: f64 = 1e-6;     // 1 μV absolute floor for voltages
-pub(crate) const RELTOL: f64 = 1e-3;    // 0.1 % relative tolerance
-/// Backup global step damping: max allowed Δ(node voltage) per iteration.
-pub(crate) const VMAX: f64 = 0.5;
-pub(crate) const MAX_ITER: usize = 150;
-/// Minimum conductance added to the diagonal to prevent near-singular matrices.
-/// Standard SPICE heuristic (ngspice default: 1e-12 S).
-pub(crate) const GMIN: f64 = 1e-12;
 
 /// Result of a nonlinear DC operating-point solve.
 pub struct NrResult {
@@ -92,9 +83,7 @@ impl NrResult {
     }
 }
 
-/// Build device instances from the Diode elements in a netlist via the registry.
-///
-/// Called by both `dc_op_nr` and `tran_nr`.
+/// Build device instances from the elements in a netlist via the registry.
 pub fn build_devices(
     netlist: &Netlist,
     topo: &CircuitTopology,
@@ -116,11 +105,9 @@ pub fn build_devices(
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                // Try the MOSFET-specific path first (built-in Level 1).
                 if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
                     devices.push(dev);
                 } else {
-                    // Fall back to the generic factory (OSDI or user-registered).
                     let factory = registry.get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     devices.push(factory(&[d, g, s, b], ctx));
@@ -133,7 +120,6 @@ pub fn build_devices(
                     .map(|net| topo.node_index.get(net).copied())
                     .collect();
                 let mut dev = factory(&terminals, ctx);
-                // Warn if net count doesn't match model's expected terminal count.
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
                     eprintln!(
@@ -154,15 +140,12 @@ pub fn build_devices(
 }
 
 /// Core Newton-Raphson loop at a fixed source scale and gmin.
-///
-/// `source_scale` ∈ [0,1]: scales all independent source amplitudes.
-/// `gmin_extra`: extra diagonal conductance added to every node (for GMIN stepping).
-/// Returns Ok(x) if converged within MAX_ITER, Err if not.
 fn nr_inner(
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
+    opts: &SimOptions,
     mut x: Vec<f64>,
     source_scale: f64,
     gmin_extra: f64,
@@ -170,7 +153,7 @@ fn nr_inner(
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
 
-    for _ in 0..MAX_ITER {
+    for _ in 0..opts.itl1 {
         let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
 
         for dev in devices.iter_mut() {
@@ -180,7 +163,7 @@ fn nr_inner(
         }
 
         for i in 0..n_nodes {
-            mat.a[i][i] += GMIN + gmin_extra;
+            mat.a[i][i] += opts.gmin + gmin_extra;
         }
 
         let x_new = lu_solve(&mat.a, &mat.b)?;
@@ -189,52 +172,50 @@ fn nr_inner(
             .map(|(n, o)| (n - o).abs())
             .fold(0.0f64, f64::max);
 
-        let x_next: Vec<f64> = if max_dv > VMAX {
-            let scale = VMAX / max_dv;
+        let x_next: Vec<f64> = if max_dv > opts.vmax {
+            let scale = opts.vmax / max_dv;
             x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
         } else {
             x_new
         };
 
         let converged = x_next.iter().zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < VNTOL + RELTOL * n.abs());
+            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
         x = x_next;
         if converged {
             return Ok(x);
         }
     }
-    Err(SimError::NoConvergence { iters: MAX_ITER })
+    Err(SimError::NoConvergence { iters: opts.itl1 })
 }
 
-/// Source-stepping homotopy: ramp sources from 0 → full value in at most `n_steps` increments.
-///
-/// Returns Ok(x) at full source values if the homotopy converges; Err if it can't even
-/// converge with tiny source steps.
+/// Source-stepping homotopy: ramp sources from 0 → full value in adaptive increments.
 fn source_stepping(
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
+    opts: &SimOptions,
     x0: Vec<f64>,
 ) -> Result<Vec<f64>, SimError> {
     let mut x = x0;
     let mut scale = 0.0_f64;
-    let mut ds = 0.1_f64;
+    let mut ds = 1.0_f64 / (opts.srcsteps as f64).max(1.0);
     let min_ds = 1e-6_f64;
 
     while scale < 1.0 {
         let next = (scale + ds).min(1.0);
-        match nr_inner(topo, netlist, devices, ctx, x.clone(), next, 0.0) {
+        match nr_inner(topo, netlist, devices, ctx, opts, x.clone(), next, 0.0) {
             Ok(x_new) => {
                 x = x_new;
                 scale = next;
-                ds = (ds * 2.0).min(0.2);
+                ds = (ds * 2.0).min(2.0 * (1.0 / opts.srcsteps.max(1) as f64));
             }
             Err(_) => {
                 ds *= 0.5;
                 if ds < min_ds {
-                    return Err(SimError::NoConvergence { iters: MAX_ITER });
+                    return Err(SimError::NoConvergence { iters: opts.itl1 });
                 }
             }
         }
@@ -242,43 +223,43 @@ fn source_stepping(
     Ok(x)
 }
 
-/// GMIN stepping: add a large artificial conductance to all nodes, solve, then ramp it
-/// down to the standard GMIN over logarithmic steps.
+/// GMIN stepping: add a large artificial conductance to all nodes, then ramp it down.
 fn gmin_stepping(
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
+    opts: &SimOptions,
 ) -> Result<Vec<f64>, SimError> {
-    let mut gmin_extra = 1.0_f64;  // Start at 1 S (≈ 1 Ω across every node)
-    let target = GMIN;
+    let mut gmin_extra = opts.gmin_max;
+    let target = opts.gmin;
     let mut x = vec![0.0f64; topo.size];
 
-    // Ramp down GMIN from 1 S to GMIN over ~12 decades in steps of ÷10.
     loop {
-        match nr_inner(topo, netlist, devices, ctx, x.clone(), 1.0, gmin_extra) {
+        match nr_inner(topo, netlist, devices, ctx, opts, x.clone(), 1.0, gmin_extra) {
             Ok(x_new) => {
                 x = x_new;
                 if gmin_extra <= target { break; }
                 gmin_extra = (gmin_extra * 0.1).max(target);
             }
             Err(_) => {
-                return Err(SimError::NoConvergence { iters: MAX_ITER });
+                return Err(SimError::NoConvergence { iters: opts.itl1 });
             }
         }
     }
     Ok(x)
 }
 
-/// DC operating-point with a pre-built registry (supports OSDI and built-in models).
+/// DC operating-point with explicit `SimOptions`.
 ///
 /// Convergence strategy (in order):
-///   1. Direct Newton-Raphson from x=0.
+///   1. Direct Newton-Raphson from x=0 (or `.nodeset` seed when supported).
 ///   2. Source stepping: ramp sources from 0 → full value.
 ///   3. GMIN stepping: add large diagonal conductance, ramp to standard GMIN.
-pub fn dc_op_nr_with_registry(
+pub fn dc_op_nr_with_registry_opts(
     netlist: &Netlist,
     registry: &DeviceRegistry,
+    opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
     let ctx = SimContext::default();
     let topo = CircuitTopology::build(netlist);
@@ -286,58 +267,73 @@ pub fn dc_op_nr_with_registry(
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
     let x0 = vec![0.0f64; topo.size];
 
-    // Strategy 1: direct NR.
-    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, x0.clone(), 1.0, 0.0) {
+    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, x0.clone(), 1.0, 0.0) {
         return Ok(NrResult { topo, x, iters: 1 });
     }
 
-    // Strategy 2: source stepping.
-    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, x0) {
+    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, x0) {
         return Ok(NrResult { topo, x, iters: 2 });
     }
 
-    // Strategy 3: GMIN stepping.
-    match gmin_stepping(&topo, netlist, &mut devices, &ctx) {
+    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts) {
         Ok(x) => Ok(NrResult { topo, x, iters: 3 }),
         Err(e) => Err(e),
     }
 }
 
+/// DC operating-point with default `SimOptions`.
+pub fn dc_op_nr_with_registry(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+) -> Result<NrResult, SimError> {
+    dc_op_nr_with_registry_opts(netlist, registry, &SimOptions::default())
+}
+
 /// DC operating-point with pre-built devices (for sweeps / parametric analysis).
-///
-/// Unlike `dc_op_nr_with_registry`, this does NOT rebuild devices from the netlist.
-/// The caller is responsible for constructing devices and setting any parameters
-/// (e.g., wavelength_nm for optical devices) before calling this function.
-///
-/// `topo` must have been built from the same `netlist` that was used to create the devices.
+pub fn dc_op_nr_with_devices_opts(
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    devices: &mut Vec<Box<dyn Device>>,
+    ctx: &SimContext,
+    opts: &SimOptions,
+) -> Result<NrResult, SimError> {
+    let x0 = vec![0.0f64; topo.size];
+
+    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, x0.clone(), 1.0, 0.0) {
+        return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
+    }
+
+    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, x0) {
+        return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
+    }
+
+    match gmin_stepping(topo, netlist, devices, ctx, opts) {
+        Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
+        Err(e) => Err(e),
+    }
+}
+
+/// DC operating-point with pre-built devices, default options.
 pub fn dc_op_nr_with_devices(
     netlist: &Netlist,
     topo: &CircuitTopology,
     devices: &mut Vec<Box<dyn Device>>,
     ctx: &SimContext,
 ) -> Result<NrResult, SimError> {
-    let x0 = vec![0.0f64; topo.size];
-
-    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, x0.clone(), 1.0, 0.0) {
-        return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
-    }
-
-    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, x0) {
-        return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
-    }
-
-    match gmin_stepping(topo, netlist, devices, ctx) {
-        Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
-        Err(e) => Err(e),
-    }
+    dc_op_nr_with_devices_opts(netlist, topo, devices, ctx, &SimOptions::default())
 }
 
-/// DC operating-point using only built-in models from `.model` cards.
+/// DC operating-point using only built-in models, default options.
 pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
+    dc_op_nr_opts(netlist, &SimOptions::default())
+}
+
+/// DC operating-point using only built-in models, with explicit options.
+pub fn dc_op_nr_opts(netlist: &Netlist, opts: &SimOptions) -> Result<NrResult, SimError> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
     registry.register_builtin_mosfets(&netlist.models);
-    dc_op_nr_with_registry(netlist, &registry)
+    dc_op_nr_with_registry_opts(netlist, &registry, opts)
 }
 
 #[cfg(test)]
@@ -345,7 +341,6 @@ mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
 
-    /// A purely linear circuit should converge quickly (no nonlinear device).
     #[test]
     fn linear_circuit_converges() {
         let net = parse_spice(
@@ -357,11 +352,8 @@ mod tests {
         assert!((v - 0.5).abs() < 1e-6, "v(out)={v}");
     }
 
-    /// Current-source biased diode: V(b) = N·Vt·ln(Ib/Is).
     #[test]
     fn current_source_biased_diode() {
-        // 1 mA into D1 b 0; Is=1e-14, N=1.
-        // Expected: V(b) = Vt * ln(1e-3/1e-14) ≈ 0.025852 * 25.328 ≈ 0.6549 V
         let net = parse_spice(
             "* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n",
         ).unwrap();
@@ -369,7 +361,7 @@ mod tests {
         let vb = r.node_voltage("b").unwrap();
         let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
         let expected = vt * (1e-3_f64 / 1e-14_f64 + 1.0).ln();
-        let tol = 1e-4 * expected;  // 0.01 % relative
+        let tol = 1e-4 * expected;
         assert!(
             (vb - expected).abs() < tol,
             "V(b)={vb:.6e}  expected={expected:.6e}  diff={:.2e}",
@@ -377,7 +369,6 @@ mod tests {
         );
     }
 
-    /// Series R-D circuit: Vdd=5V, R=10k, D biased by resistive divider.
     #[test]
     fn series_rd_circuit() {
         let net = parse_spice(
@@ -405,7 +396,6 @@ mod tests {
         assert!(s.starts_with("analysis,"), "header: {s}");
         assert!(s.contains("V(out)"), "should contain V(out): {s}");
         assert!(s.contains("dc_op"), "should have dc_op row: {s}");
-        // V(out) should be ~1.0 V (voltage divider).
         assert!(s.contains("1.000000e0") || s.contains("1.000000e+0"), "V(out)≈1V missing: {s}");
     }
 
@@ -422,5 +412,21 @@ mod tests {
         assert!(s.contains("Flags: real"), "flags: {s}");
         assert!(s.contains("v(out)\tvoltage"), "v(out): {s}");
         assert!(s.contains("No. Points: 1"), "single point: {s}");
+    }
+
+    #[test]
+    fn tighter_reltol_takes_more_iterations() {
+        // A circuit with mild nonlinearity. With opts.reltol=1e-10 NR should still
+        // converge but use more iterations than at the default 1e-3.
+        let net = parse_spice(
+            "* R-D\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
+             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+        ).unwrap();
+        let mut opts = SimOptions::default();
+        opts.reltol = 1e-10;
+        opts.vntol  = 1e-12;
+        let r = dc_op_nr_opts(&net, &opts).unwrap();
+        let vb = r.node_voltage("b").unwrap();
+        assert!(vb > 0.5 && vb < 0.8);
     }
 }
