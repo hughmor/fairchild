@@ -488,8 +488,15 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     Ok(netlist)
 }
 
-/// Recursively expand `.include "file"` lines, substituting them with file
-/// content.  `base_dir` is used to resolve relative paths.
+/// Recursively expand `.include "file"` and `.lib 'file' section` lines.
+///
+/// `.include` splices the entire file inline.  `.lib 'file' SECTION` reads the
+/// file and splices only the `.lib SECTION` … `.endl [SECTION]` block.  Top-
+/// level `.lib SECTION` … `.endl` definition blocks (the 1-arg form, used
+/// inside library files) are stripped out: they're only meaningful when
+/// referenced by name from a `.lib 'file' SECTION` directive.
+///
+/// `base_dir` is used to resolve relative paths.
 fn resolve_includes(
     input:    &str,
     base_dir: Option<&Path>,
@@ -501,12 +508,18 @@ fn resolve_includes(
             msg: ".include nesting depth > 16 (circular include?)".into(),
         });
     }
+
     let mut out = String::with_capacity(input.len());
-    for (i, raw) in input.lines().enumerate() {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let raw = lines[i];
+        let trimmed = raw.trim();
+        let lc = trimmed.to_lowercase();
         let lineno = i + 1;
-        let lc = raw.trim().to_lowercase();
+
         if lc.starts_with(".include") {
-            let tok: Vec<&str> = raw.trim().splitn(2, char::is_whitespace).collect();
+            let tok: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
             if tok.len() < 2 {
                 return Err(ParseError::Syntax {
                     line: lineno,
@@ -525,12 +538,96 @@ fn resolve_includes(
             let inlined = resolve_includes(&content, path.parent(), depth + 1)?;
             out.push_str(&inlined);
             out.push('\n');
-        } else {
-            out.push_str(raw);
-            out.push('\n');
+            i += 1;
+            continue;
         }
+
+        if lc.starts_with(".lib") {
+            let toks: Vec<&str> = trimmed.split_whitespace().collect();
+            // Two-arg form: `.lib 'file' section` (include a section).
+            // One-arg form: `.lib section` (start of a definition block — skip
+            //   until matching `.endl`).
+            if toks.len() >= 3 {
+                let fname = toks[1].trim_matches('"').trim_matches('\'');
+                let section = toks[2];
+                let path: PathBuf = match base_dir {
+                    Some(dir) => dir.join(fname),
+                    None      => PathBuf::from(fname),
+                };
+                let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
+                    line: lineno,
+                    msg: format!(".lib '{}': {e}", path.display()),
+                })?;
+                let section_text = extract_lib_section(&content, section).ok_or_else(|| {
+                    ParseError::Syntax {
+                        line: lineno,
+                        msg: format!(".lib '{}' section '{}' not found", path.display(), section),
+                    }
+                })?;
+                let inlined = resolve_includes(&section_text, path.parent(), depth + 1)?;
+                out.push_str(&inlined);
+                out.push('\n');
+                i += 1;
+                continue;
+            } else if toks.len() == 2 {
+                // Definition form: skip lines until matching `.endl`.
+                let _section = toks[1];
+                i += 1;
+                while i < lines.len() {
+                    let l = lines[i].trim().to_lowercase();
+                    if l.starts_with(".endl") { i += 1; break; }
+                    i += 1;
+                }
+                continue;
+            }
+            // `.lib` with no arguments — fall through to be reported as a
+            // syntax error by the main parser pass.
+        }
+
+        out.push_str(raw);
+        out.push('\n');
+        i += 1;
     }
     Ok(out)
+}
+
+/// Extract the text of `.lib <section_name>` ... `.endl [<section_name>]` from
+/// a library file.  Returns `None` if the named section doesn't exist.
+///
+/// Section matching is case-insensitive.  If `.endl` carries a section name,
+/// it must match; if not, the next `.endl` ends the current section.  Nested
+/// `.lib` definitions are not supported (rare in practice).
+fn extract_lib_section(content: &str, section: &str) -> Option<String> {
+    let section_lc = section.to_lowercase();
+    let mut out = String::new();
+    let mut inside = false;
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        let lc = trimmed.to_lowercase();
+
+        if !inside {
+            if lc.starts_with(".lib") {
+                let toks: Vec<&str> = trimmed.split_whitespace().collect();
+                if toks.len() == 2 && toks[1].to_lowercase() == section_lc {
+                    inside = true;
+                }
+            }
+            continue;
+        }
+
+        // inside the target section
+        if lc.starts_with(".endl") {
+            let toks: Vec<&str> = trimmed.split_whitespace().collect();
+            // If the .endl carries a section name, require it to match.
+            if toks.len() == 1 || toks[1].to_lowercase() == section_lc {
+                return Some(out);
+            }
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    if inside { Some(out) } else { None }
 }
 
 /// Parse a SPICE netlist file, resolving `.include` directives relative to
@@ -1676,6 +1773,76 @@ R1 a b 1k
                 "expected UnsupportedDirective for: {netlist_str}, got: {result:?}",
             );
         }
+    }
+
+    #[test]
+    fn extract_lib_section_basic() {
+        let lib_text = "\
+* mylib
+.lib tt
+.model nmos NMOS Vto=0.5
+.model pmos PMOS Vto=-0.5
+.endl tt
+
+.lib ff
+.model nmos NMOS Vto=0.3
+.endl ff
+";
+        let tt = extract_lib_section(lib_text, "tt").unwrap();
+        assert!(tt.contains("Vto=0.5"));
+        assert!(tt.contains("nmos"));
+        assert!(!tt.contains("Vto=0.3"));
+
+        let ff = extract_lib_section(lib_text, "ff").unwrap();
+        assert!(ff.contains("Vto=0.3"));
+        assert!(!ff.contains("Vto=0.5"));
+
+        assert!(extract_lib_section(lib_text, "missing").is_none());
+    }
+
+    #[test]
+    fn parse_spice_file_with_lib_section() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fc_lib_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib_path = dir.join("models.lib");
+        let mut f = std::fs::File::create(&lib_path).unwrap();
+        writeln!(f, ".lib tt").unwrap();
+        writeln!(f, ".model myd D Is=1e-14 N=1").unwrap();
+        writeln!(f, ".endl tt").unwrap();
+        drop(f);
+
+        let netlist_path = dir.join("test.sp");
+        let mut nf = std::fs::File::create(&netlist_path).unwrap();
+        writeln!(nf, "* lib test").unwrap();
+        writeln!(nf, ".lib 'models.lib' tt").unwrap();
+        writeln!(nf, "V1 a 0 DC 1").unwrap();
+        writeln!(nf, "R1 a b 1k").unwrap();
+        writeln!(nf, "D1 b 0 myd").unwrap();
+        writeln!(nf, ".op").unwrap();
+        writeln!(nf, ".end").unwrap();
+        drop(nf);
+
+        let netlist = parse_spice_file(&netlist_path).unwrap();
+        // The .model from the lib file should have been spliced in.
+        assert_eq!(netlist.models.len(), 1);
+        assert_eq!(netlist.models[0].name, "myd");
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&lib_path);
+        let _ = std::fs::remove_file(&netlist_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn extract_lib_section_endl_without_name() {
+        let lib_text = "\
+.lib tt
+.model nmos NMOS Vto=0.5
+.endl
+";
+        let s = extract_lib_section(lib_text, "tt").unwrap();
+        assert!(s.contains("Vto=0.5"));
     }
 
     #[test]
