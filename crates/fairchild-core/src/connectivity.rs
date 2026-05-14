@@ -81,6 +81,15 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                     add_edge(n, "0", &mut adj);
                 }
             }
+            Element::Behavioral { pos, neg, .. } => {
+                // B-element provides a finite DC stamp between (pos, neg):
+                // V= form is an aux row (≈ V-source short), I= form is a
+                // current source (open at DC), but in either case the
+                // expression Jacobian connects every referenced node to
+                // (pos, neg).  Treat as a short for connectivity purposes.
+                record(pos, &mut nodes); record(neg, &mut nodes);
+                add_edge(pos, neg, &mut adj);
+            }
         }
     }
 

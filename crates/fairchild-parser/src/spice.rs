@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use crate::{AcVariation, Analysis, DcSweepSpec, Element, ModelCard, Netlist, ParseError, Waveform};
+use crate::expr::Expr;
+use crate::{AcVariation, Analysis, BehavioralKind, DcSweepSpec, Element, ModelCard, Netlist, ParseError, Waveform};
 
 // ─── internal types ──────────────────────────────────────────────────────────
 
@@ -204,6 +205,9 @@ fn remap_element_nodes(
         Element::XOsdi { name, nets, model_name, params } =>
             Element::XOsdi { name: format!("{prefix}.{name}"),
                              nets: nets.iter().map(|n| rn(n)).collect(), model_name, params },
+        Element::Behavioral { name, pos, neg, kind, expr } =>
+            Element::Behavioral { name: format!("{prefix}.{name}"),
+                                  pos: rn(&pos), neg: rn(&neg), kind, expr },
     }
 }
 
@@ -838,6 +842,40 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 cathode:    canon_node(tokens[2]),
                 model_name: tokens[3].to_lowercase(),
             })
+        }
+        'b' => {
+            // B-element behavioural source: `Bname n+ n- V=<expr>` or `I=<expr>`.
+            // The expression may contain spaces, so we re-stitch tokens[3..].
+            if tokens.len() < 4 {
+                return Err(ParseError::FieldCount { expected: "≥4 (Bname n+ n- V=expr|I=expr)", got: tokens.len(), line: lineno });
+            }
+            let pos = canon_node(tokens[1]);
+            let neg = canon_node(tokens[2]);
+            let rest = tokens[3..].join(" ");
+            let lc = rest.to_lowercase();
+            // Recognise leading `v=`, `v =`, `i=`, `i =`.
+            let (kind, expr_str) = if let Some(stripped) = lc.strip_prefix("v=") {
+                (BehavioralKind::Voltage, rest[rest.len() - stripped.len()..].to_string())
+            } else if let Some(stripped) = lc.strip_prefix("v =") {
+                (BehavioralKind::Voltage, rest[rest.len() - stripped.len()..].to_string())
+            } else if let Some(stripped) = lc.strip_prefix("i=") {
+                (BehavioralKind::Current, rest[rest.len() - stripped.len()..].to_string())
+            } else if let Some(stripped) = lc.strip_prefix("i =") {
+                (BehavioralKind::Current, rest[rest.len() - stripped.len()..].to_string())
+            } else {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: "B-element requires V=<expr> or I=<expr>".into(),
+                });
+            };
+            // Strip optional `{ … }` wrapping.
+            let expr_str = expr_str.trim();
+            let expr_str = expr_str.trim_start_matches('{').trim_end_matches('}').trim();
+            let expr = Expr::parse(expr_str).map_err(|e| ParseError::Syntax {
+                line: lineno,
+                msg: format!("B-element expression: {e}"),
+            })?;
+            Ok(Element::Behavioral { name, pos, neg, kind, expr })
         }
         'm' => {
             if tokens.len() < 6 {
@@ -1843,6 +1881,29 @@ R1 a b 1k
 ";
         let s = extract_lib_section(lib_text, "tt").unwrap();
         assert!(s.contains("Vto=0.5"));
+    }
+
+    #[test]
+    fn parse_b_element_current() {
+        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 I=V(in)*1m\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let beh = netlist.elements.iter().find(|e| matches!(e, Element::Behavioral { .. })).unwrap();
+        if let Element::Behavioral { name, pos, neg, kind, .. } = beh {
+            assert_eq!(name, "b1");
+            assert_eq!(pos, "out");
+            assert_eq!(neg, "0");
+            assert_eq!(*kind, BehavioralKind::Current);
+        }
+    }
+
+    #[test]
+    fn parse_b_element_voltage_with_spaces() {
+        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 V = V(in) * 2\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let beh = netlist.elements.iter().find(|e| matches!(e, Element::Behavioral { .. })).unwrap();
+        if let Element::Behavioral { kind, .. } = beh {
+            assert_eq!(*kind, BehavioralKind::Voltage);
+        }
     }
 
     #[test]

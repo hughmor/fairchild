@@ -1,4 +1,5 @@
 pub mod ac;
+pub mod behavioral;
 pub mod connectivity;
 pub mod dc_sweep;
 pub mod device;

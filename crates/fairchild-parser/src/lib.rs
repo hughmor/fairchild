@@ -1,7 +1,9 @@
 mod error;
+pub mod expr;
 mod spice;
 
 pub use error::{DisciplineError, ParseError};
+pub use expr::{Expr, EvalContext, ExprError};
 pub use spice::{parse_spice, parse_spice_file};
 
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
@@ -286,7 +288,23 @@ pub enum Element {
         model_name: String,
         params: Vec<(String, f64)>,
     },
+    /// Behavioural source: `B<name> n+ n- V=<expr>` or `I=<expr>`.
+    ///
+    /// `V=` form contributes a voltage between (pos, neg) equal to `expr(x)`
+    /// (an MNA aux row, like an ordinary voltage source).  `I=` form drives
+    /// a current of `expr(x)` from pos→neg.
+    Behavioral {
+        name: String,
+        pos:  NodeName,
+        neg:  NodeName,
+        kind: BehavioralKind,
+        expr: expr::Expr,
+    },
 }
+
+/// Whether a B-element is a voltage or current source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BehavioralKind { Voltage, Current }
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.
 #[derive(Debug, Clone)]
@@ -348,6 +366,7 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
             }
             // XOsdi is intentionally not checked: mixed-domain connections are valid.
             Element::XOsdi { .. } => {}
+            Element::Behavioral { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
         }
     }
     Ok(())

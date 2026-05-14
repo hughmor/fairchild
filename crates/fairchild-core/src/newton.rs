@@ -2,6 +2,9 @@ use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
+use std::sync::Arc;
+
+use crate::behavioral::BehavioralDevice;
 use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
@@ -92,6 +95,7 @@ pub fn build_devices(
     registry: &DeviceRegistry,
 ) -> Result<Vec<Box<dyn Device>>, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
+    let topo_arc = Arc::new(topo.clone());
     for el in &netlist.elements {
         match el {
             Element::Diode { anode, cathode, model_name, .. } => {
@@ -113,6 +117,13 @@ pub fn build_devices(
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     devices.push(factory(&[d, g, s, b], ctx));
                 }
+            }
+            Element::Behavioral { name, pos, neg, kind, expr } => {
+                let dev = BehavioralDevice::build(
+                    Arc::clone(&topo_arc),
+                    name, pos, neg, *kind, expr.clone(),
+                );
+                devices.push(Box::new(dev));
             }
             Element::XOsdi { nets, model_name, params, .. } => {
                 let factory = registry.get(model_name)
