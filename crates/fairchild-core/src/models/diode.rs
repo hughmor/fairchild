@@ -201,7 +201,11 @@ impl Device for ShockleyDiode {
 
         // Junction voltage: iterate RS drop using Id from previous NR step.
         let vd_j_raw = vd_terminal - self.id_junction * self.rs;
-        let vd_j = self.pnjlim(vd_j_raw, self.vd_prev, vt);
+        let vd_j = if ctx.jlim_enabled {
+            self.pnjlim(vd_j_raw, self.vd_prev, vt)
+        } else {
+            vd_j_raw
+        };
         self.vd_prev = vd_j;
         self.vd_j_eval = vd_j;
 

@@ -10,11 +10,14 @@ pub type NodeId = Option<usize>;
 pub struct SimContext {
     pub temperature: f64,   // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
     pub omega_0: f64,        // rad/s carrier frequency for optical ports; 0 for electrical
+    /// When true, device models apply junction-step limiters (pnjlim, fetlim).
+    /// Mapped from `SimOptions::pnjlim` / `.options nopnjlim`.
+    pub jlim_enabled: bool,
 }
 
 impl Default for SimContext {
     fn default() -> Self {
-        SimContext { temperature: 300.15, omega_0: 0.0 }
+        SimContext { temperature: 300.15, omega_0: 0.0, jlim_enabled: true }
     }
 }
 

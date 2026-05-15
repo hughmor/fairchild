@@ -286,7 +286,7 @@ pub fn dc_op_nr_with_registry_opts(
     opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
     check_connectivity(netlist)?;
-    let ctx = SimContext::default();
+    let ctx = opts.sim_context();
     let topo = CircuitTopology::build(netlist);
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
@@ -379,6 +379,23 @@ mod tests {
         assert!(r.iters <= 5, "linear circuit should converge fast, took {}", r.iters);
         let v = r.node_voltage("out").unwrap();
         assert!((v - 0.5).abs() < 1e-6, "v(out)={v}");
+    }
+
+    #[test]
+    fn pnjlim_helps_stiff_diode() {
+        // 20 V across a tiny series R into a diode: an easy case for an
+        // ideal solver, a stiff one without junction limiting.  With pnjlim
+        // ON (default) this must converge in well under ITL1=150 iters.
+        let net = parse_spice(
+            "* stiff diode\nVdd a 0 DC 20\nR1 a b 100\nD1 b 0 myd\n\
+             .model myd D (Is=1e-15 N=1)\n.op\n.end\n"
+        ).unwrap();
+        let r = dc_op_nr(&net).unwrap();
+        // The pn-junction equation gives V(b) ≈ 18·V_T·ln(I/Is) ≈ 0.7 V,
+        // and most of the supply drops across R1.
+        let vb = r.node_voltage("b").unwrap();
+        assert!(vb > 0.5 && vb < 1.0, "V(b)={vb:.4} should be ~0.7V");
+        assert!(r.iters < 50, "convergence took {} iters with pnjlim on", r.iters);
     }
 
     #[test]

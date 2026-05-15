@@ -41,6 +41,10 @@ pub struct Mosfet1 {
     gds:  f64,
     gmbs: f64,
     jeq:  f64, // IDS_real − gm·VGS − gds·VDS − gmbs·VBS
+
+    // fetlim state: previous-iter Vgs_eff and Vds_eff for step-limiting.
+    vgs_eff_prev: f64,
+    vds_eff_prev: f64,
 }
 
 impl Mosfet1 {
@@ -79,6 +83,8 @@ impl Mosfet1 {
             gds:  GMIN,
             gmbs: 0.0,
             jeq:  0.0,
+            vgs_eff_prev: 0.0,
+            vds_eff_prev: 0.0,
         };
         (dev, unknown)
     }
@@ -115,7 +121,7 @@ impl Device for Mosfet1 {
         self.bulk   = terminals[3];
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         let pol = self.polarity;
         let vd = self.drain .map_or(0.0, |i| x[i]);
         let vg = self.gate  .map_or(0.0, |i| x[i]);
@@ -123,9 +129,32 @@ impl Device for Mosfet1 {
         let vb = self.bulk  .map_or(0.0, |i| x[i]);
 
         // Polarity-flipped voltages (PMOS sees inverted potential differences).
-        let vgs_eff = pol * (vg - vs);
-        let vds_eff = pol * (vd - vs);
+        let mut vgs_eff = pol * (vg - vs);
+        let mut vds_eff = pol * (vd - vs);
         let vbs_eff = pol * (vb - vs);
+
+        // fetlim: limit Vgs steps above vto (channel exponential blow-up
+        // doesn't happen at L1 but the limiter helps when MOSFETs are stacked
+        // with diodes/BJTs).  Also clamp Vds sign-changes to keep NR out of
+        // the triode/saturation ping-pong basin.  The state is reset on every
+        // accepted timestep via vgs_eff_prev = vgs_eff at convergence.
+        if ctx.jlim_enabled {
+            let vto_eff = pol * self.vto;
+            let dvg = vgs_eff - self.vgs_eff_prev;
+            if vgs_eff > vto_eff && dvg.abs() > 1.0 {
+                // Log-compress steps above threshold (mirrors pnjlim).
+                vgs_eff = self.vgs_eff_prev
+                    + dvg.signum() * (1.0 + (dvg.abs() - 1.0).ln_1p());
+            }
+            // Vds sign-change clamp.
+            if self.vds_eff_prev.abs() > 1e-6
+                && self.vds_eff_prev * vds_eff < 0.0
+            {
+                vds_eff = 0.1 * self.vds_eff_prev;
+            }
+        }
+        self.vgs_eff_prev = vgs_eff;
+        self.vds_eff_prev = vds_eff;
 
         // Threshold voltage with body effect; clamp phi−VBS to avoid sqrt(negative).
         let phi_m_vbs = (self.phi - vbs_eff).max(1e-10);
@@ -171,8 +200,11 @@ impl Device for Mosfet1 {
         let ids_real = pol * ids_eff;
 
         // Norton current offset (in real-voltage space; conductances are pol^2 = 1 invariant).
-        let vgs = vg - vs;
-        let vds = vd - vs;
+        // After fetlim, vgs_eff / vds_eff may differ from the raw terminal differences;
+        // the linearization point must use the limited values for the Norton offset
+        // to be self-consistent with the cached ids_real.
+        let vgs = pol * vgs_eff;
+        let vds = pol * vds_eff;
         let vbs = vb - vs;
         let gds_total = gds_eff + GMIN;
         self.gm   = gm_eff;
@@ -250,6 +282,10 @@ mod tests {
         // IDS = 0.5 * KP * (W/L) * (VGS-VTO)^2 = 0.5 * 100e-6 * 10 * 1^2 = 500µA.
         let kp = 100e-6;
         let mut m = nmos(1.0, kp, 10.0);
+        // Pre-seed fetlim prev to the operating point so the single-eval test
+        // doesn't see step-limiting (mirrors the diode pnjlim test pattern).
+        m.vgs_eff_prev = 2.0;
+        m.vds_eff_prev = 3.0;
         let x = [3.0_f64, 2.0, 0.0]; // VD=3, VG=2, VS=0
         m.eval(&x, EvalFlags::dc(), &ctx());
 
@@ -297,6 +333,9 @@ mod tests {
         // D=node0, G=node1, S=node2, B=gnd
         m.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
 
+        // Pre-seed fetlim prev to bypass single-eval step limiting.
+        m.vgs_eff_prev = 2.0;
+        m.vds_eff_prev = 2.0;
         let x = [0.0_f64, 0.0, 2.0]; // VD=0, VG=0, VS=2
         m.eval(&x, EvalFlags::dc(), &ctx());
 
@@ -326,6 +365,9 @@ mod tests {
         m.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
         let x0 = [3.0_f64, 2.0, 0.0];
 
+        // Pre-seed prev so fetlim doesn't bias the FD comparison.
+        m.vgs_eff_prev = 2.0;
+        m.vds_eff_prev = 3.0;
         m.eval(&x0, EvalFlags::dc(), &ctx());
         let gm_analytic  = m.gm;
         let gds_analytic = m.gds;

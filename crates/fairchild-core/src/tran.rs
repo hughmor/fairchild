@@ -326,7 +326,7 @@ pub fn tran_nr_with_registry_opts(
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
-    let ctx = SimContext::default();
+    let ctx = opts.sim_context();
     let mode = opts.method;
 
     // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
@@ -492,7 +492,7 @@ pub fn tran_nr_with_registry_var_opts(
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
-    let ctx = SimContext::default();
+    let ctx = opts.sim_context();
     let step = step.min(opts.max_step);
     let (topo, mut x) = if opts.uic {
         let topo = CircuitTopology::build(netlist);

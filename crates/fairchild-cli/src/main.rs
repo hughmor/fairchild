@@ -100,6 +100,13 @@ struct Cli {
     /// Convenience flag: maximum transient step size (s).
     #[arg(long = "maxstep", value_name = "VALUE")]
     max_step: Option<String>,
+
+    /// Disable junction-step limiters (pnjlim for diodes/BJTs, fetlim for
+    /// MOSFETs).  Equivalent to `.options nopnjlim`.  Limiters are ON by
+    /// default — turning them off occasionally helps diagnose convergence
+    /// failures by surfacing the raw NR step.
+    #[arg(long = "no-pnjlim")]
+    no_pnjlim: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -262,6 +269,7 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
     if let Some(v) = &cli.gmin     { apply("gmin",    v); }
     if let Some(v) = &cli.method   { apply("method",  v); }
     if let Some(v) = &cli.max_step { apply("maxstep", v); }
+    if cli.no_pnjlim               { apply("pnjlim",  "0"); }
 
     for raw in &cli.options {
         if let Some((k, v)) = raw.split_once('=') {

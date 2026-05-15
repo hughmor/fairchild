@@ -8,6 +8,7 @@
 
 use fairchild_parser::Netlist;
 
+use crate::device::SimContext;
 use crate::tran::IntegratorMode;
 
 /// Numerical options consumed by every analysis entry point.
@@ -61,6 +62,12 @@ pub struct SimOptions {
     /// node voltage from `.ic` directives (zero where unspecified).  Equivalent
     /// to the `UIC` keyword on a `.tran` line.
     pub uic: bool,
+
+    // ── Newton-Raphson aids ────────────────────────────────────────────────
+    /// Apply junction-step limiters (pnjlim for diodes/BJTs, fetlim for
+    /// MOSFETs).  On by default — matches ngspice/hspice.  Disable via
+    /// `.options nopnjlim` (or CLI `--no-pnjlim`).
+    pub pnjlim: bool,
 }
 
 impl Default for SimOptions {
@@ -80,6 +87,7 @@ impl Default for SimOptions {
             srcsteps:       10,
             temp_k:         300.15,
             uic:            false,
+            pnjlim:         true,
         }
     }
 }
@@ -97,6 +105,16 @@ impl SimOptions {
             opts.set(k, v);
         }
         opts
+    }
+
+    /// Build a `SimContext` consistent with these options.  Threads temperature
+    /// and the junction-limiter flag into every device-eval callback.
+    pub fn sim_context(&self) -> SimContext {
+        SimContext {
+            temperature: self.temp_k,
+            omega_0: 0.0,
+            jlim_enabled: self.pnjlim,
+        }
     }
 
     /// Apply a single `.options KEY=VALUE` token, returning `true` if recognised.
@@ -130,6 +148,17 @@ impl SimOptions {
             "uic" => {
                 self.uic = matches!(value.to_lowercase().as_str(),
                     "1" | "true" | "yes" | "on");
+            }
+            "pnjlim" => {
+                self.pnjlim = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+            }
+            "nopnjlim" => {
+                // ngspice-style bare keyword: `.options nopnjlim` disables limiting.
+                // Bare token comes in with empty value, treated as "on".
+                let off = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+                self.pnjlim = !off;
             }
             _ => return false,
         }
@@ -210,6 +239,25 @@ mod tests {
         assert!(o.uic);
         assert!(o.set("uic", "0"));
         assert!(!o.uic);
+    }
+
+    #[test]
+    fn pnjlim_flag_default_on() {
+        let o = SimOptions::default();
+        assert!(o.pnjlim, "pnjlim must default to on (matches ngspice/hspice)");
+        let ctx = o.sim_context();
+        assert!(ctx.jlim_enabled);
+    }
+
+    #[test]
+    fn nopnjlim_bare_keyword_disables() {
+        let mut o = SimOptions::default();
+        assert!(o.set("nopnjlim", ""));   // bare token
+        assert!(!o.pnjlim);
+        // also via pnjlim=0
+        let mut o2 = SimOptions::default();
+        assert!(o2.set("pnjlim", "0"));
+        assert!(!o2.pnjlim);
     }
 
     #[test]
