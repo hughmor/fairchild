@@ -6,8 +6,9 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    Mosfet1, NativeDirectionalCoupler, NativePhotodetector, NativePnPhaseShifter,
-    NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide, ShockleyDiode,
+    Mosfet1, NativeCwLaser, NativeDirectionalCoupler, NativePhotodetector,
+    NativePnPhaseShifter, NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
+    ShockleyDiode,
 };
 
 // Factory closures are `Arc` so the alias mechanism (B6) can clone a target
@@ -190,6 +191,12 @@ impl DeviceRegistry {
         });
         self.register("fc_pn_ps", |terminals, ctx| {
             let mut d = NativePnPhaseShifter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_cw_laser", |terminals, ctx| {
+            let mut d = NativeCwLaser::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

@@ -380,6 +380,114 @@ impl NativeSplitter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native CW laser source
+// ────────────────────────────────────────────────────────────────────────
+
+/// Constant-amplitude SVEA source.  Drives the three output wires of a
+/// single optical-port bundle to a fixed (re, im, λ) value via direct
+/// potential contributions — no electrical input.
+///
+/// `A_re = √P · cos(φ₀)`, `A_im = √P · sin(φ₀)` where `P = power_mW · 1e−3`.
+pub struct NativeCwLaser {
+    re_amp:     f64,
+    im_amp:     f64,
+    wavelen_m:  f64,
+    nodes:    [NodeId; 3],        // [out_re, out_im, out_lambda]
+    branches: [Option<usize>; 3],
+}
+
+impl NativeCwLaser {
+    pub fn new() -> Self {
+        // Defaults: 1 mW, 0° phase, 1550 nm.
+        let p = 1e-3_f64;
+        Self {
+            re_amp:    p.sqrt(),
+            im_amp:    0.0,
+            wavelen_m: 1550e-9,
+            nodes:    [None; 3],
+            branches: [None; 3],
+        }
+    }
+}
+
+impl Device for NativeCwLaser {
+    fn num_terminals(&self) -> usize { 3 }
+
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        debug_assert_eq!(terminals.len(), 3);
+        for i in 0..3 { self.nodes[i] = terminals[i]; }
+    }
+
+    fn num_extra_nodes(&self) -> usize { 3 }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..3 { self.branches[i] = Some(first_idx + i); }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "power_mw" => {
+                let p = (value * 1e-3).max(0.0);
+                let phi = (self.im_amp / self.re_amp.max(1e-30)).atan();
+                let mag = p.sqrt();
+                self.re_amp = mag * phi.cos();
+                self.im_amp = mag * phi.sin();
+                true
+            }
+            "power_w" => {
+                let p = value.max(0.0);
+                let phi = (self.im_amp / self.re_amp.max(1e-30)).atan();
+                let mag = p.sqrt();
+                self.re_amp = mag * phi.cos();
+                self.im_amp = mag * phi.sin();
+                true
+            }
+            "phi_0_deg" | "phase_deg" => {
+                let mag = (self.re_amp * self.re_amp + self.im_amp * self.im_amp).sqrt();
+                let phi = value * std::f64::consts::PI / 180.0;
+                self.re_amp = mag * phi.cos();
+                self.im_amp = mag * phi.sin();
+                true
+            }
+            "wavelength_nm" => { self.wavelen_m = value * 1e-9; true }
+            "wavelength_m"  => { self.wavelen_m = value; true }
+            "re_amp" => { self.re_amp = value; true }
+            "im_amp" => { self.im_amp = value; true }
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+
+    fn load_residual(&self, b: &mut [f64]) {
+        // Inhomogeneous branch equations: V(out_re) = re_amp etc. mean
+        // the branch row has b[J] = +re_amp (since residual is target − V).
+        // Convention here: row J = +V_out + (terms) − target;  residual = 0.
+        // To produce V_out = target, we need b[J] = +target (so the linear
+        // system finds V_out − target = 0 → V_out = target).
+        if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
+        if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
+        if let Some(j) = self.branches[2] { b[j] += self.wavelen_m; }
+    }
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        // Branch rows: V(out) + 0·V(in) − target = 0.
+        // Stamp +1 at (J, out) and +1 at (out, J).  RHS handled in load_residual.
+        for (i, out_node) in self.nodes.iter().enumerate() {
+            if let (Some(out), Some(j)) = (*out_node, self.branches[i]) {
+                mat.a[j][out] += 1.0;
+                mat.a[out][j] += 1.0;
+            }
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Native photodetector (PIN — instantaneous responsivity)
 // ────────────────────────────────────────────────────────────────────────
 
@@ -642,6 +750,7 @@ pub struct NativePnPhaseShifter {
     length_m: f64,
     dn_dv:    f64,
     g_pn:     f64,
+    alpha_neper_m: f64,
     nodes: [NodeId; 8],
     branches: [Option<usize>; 3],
     c_cached: f64,
@@ -654,6 +763,7 @@ impl NativePnPhaseShifter {
             length_m: 1e-3,        // 1 mm
             dn_dv:    1e-4,        // small Δn per V
             g_pn:     1e-3,        // 1 mS series conductance
+            alpha_neper_m: 0.0,    // lossless by default
             nodes:    [None; 8],
             branches: [None; 3],
             c_cached: 1.0,
@@ -694,6 +804,14 @@ impl Device for NativePnPhaseShifter {
                 }
                 true
             }
+            "alpha_db_cm" => {
+                // Propagation loss along the PN section.  When the device is
+                // used as a stand-alone ring (B4 example pattern), this loss
+                // is what gives the resonance a finite extinction ratio —
+                // without it the ring is all-pass with unit transmission.
+                self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
+                true
+            }
             _ => false,
         }
     }
@@ -713,8 +831,9 @@ impl Device for NativePnPhaseShifter {
         };
         let dneff = self.dn_dv * v_pn;
         let phi   = 2.0 * std::f64::consts::PI * self.length_m * dneff / lambda;
-        self.c_cached = phi.cos();
-        self.s_cached = phi.sin();
+        let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
+        self.c_cached = t_amp * phi.cos();
+        self.s_cached = t_amp * phi.sin();
     }
 
     fn load_residual(&self, _b: &mut [f64]) {}
@@ -844,6 +963,25 @@ mod tests {
         // Power conservation: c² + d² ≈ 1 (input was 1.0)
         let p_total = c_re * c_re + c_im * c_im + d_re * d_re + d_im * d_im;
         assert!((p_total - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_cw_laser_drives_output_potentials() {
+        let netlist = parse_spice(
+            "* laser test\n\
+             X1 out_re out_im out_wl fc_cw_laser \
+                power_mW=4.0 phi_0_deg=0.0 wavelength_nm=1550\n\
+             .op\n.end\n"
+        ).unwrap();
+        let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
+        // P = 4 mW → A = √(4e-3) ≈ 0.06325 V/m equivalent.
+        let v_re = r.node_voltage("out_re").unwrap();
+        let v_im = r.node_voltage("out_im").unwrap();
+        let v_wl = r.node_voltage("out_wl").unwrap();
+        let expected_amp = 4e-3_f64.sqrt();
+        assert!((v_re - expected_amp).abs() < 1e-9, "v_re={v_re}");
+        assert!(v_im.abs() < 1e-9);
+        assert!((v_wl - 1.55e-6).abs() < 1e-15);
     }
 
     /// PIN photodetector under a reverse bias.  Optical input drives V(in_re) =
