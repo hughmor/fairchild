@@ -94,4 +94,18 @@ pub trait Device: Send + Sync {
     /// or if `name` is not a parameter of this device (built-in devices return false
     /// by default — their parameters are set at construction time).
     fn set_real_param(&mut self, _name: &str, _value: f64) -> bool { false }
+
+    /// Internal noise current sources for `.noise` analysis.
+    ///
+    /// Called AFTER a DC-OP `eval()` so the device can read its cached
+    /// bias-point quantities (e.g. Id, gm) when building the PSDs.
+    ///
+    /// Returns one or more `(pos, neg, S_i)` tuples where `S_i` is the
+    /// one-sided current PSD in A²/Hz of an uncorrelated noise source
+    /// connected between those two terminal node indices.  Default is empty
+    /// (resistor thermal noise is iterated as `Element::Resistor` in
+    /// `noise_analysis`, not through this hook).
+    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        Vec::new()
+    }
 }

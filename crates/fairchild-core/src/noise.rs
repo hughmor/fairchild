@@ -191,7 +191,7 @@ pub fn noise_analysis(
         let lam_re = &lam[..size];
         let lam_im = &lam[size..];
 
-        // Sum thermal-noise PSDs over every linear resistor.
+        // Resistor thermal noise: 4kT/R between (pos, neg) for every linear R.
         let mut s_v_out = 0.0_f64;
         for el in &netlist.elements {
             if let Element::Resistor { pos, neg, resistance, .. } = el {
@@ -199,6 +199,18 @@ pub fn noise_analysis(
                 let s_i = four_kt / resistance;  // 4kT/R [A²/Hz]
                 let p_idx = topo.node_index.get(pos).copied();
                 let n_idx = topo.node_index.get(neg).copied();
+                let z_re = pick(lam_re, p_idx) - pick(lam_re, n_idx);
+                let z_im = pick(lam_im, p_idx) - pick(lam_im, n_idx);
+                let z_mag_sq = z_re * z_re + z_im * z_im;
+                s_v_out += s_i * z_mag_sq;
+            }
+        }
+        // Device-internal noise (diode shot, MOSFET channel thermal, …).
+        // Each device contributes one or more uncorrelated current sources
+        // between specific terminal indices; magnitude squared of the
+        // transfer impedance picks up the output PSD contribution.
+        for dev in devices.iter() {
+            for (p_idx, n_idx, s_i) in dev.noise_sources(&ctx) {
                 let z_re = pick(lam_re, p_idx) - pick(lam_re, n_idx);
                 let z_im = pick(lam_im, p_idx) - pick(lam_im, n_idx);
                 let z_mag_sq = z_re * z_re + z_im * z_im;
@@ -305,5 +317,41 @@ mod tests {
         let s = r.onoise_psd[0];
         let rel = (s - expected).abs() / expected;
         assert!(rel < 0.01, "S_V_out={s:.3e} expected={expected:.3e} rel={rel:.3e}");
+    }
+
+    /// Diode shot noise.  A current source biases a diode to ~1 mA so its
+    /// internal Id is set by the source, not by an exponential.  At low f
+    /// (cap negligible) the diode's small-signal resistance r_d = V_T / Id
+    /// terminates the noise current into the output node.  The expected
+    /// output PSD is:
+    ///     S_V_out = (R_load || r_d)² · (2qId + 4kT/R_load · (r_d/(R_load+r_d))²)
+    /// We just verify shot dominates: S_V_out > 4kT/R_load · z² and the
+    /// magnitude is roughly 2qId · (R_load || r_d)² within 30%.
+    #[test]
+    fn diode_shot_noise_dominates_at_high_bias() {
+        let src = "* diode shot\n\
+                   Vbias bias 0 DC 1\n\
+                   Ib   0 b  1m\n\
+                   D1   b 0  myd\n\
+                   .model myd D (Is=1e-14 N=1)\n\
+                   .noise V(b) Vbias DEC 1 1k 1k\n.end\n";
+        let net = parse_spice(src).unwrap();
+        let mut registry = crate::device_registry::DeviceRegistry::new();
+        registry.register_builtin_diodes(&net.models);
+        let opts = SimOptions::default();
+        let r = noise_analysis(&net, &[1e3], "b", "0", "vbias", &registry, &opts).unwrap();
+
+        // The output is the diode anode; its small-signal resistance is the
+        // only impedance to ground at that node aside from gmin.  λ at the
+        // diode terminals therefore ≈ r_d (= V_T / Id ≈ 25.85 Ω at 27 °C,
+        // Id=1mA), so output PSD ≈ 2qId · r_d².
+        const Q: f64 = 1.602176634e-19;
+        let id = 1e-3;
+        let vt = KB * opts.temp_k / Q;
+        let r_d = vt / id;
+        let expected = 2.0 * Q * id * r_d * r_d;
+        let s = r.onoise_psd[0];
+        assert!((s - expected).abs() / expected < 0.1,
+            "diode shot S_V_out={s:.3e} expected≈{expected:.3e}");
     }
 }

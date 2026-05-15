@@ -244,6 +244,17 @@ impl Device for Mosfet1 {
         stamp!(s, s,   gms);
         stamp!(s, bk, -gmbs);
     }
+
+    /// Channel thermal noise: i_n² = (8/3)·k·T·gm  (A²/Hz, saturation form,
+    /// used for both triode and saturation as the standard SPICE approximation).
+    /// Flows between drain and source.  Subthreshold leakage / 1/f flicker is
+    /// not included in this Level-1 implementation.
+    fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        if self.gm.abs() < 1e-18 { return Vec::new(); }
+        const K_BOLTZMANN: f64 = 1.380649e-23;
+        let s_i = 8.0 / 3.0 * K_BOLTZMANN * ctx.temperature * self.gm.abs();
+        vec![(self.drain, self.source, s_i)]
+    }
 }
 
 #[cfg(test)]

@@ -273,6 +273,19 @@ impl Device for ShockleyDiode {
         self.vd_prev = vd_j;
         self.q_tprev = self.q_total(vd_j, self.id_junction);
     }
+
+    /// Shot noise: i_n² = 2·q·|Id| (A²/Hz), between anode and cathode.
+    ///
+    /// Uses the bias-point Id cached by the most recent `eval()`.  Returns
+    /// nothing when the junction is essentially off (|Id| < 1e-18 A) so the
+    /// matrix doesn't pick up vanishing entries from leakage.
+    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        let id_mag = self.id_junction.abs();
+        if id_mag < 1e-18 { return Vec::new(); }
+        const Q: f64 = 1.602176634e-19;
+        let s_i = 2.0 * Q * id_mag;
+        vec![(self.anode, self.cathode, s_i)]
+    }
 }
 
 #[cfg(test)]
