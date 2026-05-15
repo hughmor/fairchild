@@ -294,10 +294,33 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
 
 /// Load built-in models + any OSDI shared libraries listed in the netlist.
 /// Relative `.osdi` paths are resolved against `netlist_dir`.
-fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, _quiet: bool) -> DeviceRegistry {
+fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool) -> DeviceRegistry {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
     registry.register_builtin_mosfets(&netlist.models);
+
+    // Photonic-model authoring guidance: as of the B-phase refactor, native
+    // Rust photonic devices (`fc_waveguide`, `fc_dcoupler`, `fc_splitter`,
+    // `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`) are the recommended
+    // path.  Surface a one-shot info note so users with `.osdi` photonic
+    // models know there's a faster, cleaner alternative.
+    if !quiet && !netlist.osdi_paths.is_empty() {
+        let photonic_count = netlist.osdi_paths.iter()
+            .filter(|p| p.contains("photonic")
+                || p.contains("waveguide")
+                || p.contains("mrr")
+                || p.contains("mzi")
+                || p.contains("laser"))
+            .count();
+        if photonic_count > 0 {
+            eprintln!(
+                "info: {} OSDI photonic library/libraries loaded — note that native Rust devices \
+                 (fc_waveguide etc.) are now the recommended path; see fairchild-osdi crate \
+                 docs for the deprecation rationale.",
+                photonic_count
+            );
+        }
+    }
 
     for osdi_path in &netlist.osdi_paths {
         let path = if std::path::Path::new(osdi_path).is_absolute() {
