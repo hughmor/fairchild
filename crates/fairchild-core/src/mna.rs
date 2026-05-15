@@ -355,6 +355,46 @@ pub fn ind_companion_be_to_tr(g_eq_be: f64, i_hist_be: f64, v_l_new: f64) -> (f6
     (g_eq_tr, i_l + g_eq_tr * v_l_new)
 }
 
+/// GEAR / BDF-2 companion for a capacitor with non-uniform step.
+///
+/// Two-step BDF: \dot{v}_{n+1} ≈ α·v_{n+1} − β₁·v_n + β₂·v_{n-1}
+/// with ρ = h_n / h_{n-1}, α = (1+2ρ)/(h(1+ρ)), β₁ = (1+ρ)/h, β₂ = ρ²/(h(1+ρ)).
+///
+/// Returns the Norton (G_eq, I_hist) such that i_C = G_eq·v − I_hist.
+pub fn cap_companion_gear2(
+    capacitance: f64,
+    h: f64,
+    h_prev: f64,
+    v_prev: f64,
+    v_prev2: f64,
+) -> (f64, f64) {
+    let rho = h / h_prev;
+    let denom = h * (1.0 + rho);
+    let g_eq = capacitance * (1.0 + 2.0 * rho) / denom;
+    let i_hist = capacitance * ((1.0 + rho) / h * v_prev - (rho * rho) / denom * v_prev2);
+    (g_eq, i_hist)
+}
+
+/// GEAR / BDF-2 companion for an inductor with non-uniform step.
+///
+/// For v_L = L·di/dt, the BDF-2 Norton form is:
+///   i_{n+1} = G_eq·v_{n+1} + I_hist
+/// with G_eq = h(1+ρ)/(L(1+2ρ)),
+///      I_hist = ((1+ρ)²/(1+2ρ))·i_n − (ρ²/(1+2ρ))·i_{n-1}.
+pub fn ind_companion_gear2(
+    inductance: f64,
+    h: f64,
+    h_prev: f64,
+    i_prev: f64,
+    i_prev2: f64,
+) -> (f64, f64) {
+    let rho = h / h_prev;
+    let denom_a = 1.0 + 2.0 * rho;
+    let g_eq = h * (1.0 + rho) / (inductance * denom_a);
+    let i_hist = ((1.0 + rho).powi(2) / denom_a) * i_prev - (rho * rho / denom_a) * i_prev2;
+    (g_eq, i_hist)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

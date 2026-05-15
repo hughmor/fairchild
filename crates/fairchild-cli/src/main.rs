@@ -76,9 +76,9 @@ struct Cli {
     /// top of any `.options` directives in the netlist.  Can be repeated.
     ///
     /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
-    /// maxstep, gminmax, srcsteps, method (be|tr), uic, temp.
+    /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp.
     ///
-    /// Example: --opt reltol=1e-5 --opt method=be
+    /// Example: --opt reltol=1e-5 --opt method=gear
     #[arg(long = "opt", value_name = "KEY=VALUE")]
     options: Vec<String>,
 
@@ -90,8 +90,11 @@ struct Cli {
     #[arg(long, value_name = "VALUE")]
     gmin: Option<String>,
 
-    /// Convenience flag: transient integration method ("be" or "tr").
-    #[arg(long, value_name = "be|tr")]
+    /// Convenience flag: transient integration method.
+    ///   be    — Backward Euler (BDF-1, robust)
+    ///   tr    — Trapezoidal Rule (2nd-order, can ring)
+    ///   gear  — GEAR / BDF-2 (2nd-order, L-stable, no ringing)
+    #[arg(long, value_name = "be|tr|gear")]
     method: Option<String>,
 
     /// Convenience flag: maximum transient step size (s).

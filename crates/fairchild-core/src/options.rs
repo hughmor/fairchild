@@ -123,6 +123,7 @@ impl SimOptions {
                 match value.to_lowercase().as_str() {
                     "be" | "backwardeuler" | "gear1" => self.method = IntegratorMode::BackwardEuler,
                     "tr" | "trap" | "trapezoidal"    => self.method = IntegratorMode::Trapezoidal,
+                    "gear" | "gear2" | "bdf2"        => self.method = IntegratorMode::Gear,
                     _ => return false,
                 }
             }

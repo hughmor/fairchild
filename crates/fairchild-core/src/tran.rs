@@ -13,8 +13,8 @@ use crate::device::{EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
-    cap_companion, cap_companion_be_to_tr, cap_companion_tr_advance,
-    ind_companion, ind_companion_be_to_tr, ind_companion_tr_advance,
+    cap_companion, cap_companion_be_to_tr, cap_companion_gear2, cap_companion_tr_advance,
+    ind_companion, ind_companion_be_to_tr, ind_companion_gear2, ind_companion_tr_advance,
     stamp_netlist, CircuitTopology,
 };
 use crate::newton::{build_devices, dc_op_nr_with_registry_opts};
@@ -28,6 +28,10 @@ pub enum IntegratorMode {
     BackwardEuler,
     /// Trapezoidal Rule (TR / BDF-2-like): second-order, A-stable, minimal overhead.
     Trapezoidal,
+    /// GEAR / BDF-2: second-order, L-stable, two-step history.  First step and
+    /// the step after any rejection demote to BE (order control 1↔2).  Applies
+    /// to linear L/C companions; device-internal reactive terms remain BDF-1.
+    Gear,
 }
 
 /// Output of a transient simulation.
@@ -242,7 +246,8 @@ fn advance_companions(
                 let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
                 let next = match mode {
-                    IntegratorMode::BackwardEuler => cap_companion(*capacitance, step, vc),
+                    IntegratorMode::BackwardEuler
+                    | IntegratorMode::Gear => cap_companion(*capacitance, step, vc),
                     IntegratorMode::Trapezoidal if first_tr => {
                         let (g_eq_be, i_hist_be) = cap_state[name];
                         cap_companion_be_to_tr(g_eq_be, i_hist_be, vc)
@@ -259,7 +264,8 @@ fn advance_companions(
                 let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
                 let next = match mode {
-                    IntegratorMode::BackwardEuler => {
+                    IntegratorMode::BackwardEuler
+                    | IntegratorMode::Gear => {
                         let il = g_eq * vl + i_hist;
                         ind_companion(*inductance, step, il)
                     }
@@ -526,8 +532,12 @@ pub fn tran_nr_with_registry_var_opts(
     }
 
     // Raw physical state: cap voltage and inductor current seeded from DC OP.
+    // `cap_v_prev2` / `ind_i_prev2` hold the state two timesteps back (only
+    // populated once at least one step has been accepted) for GEAR-2.
     let mut cap_v: IndexMap<String, f64> = IndexMap::new();
+    let mut cap_v_prev2: IndexMap<String, f64> = IndexMap::new();
     let mut ind_i: IndexMap<String, f64> = IndexMap::new();
+    let mut ind_i_prev2: IndexMap<String, f64> = IndexMap::new();
     for el in &netlist.elements {
         match el {
             Element::Capacitor { name, pos, neg, .. } => {
@@ -541,6 +551,10 @@ pub fn tran_nr_with_registry_var_opts(
             _ => {}
         }
     }
+    // Track previous accepted timestep for non-uniform BDF-2 (h_prev_accepted
+    // is the step that took us from t_{n-1} to t_n; distinct from h_prev which
+    // is the trial step for predictor extrapolation).
+    let mut h_prev_accepted = 0.0_f64;
 
     let n_hint = ((stop / step).ceil() as usize) + 2;
     let mut result = TranResult {
@@ -581,19 +595,44 @@ pub fn tran_nr_with_registry_var_opts(
         let h_actual = h_want.max(h_min);
         let t_next = t + h_actual;
 
-        // Build BE companion maps for h_actual from the stored raw state.
+        // Order control: GEAR-2 needs two accepted steps of history.  Demote
+        // to BE on the first two steps, after any rejection (history stale),
+        // and on extreme step ratios where BDF-2 would amplify noise.
+        let history_ready = h_prev_accepted > 0.0
+            && cap_v.keys().all(|n| cap_v_prev2.contains_key(n))
+            && ind_i.keys().all(|n| ind_i_prev2.contains_key(n));
+        let step_ratio = if h_prev_accepted > 0.0 { h_actual / h_prev_accepted } else { 1.0 };
+        let use_gear2 = matches!(opts.method, IntegratorMode::Gear)
+            && history_ready
+            && consecutive_rejects == 0
+            && step_ratio > 0.25
+            && step_ratio < 4.0;
+
+        // Build companion maps for h_actual from the stored raw state.
         let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
         let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
         for el in &netlist.elements {
             match el {
                 Element::Capacitor { name, capacitance, .. } => {
                     if let Some(&vc) = cap_v.get(name) {
-                        cap_state.insert(name.clone(), cap_companion(*capacitance, h_actual, vc));
+                        let stamp = if use_gear2 {
+                            let vc_prev2 = cap_v_prev2.get(name).copied().unwrap_or(vc);
+                            cap_companion_gear2(*capacitance, h_actual, h_prev_accepted, vc, vc_prev2)
+                        } else {
+                            cap_companion(*capacitance, h_actual, vc)
+                        };
+                        cap_state.insert(name.clone(), stamp);
                     }
                 }
                 Element::Inductor { name, inductance, .. } => {
                     if let Some(&il) = ind_i.get(name) {
-                        ind_state.insert(name.clone(), ind_companion(*inductance, h_actual, il));
+                        let stamp = if use_gear2 {
+                            let il_prev2 = ind_i_prev2.get(name).copied().unwrap_or(il);
+                            ind_companion_gear2(*inductance, h_actual, h_prev_accepted, il, il_prev2)
+                        } else {
+                            ind_companion(*inductance, h_actual, il)
+                        };
+                        ind_state.insert(name.clone(), stamp);
                     }
                 }
                 _ => {}
@@ -681,9 +720,14 @@ pub fn tran_nr_with_registry_var_opts(
             t = t_next;
 
             // Update raw companion state from accepted solution.
+            // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
+            // prev value so the next step has a valid two-step window.
             for el in &netlist.elements {
                 match el {
                     Element::Capacitor { name, pos, neg, .. } => {
+                        if let Some(&vc_prev) = cap_v.get(name) {
+                            cap_v_prev2.insert(name.clone(), vc_prev);
+                        }
                         let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
                             - topo.node_voltage(neg, &x).unwrap_or(0.0);
                         cap_v.insert(name.clone(), vc);
@@ -691,13 +735,21 @@ pub fn tran_nr_with_registry_var_opts(
                     Element::Inductor { name, pos, neg, inductance } => {
                         let vl = topo.node_voltage(pos, &x).unwrap_or(0.0)
                             - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                        let il = ind_i.get(name).copied().unwrap_or(0.0)
-                            + (h_actual / inductance) * vl;
-                        ind_i.insert(name.clone(), il);
+                        let il_prev = ind_i.get(name).copied().unwrap_or(0.0);
+                        // Closed-form current update: i_new = G_eq·v_new + I_hist
+                        // where (G_eq, I_hist) is the companion we just stamped.
+                        let il_new = if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
+                            g_eq * vl + i_hist
+                        } else {
+                            il_prev + (h_actual / inductance) * vl
+                        };
+                        ind_i_prev2.insert(name.clone(), il_prev);
+                        ind_i.insert(name.clone(), il_new);
                     }
                     _ => {}
                 }
             }
+            h_prev_accepted = h_actual;
 
             for dev in &mut devices {
                 dev.commit_timestep(&x);
@@ -921,6 +973,37 @@ mod tests {
             (vb_tran - vb_dc).abs() < 1e-5,
             "var-step V(b)={vb_tran:.6e}  dc_op={vb_dc:.6e}"
         );
+    }
+
+    #[test]
+    fn tran_nr_var_gear2_more_accurate_than_be() {
+        // RC step response, analytic V(t) = 1 - exp(-t/τ), τ=RC=1ms.
+        // Both methods are run with the same LTE tolerance; GEAR-2 is second-
+        // order so it should be at least as accurate as BE at the matched τ.
+        let src = "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\n\
+                   R1 in out 1k\nC1 out 0 1u\n.tran 200u 4m\n.end\n";
+        let net = parse_spice(src).unwrap();
+        let mut registry = crate::device_registry::DeviceRegistry::new();
+        registry.register_builtin_diodes(&net.models);
+
+        let mut opts_be = crate::options::SimOptions::default();
+        opts_be.method = IntegratorMode::BackwardEuler;
+        let r_be = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_be).unwrap();
+
+        let mut opts_g = crate::options::SimOptions::default();
+        opts_g.method = IntegratorMode::Gear;
+        let r_g  = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_g).unwrap();
+
+        let tau = 1e-3;
+        let exact = |t: f64| 1.0 - (-t / tau).exp();
+        let err_at = |r: &TranResult, t: f64| {
+            (r.voltage_at("out", t).unwrap() - exact(t)).abs()
+        };
+        // Sample at 3·τ where both methods are well past the transient.
+        let e_be = err_at(&r_be, 3e-3);
+        let e_g  = err_at(&r_g , 3e-3);
+        assert!(e_g <= e_be + 1e-4,
+            "GEAR-2 error {e_g:.3e} should not exceed BE error {e_be:.3e}");
     }
 
     #[test]

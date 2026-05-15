@@ -497,9 +497,9 @@ impl Circuit {
     ///   `src` (excitation source name, default `None` = first V source).
     ///
     ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
-    ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`, `method` (`"be"` or `"tr"`),
-    ///   `uic`, `temp` (°C).  These overlay any `.options` directives from the
-    ///   netlist.
+    ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
+    ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C).
+    ///   These overlay any `.options` directives from the netlist.
     #[pyo3(signature = (analysis, **kwargs))]
     pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
         let netlist = self.netlist.as_ref()
