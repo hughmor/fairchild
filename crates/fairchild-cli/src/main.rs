@@ -402,6 +402,27 @@ fn main() {
 
     let mut ran_something = false;
 
+    // .temp <T1> [<T2> ...] sweep: re-run every analysis once per temperature.
+    // Empty `temps` ⇒ single pass at whatever `opts.temp_k` already is.
+    let temp_sweep: Vec<f64> = if netlist.temps.len() > 1 {
+        netlist.temps.clone()
+    } else {
+        vec![opts.temp_k]
+    };
+    for (ti, &temp_k) in temp_sweep.iter().enumerate() {
+        let mut opts = opts.clone();
+        opts.temp_k = temp_k;
+        if temp_sweep.len() > 1 {
+            // Header so concatenated CSVs are bisectable.
+            writeln!(w, "# temp_c={:.3} (point {}/{})",
+                temp_k - 273.15, ti + 1, temp_sweep.len())
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            if cli.verbose {
+                eprintln!("info: temperature sweep point {}/{}: {:.2} °C",
+                    ti + 1, temp_sweep.len(), temp_k - 273.15);
+            }
+        }
+
     for analysis in &netlist.analyses {
         match analysis {
             Analysis::Op => {
@@ -557,6 +578,7 @@ fn main() {
             }
         }
     }
+    }  // end .temp sweep loop
 
     if !ran_something && !cli.quiet {
         eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");

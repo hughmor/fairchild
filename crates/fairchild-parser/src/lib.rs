@@ -34,6 +34,11 @@ pub struct Netlist {
     /// `.nodeset V(node)=value …`: initial guess for the DC operating point
     /// Newton-Raphson.  Always applied if present.
     pub nodeset: Vec<(NodeName, f64)>,
+    /// `.temp <T1> [<T2> …]`: simulation temperatures in Kelvin (converted
+    /// from Celsius).  Empty ⇒ use `SimOptions::temp_k` default (300.15 K).
+    /// More than one entry asks the CLI/Python driver to repeat every
+    /// analysis once per temperature.
+    pub temps: Vec<f64>,
 }
 
 /// Waveform specification for independent sources.

@@ -664,6 +664,12 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             netlist.analyses.push(parse_dc(&lc, *lineno)?);
         } else if lc.starts_with(".noise") {
             netlist.analyses.push(parse_noise(&lc, *lineno)?);
+        } else if lc.starts_with(".temp") {
+            // .temp <T1_celsius> [<T2_celsius> …] — one entry per sweep point.
+            for tok in lc.split_whitespace().skip(1) {
+                let c = parse_value(tok, *lineno)?;
+                netlist.temps.push(c + 273.15);
+            }
         } else if lc.starts_with(".model") {
             if let Some(card) = parse_model(&lc, *lineno)? {
                 netlist.models.push(card);

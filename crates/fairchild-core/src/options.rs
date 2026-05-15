@@ -101,6 +101,12 @@ impl SimOptions {
     /// later `.options` lines override earlier ones — same semantics as ngspice.
     pub fn from_netlist(netlist: &Netlist) -> Self {
         let mut opts = SimOptions::default();
+        // `.temp` precedes `.options temp=…` only as a default; `.options
+        // temp=…` written after `.temp` still wins, matching ngspice's
+        // last-token-wins rule.
+        if let Some(&t_k) = netlist.temps.first() {
+            opts.temp_k = t_k;
+        }
         for (k, v) in &netlist.options {
             opts.set(k, v);
         }
@@ -239,6 +245,30 @@ mod tests {
         assert!(o.uic);
         assert!(o.set("uic", "0"));
         assert!(!o.uic);
+    }
+
+    #[test]
+    fn temp_directive_seeds_temp_k() {
+        // .temp 75 should set temp_k to 75 + 273.15 K, threaded through the
+        // SimContext so device evals see the right thermal voltage.
+        let net = fairchild_parser::parse_spice(
+            "* tempd\nV1 in 0 DC 0.7\nR1 in out 1k\n.temp 75\n.op\n.end\n"
+        ).unwrap();
+        assert_eq!(net.temps.len(), 1);
+        assert!((net.temps[0] - 348.15).abs() < 1e-9);
+        let opts = SimOptions::from_netlist(&net);
+        assert!((opts.temp_k - 348.15).abs() < 1e-9);
+        assert!((opts.sim_context().temperature - 348.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn temp_list_parsed_for_sweep() {
+        let net = fairchild_parser::parse_spice(
+            "* tempd\nV1 in 0 DC 1\n.temp -40 27 85 125\n.op\n.end\n"
+        ).unwrap();
+        assert_eq!(net.temps.len(), 4);
+        assert!((net.temps[0] - 233.15).abs() < 1e-9);
+        assert!((net.temps[3] - 398.15).abs() < 1e-9);
     }
 
     #[test]
