@@ -66,6 +66,14 @@ PORT_SCHEMA: Dict[str, List[str]] = {
     "fc_thermal_ps":    ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n
 }
 
+# `fc_mux` / `fc_demux` are variable-arity bundle bridges. Pin 1 is the
+# multi-channel bus side; pins 2..N+1 are the single-channel side. The
+# channel count N is inferred from instance pin count: `1 + N` positional
+# nets. The bus net needs a multi-channel `.optical_port NAME N` declaration
+# and every device on the bus inherits that width through per-channel
+# replication.
+BUNDLE_BRIDGE_MODELS = {"fc_mux", "fc_demux"}
+
 GROUND_NETS = {"0", "gnd"}
 
 # KiCad directives we silently comment out — fairchild's parser doesn't
@@ -172,17 +180,61 @@ def try_transpile_x_element(
 def collect_bundle_nets(
     x_elements: List[Tuple[str, str, List[str]]],
     warn,
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[Tuple[str, int]], List[str]]:
     """
     Walk every native-device X-element, look up its port schema, and collect
-    the set of nets that appear in a bundle position. Returns (bundle_nets,
-    unknown_models) where bundle_nets preserves first-seen insertion order.
+    the set of nets that appear in a bundle position. Returns
+    (bundle_nets_with_width, unknown_models) where bundle_nets_with_width is
+    an ordered list of (net_name, channel_count) pairs.
+
+    Channel-count inference:
+      - `fc_mux` / `fc_demux` with M positional nets implies N = M − 1
+        channels on the bus side (pin 1). All single-channel pins on the
+        bridge stay at N = 1.
+      - After MUX/DEMUX widths are known, propagate the width along bus
+        wires by walking the X-element graph: any non-bridge device that
+        connects bundle-side to a known multi-channel net inherits that
+        width on its other bundle pins.
     """
-    seen = set()
-    bundle_nets: List[str] = []
+    bundle_widths: Dict[str, int] = {}
+    bundle_first_seen_order: List[str] = []
     unknown: List[str] = []
 
+    def record(net: str, width: int, *, authoritative: bool = False):
+        """Register a bundle net at the given channel width.  Non-authoritative
+        records (regular devices defaulting to 1) lose to authoritative ones
+        (MUX/DEMUX or width-propagation passes)."""
+        nlc = net.lower()
+        if nlc in GROUND_NETS:
+            return
+        existing = bundle_widths.get(nlc)
+        if existing is None:
+            bundle_widths[nlc] = width
+            bundle_first_seen_order.append(net)
+        elif existing != width:
+            if authoritative:
+                bundle_widths[nlc] = width
+            else:
+                # Quietly defer to the existing (likely authoritative) width.
+                pass
+
+    # ── Pass 1: fc_mux / fc_demux first — bus widths are authoritative.
     for refdes, model, nets in x_elements:
+        if model not in BUNDLE_BRIDGE_MODELS:
+            continue
+        if len(nets) < 2:
+            warn(f"{refdes} ({model}): need ≥ 2 nets (1 bus + ≥ 1 channels); got {len(nets)}")
+            continue
+        n_channels = len(nets) - 1
+        bus_net = nets[0]
+        record(bus_net, n_channels, authoritative=True)
+        for ch_net in nets[1:]:
+            record(ch_net, 1, authoritative=True)
+
+    # ── Pass 2: regular devices, default to width 1.
+    for refdes, model, nets in x_elements:
+        if model in BUNDLE_BRIDGE_MODELS:
+            continue
         if model not in PORT_SCHEMA:
             unknown.append(model)
             continue
@@ -194,18 +246,50 @@ def collect_bundle_nets(
             )
             continue
         for kind, net in zip(schema, nets):
-            if kind != "bundle":
-                continue
-            nlc = net.lower()
-            if nlc in GROUND_NETS:
-                warn(f"{refdes} ({model}): bundle pin tied to ground ('{net}') — likely wiring error")
-                continue
-            if nlc in seen:
-                continue
-            seen.add(nlc)
-            bundle_nets.append(net)
+            if kind == "bundle":
+                if net.lower() in GROUND_NETS:
+                    warn(f"{refdes} ({model}): bundle pin tied to ground ('{net}') — likely wiring error")
+                    continue
+                record(net, 1)
 
-    return bundle_nets, sorted(set(unknown))
+    # ── Pass 3: propagate widths through non-bridge devices ─────────────
+    # Any non-bridge device with multiple bundle pins should have matching
+    # widths on every bundle pin (the parser enforces this). If one bundle
+    # pin is already known to be N-channel and others are still at default
+    # width 1, upgrade those to N.
+    changed = True
+    while changed:
+        changed = False
+        for refdes, model, nets in x_elements:
+            if model in BUNDLE_BRIDGE_MODELS or model not in PORT_SCHEMA:
+                continue
+            schema = PORT_SCHEMA[model]
+            if len(nets) != len(schema):
+                continue
+            bundle_pins = [n for kind, n in zip(schema, nets) if kind == "bundle"]
+            if len(bundle_pins) < 2:
+                continue
+            widths_here = [bundle_widths.get(p.lower(), 1) for p in bundle_pins]
+            max_w = max(widths_here)
+            if max_w == 1:
+                continue
+            for pin in bundle_pins:
+                pl = pin.lower()
+                if bundle_widths.get(pl, 1) != max_w:
+                    bundle_widths[pl] = max_w
+                    changed = True
+
+    ordered: List[Tuple[str, int]] = []
+    for net in bundle_first_seen_order:
+        w = bundle_widths.get(net.lower(), 1)
+        ordered.append((net, w))
+    # Also include any nets that appeared only through MUX/DEMUX processing
+    # but weren't in first-seen order yet (rare; defensive).
+    for net_lc, w in bundle_widths.items():
+        if not any(n.lower() == net_lc for n, _ in ordered):
+            ordered.append((net_lc, w))
+
+    return ordered, sorted(set(unknown))
 
 
 # ── Wrapper emission ────────────────────────────────────────────────────────
@@ -265,17 +349,22 @@ def emit_wrapper(
 
     bundle_nets, unknown_models = collect_bundle_nets(x_elements, warn)
 
+    n_wdm = sum(1 for _, w in bundle_nets if w > 1)
     lines: List[str] = []
     lines.append("* Auto-generated by kicad_to_fairchild.py — DO NOT EDIT BY HAND.")
     lines.append(f"* Source: {kicad_path.name}")
     lines.append(f"* Transpiled {n_transpiled} KiCad X-element(s); "
-                 f"detected {len(bundle_nets)} optical bundle net(s).")
+                 f"detected {len(bundle_nets)} optical bundle net(s)"
+                 + (f", {n_wdm} of which are WDM (multi-channel)." if n_wdm else "."))
     lines.append("")
 
     if bundle_nets:
         lines.append("* ── Optical bundle declarations ──────────────────────────────")
-        for net in bundle_nets:
-            lines.append(f".optical_port {net}")
+        for net, width in bundle_nets:
+            if width > 1:
+                lines.append(f".optical_port {net} {width}")
+            else:
+                lines.append(f".optical_port {net}")
         lines.append("")
 
     if options_lines:

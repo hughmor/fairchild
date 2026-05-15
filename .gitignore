@@ -8,7 +8,14 @@ Cargo.lock
 /tmp/
 examples/*/*.png
 examples/*/*.csv
-__pycache__sotu.md
+
+# project-state-of-the-union scratch file; never committed
+sotu.md
+
+# kicad_to_fairchild.py transpiled wrappers + sim outputs
+*_transpiled_netlist.sp
+*_transpiled_output
+run_*.sp
 
 # python bytecode
 __pycache__/

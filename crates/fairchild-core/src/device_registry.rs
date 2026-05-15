@@ -6,8 +6,9 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    Mosfet1, NativeCwLaser, NativeDirectionalCoupler, NativePhotodetector,
-    NativePnPhaseShifter, NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
+    Mosfet1, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeMux,
+    NativePhotodetector, NativePnPhaseShifter, NativeSplitter, NativeThermalPhaseShifter,
+    NativeWaveguide,
     ShockleyDiode,
 };
 
@@ -197,6 +198,18 @@ impl DeviceRegistry {
         });
         self.register("fc_cw_laser", |terminals, ctx| {
             let mut d = NativeCwLaser::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_mux", |terminals, ctx| {
+            let mut d = NativeMux::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_demux", |terminals, ctx| {
+            let mut d = NativeDemux::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

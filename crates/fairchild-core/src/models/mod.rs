@@ -4,6 +4,6 @@ pub mod photonic;
 pub use diode::ShockleyDiode;
 pub use mosfet1::Mosfet1;
 pub use photonic::{
-    NativeCwLaser, NativeDirectionalCoupler, NativePhotodetector, NativePnPhaseShifter,
-    NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
+    NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeMux, NativePhotodetector,
+    NativePnPhaseShifter, NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
 };

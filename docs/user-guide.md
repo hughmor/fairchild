@@ -728,6 +728,68 @@ revision.
 and later change `wavelength_nm`, **re-set `V_pi_L`** so the EO calibration
 tracks the new λ_ref.
 
+### `fc_mux` — N → 1 WDM multiplexer
+
+```
+X<name>  bus  ch_0  ch_1  ...  ch_{N-1}  fc_mux
+```
+
+| Port | Role |
+|---|---|
+| `bus` | bundle, N-channel optical output |
+| `ch_k` (k = 0..N-1) | bundle, single-channel optical input |
+
+No parameters; channel count `N` is inferred from instance arity (number of
+positional nets minus 1).
+
+**Physics.** Identity routing per channel: `V(bus_k.re) = V(ch_k.re)`,
+`V(bus_k.im) = V(ch_k.im)`, `V(bus_k.λ) = V(ch_k.λ)` for k = 0..N-1.
+There's no wavelength selectivity — this is a topology marker, not an
+AWG. For wavelength-selective combining you'd write a different device
+that conditionally couples based on input wavelength; not in scope yet.
+
+The parser special-cases `fc_mux` so that (a) the bus and channel
+bundles can have different channel widths without erroring, and (b)
+the device is NOT replicated per channel — one instance handles all N
+channels at once.
+
+### `fc_demux` — 1 → N WDM demultiplexer
+
+```
+X<name>  bus  ch_0  ch_1  ...  ch_{N-1}  fc_demux
+```
+
+| Port | Role |
+|---|---|
+| `bus` | bundle, N-channel optical input |
+| `ch_k` (k = 0..N-1) | bundle, single-channel optical output |
+
+Symmetric counterpart to `fc_mux`: `V(ch_k.*) = V(bus_k.*)`. Same
+no-wavelength-selectivity caveat.
+
+Typical WDM topology:
+
+```spice
+.optical_port ch0
+.optical_port ch1
+.optical_port bus 2
+.optical_port out_bus 2
+.optical_port d0
+.optical_port d1
+
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1549.9
+Xl1 ch1 fc_cw_laser power_mW=1.0 wavelength_nm=1550.1
+Xmux bus ch0 ch1 fc_mux
+Xwg  bus out_bus fc_waveguide L_um=500 alpha_dB_cm=2 wavelength_nm=1550
+Xdemux out_bus d0 d1 fc_demux
+Xpd0 d0 v_pd0 0 fc_photodetector responsivity=0.8
+Xpd1 d1 v_pd1 0 fc_photodetector responsivity=0.8
+```
+
+The `bus` and `out_bus` bundles each carry 2 channels; `Xwg` replicates
+into 2 parallel single-channel waveguides automatically because both
+its input and output bundles are 2-channel.
+
 ### `fc_thermal_ps` — thermo-optic phase shifter
 
 ```

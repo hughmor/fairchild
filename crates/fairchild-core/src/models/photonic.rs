@@ -913,6 +913,179 @@ impl NativePnPhaseShifter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native WDM multiplexer / demultiplexer
+// ────────────────────────────────────────────────────────────────────────
+//
+// `fc_mux` / `fc_demux` bridge between N single-channel optical bundles and
+// one N-channel optical bundle.  They are TOPOLOGY MARKERS, not signal
+// processors: each device is identity-routing channel-by-channel
+// (`bus[k].* = ch_k.*`).  The point is to give the schematic a single place
+// where bundle widths change, so users can wire a wavelength-diverse circuit
+// without dealing with KiCad's bus syntax (which can't connect directly to
+// single symbol pins).
+//
+// Terminal layout (variable arity, derived in `setup_instance`):
+//
+//   fc_mux  N=4 has 6·N = 24 terminals.  The first 3·N are the bus output
+//           wires interleaved per channel: [bus.0.re, bus.0.im, bus.0.λ,
+//           bus.1.re, ..., bus.{N-1}.λ].  The next 3·N are the N single-
+//           channel inputs in instance order: [ch0.re, ch0.im, ch0.λ,
+//           ch1.re, ..., ch{N-1}.λ].
+//   fc_demux same layout — bus first (now input), single channels next
+//           (now outputs).
+//
+// The parser knows these two model names are "bundle-bridging" and must
+// (a) skip the channel-count matching check and (b) emit a single instance
+// with every bundle flattened to its underlying wires.  See
+// `expand_optical_ports` in fairchild-parser.
+
+/// Identity-routing combiner: N single-channel optical bundles → 1 N-channel
+/// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
+pub struct NativeMux {
+    n_channels: usize,
+    nodes:      Vec<NodeId>,
+    branches:   Vec<Option<usize>>,
+}
+
+impl NativeMux {
+    pub fn new() -> Self {
+        Self { n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
+    }
+}
+
+impl Device for NativeMux {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        assert!(
+            !terminals.is_empty() && terminals.len() % 6 == 0,
+            "fc_mux: terminal count must be a positive multiple of 6 (1 bus + N channels × 3 wires each); got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
+    }
+
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n = self.n_channels;
+        for k in 0..n {
+            // Bus wires for channel k.
+            let bus_re = self.nodes[3 * k];
+            let bus_im = self.nodes[3 * k + 1];
+            let bus_l  = self.nodes[3 * k + 2];
+            // Single-channel input k (offset by the N-channel bus block).
+            let off = 3 * (n + k);
+            let ch_re = self.nodes[off];
+            let ch_im = self.nodes[off + 1];
+            let ch_l  = self.nodes[off + 2];
+            // Bus drives FROM channel: V(bus_k.*) = V(ch_k.*).
+            stamp_potential_eq(mat, &self.branches, 3 * k,     bus_re, &[(ch_re, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, bus_im, &[(ch_im, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, bus_l,  &[(ch_l,  -1.0)]);
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+/// Identity-routing splitter: 1 N-channel optical bundle → N single-channel
+/// bundles.  Pin 1 (and the first bundle wire block) is the bus input.
+pub struct NativeDemux {
+    n_channels: usize,
+    nodes:      Vec<NodeId>,
+    branches:   Vec<Option<usize>>,
+}
+
+impl NativeDemux {
+    pub fn new() -> Self {
+        Self { n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
+    }
+}
+
+impl Device for NativeDemux {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        assert!(
+            !terminals.is_empty() && terminals.len() % 6 == 0,
+            "fc_demux: terminal count must be a positive multiple of 6 (1 bus + N channels × 3 wires each); got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
+    }
+
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n = self.n_channels;
+        for k in 0..n {
+            let bus_re = self.nodes[3 * k];
+            let bus_im = self.nodes[3 * k + 1];
+            let bus_l  = self.nodes[3 * k + 2];
+            let off = 3 * (n + k);
+            let ch_re = self.nodes[off];
+            let ch_im = self.nodes[off + 1];
+            let ch_l  = self.nodes[off + 2];
+            // Channels drive FROM bus: V(ch_k.*) = V(bus_k.*).
+            stamp_potential_eq(mat, &self.branches, 3 * k,     ch_re, &[(bus_re, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, ch_im, &[(bus_im, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, ch_l,  &[(bus_l,  -1.0)]);
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+/// Stamp `V(out) = Σ k_i · V(in_i)` into one auxiliary branch row.
+fn stamp_potential_eq(
+    mat: &mut MnaMatrix,
+    branches: &[Option<usize>],
+    branch_idx: usize,
+    out_node: NodeId,
+    ins: &[(NodeId, f64)],
+) {
+    let (Some(out), Some(j)) = (out_node, branches[branch_idx]) else { return };
+    mat.a[j][out] += 1.0;
+    for &(in_node, k) in ins {
+        if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
+    }
+    mat.a[out][j] += 1.0;
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Shared utilities
 // ────────────────────────────────────────────────────────────────────────
 

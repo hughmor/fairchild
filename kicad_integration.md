@@ -221,17 +221,53 @@ Non-`fc_*` X-elements (e.g. `.subckt`-based hierarchical photonic blocks,
 third-party OSDI models) are passed through untouched and reported with an
 info message under `-v`.
 
+### WDM via `fc_mux` / `fc_demux`
+
+KiCad doesn't allow connecting a bus directly to a single symbol pin —
+buses are explicitly for grouping multiple individual wires. The fairchild
+WDM convention sidesteps this entirely: two new native devices, `fc_mux`
+and `fc_demux`, bridge between N single-channel optical bundles and one
+N-channel bundle. Every wire on the schematic stays a normal single-line
+wire; the "bus-ness" lives in fairchild's `.optical_port NAME N` declaration
+which the post-processor auto-generates.
+
+Symbol convention:
+
+- **`fc_mux`** (combiner): pin 1 is the bus output; pins 2..N+1 are N
+  single-channel inputs. One symbol per supported N (typically 2, 4, 8).
+- **`fc_demux`** (splitter): pin 1 is the bus input; pins 2..N+1 are N
+  single-channel outputs.
+
+The post-processor infers each bundle's channel count from MUX/DEMUX
+instance arity (N = pin count − 1) and propagates the width along the
+bus to every device between the MUX and DEMUX. Single-channel bundles
+on the periphery (where lasers and detectors connect) stay at width 1.
+
+Example transpiler output for a 2-channel WDM circuit:
+
+```spice
+.optical_port wdm_bus 2          ← bus, auto-detected from MUX1's 3-pin arity
+.optical_port ch0                ← laser-side single channel
+.optical_port ch1                ← laser-side single channel
+.optical_port wg_out 2           ← propagated from MUX → WG1
+.optical_port d0                 ← detector-side single channel
+.optical_port d1
+```
+
+The MRR-modulator + MUX/DEMUX combo gives you the "single physical ring,
+multiple wavelengths simultaneously" topology described in
+`examples/photonic/native_wdm_mrr_modulator.sp`, but now drawable as a
+KiCad schematic.
+
 ### Limits today (first PR scope)
 
-- **WDM**: `.optical_port NAME N` for `N > 1` is supported by the parser
-  (the WDM MRR example uses it) but the wrapper script does not yet
-  auto-detect KiCad bus syntax (`net[0..3]`) and convert to it. For now,
-  WDM circuits should be expressed by replicating the per-channel symbols
-  in the schematic or by hand-editing the wrapper to declare `.optical_port
-  NAME N` with explicit channel-suffixed wiring on lasers and detectors
-  (see `examples/photonic/native_wdm_mrr_modulator.sp` for the pattern).
-  Auto-bus-expansion is the natural follow-up once a single-channel KiCad
-  circuit lands end-to-end.
+- **Mixed widths on one device** — if two `fc_mux` instances feed into
+  different parts of the same bundle name with different N, the
+  post-processor uses the first authoritative width it sees and warns
+  on conflicts. Don't reuse bundle names across mismatched widths.
+- **No KiCad-bus expansion** — `net[0..3]` syntax is unused; the MUX/DEMUX
+  approach makes it unnecessary. If a future user wants buses on the
+  schematic for visual grouping, that's a separate post-processor feature.
 
 ---
 

@@ -1052,6 +1052,29 @@ fn expand_optical_ports(
         // No port references — return the element unchanged.
         return Ok(vec![Element::XOsdi { name, nets, model_name, params }]);
     }
+    // `fc_mux` and `fc_demux` are bundle-bridging devices: they bridge N
+    // single-channel bundles to one N-channel bundle (or vice versa) in a
+    // single instance. They do NOT replicate per channel, and channel
+    // counts intentionally don't match across their pins.  Skip the
+    // matching check and emit one instance with every bundle flattened to
+    // its underlying wires.  See `NativeMux`/`NativeDemux`.
+    let model_lc = model_name.to_lowercase();
+    if model_lc == "fc_mux" || model_lc == "fc_demux" {
+        let mut flat_nets: Vec<String> = Vec::with_capacity(nets.len() * 3);
+        for (net, port_ref) in nets.iter().zip(port_refs.iter()) {
+            if let Some(port_idx) = port_ref {
+                let port = &ports[*port_idx];
+                for ch in 0..port.channels {
+                    flat_nets.extend(port.wires_for_channel(ch));
+                }
+            } else {
+                flat_nets.push(net.clone());
+            }
+        }
+        return Ok(vec![Element::XOsdi {
+            name, nets: flat_nets, model_name, params,
+        }]);
+    }
     // Validate consistent channel count when more than one port is involved.
     let max_n = channel_counts.iter().copied().max().unwrap_or(1);
     if channel_counts.iter().any(|&n| n != max_n) {
