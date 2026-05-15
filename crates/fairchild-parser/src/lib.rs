@@ -39,6 +39,56 @@ pub struct Netlist {
     /// More than one entry asks the CLI/Python driver to repeat every
     /// analysis once per temperature.
     pub temps: Vec<f64>,
+    /// `.alter <label>` blocks: each is a set of element / model overrides
+    /// applied on top of the base netlist for a re-run pass.  The base run
+    /// uses the original netlist; each block runs once after applying.
+    pub alters: Vec<AlterBlock>,
+}
+
+/// One `.alter <label>` block: name-keyed patches applied to the base netlist
+/// before a re-run pass.  `element_overrides` replace by name (or append when
+/// the name doesn't exist); `model_overrides` follow the same rule.
+#[derive(Debug, Clone, Default)]
+pub struct AlterBlock {
+    pub label: String,
+    pub element_overrides: Vec<Element>,
+    pub model_overrides:  Vec<ModelCard>,
+}
+
+impl Netlist {
+    /// Apply an `.alter` block in place: replace any same-named Element /
+    /// ModelCard, or append a new entry if the name is unseen.
+    pub fn apply_alter(&mut self, block: &AlterBlock) {
+        for new_el in &block.element_overrides {
+            if let Some(slot) = self.elements.iter_mut().find(|e| element_name(e) == element_name(new_el)) {
+                *slot = new_el.clone();
+            } else {
+                self.elements.push(new_el.clone());
+            }
+        }
+        for new_m in &block.model_overrides {
+            if let Some(slot) = self.models.iter_mut().find(|m| m.name == new_m.name) {
+                *slot = new_m.clone();
+            } else {
+                self.models.push(new_m.clone());
+            }
+        }
+    }
+}
+
+/// Extract the name (case-folded) from any Element variant, for alter matching.
+fn element_name(el: &Element) -> String {
+    match el {
+        Element::Resistor      { name, .. } |
+        Element::Capacitor     { name, .. } |
+        Element::Inductor      { name, .. } |
+        Element::VoltageSource { name, .. } |
+        Element::CurrentSource { name, .. } |
+        Element::Diode         { name, .. } |
+        Element::Mosfet        { name, .. } |
+        Element::XOsdi         { name, .. } |
+        Element::Behavioral    { name, .. } => name.to_lowercase(),
+    }
 }
 
 /// Waveform specification for independent sources.

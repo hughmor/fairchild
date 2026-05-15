@@ -616,6 +616,7 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 
     // Pass 2: parse main body.
     let mut expanding: HashSet<String> = HashSet::new();
+    let mut current_alter: Option<crate::AlterBlock> = None;
 
     for (lineno, line) in &main_lines {
         let trimmed = line.trim();
@@ -627,6 +628,18 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 
         if lc == ".end" {
             break;
+        } else if lc.starts_with(".alter") {
+            // Flush any current block, start a new one.  Label defaults to the
+            // 1-based ordinal so each block gets a stable name even when the
+            // user omits one.
+            if let Some(b) = current_alter.take() { netlist.alters.push(b); }
+            let label = lc.split_whitespace().nth(1).map(str::to_string)
+                .unwrap_or_else(|| format!("alter{}", netlist.alters.len() + 1));
+            current_alter = Some(crate::AlterBlock {
+                label,
+                element_overrides: Vec::new(),
+                model_overrides:   Vec::new(),
+            });
         } else if lc.starts_with(".optical_bus") {
             // .optical_bus N re_base im_base wl_base
             // Declares an N-channel WDM optical bus, generating 3N net entries:
@@ -672,7 +685,11 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             }
         } else if lc.starts_with(".model") {
             if let Some(card) = parse_model(&lc, *lineno)? {
-                netlist.models.push(card);
+                if let Some(alter) = current_alter.as_mut() {
+                    alter.model_overrides.push(card);
+                } else {
+                    netlist.models.push(card);
+                }
             }
         } else if lc.starts_with(".osdi") {
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
@@ -710,13 +727,21 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                         model_name, name, nets, params,
                         def, &subckt_defs, &global_params, &mut expanding, *lineno,
                     )?;
-                    netlist.elements.extend(flat);
+                    if let Some(alter) = current_alter.as_mut() {
+                        alter.element_overrides.extend(flat);
+                    } else {
+                        netlist.elements.extend(flat);
+                    }
                 }
+            } else if let Some(alter) = current_alter.as_mut() {
+                alter.element_overrides.push(el);
             } else {
                 netlist.elements.push(el);
             }
         }
     }
+    // Flush trailing .alter block on EOF (no terminator required).
+    if let Some(b) = current_alter.take() { netlist.alters.push(b); }
 
     Ok(netlist)
 }
@@ -1739,6 +1764,30 @@ mod tests {
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         // At t=td1+tau1 the rise is (1-e^-1) = 0.6321
         assert!((w.at(2e-6) - (1.0 - (-1.0_f64).exp())).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_alter_blocks_collect_overrides() {
+        let input = "* alters\n\
+                     V1 in 0 DC 1\nR1 in out 1k\n.op\n\
+                     .alter slow\nR1 in out 2k\n\
+                     .alter fast\nR1 in out 500\n\
+                     .end\n";
+        let net = parse_spice(input).unwrap();
+        assert_eq!(net.elements.len(), 2, "base has V1 and R1");
+        assert_eq!(net.alters.len(), 2);
+        assert_eq!(net.alters[0].label, "slow");
+        assert_eq!(net.alters[1].label, "fast");
+        assert_eq!(net.alters[0].element_overrides.len(), 1);
+
+        // Apply: base R1 = 1k, slow R1 = 2k.
+        let mut applied = net.clone();
+        applied.apply_alter(&net.alters[0]);
+        let r1 = applied.elements.iter().find_map(|e| match e {
+            crate::Element::Resistor { name, resistance, .. } if name == "r1" => Some(*resistance),
+            _ => None,
+        }).unwrap();
+        assert!((r1 - 2000.0).abs() < 1e-9, "expected R1=2k after alter, got {r1}");
     }
 
     #[test]

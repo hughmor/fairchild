@@ -377,9 +377,9 @@ fn main() {
     let title = netlist.title.clone();
     let probe_list: Vec<String> = cli.probe.as_deref().map(parse_probe).unwrap_or_default();
 
-    // Build device registry: built-in models + OSDI shared libraries
+    // Build device registry: built-in models + OSDI shared libraries.
+    // Constructed inside the .alter loop below so model overrides take effect.
     let netlist_dir = cli.file.parent().map(|p| p.to_path_buf());
-    let registry = build_registry(&netlist, netlist_dir.as_ref(), cli.quiet);
 
     // Merge netlist `.options` + CLI flag overrides into a single SimOptions.
     let opts = build_options(&netlist, &cli);
@@ -409,6 +409,31 @@ fn main() {
     } else {
         vec![opts.temp_k]
     };
+    // .alter sweep: base run + one re-run per .alter block.
+    // We materialise the netlists up front so the analysis loop doesn't have
+    // to know about block iteration.
+    let mut alter_runs: Vec<(String, Netlist)> = vec![("base".into(), netlist.clone())];
+    for block in &netlist.alters {
+        let mut patched = netlist.clone();
+        patched.apply_alter(block);
+        alter_runs.push((block.label.clone(), patched));
+    }
+
+    for (ai, (alter_label, netlist)) in alter_runs.iter().enumerate() {
+        if alter_runs.len() > 1 {
+            writeln!(w, "# alter={alter_label} (block {}/{})",
+                ai + 1, alter_runs.len())
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            if cli.verbose {
+                eprintln!("info: .alter block {}/{}: '{alter_label}'",
+                    ai + 1, alter_runs.len());
+            }
+        }
+        // Rebuild the device registry for this alter pass — `.model`
+        // overrides inside the block need to make it into the built-in
+        // model registry.  OSDI shared-library handles are recomputed too;
+        // that's a small redundancy worth the simplicity.
+        let registry = build_registry(netlist, netlist_dir.as_ref(), cli.quiet);
     for (ti, &temp_k) in temp_sweep.iter().enumerate() {
         let mut opts = opts.clone();
         opts.temp_k = temp_k;
@@ -579,6 +604,7 @@ fn main() {
         }
     }
     }  // end .temp sweep loop
+    }  // end .alter sweep loop
 
     if !ran_something && !cli.quiet {
         eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");

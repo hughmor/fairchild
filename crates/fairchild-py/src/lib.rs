@@ -513,6 +513,16 @@ impl Circuit {
         self.overrides.insert(key, value);
     }
 
+    /// List the `.alter` block labels declared in the loaded netlist.
+    ///
+    /// Pass one of these as the `alter` kwarg to `run()` to apply that
+    /// block on top of the base netlist for that call.
+    pub fn alter_labels(&self) -> Vec<String> {
+        self.netlist.as_ref()
+            .map(|n| n.alters.iter().map(|b| b.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Inject a numpy waveform as the source for a voltage or current source.
     ///
     /// The source named `name` (e.g. `"Vin"`, `"V1"`) will have its waveform
@@ -546,6 +556,19 @@ impl Circuit {
         let mut nl = netlist.clone();
         apply_overrides(&mut nl, &self.overrides);
         apply_source_overrides(&mut nl, &self.source_overrides);
+
+        // Apply a `.alter` block if the user requested one via `alter=...`.
+        if let Some(kw) = kwargs {
+            if let Some(v) = kw.get_item("alter")? {
+                let label: String = v.extract()?;
+                let block = nl.alters.iter().find(|b| b.label == label).cloned()
+                    .ok_or_else(|| PyRuntimeError::new_err(format!(
+                        "no .alter block named '{label}'; available: {:?}",
+                        nl.alters.iter().map(|b| &b.label).collect::<Vec<_>>()
+                    )))?;
+                nl.apply_alter(&block);
+            }
+        }
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let opts = build_sim_options(&nl, kwargs)?;
