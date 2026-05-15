@@ -1,7 +1,7 @@
 # fairchild ↔ KiCad — Setup Guide
 
 This guide is the **native-device flow**. It assumes you draw a schematic in
-KiCad using symbols from a `fairchild_native.kicad_sym` library whose models
+KiCad using symbols from a `fairchild_photonics.kicad_sym` library whose models
 map onto fairchild's native `fc_*` photonic devices and onto built-in
 electrical primitives (R / L / C / V / I / D / M). The pre-Phase-B path that
 used compiled `.osdi` Verilog-A models is no longer recommended; that file
@@ -34,19 +34,31 @@ native flow.
 
 ## 2. Project layout
 
+The fairchild repo ships the symbol library and reference KiCad examples
+under `examples/kicad/`:
+
 ```
-my-photonic-project/
-├── fairchild_native.kicad_sym     ← native fc_* symbol library
-├── my_circuit.kicad_sch
-├── my_circuit.kicad_pro
-├── my_circuit.net                 ← KiCad SPICE export (regenerated each save)
-└── run_my_circuit.sp              ← wrapper from kicad_to_fairchild.py
+fairchild/
+└── examples/
+    └── kicad/
+        ├── fairchild_photonics.kicad_sym   ← native fc_* symbol library
+        └── mrm_kicad_test.cir              ← reference MRR-modulator export
 ```
 
-Add `fairchild_native.kicad_sym` via **Preferences → Manage Symbol Libraries
-→ Project Libraries → Add**. Point it at the file location; if you keep the
-library in this repo, the simplest path is to symlink or copy it into your
-project directory.
+Your own project lives outside the fairchild repo and looks like:
+
+```
+my-photonic-project/
+├── my_circuit.kicad_sch
+├── my_circuit.kicad_pro
+├── my_circuit.cir                  ← KiCad SPICE export (regenerated each save)
+└── run_my_circuit.sp               ← wrapper from kicad_to_fairchild.py
+```
+
+Add `fairchild_photonics.kicad_sym` via **Preferences → Manage Symbol Libraries
+→ Project Libraries → Add**, pointing at
+`<fairchild>/examples/kicad/fairchild_photonics.kicad_sym`. Update the
+library path whenever you pull fairchild updates that touch the library.
 
 ---
 
@@ -292,7 +304,7 @@ outputs swap at `V = V_pi`.
 
 The next steps for this integration, in rough order:
 
-1. **`fairchild_native.kicad_sym` symbol library** — committed alongside a
+1. **`fairchild_photonics.kicad_sym` symbol library** — committed alongside a
    regression-test schematic.
 2. **Bus-syntax auto-expansion in the wrapper** — translate KiCad buses
    `opt[0..3]` into `.optical_port opt 4` plus per-channel wiring.
