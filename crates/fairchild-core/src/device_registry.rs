@@ -1,15 +1,19 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use fairchild_parser::ModelCard;
 
-use crate::device::{Device, NodeId, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::mna::MnaMatrix;
 use crate::models::{
     Mosfet1, NativeDirectionalCoupler, NativePhotodetector, NativePnPhaseShifter,
     NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide, ShockleyDiode,
 };
 
+// Factory closures are `Arc` so the alias mechanism (B6) can clone a target
+// factory into an outer wrapper that performs parameter-name translation.
 type Factory =
-    Box<dyn Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static>;
+    Arc<dyn Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static>;
 
 /// Maps model names to device factory closures.
 ///
@@ -44,7 +48,48 @@ impl DeviceRegistry {
         name: impl Into<String>,
         factory: impl Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static,
     ) {
-        self.factories.insert(name.into(), Box::new(factory));
+        self.factories.insert(name.into(), Arc::new(factory));
+    }
+
+    /// Register `new_name` as an alias of an existing factory, optionally
+    /// translating parameter names on `set_real_param` calls.
+    ///
+    /// This is the **PDK-adapter hook** (Phase B6): a user-supplied PDK
+    /// mapping table can register foundry device names against native
+    /// devices without leaking PDK-specific code into master.  Example:
+    ///
+    /// ```rust,ignore
+    /// use std::collections::HashMap;
+    /// let mut reg = DeviceRegistry::new();
+    /// let mut remap = HashMap::new();
+    /// remap.insert("waveguide_length_um".into(), "l_um".into());
+    /// remap.insert("group_index".into(),        "n_g".into());
+    /// reg.register_alias("pdk_foo_waveguide", "fc_waveguide", remap).unwrap();
+    /// ```
+    ///
+    /// After registration, the netlist token `pdk_foo_waveguide` builds an
+    /// `fc_waveguide` instance, with PDK-named parameters routed to the
+    /// native device's underlying parameter names through the map.  Unknown
+    /// parameter names pass through unchanged.
+    pub fn register_alias(
+        &mut self,
+        new_name: impl Into<String>,
+        target_name: &str,
+        param_remap: HashMap<String, String>,
+    ) -> Result<(), String> {
+        let target_factory = self.factories.get(target_name)
+            .cloned()
+            .ok_or_else(|| format!(
+                "register_alias: unknown target factory '{target_name}' \
+                 (register it before creating aliases)"
+            ))?;
+        let remap = Arc::new(param_remap);
+        let aliased_factory = Arc::new(move |terminals: &[NodeId], ctx: &SimContext| {
+            let inner = target_factory(terminals, ctx);
+            Box::new(AliasedDevice { inner, remap: Arc::clone(&remap) }) as Box<dyn Device>
+        });
+        self.factories.insert(new_name.into(), aliased_factory);
+        Ok(())
     }
 
     /// Populate the registry from `.model D` cards using the built-in Shockley diode.
@@ -176,5 +221,100 @@ impl DeviceRegistry {
 impl Default for DeviceRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── PDK adapter (B6) ────────────────────────────────────────────────────
+
+/// Wraps another `Device`, translating parameter names on `set_real_param`
+/// through a fixed remap table.  Used by `DeviceRegistry::register_alias`
+/// to surface foundry-specific device names with native fairchild devices
+/// underneath.  All other Device-trait methods forward verbatim.
+struct AliasedDevice {
+    inner: Box<dyn Device>,
+    remap: Arc<HashMap<String, String>>,
+}
+
+impl Device for AliasedDevice {
+    fn num_terminals(&self) -> usize { self.inner.num_terminals() }
+    fn setup_model(&mut self, ctx: &SimContext) { self.inner.setup_model(ctx) }
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        self.inner.setup_instance(terminals, ctx)
+    }
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
+        self.inner.eval(x, flags, ctx)
+    }
+    fn load_residual(&self, b: &mut [f64]) { self.inner.load_residual(b) }
+    fn load_jacobian(&self, mat: &mut MnaMatrix) { self.inner.load_jacobian(mat) }
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        self.inner.load_residual_tran(b, alpha)
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        self.inner.load_jacobian_tran(mat, alpha)
+    }
+    fn commit_timestep(&mut self, x: &[f64]) { self.inner.commit_timestep(x) }
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        // Look up the remap (case-insensitive); fall through unchanged if
+        // not found so users can mix PDK-named and native-named params.
+        let key = name.to_lowercase();
+        let translated = self.remap.get(&key).map(String::as_str).unwrap_or(name);
+        self.inner.set_real_param(translated, value)
+    }
+    fn num_extra_nodes(&self) -> usize { self.inner.num_extra_nodes() }
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        self.inner.bind_extra_nodes(first_idx)
+    }
+    fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        self.inner.noise_sources(ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fairchild_parser::parse_spice;
+
+    /// Register a PDK-style alias mapping `pdk_widget_wg` →
+    /// `fc_waveguide` with parameter-name remapping, then verify a netlist
+    /// using the PDK name + PDK param names builds the right device and
+    /// produces the same numbers as the native form.
+    #[test]
+    fn register_alias_pdk_name_with_param_remap() {
+        let netlist = parse_spice(
+            "* aliased waveguide\n\
+             V_re in_re 0 DC 1.0\n\
+             V_im in_im 0 DC 0.0\n\
+             V_wl in_wl 0 DC 1.55e-6\n\
+             X1 in_re in_im in_wl out_re out_im out_wl pdk_widget_wg \
+                wg_len_um=100 mode_index=4.2 prop_loss_dB_cm=2.0\n\
+             .op\n.end\n"
+        ).unwrap();
+        let mut registry = DeviceRegistry::new();
+        let mut remap = HashMap::new();
+        remap.insert("wg_len_um".to_string(),       "l_um".to_string());
+        remap.insert("mode_index".to_string(),       "n_g".to_string());
+        remap.insert("prop_loss_db_cm".to_string(),  "alpha_db_cm".to_string());
+        registry.register_alias("pdk_widget_wg", "fc_waveguide", remap)
+            .expect("alias should register");
+        let r = crate::newton::dc_op_nr_with_registry(&netlist, &registry)
+            .expect("DC OP should converge");
+        // Same numbers as the un-aliased fc_waveguide test elsewhere.
+        let v_re = r.node_voltage("out_re").unwrap();
+        let v_im = r.node_voltage("out_im").unwrap();
+        let amp  = (v_re * v_re + v_im * v_im).sqrt();
+        let expected = (-23.0258509_f64 * 100e-6 / 2.0).exp();
+        assert!((amp - expected).abs() < 1e-5,
+            "|A_out|={amp:.6} expected={expected:.6}");
+    }
+
+    #[test]
+    fn register_alias_unknown_target_errors() {
+        let mut reg = DeviceRegistry::new();
+        let res = reg.register_alias(
+            "pdk_widget_wg",
+            "nonexistent_target",
+            HashMap::new(),
+        );
+        assert!(res.is_err());
     }
 }
