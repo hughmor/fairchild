@@ -12,6 +12,16 @@ examples/*/*.csv
 # project-state-of-the-union scratch file; never committed
 sotu.md
 
+# kicad development project
+examples/kicad_photonics/.history
+examples/kicad_photonics/*.bak
+examples/kicad_photonics/*-backups
+examples/kicad_photonics/*.kicad_pcb
+examples/kicad_photonics/*.kicad_sch
+examples/kicad_photonics/*.kicad_prl
+examples/kicad_photonics/*.kicad_pro*
+examples/kicad_photonics/sym-lib-table
+
 # kicad_to_fairchild.py transpiled wrappers + sim outputs
 *_transpiled_netlist.sp
 *_transpiled_output
