@@ -1,34 +1,91 @@
-// Optical discipline for fairchild EO co-simulator.
+// Optical disciplines.
 //
-// Used for ALL optical wires: amplitude (re/im) and wavelength (lambda).
-// The lambda wire stores wavelength in µm using the same Ophase/Oamp pattern.
+// Two generations live side-by-side during the B-phase photonic refactor:
 //
-// Signal semantics:
-//   Ophase(port)    — READ potential (amplitude in √W, or wavelength in µm)
-//   Oamp(port)  <+  — WRITE flow contribution (Norton current source)
+//   LEGACY (pre-B1):  discipline `optical` with potentials accessed via
+//                     `Ophase` and flows via `Oamp`.  Models written before
+//                     B1 use this discipline.  The amplitude is a "flow" and
+//                     each output port stamps a Norton-equivalent driver:
+//                       Oamp(out) <+ G * (target - Ophase(out));
+//                     Kept compiling for backward compatibility; new models
+//                     should not use it.
 //
-// Norton-equivalent pattern (never use Ophase(port) <+ on the LHS):
-//   Oamp(out) <+ G * (target - Ophase(out))   // output driver
-//   Oamp(in)  <+ 1e-12 * (-Ophase(in))        // high-impedance input shunt
+//   NEW (B1+):        discipline `optical_field` for SVEA amplitude wires
+//                     (re/im) accessed via `OF`, and `optical_lambda` for
+//                     wavelength wires accessed via `OWL`.  Potentials are
+//                     the primary signal; each model writes its output
+//                     directly:
+//                       OF(out_re) <+ target_re;
+//                     This shape mirrors the discipline conventions used in
+//                     production photonic PDKs and removes the Norton hack.
+//
+// OpenVAF 23.5 crashes in `intern_node_strs` if a discipline declares only
+// a `potential` (no `flow`).  Each new discipline includes an unused
+// placeholder flow nature solely to dodge that codegen bug.  Model bodies
+// must not reference the placeholder access functions.
 
 `ifndef OPTICAL_VAMS
 `define OPTICAL_VAMS
 
+// ────────────────────────────────────────────────────────────────────────
+// LEGACY scheme (pre-B1).  Do not use in new models.
+// ────────────────────────────────────────────────────────────────────────
+
 nature Optical_Amplitude
     units   = "sqrt(W)";
-    access  = Oamp;     // flow — Norton contribution (WRITE with <+ Oamp)
+    access  = Oamp;
     abstol  = 1e-12;
 endnature
 
 nature Optical_Phase
-    units   = "rad";    // must differ from Optical_Amplitude units to avoid OpenVAF flow-node generation
-    access  = Ophase;   // potential — amplitude value at node (READ with Ophase)
+    units   = "rad";
+    access  = Ophase;
     abstol  = 1e-9;
 endnature
 
 discipline optical
     potential Optical_Phase;
     flow      Optical_Amplitude;
+enddiscipline
+
+// ────────────────────────────────────────────────────────────────────────
+// NEW scheme (B1+) — potential-only, direct contributions.
+// ────────────────────────────────────────────────────────────────────────
+
+nature OpticalField
+    units   = "V/m";
+    access  = OF;
+    abstol  = 1e-9;
+endnature
+
+nature OpticalLambda
+    units   = "m";
+    access  = OWL;
+    abstol  = 1e-12;
+endnature
+
+// Placeholder flow natures — never accessed; present only because OpenVAF
+// 23.5 panics on potential-only disciplines during OSDI metadata codegen.
+nature _OpticalFieldFlow
+    units   = "A";
+    access  = _of_flow;
+    abstol  = 1e-15;
+endnature
+
+nature _OpticalLambdaFlow
+    units   = "A";
+    access  = _owl_flow;
+    abstol  = 1e-15;
+endnature
+
+discipline optical_field
+    potential OpticalField;
+    flow      _OpticalFieldFlow;
+enddiscipline
+
+discipline optical_lambda
+    potential OpticalLambda;
+    flow      _OpticalLambdaFlow;
 enddiscipline
 
 `endif // OPTICAL_VAMS

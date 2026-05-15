@@ -1,20 +1,15 @@
 // PIN photodetector — converts optical power to photocurrent.
 //
-// Mixed-domain: 3-wire optical input (in_re, in_im, in_lambda) + electrical output.
+// Direct potential contributions (B1+ discipline scheme).  Optical inputs
+// use the `optical_field` / `optical_lambda` disciplines; reading is
+// `OF(in_re)`, `OF(in_im)`, `OWL(in_lambda)`.  Electrical output side is
+// unchanged.  No Norton-hack high-impedance shunts — the upstream device
+// drives the optical inputs via direct potential contribution.
 //
 // Physics:
-//   P_opt  = |A|² = in_re² + in_im²     (optical power in W)
-//   I_ph   = responsivity · P_opt        (photocurrent in A)
-//   I_dark = I_dark_A (constant reverse dark current)
-//
-// The photocurrent flows from cathode to anode (reverse-biased convention).
-// A shunt resistance R_shunt models the junction impedance.
-//
-// Parameters:
-//   responsivity  — A/W at operating wavelength
-//   I_dark_A      — dark current (A)
-//   R_shunt       — shunt resistance (Ω)
-//   wavelength_nm — operating wavelength (nm); informational / NR bootstrap
+//   P_opt  = |A|² = re² + im²            (W)
+//   I_ph   = responsivity · P_opt + I_dark  (A)
+//   I(anode, cathode) <+ −I_ph + V/R_shunt
 
 `include "disciplines.vams"
 `include "constants.vams"
@@ -23,33 +18,26 @@
 module photodetector(in_re, in_im, in_lambda, anode, cathode);
     inout in_re, in_im, in_lambda;
     inout anode, cathode;
-    optical    in_re, in_im, in_lambda;
-    electrical anode, cathode;
+    optical_field  in_re, in_im;
+    optical_lambda in_lambda;
+    electrical     anode, cathode;
 
     parameter real responsivity  = 1.0   from (0:inf);
     parameter real I_dark_A      = 1e-9  from [0:inf);
     parameter real R_shunt       = 1e6   from (0:inf);
-    parameter real wavelength_nm = 1550.0 from (0:inf);
 
     real P_opt, I_ph, Vj;
 
     analog begin
-        P_opt = Ophase(in_re) * Ophase(in_re) + Ophase(in_im) * Ophase(in_im);
+        P_opt = OF(in_re) * OF(in_re) + OF(in_im) * OF(in_im);
         I_ph  = responsivity * P_opt + I_dark_A;
 
         Vj = V(anode, cathode);
 
-        // Photocurrent (flows cathode → anode in conventional current sense)
+        // Photocurrent (flows cathode → anode in conventional sense)
         I(anode, cathode) <+ -I_ph;
 
         // Shunt resistance across junction
         I(anode, cathode) <+ Vj / R_shunt;
-
-        // Input amplitude: high-impedance shunt (ensures node appears in Jacobian)
-        Oamp(in_re) <+ 1e-12 * (-Ophase(in_re));
-        Oamp(in_im) <+ 1e-12 * (-Ophase(in_im));
-
-        // Input lambda: high-impedance shunt
-        Oamp(in_lambda) <+ 1e-12 * (-Ophase(in_lambda));
     end
 endmodule

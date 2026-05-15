@@ -1,16 +1,13 @@
 // CW laser source — injects a constant complex SVEA field.
 //
-// 3-wire port representation: (out_re, out_im, out_lambda).
-//   out_re, out_im  — optical amplitude in √W (SVEA complex envelope)
-//   out_lambda      — carrier wavelength in µm; drives the shared `wl` net
-//
-// All three ports use the single `optical` discipline (Ophase=read, Oamp=write).
-// The lambda wire stores wavelength in µm (~1.55) to stay within NR VMAX=0.5.
+// Direct potential contributions (B1+ discipline scheme).  Outputs are
+// 3-wire (re, im, lambda) using the `optical_field` + `optical_lambda`
+// disciplines; no Norton hack.
 //
 // Parameters:
-//   power_mW      — output power in mW
+//   power_mW      — output power in mW (P = |A|² so A = √P)
 //   phi_0_deg     — initial phase offset in degrees
-//   wavelength_nm — carrier wavelength (nm); drives the lambda node
+//   wavelength_nm — carrier wavelength (nm); drives the lambda port in metres
 
 `include "disciplines.vams"
 `include "constants.vams"
@@ -18,25 +15,21 @@
 
 module cw_laser(out_re, out_im, out_lambda);
     inout out_re, out_im, out_lambda;
-    optical out_re, out_im, out_lambda;
+    optical_field  out_re, out_im;
+    optical_lambda out_lambda;
 
     parameter real power_mW      = 1.0    from (0:inf);
     parameter real phi_0_deg     = 0.0;
     parameter real wavelength_nm = 1550.0 from (0:inf);
 
-    real A_re, A_im, G_src;
+    real A_re, A_im;
 
     analog begin
-        G_src = 1.0e6;
-
         A_re = sqrt(power_mW * 1e-3) * cos(phi_0_deg * `M_PI / 180.0);
         A_im = sqrt(power_mW * 1e-3) * sin(phi_0_deg * `M_PI / 180.0);
 
-        // Norton drive: amplitude ports converge to (A_re, A_im)
-        Oamp(out_re) <+ G_src * (A_re - Ophase(out_re));
-        Oamp(out_im) <+ G_src * (A_im - Ophase(out_im));
-
-        // Norton drive: lambda port stores wavelength in µm.
-        Oamp(out_lambda) <+ G_src * (wavelength_nm * 1e-3 - Ophase(out_lambda));
+        OF(out_re)     <+ A_re;
+        OF(out_im)     <+ A_im;
+        OWL(out_lambda) <+ wavelength_nm * 1e-9;
     end
 endmodule

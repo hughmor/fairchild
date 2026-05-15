@@ -1,0 +1,24 @@
+// Constant-amplitude optical source for tests and bench validation.
+//
+// Drives a 3-wire optical bundle (re, im, lambda) to fixed parameter values
+// using direct potential contributions (new B1 discipline scheme).
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "disciplines/optical.vams"
+
+module optical_source(out_re, out_im, out_lambda);
+    inout out_re, out_im, out_lambda;
+    optical_field  out_re, out_im;
+    optical_lambda out_lambda;
+
+    parameter real re_amp = 1.0;
+    parameter real im_amp = 0.0;
+    parameter real wavelength_m = 1.55e-6 from (0:inf);
+
+    analog begin
+        OF(out_re)     <+ re_amp;
+        OF(out_im)     <+ im_amp;
+        OWL(out_lambda) <+ wavelength_m;
+    end
+endmodule
