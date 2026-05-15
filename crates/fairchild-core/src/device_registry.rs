@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use fairchild_parser::ModelCard;
 
 use crate::device::{Device, NodeId, SimContext};
-use crate::models::{Mosfet1, NativeDirectionalCoupler, NativeSplitter, NativeWaveguide, ShockleyDiode};
+use crate::models::{
+    Mosfet1, NativeDirectionalCoupler, NativePhotodetector, NativePnPhaseShifter,
+    NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide, ShockleyDiode,
+};
 
 type Factory =
     Box<dyn Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static>;
@@ -97,16 +100,18 @@ impl DeviceRegistry {
         }
     }
 
-    /// Register the always-available native photonic passive devices.
-    /// These are addressable by model name in any X-element instance line:
+    /// Register the always-available native photonic devices.
+    /// All addressable by model name in any X-element instance line:
     ///
-    /// - `fc_waveguide`  — straight waveguide (B3 NativeWaveguide).
-    /// - `fc_dcoupler`   — 2×2 directional coupler.
-    /// - `fc_splitter`   — 1×2 Y-junction (3 dB lossless).
+    /// Passives (B3):
+    /// - `fc_waveguide`     — straight waveguide.
+    /// - `fc_dcoupler`      — 2×2 directional coupler.
+    /// - `fc_splitter`      — 1×2 Y-junction (3 dB lossless).
     ///
-    /// No `.osdi` library or `.model` card is needed — the registry
-    /// constructs them on demand.  Parameters (`L_um`, `n_g`, etc.) are
-    /// applied through `set_real_param` after construction.
+    /// Actives (B4):
+    /// - `fc_photodetector` — PIN photodetector with linear responsivity.
+    /// - `fc_thermal_ps`    — thermal phase shifter (Joule heating → φ = π·P/P_pi).
+    /// - `fc_pn_ps`         — PN-junction phase shifter (Δn_eff = dn_dv·V).
     pub fn register_native_photonics(&mut self) {
         self.register("fc_waveguide", |terminals, ctx| {
             let mut d = NativeWaveguide::new();
@@ -122,6 +127,24 @@ impl DeviceRegistry {
         });
         self.register("fc_splitter", |terminals, ctx| {
             let mut d = NativeSplitter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_photodetector", |terminals, ctx| {
+            let mut d = NativePhotodetector::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_thermal_ps", |terminals, ctx| {
+            let mut d = NativeThermalPhaseShifter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_pn_ps", |terminals, ctx| {
+            let mut d = NativePnPhaseShifter::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>
