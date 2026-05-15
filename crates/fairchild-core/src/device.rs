@@ -108,4 +108,19 @@ pub trait Device: Send + Sync {
     fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
         Vec::new()
     }
+
+    /// How many extra MNA rows this device needs beyond its terminal nodes.
+    ///
+    /// Verilog-A models with potential contributions (`V(port) <+ value;`)
+    /// implicitly introduce branch-flow nodes that OSDI exposes as
+    /// `num_nodes − num_terminals`.  The topology allocates that many rows
+    /// per device and then calls `bind_extra_nodes` with the starting index.
+    /// Returns 0 by default — native Rust devices that stamp directly into
+    /// terminal nodes have no extras.
+    fn num_extra_nodes(&self) -> usize { 0 }
+
+    /// Tell the device which contiguous MNA rows (starting at `first_idx`)
+    /// have been allocated for its internal nodes.  Called once after
+    /// construction and before the first `eval()`.  Default is a no-op.
+    fn bind_extra_nodes(&mut self, _first_idx: usize) {}
 }

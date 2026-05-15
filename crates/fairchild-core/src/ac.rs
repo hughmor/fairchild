@@ -162,13 +162,13 @@ pub fn ac_analysis_opts(
 ) -> Result<AcResult, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let topo = CircuitTopology::build(netlist);
-    let n_nodes = topo.n_nodes();
-    let size = topo.size;
+    let mut topo = CircuitTopology::build(netlist);
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
 
     // --- DC operating point ---
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let n_nodes = topo.n_nodes();
+    let size = topo.size;
     let dc_solver = opts.linear_solver(size);
     let x0 = dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
     // The AC system is 2N×2N (real-block of complex); build a sized solver.
@@ -190,8 +190,12 @@ pub fn ac_analysis_opts(
             }
         }
     }
-    // GMIN
+    // GMIN — node rows and OSDI internal-node rows.
     for i in 0..n_nodes {
+        g_mat[i][i] += opts.gmin;
+    }
+    let vsrc_end = n_nodes + topo.vsrc_index.len();
+    for i in vsrc_end..size {
         g_mat[i][i] += opts.gmin;
     }
 
@@ -294,6 +298,10 @@ fn dc_op(
             dev.load_jacobian(&mut mat);
         }
         for i in 0..n_nodes {
+            mat.a[i][i] += opts.gmin;
+        }
+        let vsrc_end = n_nodes + topo.vsrc_index.len();
+        for i in vsrc_end..topo.size {
             mat.a[i][i] += opts.gmin;
         }
         let x_new = solver.solve(&mat.a, &mat.b)?;

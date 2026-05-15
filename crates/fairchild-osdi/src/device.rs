@@ -171,7 +171,15 @@ impl Device for OsdiDevice {
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
-        self.mna_nodes = terminals.to_vec();
+        // Pre-size mna_nodes to num_nodes so internal slots are at least
+        // ground (UINT32_MAX).  `bind_extra_nodes` later overwrites them
+        // with real allocated row indices.
+        let num_nodes = self.desc().num_nodes as usize;
+        let num_terminals = self.desc().num_terminals as usize;
+        self.mna_nodes = terminals.iter().copied()
+            .chain(std::iter::repeat(None).take(num_nodes.saturating_sub(terminals.len())))
+            .take(num_nodes)
+            .collect();
 
         // Cache all descriptor reads before taking the mutable borrow on instance.
         // (desc() borrows self; as_mut_ptr() is a conflicting &mut borrow.)
@@ -182,10 +190,12 @@ impl Device for OsdiDevice {
         // The model reads node_mapping[i] from (inst + node_mapping_offset) to
         // find which solution-vector index corresponds to its i-th node.
         // UINT32_MAX is the sentinel for ground (NodeId = None).
+        // We write ALL num_nodes slots (terminals + internals).
         let map_ptr = unsafe {
             (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32
         };
-        for (i, &node) in terminals.iter().enumerate() {
+        for i in 0..num_nodes {
+            let node = self.mna_nodes.get(i).copied().flatten();
             unsafe {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }
@@ -201,12 +211,29 @@ impl Device for OsdiDevice {
                     self.inst_ptr(),
                     self.model_ptr(),
                     ctx.temperature,
-                    terminals.len() as u32,
+                    num_terminals as u32,
                     &mut paras,
                     &mut res,
                 );
             }
         }
+    }
+
+    fn num_extra_nodes(&self) -> usize {
+        let desc = self.desc();
+        (desc.num_nodes as usize).saturating_sub(desc.num_terminals as usize)
+    }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        let num_terminals = self.desc().num_terminals as usize;
+        let num_nodes = self.desc().num_nodes as usize;
+        // mna_nodes is sized to num_nodes already; overwrite the trailing
+        // internal slots with the allocated MNA row indices.
+        for i in num_terminals..num_nodes {
+            let offset = i - num_terminals;
+            self.mna_nodes[i] = Some(first_idx + offset);
+        }
+        self.refresh_instance();
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, _ctx: &SimContext) {
@@ -434,13 +461,17 @@ impl OsdiDevice {
     fn refresh_instance(&mut self) {
         let node_mapping_offset = self.desc().node_mapping_offset as usize;
         let setup_fn = self.desc().setup_instance;
-        let num_terminals = self.mna_nodes.len() as u32;
+        // OSDI's `num_terminals` argument is the count of *external* nodes;
+        // internal flow-branch nodes are implicit (the rest of num_nodes).
+        let num_terminals = self.desc().num_terminals;
+        let num_nodes = self.desc().num_nodes as usize;
         let temperature = SimContext::default().temperature;
 
         let map_ptr = unsafe {
             (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32
         };
-        for (i, &node) in self.mna_nodes.iter().enumerate() {
+        for i in 0..num_nodes {
+            let node = self.mna_nodes.get(i).copied().flatten();
             unsafe {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }

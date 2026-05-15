@@ -342,10 +342,17 @@ pub fn tran_nr_with_registry_opts(
         (topo, x)
     } else {
         let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
+        // DC OP already allocated extras; reuse its topology so the row
+        // layout (and matrix size) stays consistent through the transient.
         (dc.topo, dc.x)
     };
+    let mut topo = topo;
 
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    // After build_devices, topo.size is final.  Pad the initial x vector
+    // to match — when we came via UIC, x was sized to the pre-allocation
+    // topology; OSDI internal nodes get a zero initial guess.
+    x.resize(topo.size, 0.0);
     // Topology is fixed across the whole transient — build the linear
     // solver once and reuse for every NR iter.
     let solver = opts.linear_solver(topo.size);
@@ -391,6 +398,11 @@ pub fn tran_nr_with_registry_opts(
             }
 
             for i in 0..topo.n_nodes() {
+                mat.a[i][i] += opts.gmin;
+            }
+            // gmin on OSDI internal-node rows (see newton.rs for rationale).
+            let vsrc_end = topo.n_nodes() + topo.vsrc_index.len();
+            for i in vsrc_end..topo.size {
                 mat.a[i][i] += opts.gmin;
             }
 
@@ -510,7 +522,10 @@ pub fn tran_nr_with_registry_var_opts(
         let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
         (dc.topo, dc.x)
     };
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let mut topo = topo;
+    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    // Pad x for any OSDI internal-node rows allocated by build_devices.
+    x.resize(topo.size, 0.0);
     let solver = opts.linear_solver(topo.size);
 
     let n_nodes = topo.n_nodes();
@@ -666,6 +681,11 @@ pub fn tran_nr_with_registry_var_opts(
             }
 
             for i in 0..n_nodes {
+                mat.a[i][i] += opts.gmin;
+            }
+            // gmin on OSDI internal-node rows (see newton.rs for rationale).
+            let vsrc_end = n_nodes + topo.vsrc_index.len();
+            for i in vsrc_end..topo.size {
                 mat.a[i][i] += opts.gmin;
             }
 

@@ -90,7 +90,7 @@ impl NrResult {
 /// Build device instances from the elements in a netlist via the registry.
 pub fn build_devices(
     netlist: &Netlist,
-    topo: &CircuitTopology,
+    topo: &mut CircuitTopology,
     ctx: &SimContext,
     registry: &DeviceRegistry,
 ) -> Result<Vec<Box<dyn Device>>, SimError> {
@@ -143,6 +143,16 @@ pub fn build_devices(
                 for (name, value) in params {
                     dev.set_real_param(name, *value);
                 }
+                // OSDI models that use direct potential contributions
+                // (`V(port) <+ ...`) declare internal flow-branch nodes:
+                // OpenVAF surfaces these as `num_nodes − num_terminals`.
+                // Allocate MNA rows for them so the OSDI runtime has real
+                // slots to stamp into instead of running past mna_nodes.
+                let extras = dev.num_extra_nodes();
+                if extras > 0 {
+                    let first = topo.allocate_extra_rows(extras);
+                    dev.bind_extra_nodes(first);
+                }
                 devices.push(dev);
             }
             _ => {}
@@ -176,6 +186,16 @@ fn nr_inner(
         }
 
         for i in 0..n_nodes {
+            mat.a[i][i] += opts.gmin + gmin_extra;
+        }
+        // Stamp gmin on OSDI internal-node rows too.  Their default state
+        // when the device emits a degenerate contribution (e.g.
+        // `OWL(out_lambda) <+ OWL(in_lambda)` where both ports map to the
+        // same circuit net) is a zero row — singular without gmin.  Skip
+        // voltage-source aux rows, which need a clean diagonal for their
+        // own KCL equation.
+        let vsrc_end = n_nodes + topo.vsrc_index.len();
+        for i in vsrc_end..topo.size {
             mat.a[i][i] += opts.gmin + gmin_extra;
         }
 
@@ -290,9 +310,9 @@ pub fn dc_op_nr_with_registry_opts(
 ) -> Result<NrResult, SimError> {
     check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build(netlist);
 
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
     let x0 = build_x0_from_nodeset(netlist, &topo);
     let solver = opts.linear_solver(topo.size);
 

@@ -218,12 +218,12 @@ fn set_real_param_verification() {
                        .op\n\
                        .end\n";
     let netlist = parse_spice(netlist_str).expect("parse netlist");
-    let topo = CircuitTopology::build(&netlist);
+    let mut topo = CircuitTopology::build(&netlist);
     let ctx = SimContext::default();
 
     // Default power_mW = 1.0 → V(laser_re) ≈ sqrt(1e-3) ≈ 0.03162 V
     {
-        let mut devs = build_devices(&netlist, &topo, &ctx, &registry).expect("build");
+        let mut devs = build_devices(&netlist, &mut topo, &ctx, &registry).expect("build");
         let r = dc_op_nr_with_devices(&netlist, &topo, &mut devs, &ctx).expect("dc op default");
         let v = r.node_voltage("laser_re").unwrap();
         let expected = (1e-3_f64).sqrt();
@@ -236,7 +236,7 @@ fn set_real_param_verification() {
 
     // set_real_param power_mW = 4.0 → V(laser_re) ≈ sqrt(4e-3) ≈ 0.06325 V
     {
-        let mut devs = build_devices(&netlist, &topo, &ctx, &registry).expect("build");
+        let mut devs = build_devices(&netlist, &mut topo, &ctx, &registry).expect("build");
         let ok = devs[0].set_real_param("power_mW", 4.0);
         eprintln!("[set_real_param] power_mW=4.0 returned: {ok}");
         assert!(ok, "set_real_param('power_mW', 4.0) must return true");
@@ -279,11 +279,11 @@ fn ring_single_point_diagnostic() {
 
     let netlist_str = ring_resonator_netlist(1550.0);
     let netlist = parse_spice(&netlist_str).expect("parse netlist");
-    let topo = CircuitTopology::build(&netlist);
+    let mut topo = CircuitTopology::build(&netlist);
     let ctx = SimContext::default();
 
     // build_devices element order: [laser=0, coupler=1, waveguide=2, PD=3]
-    let mut devices = build_devices(&netlist, &topo, &ctx, &registry).expect("build_devices");
+    let mut devices = build_devices(&netlist, &mut topo, &ctx, &registry).expect("build_devices");
 
     let r_laser_pwr  = devices[0].set_real_param("power_mW",      POWER_MW);
     let r_laser_wl   = devices[0].set_real_param("wavelength_nm", 1550.0);
@@ -378,11 +378,11 @@ fn ring_resonator_wavelength_sweep() {
     // we build fresh devices per point and call set_real_param for correctness.
     let base_netlist_str = ring_resonator_netlist(1550.0);
     let base_netlist = parse_spice(&base_netlist_str).expect("parse netlist");
-    let topo = CircuitTopology::build(&base_netlist);
+    let mut topo = CircuitTopology::build(&base_netlist);
     let ctx = SimContext::default();
 
     for &wl_nm in &wavelengths {
-        let mut devices = build_devices(&base_netlist, &topo, &ctx, &registry)
+        let mut devices = build_devices(&base_netlist, &mut topo, &ctx, &registry)
             .expect("build_devices");
 
         // Inject wavelength into every optical OSDI device.

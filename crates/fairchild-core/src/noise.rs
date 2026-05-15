@@ -73,13 +73,13 @@ pub fn noise_analysis(
 ) -> Result<NoiseResult, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let topo = CircuitTopology::build(netlist);
-    let n_nodes = topo.n_nodes();
-    let size = topo.size;
+    let mut topo = CircuitTopology::build(netlist);
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
 
     // DC operating point.
-    let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let n_nodes = topo.n_nodes();
+    let size = topo.size;
     let dc_solver    = opts.linear_solver(size);
     let noise_solver = opts.linear_solver(2 * size);
     let x0 = run_dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
@@ -97,6 +97,10 @@ pub fn noise_analysis(
         }
     }
     for i in 0..n_nodes {
+        g_mat[i][i] += opts.gmin;
+    }
+    let vsrc_end = n_nodes + topo.vsrc_index.len();
+    for i in vsrc_end..size {
         g_mat[i][i] += opts.gmin;
     }
     let mut c_mat = vec![vec![0.0f64; size]; size];
@@ -274,6 +278,10 @@ fn run_dc_op(
             dev.load_jacobian(&mut mat);
         }
         for i in 0..n_nodes {
+            mat.a[i][i] += opts.gmin;
+        }
+        let vsrc_end = n_nodes + topo.vsrc_index.len();
+        for i in vsrc_end..topo.size {
             mat.a[i][i] += opts.gmin;
         }
         let x_new = solver.solve(&mat.a, &mat.b)?;

@@ -123,7 +123,7 @@ fn main() {
         eprintln!("error: netlist parse failed: {e}");
         std::process::exit(1);
     });
-    let topo = CircuitTopology::build(&base_netlist);
+    let mut topo = CircuitTopology::build(&base_netlist);
     let ctx = SimContext::default();
 
     // ── Wavelength sweep ──────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ fn main() {
     let mut sweep: Vec<(f64, f64, f64)> = Vec::with_capacity(n_points); // (wl_nm, v_sim, t_cmt)
 
     for (idx, &wl_nm) in wavelengths.iter().enumerate() {
-        let mut devices = build_devices(&base_netlist, &topo, &ctx, &registry)
+        let mut devices = build_devices(&base_netlist, &mut topo, &ctx, &registry)
             .unwrap_or_else(|e| {
                 eprintln!("error: build_devices at {wl_nm:.3} nm: {e}");
                 std::process::exit(1);
