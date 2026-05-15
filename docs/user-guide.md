@@ -529,42 +529,242 @@ the output. Equivalent input noise referred to the named input source.
 
 ## 12. Photonic devices
 
-### Native devices (recommended)
+### Conventions
 
-| Card | Ports (bundle / electrical) | Purpose |
+Every "optical port" is a **3-wire bundle** `(re, im, λ)`:
+
+- `re`, `im` — slowly-varying-envelope (SVEA) complex amplitude in √W. The
+  optical power at the port is `|A|² = V(re)² + V(im)²`. The carrier
+  frequency is implicit; only the envelope is solved.
+- `λ` — propagation wavelength in metres. A device-local wire that allows
+  wavelength-dependent physics (e.g. waveguide propagation phase) without
+  forcing a global parameter.
+
+`.optical_port NAME [N]` declares a bundle. For `N > 1`, each bundle-using
+device instance is auto-replicated into `N` parallel single-channel
+instances by the parser. Electrical nets and scalar nets shared across the
+replicas (e.g. one `V_pn` driving every replica of a PN-loaded ring) make
+single-modulator-multi-wavelength topologies trivial — see
+`examples/photonic/native_wdm_mrr_modulator.sp`.
+
+All values internally are SI. Convenience aliases like `L_um` and
+`wavelength_nm` accept the named unit and convert. **Beware SPICE SI
+prefixes**: writing `L_um=8u` parses as `L_um = 8e-6` (because `u` =
+1e-6 in SPICE), then the device interprets that as `8e-6 µm = 8 pm` —
+almost certainly not what you meant. Either drop the suffix (`L_um=8`,
+read as 8 µm) or use the SI alias (`L_m=8e-6`, read as 8 µm).
+
+Direction of energy flow is fixed by the device — there are no
+back-propagating modes in this version, and reflections / standing waves
+are out of scope.
+
+### `fc_cw_laser` — constant-wave laser
+
+```
+X<name>  out  fc_cw_laser  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `out` | bundle, optical output |
+
+| Parameter | Default | Description |
 |---|---|---|
-| `fc_cw_laser` | 1 optical out | Constant-wave laser |
-| `fc_waveguide` | 1 in, 1 out | Lossy / dispersive waveguide |
-| `fc_dcoupler` | 2 in, 2 out | 2×2 directional coupler |
-| `fc_splitter` | 1 in, 2 out | Y-junction splitter |
-| `fc_pn_ps` | 1 in, 1 out, 2 elec | PN-junction phase shifter |
-| `fc_thermal_ps` | 1 in, 1 out, 2 elec | Thermo-optic phase shifter |
-| `fc_photodetector` | 1 optical in, 2 elec | Photodetector |
+| `power_mW` | 1.0 | Output optical power. Sets `re² + im² = power_mW × 1e−3`. |
+| `power_W` | — | Alternative spelling; overrides `power_mW`. |
+| `phase_deg` | 0 | Initial phase of the SVEA carrier. |
+| `wavelength_nm` | 1550 | Output wavelength (drives the `λ` wire). |
+| `re_amp` / `im_amp` | derived | Direct override of the SVEA components. |
 
-Each "optical port" is a 3-wire bundle `(re, im, λ)`: SVEA real / imaginary
-amplitude in √W and wavelength in metres. Declare bundles with
-`.optical_port`:
+`power_mW`, `power_W`, and `phase_deg` are not orthogonal: `power_*` set
+the magnitude of `(re, im)` while preserving phase; `phase_deg` rotates the
+current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 
-```spice
-.optical_port laser_out
-.optical_port pd_in
+**Physics.** Three direct-potential equations fix `V(out_re) = √P · cos(φ₀)`,
+`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input; no noise;
+no spectral linewidth.
 
-Xlaser  laser_out  fc_cw_laser  power_mW=1.0 wavelength_nm=1550
-Xpd     pd_in pd_anode 0  fc_photodetector  responsivity=0.8
+### `fc_waveguide` — lossy waveguide
+
+```
+X<name>  in  out  fc_waveguide  [param=val …]
 ```
 
-For WDM, declare an N-channel bundle. Devices on the bundle replicate per
-channel automatically; non-bundle nets (e.g. an electrical drive voltage)
-are shared across all replicas.
+| Port | Role |
+|---|---|
+| `in`  | bundle, optical input |
+| `out` | bundle, optical output |
 
-```spice
-.optical_port bus 4
-* one Xwg instance produces four parallel waveguide channels:
-Xwg  bus_in bus_out  fc_waveguide  L_um=500 alpha_dB_cm=2 wavelength_nm=1550
+| Parameter | Default | Description |
+|---|---|---|
+| `L_um` | 100 | Length, µm. |
+| `L_m` / `length` | — | Length, m (overrides `L_um`). |
+| `n_g` | 4.2 | Group index. |
+| `alpha_dB_cm` | 2.0 | Power loss (dB/cm). |
+| `wavelength_nm` | 1550 | **Bootstrap** wavelength used when the input `λ` wire is unbound (initial NR iterate). Otherwise the wire value wins. |
+| `wavelength_m` | — | Same, in metres. |
+
+**Physics.** `A_out = A_in · exp(−α L / 2) · exp(−j β L)` with `β = 2π n_g / λ`
+and `α` in nepers/m (the `alpha_dB_cm` value is converted internally). The
+`λ` wire is read at evaluation time, so wavelength-dependent propagation
+phase is captured automatically — this is what makes the ring resonator
+example see a true resonance dip when you sweep the laser wavelength.
+
+### `fc_dcoupler` — 2×2 directional coupler
+
+```
+X<name>  a  b  c  d  fc_dcoupler  [param=val …]
 ```
 
-See `examples/photonic/native_mrr_modulator.sp` for a single-channel ring
-modulator and `native_wdm_mrr_modulator.sp` for a 2-channel WDM extension.
+| Port | Role |
+|---|---|
+| `a` | bundle, input arm 1 |
+| `b` | bundle, input arm 2 |
+| `c` | bundle, through output (paired with `a`) |
+| `d` | bundle, cross output (paired with `a`) |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `kappa_per_m` / `kappa` | 100 | Coupling rate (rad/m). |
+| `L_um` / `L_m` / `length` | 5e-3 m | Interaction length. |
+| `kappa_L` / `kappaL` | — | Override for `κ·L` directly (preserves length, scales `kappa_per_m`). |
+
+`kappa_L=0` gives a perfect through, `kappa_L=π/2` gives full cross. The
+mass-action numbers in `examples/photonic/native_mrr_modulator.sp` use
+`kappa_L=0.336` (≈ 11% cross-coupled power) for a critically-coupled ring.
+
+**Physics.** Lossless coupling matrix `[c; d] = [cos(κL), j sin(κL); j sin(κL), cos(κL)] · [a; b]`.
+In SVEA `(re, im)` form this is six direct-potential equations. `c_λ = a_λ`,
+and `d_λ = a_λ` too — the second was originally `d_λ = b_λ` but that creates
+a feedback loop with no driving source in closed-loop topologies (e.g. ring
+resonators) and causes the PN PS to read `λ ≈ 0`. Both outputs now route
+the input-arm-`a` wavelength. For asymmetric WDM topologies where you
+genuinely want different wavelengths on the two arms, that's a future
+device — file an issue.
+
+### `fc_splitter` — 1×2 Y-junction (3 dB)
+
+```
+X<name>  in  out_a  out_b  fc_splitter
+```
+
+| Port | Role |
+|---|---|
+| `in` | bundle, optical input |
+| `out_a`, `out_b` | bundles, optical outputs |
+
+No parameters. Lossless equal-power split: `out_a = out_b = in / √2`.
+Wavelength duplicated to both outputs. Use for combining MZI arms in
+reverse (with a second `fc_splitter` instance) or for any branching
+topology where you want half-power outputs.
+
+### `fc_photodetector` — PIN photodetector
+
+```
+X<name>  in  anode  cathode  fc_photodetector  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` | bundle, optical input |
+| `anode` / `cathode` | scalar electrical nodes |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `responsivity` | 1.0 | A/W. |
+| `i_dark` / `i_dark_a` | 1e-9 | Dark current (A). |
+| `r_shunt` | 1e6 | Shunt resistance (Ω) — junction non-idealness. |
+
+**Physics.** Photocurrent `I_ph = responsivity × (V(in_re)² + V(in_im)²) + i_dark`
+flows from cathode to anode internally (reverse-biased convention).
+Externally, the anode sources current. A linear shunt `1/r_shunt` is
+stamped between anode and cathode. The photocurrent is nonlinear in the
+optical amplitudes, so a Norton equivalent linearised at the current
+operating point is contributed to the NR loop; `∂I_ph/∂V_re = 2R·V_re`,
+`∂I_ph/∂V_im = 2R·V_im`.
+
+No bandwidth limit, no transit-time delay, no avalanche gain. A linear
+capacitance and finite responsivity bandwidth are future parameters.
+
+### `fc_pn_ps` — PN-junction phase shifter
+
+```
+X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` / `out` | bundles, optical pass-through |
+| `anode` / `cathode` | scalar electrical nodes (PN-junction terminals) |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `L_um` | 1000 (1 mm) | PN-section length, µm. |
+| `L_m` / `length` | — | Same, in metres. |
+| `n_g` | 4.2 | Group index (sets the wavelength-dependent propagation phase). |
+| `wavelength_nm` | 1550 | Reference wavelength: propagation phase is zero at `λ = wavelength_nm`. Pin this to your laser's λ so the device is "on resonance" by default. |
+| `dn_dv` | 1e-4 | Effective-index change per applied volt (small-signal). |
+| `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
+| `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. |
+| `alpha_dB_cm` | 0 | Propagation loss along the PN section. For a closed-loop ring this loss sets the extinction ratio of the resonance dip — without it the ring is all-pass. |
+
+**Physics.** Optical: `φ = φ_prop + φ_eo` where
+
+- `φ_prop = 2π n_g L (1/λ − 1/λ_ref)` — wavelength-dependent propagation
+  phase, zeroed at the reference wavelength.
+- `φ_eo = 2π L (dn/dV) V_pn / λ` — the electro-optic shift.
+
+The transfer is `A_out = A_in · exp(−α L / 2) · exp(−j φ)`. Wavelength
+passes through unchanged.
+
+Electrical: a single linear conductance `g_pn` between anode and cathode.
+The model does not yet capture the diode I-V or the bias-dependent
+depletion-region capacitance — for a forward-biased carrier-injection
+device, replace `g_pn` with a more complete junction model in a future
+revision.
+
+`V_pi_L` and `dn_dv` are not orthogonal: setting `V_pi_L` recomputes
+`dn_dv` from the current `wavelength_nm` and `L`. If you set `V_pi_L`
+and later change `wavelength_nm`, **re-set `V_pi_L`** so the EO calibration
+tracks the new λ_ref.
+
+### `fc_thermal_ps` — thermo-optic phase shifter
+
+```
+X<name>  in  out  heat_p  heat_n  fc_thermal_ps  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` / `out` | bundles, optical pass-through |
+| `heat_p` / `heat_n` | scalar electrical nodes (heater drive) |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `r_heater` / `r` | 1000 | Heater resistance (Ω). |
+| `p_pi` / `p_pi_w` | 10e-3 | Heater power for π phase shift (W). |
+
+**Physics.** Electrical: linear resistor `R_heater` between `heat_p` and
+`heat_n`. Joule power `P = V² / R_heater` is converted instantaneously into
+an optical phase shift `φ = π · P / P_pi`. No thermal RC — the conversion
+is algebraic, no transient lag. For a circuit where thermal time constants
+matter (most real heaters), build an external RC between the drive node
+and an intermediate `T_dev` net and feed `T_dev` to the heater pin pair
+with a B-element converting temperature to equivalent voltage.
+
+The transfer is `A_out = A_in · exp(−j φ)` — lossless. Wavelength passes
+through unchanged.
+
+### Registering PDK-specific aliases
+
+Native devices can be aliased into a PDK-specific taxonomy without
+duplicating the device. `DeviceRegistry::register_alias("pdk_foo_waveguide",
+"fc_waveguide", remap)` registers a new card name that delegates to
+`fc_waveguide` with a parameter-remapping closure. This is the PDK
+private-fork extension point — it lets foundry naming and parameter
+conventions live downstream without leaking into the upstream master
+branch. See `crates/fairchild-core/src/device_registry.rs:300` for an
+example.
 
 ### Legacy OSDI Verilog-A models
 
