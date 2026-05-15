@@ -167,6 +167,7 @@ enum SimResultInner {
     Tran(TranResult),
     Ac(AcResult),
     DcSweep(DcSweepResult),
+    Noise(fairchild_core::NoiseResult),
 }
 
 /// Result of a simulation run.
@@ -197,6 +198,23 @@ impl SimResult {
     fn freq<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         match &self.inner {
             SimResultInner::Ac(r) => PyArray1::from_vec_bound(py, r.freq.clone()),
+            SimResultInner::Noise(r) => PyArray1::from_vec_bound(py, r.freq.clone()),
+            _ => PyArray1::from_vec_bound(py, vec![]),
+        }
+    }
+
+    /// Output-referred voltage noise PSD in V²/Hz (only meaningful for noise).
+    fn onoise<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        match &self.inner {
+            SimResultInner::Noise(r) => PyArray1::from_vec_bound(py, r.onoise_psd.clone()),
+            _ => PyArray1::from_vec_bound(py, vec![]),
+        }
+    }
+
+    /// Input-referred voltage noise PSD in V²/Hz (only meaningful for noise).
+    fn inoise<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        match &self.inner {
+            SimResultInner::Noise(r) => PyArray1::from_vec_bound(py, r.inoise_psd.clone()),
             _ => PyArray1::from_vec_bound(py, vec![]),
         }
     }
@@ -231,6 +249,22 @@ impl SimResult {
             SimResultInner::DcSweep(r) => {
                 self.get_dc_sweep_signal(py, &key_lc, r)
             }
+            SimResultInner::Noise(r) => {
+                // Recognise the same keys as the CSV output.
+                let arr = match key_lc.as_str() {
+                    "onoise" | "v(onoise)" | "onoise_psd" =>
+                        r.onoise_psd.clone(),
+                    "inoise" | "v(inoise)" | "inoise_psd" =>
+                        r.inoise_psd.clone(),
+                    "onoise_vrthz" => r.onoise_psd.iter().map(|x| x.max(0.0).sqrt()).collect(),
+                    "inoise_vrthz" => r.inoise_psd.iter().map(|x| x.max(0.0).sqrt()).collect(),
+                    other => return Err(PyRuntimeError::new_err(format!(
+                        "noise result: unknown key '{other}'; use 'onoise', 'inoise', \
+                         'onoise_vrthz', or 'inoise_vrthz'"
+                    ))),
+                };
+                Ok(PyArray1::from_vec_bound(py, arr))
+            }
         }
     }
 
@@ -260,6 +294,10 @@ impl SimResult {
                     .collect();
                 sigs.extend(r.vsrc_currents.keys().map(|n| format!("I({n})")));
                 sigs
+            }
+            SimResultInner::Noise(_) => {
+                vec!["onoise".into(), "inoise".into(),
+                     "onoise_vrthz".into(), "inoise_vrthz".into()]
             }
         }
     }
@@ -555,8 +593,15 @@ impl Circuit {
                 let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
                 Ok(SimResult { inner: SimResultInner::Ac(result), measurements: Vec::new() })
             }
+            "noise" => {
+                let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(kwargs)?;
+                let result = fairchild_core::noise_analysis(
+                    &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
+                ).map_err(sim_err)?;
+                Ok(SimResult { inner: SimResultInner::Noise(result), measurements: Vec::new() })
+            }
             other => Err(PyRuntimeError::new_err(format!(
-                "unknown analysis '{}'; use 'op', 'tran', 'ac', or 'dc_sweep'",
+                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', or 'dc_sweep'",
                 other
             ))),
         }
@@ -825,6 +870,58 @@ fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Op
     };
 
     Ok((freqs, src))
+}
+
+fn parse_noise_kwargs(kwargs: Option<&Bound<'_, PyDict>>)
+    -> PyResult<(Vec<f64>, String, String, String)>
+{
+    let kw = kwargs.ok_or_else(|| PyRuntimeError::new_err(
+        "noise requires kwargs: out (or out_pos+out_neg), src, fstart, fstop"
+    ))?;
+
+    let mut out_pos: Option<String> = None;
+    let mut out_neg: String = "0".to_string();
+    if let Some(v) = kw.get_item("out_pos")? { out_pos = Some(v.extract()?); }
+    if let Some(v) = kw.get_item("out_neg")? { out_neg = v.extract()?; }
+    if out_pos.is_none() {
+        if let Some(v) = kw.get_item("out")? { out_pos = Some(v.extract()?); }
+    }
+    let out_pos = out_pos.ok_or_else(|| PyRuntimeError::new_err(
+        "noise: missing 'out' (or 'out_pos') kwarg — the observation node"
+    ))?;
+
+    let input_src: String = kw.get_item("src")?
+        .ok_or_else(|| PyRuntimeError::new_err("noise: missing 'src' kwarg"))?
+        .extract()?;
+
+    let mut fstart: Option<f64> = None;
+    let mut fstop:  Option<f64> = None;
+    let mut points: usize = 20;
+    let mut variation = AcVariation::Dec;
+    if let Some(v) = kw.get_item("fstart")? { fstart = Some(v.extract()?); }
+    if let Some(v) = kw.get_item("fstop")?  { fstop  = Some(v.extract()?); }
+    if let Some(v) = kw.get_item("points")? { points = v.extract()?; }
+    if let Some(v) = kw.get_item("variation")? {
+        let var: String = v.extract()?;
+        variation = match var.to_lowercase().as_str() {
+            "dec" => AcVariation::Dec,
+            "oct" => AcVariation::Oct,
+            "lin" => AcVariation::Lin,
+            other => return Err(PyRuntimeError::new_err(format!(
+                "unknown variation '{other}'; use 'dec', 'oct', or 'lin'"
+            ))),
+        };
+    }
+    let fstart = fstart.ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstart' kwarg"))?;
+    let fstop  = fstop .ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstop' kwarg"))?;
+
+    let freqs = match variation {
+        AcVariation::Dec => freq_decade(fstart, fstop, points),
+        AcVariation::Oct => freq_oct(fstart, fstop, points),
+        AcVariation::Lin => freq_linear(fstart, fstop, points),
+    };
+
+    Ok((freqs, out_pos.to_lowercase(), out_neg.to_lowercase(), input_src.to_lowercase()))
 }
 
 // ---------------------------------------------------------------------------

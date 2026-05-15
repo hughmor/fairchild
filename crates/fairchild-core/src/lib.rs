@@ -9,6 +9,7 @@ pub mod error;
 pub mod mna;
 pub mod models;
 pub mod newton;
+pub mod noise;
 pub mod options;
 pub mod solver;
 pub mod tran;
@@ -17,6 +18,7 @@ pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, 
 pub use connectivity::check_connectivity;
 pub use dc_sweep::{dc_sweep_with_registry, dc_sweep_with_registry_opts, DcSweepResult, SweepAxis};
 pub use measure::{evaluate_measurements, MeasureResult};
+pub use noise::{noise_analysis, NoiseResult};
 pub use device::{Device, EvalFlags, NodeId, SimContext};
 pub use device_registry::DeviceRegistry;
 pub use error::SimError;

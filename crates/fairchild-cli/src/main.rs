@@ -528,6 +528,33 @@ fn main() {
                 }
                 ran_something = true;
             }
+
+            Analysis::Noise { out_pos, out_neg, input_src, variation, points, fstart, fstop } => {
+                if cli.verbose {
+                    eprintln!("info: running noise analysis V({out_pos},{out_neg}) on {input_src} \
+                              ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)...");
+                }
+                let t0 = Instant::now();
+                let freqs = match variation {
+                    AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
+                    AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
+                    AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
+                };
+                let result = fairchild_core::noise_analysis(
+                    &netlist, &freqs, out_pos, out_neg, input_src, &registry, &opts,
+                ).unwrap_or_else(|e| {
+                    eprintln!("error: noise analysis failed: {e}");
+                    std::process::exit(1);
+                });
+                if cli.verbose {
+                    eprintln!("info: noise analysis complete: {} pts [{:.1} ms]",
+                        freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                let mut buf = Vec::new();
+                result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
         }
     }
 

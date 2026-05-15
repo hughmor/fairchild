@@ -427,6 +427,19 @@ pub enum Analysis {
         step: f64,
         nested: Option<DcSweepSpec>,
     },
+    /// `.noise V(<out_node>[,<ref_node>]) <input_src> DEC|OCT|LIN <pts> <fstart> <fstop>`
+    ///
+    /// Small-signal noise sweep.  Reports output noise PSD at the observation
+    /// node and input-referred PSD through the named excitation source.
+    Noise {
+        out_pos: String,
+        out_neg: String,           // "0" if user writes `V(out)`
+        input_src: String,
+        variation: AcVariation,
+        points: usize,
+        fstart: f64,
+        fstop: f64,
+    },
 }
 
 /// One leg of a `.dc` sweep (the nested form's inner specification).

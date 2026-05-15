@@ -662,6 +662,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             netlist.analyses.push(parse_ac(&lc, *lineno)?);
         } else if lc.starts_with(".dc") {
             netlist.analyses.push(parse_dc(&lc, *lineno)?);
+        } else if lc.starts_with(".noise") {
+            netlist.analyses.push(parse_noise(&lc, *lineno)?);
         } else if lc.starts_with(".model") {
             if let Some(card) = parse_model(&lc, *lineno)? {
                 netlist.models.push(card);
@@ -933,6 +935,56 @@ fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
         points,
         fstart: parse_value(tokens[3], lineno)?,
         fstop:  parse_value(tokens[4], lineno)?,
+    })
+}
+
+/// Parse `.noise V(<out>[,<ref>]) <src> <DEC|OCT|LIN> <pts> <fstart> <fstop>`.
+fn parse_noise(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 7 {
+        return Err(ParseError::FieldCount {
+            expected: "≥7 (.noise V(node) src DEC|OCT|LIN points fstart fstop)",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    // tokens[0] = ".noise"; tokens[1] = "v(out[,ref])"; tokens[2] = src;
+    // tokens[3] = DEC|OCT|LIN; tokens[4] = pts; tokens[5..7] = fstart, fstop.
+    let v_expr = tokens[1];
+    let inside = v_expr
+        .strip_prefix("v(")
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| ParseError::Syntax {
+            line: lineno,
+            msg: format!("expected V(node[,ref]); got '{v_expr}'"),
+        })?;
+    let (out_pos, out_neg) = if let Some((a, b)) = inside.split_once(',') {
+        (canon_node(a.trim()), canon_node(b.trim()))
+    } else {
+        (canon_node(inside.trim()), "0".to_string())
+    };
+    let input_src = tokens[2].to_lowercase();
+    let variation = match tokens[3] {
+        "dec" => AcVariation::Dec,
+        "oct" => AcVariation::Oct,
+        "lin" => AcVariation::Lin,
+        other => return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!("unknown variation '{other}'; expected dec, oct, or lin"),
+        }),
+    };
+    let points = tokens[4].parse::<usize>().map_err(|_| ParseError::Syntax {
+        line: lineno,
+        msg: format!("invalid point count '{}'", tokens[4]),
+    })?;
+    Ok(Analysis::Noise {
+        out_pos,
+        out_neg,
+        input_src,
+        variation,
+        points,
+        fstart: parse_value(tokens[5], lineno)?,
+        fstop:  parse_value(tokens[6], lineno)?,
     })
 }
 
