@@ -43,6 +43,42 @@ pub struct Netlist {
     /// applied on top of the base netlist for a re-run pass.  The base run
     /// uses the original netlist; each block runs once after applying.
     pub alters: Vec<AlterBlock>,
+    /// `.optical_port NAME [N]` declarations.  Each entry is a single
+    /// user-visible port that expands to 3·N underlying wires (re, im, λ
+    /// per channel).  Used by the parser's X-line preprocessor.
+    pub optical_ports: Vec<OpticalPort>,
+}
+
+/// A bundle optical port declared via `.optical_port NAME [N]`.
+///
+/// A reference to `NAME` in an X-element net list expands to N copies of the
+/// 3-wire `(NAME_re_i, NAME_im_i, NAME_wl_i)` tuple; the device instance is
+/// replicated once per channel when `channels > 1`.
+#[derive(Debug, Clone)]
+pub struct OpticalPort {
+    pub name: String,
+    pub channels: usize,
+}
+
+impl OpticalPort {
+    /// Underlying wire names for channel `ch` of this port.
+    pub fn wires_for_channel(&self, ch: usize) -> [String; 3] {
+        [
+            format!("{}_re_{}", self.name, ch),
+            format!("{}_im_{}", self.name, ch),
+            format!("{}_wl_{}", self.name, ch),
+        ]
+    }
+
+    /// Every underlying wire across every channel.  Used to register the
+    /// port's wires as optical nets for discipline-check purposes.
+    pub fn all_wires(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.channels * 3);
+        for ch in 0..self.channels {
+            out.extend(self.wires_for_channel(ch));
+        }
+        out
+    }
 }
 
 /// One `.alter <label>` block: name-keyed patches applied to the base netlist

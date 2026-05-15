@@ -640,6 +640,30 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 element_overrides: Vec::new(),
                 model_overrides:   Vec::new(),
             });
+        } else if lc.starts_with(".optical_port") {
+            // .optical_port NAME [N]  — declare a bundle port that expands
+            // to 3·N underlying wires (re/im/λ per channel).  Subsequent
+            // X-element lines that reference NAME as a net token are
+            // expanded; for N>1 the X-instance is also replicated per
+            // channel.  All underlying wires are registered as optical
+            // nets so the discipline check works as before.
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 2 {
+                let name = canon_node(tokens[1]);
+                let channels = if tokens.len() >= 3 {
+                    tokens[2].parse::<usize>().map_err(|_| ParseError::Syntax {
+                        line: *lineno,
+                        msg: format!("invalid channel count '{}' in .optical_port", tokens[2]),
+                    })?
+                } else {
+                    1
+                };
+                let port = crate::OpticalPort { name, channels };
+                for w in port.all_wires() {
+                    netlist.optical_nets.push(w);
+                }
+                netlist.optical_ports.push(port);
+            }
         } else if lc.starts_with(".optical_bus") {
             // .optical_bus N re_base im_base wl_base
             // Declares an N-channel WDM optical bus, generating 3N net entries:
@@ -714,29 +738,39 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             let substituted = substitute_params(trimmed, &global_params, *lineno)?;
             let el = parse_element(&substituted, *lineno)?;
 
-            let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
-                subckt_defs.contains_key(model_name)
-            } else {
-                false
-            };
+            // Bundle-port expansion (B2): any token in an XOsdi nets list
+            // that matches a declared `.optical_port` is replaced with its
+            // (re,im,λ) underlying wires.  When at least one referenced
+            // port has channels > 1, the instance replicates per channel.
+            // Returns one XOsdi per channel; for non-XOsdi elements or
+            // unreferenced ports, returns a single-element vec.
+            let expanded_elements = expand_optical_ports(el, &netlist.optical_ports, *lineno)?;
 
-            if is_subckt_inst {
-                if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
-                    let def  = subckt_defs.get(model_name).unwrap();
-                    let flat = expand_instance(
-                        model_name, name, nets, params,
-                        def, &subckt_defs, &global_params, &mut expanding, *lineno,
-                    )?;
-                    if let Some(alter) = current_alter.as_mut() {
-                        alter.element_overrides.extend(flat);
-                    } else {
-                        netlist.elements.extend(flat);
+            for el in expanded_elements {
+                let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
+                    subckt_defs.contains_key(model_name)
+                } else {
+                    false
+                };
+
+                if is_subckt_inst {
+                    if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
+                        let def  = subckt_defs.get(model_name).unwrap();
+                        let flat = expand_instance(
+                            model_name, name, nets, params,
+                            def, &subckt_defs, &global_params, &mut expanding, *lineno,
+                        )?;
+                        if let Some(alter) = current_alter.as_mut() {
+                            alter.element_overrides.extend(flat);
+                        } else {
+                            netlist.elements.extend(flat);
+                        }
                     }
+                } else if let Some(alter) = current_alter.as_mut() {
+                    alter.element_overrides.push(el);
+                } else {
+                    netlist.elements.push(el);
                 }
-            } else if let Some(alter) = current_alter.as_mut() {
-                alter.element_overrides.push(el);
-            } else {
-                netlist.elements.push(el);
             }
         }
     }
@@ -967,6 +1001,67 @@ fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
         fstart: parse_value(tokens[3], lineno)?,
         fstop:  parse_value(tokens[4], lineno)?,
     })
+}
+
+/// Expand any tokens in an XOsdi element's net list that match a declared
+/// `.optical_port`.  Returns one XOsdi per channel (most ports have channels
+/// = 1, so most lines return a single element).  Non-XOsdi elements are
+/// passed through unchanged.
+fn expand_optical_ports(
+    el: Element,
+    ports: &[crate::OpticalPort],
+    lineno: usize,
+) -> Result<Vec<Element>, ParseError> {
+    let Element::XOsdi { name, nets, model_name, params } = el else {
+        return Ok(vec![el]);
+    };
+    // Build a per-token (matching_port_index | None) map; collect each
+    // referenced port's channel count to detect mismatches.
+    let mut port_refs: Vec<Option<usize>> = Vec::with_capacity(nets.len());
+    let mut channel_counts: Vec<usize> = Vec::new();
+    for net in &nets {
+        match ports.iter().position(|p| p.name == *net) {
+            Some(i) => {
+                port_refs.push(Some(i));
+                channel_counts.push(ports[i].channels);
+            }
+            None => port_refs.push(None),
+        }
+    }
+    if port_refs.iter().all(|r| r.is_none()) {
+        // No port references — return the element unchanged.
+        return Ok(vec![Element::XOsdi { name, nets, model_name, params }]);
+    }
+    // Validate consistent channel count when more than one port is involved.
+    let max_n = channel_counts.iter().copied().max().unwrap_or(1);
+    if channel_counts.iter().any(|&n| n != max_n) {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "X{name}: bundle ports must have matching channel counts, got {:?}",
+                channel_counts
+            ),
+        });
+    }
+    let mut out = Vec::with_capacity(max_n);
+    for ch in 0..max_n {
+        let mut expanded_nets: Vec<String> = Vec::new();
+        for (net, port_ref) in nets.iter().zip(port_refs.iter()) {
+            if let Some(port_idx) = port_ref {
+                expanded_nets.extend(ports[*port_idx].wires_for_channel(ch));
+            } else {
+                expanded_nets.push(net.clone());
+            }
+        }
+        let new_name = if max_n > 1 { format!("{name}_ch{ch}") } else { name.clone() };
+        out.push(Element::XOsdi {
+            name: new_name,
+            nets: expanded_nets,
+            model_name: model_name.clone(),
+            params: params.clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// Parse `.noise V(<out>[,<ref>]) <src> <DEC|OCT|LIN> <pts> <fstart> <fstop>`.
@@ -1764,6 +1859,79 @@ mod tests {
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         // At t=td1+tau1 the rise is (1-e^-1) = 0.6321
         assert!((w.at(2e-6) - (1.0 - (-1.0_f64).exp())).abs() < 1e-9);
+    }
+
+    #[test]
+    fn optical_port_single_channel_expands_3_wires() {
+        let net = parse_spice(
+            "* port test\n\
+             .optical_port portin\n\
+             .optical_port portout\n\
+             Xwg portin portout some_model\n.end\n"
+        ).unwrap();
+        assert_eq!(net.optical_ports.len(), 2);
+        assert_eq!(net.optical_ports[0].name, "portin");
+        assert_eq!(net.optical_ports[0].channels, 1);
+        // Single XOsdi (max_n = 1); nets list is 6 wires (3 per port).
+        assert_eq!(net.elements.len(), 1);
+        match &net.elements[0] {
+            Element::XOsdi { name, nets, model_name, .. } => {
+                assert_eq!(name, "xwg");
+                assert_eq!(model_name, "some_model");
+                assert_eq!(nets, &vec![
+                    "portin_re_0".to_string(), "portin_im_0".to_string(), "portin_wl_0".to_string(),
+                    "portout_re_0".to_string(), "portout_im_0".to_string(), "portout_wl_0".to_string(),
+                ]);
+            }
+            _ => panic!("expected XOsdi"),
+        }
+        // All 6 underlying wires registered as optical.
+        for w in ["portin_re_0", "portin_im_0", "portin_wl_0",
+                  "portout_re_0", "portout_im_0", "portout_wl_0"] {
+            assert!(net.optical_nets.iter().any(|n| n == w), "missing {w}");
+        }
+    }
+
+    #[test]
+    fn optical_port_wdm_replicates_per_channel() {
+        let net = parse_spice(
+            "* WDM port test\n\
+             .optical_port bus_in 4\n\
+             .optical_port bus_out 4\n\
+             Xwg bus_in bus_out some_model L_um=100\n.end\n"
+        ).unwrap();
+        assert_eq!(net.optical_ports[0].channels, 4);
+        // 4 channels → 4 device instances.
+        assert_eq!(net.elements.len(), 4);
+        for ch in 0..4 {
+            match &net.elements[ch] {
+                Element::XOsdi { name, nets, model_name, .. } => {
+                    assert_eq!(name, &format!("xwg_ch{ch}"));
+                    assert_eq!(model_name, "some_model");
+                    assert_eq!(nets, &vec![
+                        format!("bus_in_re_{ch}"),
+                        format!("bus_in_im_{ch}"),
+                        format!("bus_in_wl_{ch}"),
+                        format!("bus_out_re_{ch}"),
+                        format!("bus_out_im_{ch}"),
+                        format!("bus_out_wl_{ch}"),
+                    ]);
+                }
+                _ => panic!("expected XOsdi"),
+            }
+        }
+    }
+
+    #[test]
+    fn optical_port_mismatched_channels_error() {
+        let res = parse_spice(
+            "* bad\n\
+             .optical_port a 2\n\
+             .optical_port b 4\n\
+             Xwg a b model\n.end\n"
+        );
+        assert!(res.is_err(),
+            "should error on mismatched channel counts: {:?}", res.map(|n| n.elements.len()));
     }
 
     #[test]
