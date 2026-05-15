@@ -1086,6 +1086,37 @@ fn expand_optical_ports(
             ),
         });
     }
+    // `fc_pn_ps`, `fc_thermal_ps`, and `fc_photodetector` are bundle-AWARE
+    // devices: they have both optical bundle pins AND shared electrical pins
+    // (anode/cathode, heat_p/heat_n) representing one physical device.
+    // Replicating per channel would create N parallel electrical components
+    // — for PN-PS the same V_pn would drive N parallel conductances drawing
+    // N× the current; for the photodetector the dark current and shunt would
+    // each be N× too large; for thermal PS the heater would dissipate N× the
+    // joule heat for the same drive voltage.  Instead, emit ONE instance
+    // with all bundles flattened and let the device handle the N channels
+    // internally with one shared electrical interface.  See
+    // `NativePnPhaseShifter`, `NativeThermalPhaseShifter`,
+    // `NativePhotodetector`.
+    if model_lc == "fc_pn_ps"
+        || model_lc == "fc_thermal_ps"
+        || model_lc == "fc_photodetector"
+    {
+        let mut flat_nets: Vec<String> = Vec::with_capacity(nets.len() * 3);
+        for (net, port_ref) in nets.iter().zip(port_refs.iter()) {
+            if let Some(port_idx) = port_ref {
+                let port = &ports[*port_idx];
+                for ch in 0..port.channels {
+                    flat_nets.extend(port.wires_for_channel(ch));
+                }
+            } else {
+                flat_nets.push(net.clone());
+            }
+        }
+        return Ok(vec![Element::XOsdi {
+            name, nets: flat_nets, model_name, params,
+        }]);
+    }
     let mut out = Vec::with_capacity(max_n);
     for ch in 0..max_n {
         let mut expanded_nets: Vec<String> = Vec::new();

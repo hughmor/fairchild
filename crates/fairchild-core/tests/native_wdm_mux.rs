@@ -80,6 +80,109 @@ fn wdm_mux_demux_channels_are_independent() {
         "photocurrent ratio {ratio:.4}, expected ≈ 4.0 (2 mW / 0.5 mW)");
 }
 
+/// **WDM electrical-correctness regression.**  A single PN-PS on an
+/// N-channel bus represents ONE physical PN junction driven by one V_pn.
+/// The current drawn at V_pn must therefore equal V_pn · g_pn regardless
+/// of N — earlier versions replicated fc_pn_ps per channel and stamped N
+/// parallel conductances, yielding N × g_pn (a real bug; see commit
+/// log for the empirical 2 mA / 1 mA discrepancy that surfaced this).
+#[test]
+fn wdm_pn_ps_electrical_is_shared_across_channels() {
+    let single_channel = "\
+.optical_port ch0
+.optical_port out0
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100 g_pn=1e-3
+Vmod vmod 0 DC 1.0
+.op
+.end
+";
+    let two_channel = "\
+.optical_port ch0
+.optical_port ch1
+.optical_port out0
+.optical_port out1
+.optical_port bus 2
+.optical_port out_bus 2
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xl1 ch1 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xmux bus ch0 ch1 fc_mux
+Xpn bus out_bus vmod 0 fc_pn_ps L_um=100 g_pn=1e-3
+Xdemux out_bus out0 out1 fc_demux
+Vmod vmod 0 DC 1.0
+.op
+.end
+";
+    let one  = parse_spice(single_channel).unwrap();
+    let two  = parse_spice(two_channel).unwrap();
+    let r1 = dc_op_nr_with_registry(&one, &DeviceRegistry::new()).unwrap();
+    let r2 = dc_op_nr_with_registry(&two, &DeviceRegistry::new()).unwrap();
+    // I(Vmod) sign is negative (current flowing OUT of Vmod's + terminal into
+    // the device side that's at lower potential, then back through the conductance).
+    // Magnitudes should match.
+    let i1 = r1.vsrc_current("vmod").unwrap().abs();
+    let i2 = r2.vsrc_current("vmod").unwrap().abs();
+    assert!((i1 - 1e-3).abs() < 1e-9, "single-channel I(Vmod) = {i1:e}; expected 1 mA");
+    assert!((i2 - 1e-3).abs() < 1e-9,
+        "2-channel I(Vmod) = {i2:e}; expected 1 mA (one shared PN junction, NOT 2 mA from N parallel conductances)");
+}
+
+/// **Photodetector WDM regression**: one physical PD with an N-channel input
+/// should sum photocurrents from every channel but stamp ONE dark current
+/// and ONE shunt — not N copies.  Earlier per-channel replication produced
+/// N · i_dark and N/r_shunt, a real bug with the same shape as the PN-PS
+/// over-replication.
+#[test]
+fn wdm_pd_dark_current_is_shared_across_channels() {
+    let netlist_str = "\
+* 4 channels, no light, dark current only.
+.optical_port ch0
+.optical_port ch1
+.optical_port ch2
+.optical_port ch3
+.optical_port bus 4
+Xmux bus ch0 ch1 ch2 ch3 fc_mux
+Xpd bus pd_a 0 fc_photodetector responsivity=1.0 i_dark_a=1e-9 r_shunt=1e12
+Vb bias 0 DC 1.0
+Rload pd_a bias 1k
+.op
+.end
+";
+    let net = parse_spice(netlist_str).unwrap();
+    let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).unwrap();
+    let v = r.node_voltage("pd_a").unwrap();
+    // I_dark = 1 nA × 1k Ω = 1 µV → V(pd_a) ≈ 1 + 1e-6 V.
+    // If PD were per-channel-replicated, I_dark would be 4 nA → V(pd_a) ≈ 1.000004 V.
+    assert!((v - 1.000001).abs() < 1e-8,
+        "V(pd_a) = {v}; expected ≈ 1.000001 V (one shared dark current, NOT 4× from 4 replicas)");
+}
+
+/// **Band-centre default**: setting `.options lambda_center_nm=1310` should
+/// make every photonic device default to O-band — laser output wavelength,
+/// PN-PS reference wavelength, waveguide bootstrap — without per-device
+/// `wavelength_nm` overrides.
+#[test]
+fn lambda_center_nm_drives_default_wavelength() {
+    let netlist_str = "\
+.options lambda_center_nm=1310
+.optical_port ch0
+.optical_port out0
+Xl0 ch0 fc_cw_laser power_mW=1.0
+Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100
+Xpd out0 pd_a 0 fc_photodetector responsivity=0.8
+Vmod vmod 0 DC 0.0
+Vb bias 0 DC 1.0
+Rload pd_a bias 1k
+.op
+.end
+";
+    let net = parse_spice(netlist_str).unwrap();
+    let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).unwrap();
+    let wl = r.node_voltage("ch0_wl_0").expect("ch0's λ wire");
+    assert!((wl - 1.31e-6).abs() < 1e-12,
+        "ch0_wl = {wl}; expected 1.31 µm from .options lambda_center_nm=1310");
+}
+
 /// 4-channel MUX/DEMUX — verify the inferred bundle width scales beyond N=2.
 #[test]
 fn wdm_mux_demux_n4_routes_four_channels() {

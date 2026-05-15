@@ -75,6 +75,13 @@ pub struct SimOptions {
     /// `faer-sparse` above.  Override with `.options solver=sparse|dense|auto`
     /// or CLI `--solver`.
     pub solver: SolverKind,
+
+    /// Centre wavelength of the photonic band of interest (m).  Used by
+    /// photonic devices as the bootstrap λ for the initial NR iterate, before
+    /// a laser has driven the actual λ wire.  Override with `.options
+    /// lambda_center_nm=1310` (O-band) or `lambda_center_m=…`.  Default
+    /// 1.55 µm (C-band).
+    pub lambda_center_m: f64,
 }
 
 impl Default for SimOptions {
@@ -96,6 +103,7 @@ impl Default for SimOptions {
             uic:            false,
             pnjlim:         true,
             solver:         SolverKind::Auto,
+            lambda_center_m: 1.55e-6,
         }
     }
 }
@@ -128,6 +136,7 @@ impl SimOptions {
             temperature: self.temp_k,
             omega_0: 0.0,
             jlim_enabled: self.pnjlim,
+            lambda_center_m: self.lambda_center_m,
         }
     }
 
@@ -156,6 +165,13 @@ impl SimOptions {
             "srcsteps" | "srcmax"  => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
             "temp"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
             "tnom"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "lambda_center_nm" => {
+                self.lambda_center_m = parse_num(value).map(|nm| nm * 1e-9)
+                    .unwrap_or(self.lambda_center_m);
+            }
+            "lambda_center_m"  => {
+                self.lambda_center_m = parse_num(value).unwrap_or(self.lambda_center_m);
+            }
             "max_rejections" => self.max_rejections = parse_int(value).unwrap_or(self.max_rejections),
             "method" => {
                 match value.to_lowercase().as_str() {

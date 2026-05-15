@@ -16,7 +16,8 @@
 10. [Output formats](#10-output-formats)
 11. [Solver theory](#11-solver-theory)
 12. [Photonic devices](#12-photonic-devices)
-13. [OSDI model loading](#13-osdi-model-loading)
+13. [Writing custom devices](#13-writing-custom-devices)
+14. [OSDI model loading](#14-osdi-model-loading)
 
 ---
 
@@ -342,6 +343,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `uic` | false | Use `.ic` / element `IC=` instead of DC |
 | `pnjlim` | true | Diode / MOSFET junction limiting in NR |
 | `solver` | `auto` | `auto` / `dense` / `sparse` linear backend |
+| `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
 
 Setting any of these from the netlist:
 
@@ -540,12 +542,52 @@ Every "optical port" is a **3-wire bundle** `(re, im, λ)`:
   wavelength-dependent physics (e.g. waveguide propagation phase) without
   forcing a global parameter.
 
-`.optical_port NAME [N]` declares a bundle. For `N > 1`, each bundle-using
-device instance is auto-replicated into `N` parallel single-channel
-instances by the parser. Electrical nets and scalar nets shared across the
-replicas (e.g. one `V_pn` driving every replica of a PN-loaded ring) make
-single-modulator-multi-wavelength topologies trivial — see
-`examples/photonic/native_wdm_mrr_modulator.sp`.
+`.optical_port NAME [N]` declares a bundle. How the parser handles a
+multi-channel bundle depends on the device on it:
+
+- **Pure-optical devices** (`fc_cw_laser`, `fc_waveguide`, `fc_dcoupler`,
+  `fc_splitter`): the parser replicates the X-element into `N` parallel
+  single-channel instances. Each instance handles one wavelength; they're
+  independent.
+- **Bundle-aware devices with shared electrical state**
+  (`fc_pn_ps`, `fc_thermal_ps`, `fc_photodetector`): the parser does NOT
+  replicate. One device instance handles all `N` optical channels
+  internally while keeping one shared electrical interface
+  (anode/cathode or heat_p/heat_n). This is what makes "single physical
+  modulator, multiple wavelengths" work correctly — the V_pn supply sees
+  one PN junction, not N parallel copies; the photodetector sums
+  photocurrents across channels into one anode current and presents one
+  dark current and one shunt.
+- **Bundle-bridges** (`fc_mux`, `fc_demux`): the parser does NOT replicate
+  and intentionally allows mismatched channel counts on different pins
+  (N-channel bus side + N single-channel pins on the other side).
+
+Electrical nets and scalar nets (`vmod`, `0`, etc.) wired into a bundle-
+aware device are shared across all channels; the device sees one shared
+voltage / current per electrical pin. See
+`examples/photonic/native_wdm_mrr_modulator.sp` for a full topology.
+
+### Band centre
+
+Photonic devices need a default wavelength for things like the initial
+NR iterate (when no laser has yet driven the λ wire) and for any
+device parameter that defaults to "the design wavelength". One global
+option sets this band-wide default:
+
+```spice
+.options lambda_center_nm=1310    * O-band
+.options lambda_center_nm=1550    * C-band (default)
+.options lambda_center_m=1.31e-6  * same, in metres
+```
+
+Or via the CLI: `--opt lambda_center_nm=1310`. Or in Python:
+`Circuit.run("op", lambda_center_nm=1310)`.
+
+Devices with their own `wavelength_nm` parameter (the laser's output
+wavelength, the PN-PS's reference wavelength) override the band centre
+when set explicitly. The waveguide doesn't have a `wavelength_nm`
+parameter at all — its λ comes entirely from the input wire and the
+band-centre is only a bootstrap fallback.
 
 All values internally are SI. Convenience aliases like `L_um` and
 `wavelength_nm` accept the named unit and convert. **Beware SPICE SI
@@ -601,8 +643,13 @@ X<name>  in  out  fc_waveguide  [param=val …]
 | `L_m` / `length` | — | Length, m (overrides `L_um`). |
 | `n_g` | 4.2 | Group index. |
 | `alpha_dB_cm` | 2.0 | Power loss (dB/cm). |
-| `wavelength_nm` | 1550 | **Bootstrap** wavelength used when the input `λ` wire is unbound (initial NR iterate). Otherwise the wire value wins. |
-| `wavelength_m` | — | Same, in metres. |
+
+The `wavelength_nm` parameter is accepted for backward compatibility but
+no longer does anything — the waveguide reads λ directly from the input
+bundle's λ wire, and the laser drives that wire to whatever wavelength it
+was configured with. A hard-coded 1.55 µm is used only to seed the very
+first NR iterate (where the wire is still at 0 V); after iteration 1 the
+laser's value wins.
 
 **Physics.** `A_out = A_in · exp(−α L / 2) · exp(−j β L)` with `β = 2π n_g / λ`
 and `α` in nepers/m (the `alpha_dB_cm` value is converted internally). The
@@ -675,13 +722,21 @@ X<name>  in  anode  cathode  fc_photodetector  [param=val …]
 | `i_dark` / `i_dark_a` | 1e-9 | Dark current (A). |
 | `r_shunt` | 1e6 | Shunt resistance (Ω) — junction non-idealness. |
 
-**Physics.** Photocurrent `I_ph = responsivity × (V(in_re)² + V(in_im)²) + i_dark`
-flows from cathode to anode internally (reverse-biased convention).
-Externally, the anode sources current. A linear shunt `1/r_shunt` is
-stamped between anode and cathode. The photocurrent is nonlinear in the
-optical amplitudes, so a Norton equivalent linearised at the current
-operating point is contributed to the NR loop; `∂I_ph/∂V_re = 2R·V_re`,
-`∂I_ph/∂V_im = 2R·V_im`.
+**WDM behaviour.** Bundle-aware. On an N-channel optical input, ONE
+`fc_photodetector` instance handles all N channels: it sums the photocurrents
+(`I_ph = responsivity · Σ_k (V(re_k)² + V(im_k)²) + i_dark`) into one anode
+current, presents one shared dark current, and stamps one shunt resistance
+— not N copies. Responsivity is the same on every channel in this first-
+pass model; per-channel responsivity (for wavelength-selective detection)
+is a future parameter.
+
+**Physics.** Photocurrent flows from cathode to anode internally
+(reverse-biased convention). Externally, the anode sources current. A
+linear shunt `1/r_shunt` is stamped between anode and cathode. The
+photocurrent is nonlinear in the optical amplitudes, so a Norton
+equivalent linearised at the current operating point is contributed to
+the NR loop; `∂I_ph/∂V(re_k) = 2R·V(re_k)`, `∂I_ph/∂V(im_k) = 2R·V(im_k)`
+for every channel `k`.
 
 No bandwidth limit, no transit-time delay, no avalanche gain. A linear
 capacitance and finite responsivity bandwidth are future parameters.
@@ -705,8 +760,15 @@ X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
 | `wavelength_nm` | 1550 | Reference wavelength: propagation phase is zero at `λ = wavelength_nm`. Pin this to your laser's λ so the device is "on resonance" by default. |
 | `dn_dv` | 1e-4 | Effective-index change per applied volt (small-signal). |
 | `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
-| `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. |
+| `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. ONE conductance shared across all N optical channels — see WDM note below. |
 | `alpha_dB_cm` | 0 | Propagation loss along the PN section. For a closed-loop ring this loss sets the extinction ratio of the resonance dip — without it the ring is all-pass. |
+
+**WDM behaviour.** `fc_pn_ps` is bundle-aware. On an N-channel optical
+bus, ONE `fc_pn_ps` instance handles all N optical paths and presents ONE
+shared electrical interface — the V_pn supply sees exactly `g_pn`, not
+`N · g_pn`. Per-channel wavelength is read independently from each
+channel's λ wire, so a single Vπ-driven modulator naturally produces
+wavelength-diverse phase shifts.
 
 **Physics.** Optical: `φ = φ_prop + φ_eo` where
 
@@ -806,6 +868,10 @@ X<name>  in  out  heat_p  heat_n  fc_thermal_ps  [param=val …]
 | `r_heater` / `r` | 1000 | Heater resistance (Ω). |
 | `p_pi` / `p_pi_w` | 10e-3 | Heater power for π phase shift (W). |
 
+**WDM behaviour.** Like `fc_pn_ps`, this is bundle-aware. One device, one
+shared heater, all N optical channels see the same phase shift (no
+wavelength dependence in this first-pass model).
+
 **Physics.** Electrical: linear resistor `R_heater` between `heat_p` and
 `heat_n`. Joule power `P = V² / R_heater` is converted instantaneously into
 an optical phase shift `φ = π · P / P_pi`. No thermal RC — the conversion
@@ -839,7 +905,327 @@ back-compat and third-party clear-text Verilog-A. See `docs/photonic_models.md`.
 
 ---
 
-## 13. OSDI model loading
+## 13. Writing custom devices
+
+This is the path for adding a new SPICE primitive to fairchild — say, a
+better PN-junction model with proper diode I-V, or a new photonic device
+class. You need a working Rust toolchain (`rustup install stable`) but
+you don't need deep Rust experience: every existing device is a copy-
+paste template, and the trait you implement has small methods that
+follow the same MNA stamp patterns SPICE has used for 50 years.
+
+The work has three parts:
+
+1. Write a `struct` for your device + an `impl Device` block.
+2. Register it in `device_registry.rs` so SPICE element names dispatch
+   to your factory.
+3. Add a regression test under `crates/fairchild-core/tests/`.
+
+### 13.1 Where files live
+
+| File | Purpose |
+|---|---|
+| `crates/fairchild-core/src/models/<your_family>.rs` | The device struct + `impl Device`. Put diodes in `diode.rs`, MOSFETs in `mosfet1.rs`, photonics in `photonic.rs`, or create a new file for a new family. |
+| `crates/fairchild-core/src/models/mod.rs` | One-line `pub use` re-export so the type is visible from `crate::models`. |
+| `crates/fairchild-core/src/device_registry.rs` | The factory call that maps `"my_device"` (SPICE card name) to a constructor. |
+| `crates/fairchild-core/tests/<your_test>.rs` | Regression test — exercise DC OP / transient / AC against a closed-form expectation. |
+
+### 13.2 Minimum Rust syntax you'll touch
+
+```rust
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::mna::MnaMatrix;
+
+pub struct MyDevice {
+    // Parameters as plain f64 fields. Defaults set in new().
+    my_param: f64,
+    // Terminal node indices. Use [NodeId; N] for fixed arity, Vec<NodeId> for variable.
+    // NodeId is Option<usize>: None means "tied to ground", Some(i) is row i in the MNA matrix.
+    nodes: [NodeId; 2],
+    // Cached values from eval() that load_jacobian / load_residual will read.
+    // Anything that depends on the current iterate goes here.
+    g_cached: f64,
+}
+
+impl MyDevice {
+    pub fn new() -> Self {
+        Self { my_param: 1.0, nodes: [None; 2], g_cached: 0.0 }
+    }
+}
+
+impl Device for MyDevice {
+    fn num_terminals(&self) -> usize { 2 }
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        for i in 0..2 { self.nodes[i] = terminals[i]; }
+    }
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "my_param" => { self.my_param = value; true }
+            _ => false,
+        }
+    }
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        // Compute anything that depends on the current solution.  x[i] is
+        // the voltage / current at MNA row i.  Store results in self.*_cached.
+    }
+    fn load_residual(&self, b: &mut [f64]) {
+        // Add current contributions to the RHS vector b (one entry per MNA row).
+    }
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        // Add conductance contributions to mat.a[row][col].
+    }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+```
+
+That's the minimum. The hard part is what to put inside `eval`,
+`load_residual`, `load_jacobian` — that's the device physics. The
+sections below give you the standard patterns.
+
+### 13.3 Stamp patterns by physics type
+
+#### Linear resistance (Ohm's law)
+
+A resistor `R` between nodes `a` and `b` stamps a conductance `g = 1/R`:
+
+```rust
+fn load_jacobian(&self, mat: &mut MnaMatrix) {
+    let g = 1.0 / self.r;
+    if let Some(a) = self.nodes[0] {
+        mat.a[a][a] += g;
+        if let Some(b) = self.nodes[1] { mat.a[a][b] -= g; }
+    }
+    if let Some(b) = self.nodes[1] {
+        mat.a[b][b] += g;
+        if let Some(a) = self.nodes[0] { mat.a[b][a] -= g; }
+    }
+}
+```
+
+`load_residual` does nothing — a linear resistor has no current source
+to contribute to the RHS, only diagonal/off-diagonal entries in the
+Jacobian. The `if let Some(a) = self.nodes[i]` guards skip stamps to
+ground (NodeId is None = ground).
+
+#### Reactive element (capacitor / inductor) between nodes
+
+A capacitor `C dv/dt = i` is integrated by the time-stepping rule. The
+companion model at step h is `i = (C/h) · (v − v_prev)`. In MNA terms
+that's a conductance `g_eq = C·α` (α = 1/h for Backward Euler, 2/h for
+Trapezoidal — passed by the solver into `load_*_tran`) plus a history
+current `−g_eq · v_prev` on the RHS.
+
+```rust
+pub struct MyCap {
+    c: f64,
+    nodes: [NodeId; 2],
+    v_prev: f64,    // committed voltage from the previous accepted step
+}
+
+impl Device for MyCap {
+    fn num_terminals(&self) -> usize { 2 }
+    fn setup_instance(&mut self, t: &[NodeId], _: &SimContext) {
+        self.nodes = [t[0], t[1]];
+    }
+    fn eval(&mut self, _x: &[f64], _: EvalFlags, _: &SimContext) {}
+
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        let g_eq = self.c * alpha;
+        if let Some(a) = self.nodes[0] {
+            mat.a[a][a] += g_eq;
+            if let Some(b) = self.nodes[1] { mat.a[a][b] -= g_eq; }
+        }
+        if let Some(b) = self.nodes[1] {
+            mat.a[b][b] += g_eq;
+            if let Some(a) = self.nodes[0] { mat.a[b][a] -= g_eq; }
+        }
+    }
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        let g_eq = self.c * alpha;
+        let i_hist = g_eq * self.v_prev;
+        if let Some(a) = self.nodes[0] { b[a] += i_hist; }
+        if let Some(c) = self.nodes[1] { b[c] -= i_hist; }
+    }
+    fn commit_timestep(&mut self, x: &[f64]) {
+        let va = self.nodes[0].map_or(0.0, |i| x[i]);
+        let vb = self.nodes[1].map_or(0.0, |i| x[i]);
+        self.v_prev = va - vb;
+    }
+
+    fn load_residual(&self, _b: &mut [f64]) {}              // DC: open circuit
+    fn load_jacobian(&self, _mat: &mut MnaMatrix) {}        // DC: no current
+}
+```
+
+An inductor is the dual: `L di/dt = v`, integrate to get `v = L·α·(i−i_prev)`.
+You'd introduce an auxiliary branch row for the current (via
+`num_extra_nodes` returning 1 and `bind_extra_nodes` recording the row),
+then stamp `L·α` on the diagonal of that row and `-L·α·i_prev` to the RHS.
+See built-in `Inductor` in fairchild-core for the worked example.
+
+The takeaway: **time derivatives are α-scaled stamps + a `commit_timestep`
+that snapshots the new state.** That's the same pattern Verilog-A's
+`ddt(x)` compiles to.
+
+#### Nonlinear current (diode-like)
+
+For a current `I = f(V)` that's nonlinear in V (diode I-V curve, MOSFET
+drain current, photodetector responsivity), Newton-Raphson linearises:
+
+```
+I_real(V) ≈ I(V_op) + (dI/dV)·(V − V_op)
+```
+
+You stamp `dI/dV` like a conductance in the Jacobian, and an equivalent
+current source `I_eq = I(V_op) − (dI/dV)·V_op` on the RHS. This is the
+standard "Norton equivalent" companion model. See `ShockleyDiode` in
+`crates/fairchild-core/src/models/diode.rs` for a textbook example, or
+`NativePhotodetector` in `photonic.rs` for a 2-input version where the
+current depends on `V(in_re)² + V(in_im)²`.
+
+The key insight: `eval()` evaluates the I-V curve at the current
+operating point and caches `I_op`, `dI/dV`, and `V_op`. `load_residual`
+contributes `±I_eq` to the two terminal rows. `load_jacobian`
+contributes `dI/dV` like a conductance.
+
+#### Integrals (Verilog-A `idt(x)`)
+
+An integral `y = idt(x)` is the dual of `ddt`: you need an auxiliary state
+variable that accumulates `h·x` per step. Introduce one auxiliary MNA row
+via `num_extra_nodes() = 1` and `bind_extra_nodes`, then for that row stamp
+`+1` against `y` and `-h·α^{-1}` against `x`, with the history term on the
+RHS. In practice this is rare in SPICE-style devices — circuits usually
+prefer differential equations that the solver integrates implicitly.
+
+#### Voltage-source contributions (Verilog-A `V(p,n) <+ expr`)
+
+For `V(out) = expr`, you need an auxiliary branch row to enforce the
+voltage relation as an extra equation, plus an entry coupling the
+branch's "current" back to the KCL at `out`. The pattern is:
+
+```
+[ 1   ... |  k_i ... ]    branch row: V(out) − Σ k_i · V(in_i) = expr_rhs
+[ ...     |  ...     ]
+[ ...   1 |  ...     ]    KCL at out: + branch current
+```
+
+`fc_waveguide.stamp_potential_eq` is the canonical worked example. The
+inputs are `(out_node, [(in_node, coefficient)...])` and the function
+takes care of both stamps. You request the branch rows via
+`num_extra_nodes()` (returning N branches) and bind them via
+`bind_extra_nodes`.
+
+#### Bundle ports (the `(re, im, λ)` photonic convention)
+
+A bundle is just 3 ordinary scalar nets named with `_re`, `_im`, `_λ`
+suffixes. The parser's `.optical_port NAME` directive lets the user
+write a single token and the parser expands it to 3 wires. Your device
+just sees those 3 wires as positions in its terminal list. There's
+nothing special at the device layer.
+
+For variable-arity (e.g. an N-channel waveguide), use `Vec<NodeId>` for
+nodes, derive N from `terminals.len()` in `setup_instance`, and loop
+over channels in `load_jacobian`. `NativeMux` / `NativeDemux` are the
+worked examples. The parser side requires adding the device's model
+name to the "don't replicate" list in `expand_optical_ports`.
+
+### 13.4 Verilog-A ↔ Rust cheat sheet
+
+| Verilog-A | Rust equivalent in fairchild |
+|---|---|
+| `parameter real x = 1.0;` | `x: f64` field on the struct, `"x" => { self.x = value; true }` in `set_real_param`. |
+| `module foo(p, n);` ports | `nodes: [NodeId; N]` array in the struct, indexed positionally. |
+| `analog begin … end` body | `eval()` (read x → cache), `load_residual()` (RHS stamps), `load_jacobian()` (Jacobian stamps). |
+| `I(p, n) <+ expr` | Compute I and dI/dV in `eval`, cache; stamp dI/dV like a conductance in `load_jacobian` and `I_eq` in `load_residual`. |
+| `V(p, n) <+ expr` | Use a direct-potential branch row (`fc_waveguide.stamp_potential_eq`). |
+| `ddt(x)` | `α · (x − x_prev)`. Stamp `α·coef` in `load_jacobian_tran`, history on RHS in `load_residual_tran`, snapshot in `commit_timestep`. |
+| `idt(x)` | Auxiliary state variable accumulating `h·x` per step. Rare; use a differential reformulation if you can. |
+| `cross(expr, dir)` event | Add a breakpoint via `SimContext` (not yet supported — file an issue). |
+| `@(initial_step)` | `setup_instance` runs once; the first `eval` is the equivalent of initial_step. |
+| `node_temperature` / `$temperature` | `ctx.temp_k` in `SimContext`. |
+
+### 13.5 Registering the device
+
+Once your `impl Device` compiles, register the SPICE card name in
+`crates/fairchild-core/src/device_registry.rs`. Add to `mod.rs`
+re-exports first:
+
+```rust
+// crates/fairchild-core/src/models/mod.rs
+pub use my_family::MyDevice;
+```
+
+Then in `register_native_photonics` (or wherever your family belongs):
+
+```rust
+self.register("my_device", |terminals, ctx| {
+    let mut d = MyDevice::new();
+    d.setup_model(ctx);
+    d.setup_instance(terminals, ctx);
+    Box::new(d) as Box<dyn Device>
+});
+```
+
+The string `"my_device"` is what the user writes in the netlist:
+`X1 a b my_device my_param=2.0`.
+
+### 13.6 Testing
+
+Write a regression test at `crates/fairchild-core/tests/my_device.rs`:
+
+```rust
+use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_parser::parse_spice;
+
+#[test]
+fn my_device_dc_op_matches_closed_form() {
+    let netlist = parse_spice(
+        "* test\n\
+         V1 in 0 DC 1.0\n\
+         X1 in out my_device my_param=2.0\n\
+         R1 out 0 1k\n\
+         .op\n.end\n"
+    ).unwrap();
+    let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
+    let v = r.node_voltage("out").unwrap();
+    let expected = /* your closed-form expression */;
+    assert!((v - expected).abs() < 1e-6,
+        "V(out) = {v}, expected {expected}");
+}
+```
+
+Run with `cargo test --release --test my_device`. Once it passes, the
+device is part of the standard build and your custom netlists can use it.
+
+### 13.7 Where the change propagates
+
+After adding a device, the only files you touch are:
+
+1. `crates/fairchild-core/src/models/<your_file>.rs` (the device itself)
+2. `crates/fairchild-core/src/models/mod.rs` (re-export)
+3. `crates/fairchild-core/src/device_registry.rs` (factory)
+4. `crates/fairchild-core/tests/<your_test>.rs` (regression)
+
+You do NOT need to touch the parser, the CLI, the Python bindings, or
+the netlist analyses — those all dispatch through `DeviceRegistry` and
+will pick up your new device automatically once it's registered.
+
+The parser-side `.optical_port` bundle handling DOES need a touch if
+your device is variable-arity (treats the bundle as multi-channel
+internally) — add its name to the "don't replicate" list in
+`expand_optical_ports`. Pure scalar devices don't need this.
+
+If you find yourself wanting a more general extension point (e.g. a
+plugin registry that loads compiled `.so` files from outside the
+fairchild source tree), that's the OpenVAF / OSDI path described in the
+next section. For most new devices, writing a small Rust struct is
+simpler and produces faster code.
+
+---
+
+## 14. OSDI model loading
 
 fairchild loads compact models compiled by [OpenVAF-Reloaded][openvaf] as
 OSDI v0.4 shared libraries (`.osdi`).

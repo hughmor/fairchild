@@ -13,11 +13,22 @@ pub struct SimContext {
     /// When true, device models apply junction-step limiters (pnjlim, fetlim).
     /// Mapped from `SimOptions::pnjlim` / `.options nopnjlim`.
     pub jlim_enabled: bool,
+    /// Centre wavelength of the photonic band of interest, in metres.  Devices
+    /// use this to bootstrap their λ wire during the initial NR iterate (when
+    /// the laser hasn't driven the wire yet — value at x=0).  After iteration 0
+    /// the actual wire value wins.  Set via `.options lambda_center_nm=1310`
+    /// for O-band designs, `lambda_center_nm=1550` (default) for C-band.
+    pub lambda_center_m: f64,
 }
 
 impl Default for SimContext {
     fn default() -> Self {
-        SimContext { temperature: 300.15, omega_0: 0.0, jlim_enabled: true }
+        SimContext {
+            temperature: 300.15,
+            omega_0: 0.0,
+            jlim_enabled: true,
+            lambda_center_m: 1.55e-6,
+        }
     }
 }
 
