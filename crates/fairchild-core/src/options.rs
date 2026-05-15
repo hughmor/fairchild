@@ -9,6 +9,7 @@
 use fairchild_parser::Netlist;
 
 use crate::device::SimContext;
+use crate::solver::{LinearSolver, SolverKind, make_solver};
 use crate::tran::IntegratorMode;
 
 /// Numerical options consumed by every analysis entry point.
@@ -68,6 +69,12 @@ pub struct SimOptions {
     /// MOSFETs).  On by default — matches ngspice/hspice.  Disable via
     /// `.options nopnjlim` (or CLI `--no-pnjlim`).
     pub pnjlim: bool,
+
+    // ── linear-system backend ──────────────────────────────────────────────
+    /// LU factorisation backend.  `Auto` picks dense for ≤50 nodes and
+    /// `faer-sparse` above.  Override with `.options solver=sparse|dense|auto`
+    /// or CLI `--solver`.
+    pub solver: SolverKind,
 }
 
 impl Default for SimOptions {
@@ -88,6 +95,7 @@ impl Default for SimOptions {
             temp_k:         300.15,
             uic:            false,
             pnjlim:         true,
+            solver:         SolverKind::Auto,
         }
     }
 }
@@ -121,6 +129,12 @@ impl SimOptions {
             omega_0: 0.0,
             jlim_enabled: self.pnjlim,
         }
+    }
+
+    /// Build the linear solver matching this options' `solver` choice, sized
+    /// for an `n`-row system.  Used by every analysis entry point.
+    pub fn linear_solver(&self, n: usize) -> Box<dyn LinearSolver> {
+        make_solver(self.solver, n)
     }
 
     /// Apply a single `.options KEY=VALUE` token, returning `true` if recognised.
@@ -165,6 +179,14 @@ impl SimOptions {
                 let off = matches!(value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on");
                 self.pnjlim = !off;
+            }
+            "solver" => {
+                self.solver = match value.to_lowercase().as_str() {
+                    "dense"  => SolverKind::Dense,
+                    "sparse" | "faer-sparse" | "faer_sparse" => SolverKind::Sparse,
+                    "auto"   => SolverKind::Auto,
+                    _ => return false,
+                };
             }
             _ => return false,
         }

@@ -26,7 +26,7 @@ use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
 use crate::device::{Device, EvalFlags, SimContext};
-use crate::solver::lu_solve;
+use crate::solver::LinearSolver;
 
 /// Result of an AC sweep: complex node voltages at each frequency.
 pub struct AcResult {
@@ -169,7 +169,10 @@ pub fn ac_analysis_opts(
 
     // --- DC operating point ---
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
-    let x0 = dc_op(&topo, netlist, &mut devices, &ctx, opts)?;
+    let dc_solver = opts.linear_solver(size);
+    let x0 = dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
+    // The AC system is 2N×2N (real-block of complex); build a sized solver.
+    let ac_solver = opts.linear_solver(2 * size);
 
     // --- Small-signal G matrix (real, from DC Jacobian at x0) ---
     // Re-stamp the linear passive network.
@@ -254,7 +257,7 @@ pub fn ac_analysis_opts(
             rhs[size + i] = b_ac_im[i];
         }
 
-        let x = lu_solve(&a2, &rhs)?;
+        let x = ac_solver.solve(&a2, &rhs)?;
         let x_re = &x[..size];
         let x_im = &x[size..];
 
@@ -277,6 +280,7 @@ fn dc_op(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
     opts: &SimOptions,
+    solver: &dyn LinearSolver,
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
@@ -292,7 +296,7 @@ fn dc_op(
         for i in 0..n_nodes {
             mat.a[i][i] += opts.gmin;
         }
-        let x_new = lu_solve(&mat.a, &mat.b)?;
+        let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs()).fold(0.0f64, f64::max);
         let x_next: Vec<f64> = if max_dv > opts.vmax {

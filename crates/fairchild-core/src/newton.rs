@@ -11,7 +11,7 @@ use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::options::SimOptions;
-use crate::solver::lu_solve;
+use crate::solver::{lu_solve, LinearSolver};
 
 /// Result of a nonlinear DC operating-point solve.
 pub struct NrResult {
@@ -158,6 +158,7 @@ fn nr_inner(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
     opts: &SimOptions,
+    solver: &dyn LinearSolver,
     mut x: Vec<f64>,
     source_scale: f64,
     gmin_extra: f64,
@@ -178,7 +179,7 @@ fn nr_inner(
             mat.a[i][i] += opts.gmin + gmin_extra;
         }
 
-        let x_new = lu_solve(&mat.a, &mat.b)?;
+        let x_new = solver.solve(&mat.a, &mat.b)?;
 
         let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs())
@@ -209,6 +210,7 @@ fn source_stepping(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
     opts: &SimOptions,
+    solver: &dyn LinearSolver,
     x0: Vec<f64>,
 ) -> Result<Vec<f64>, SimError> {
     let mut x = x0;
@@ -218,7 +220,7 @@ fn source_stepping(
 
     while scale < 1.0 {
         let next = (scale + ds).min(1.0);
-        match nr_inner(topo, netlist, devices, ctx, opts, x.clone(), next, 0.0) {
+        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(), next, 0.0) {
             Ok(x_new) => {
                 x = x_new;
                 scale = next;
@@ -242,13 +244,14 @@ fn gmin_stepping(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
     opts: &SimOptions,
+    solver: &dyn LinearSolver,
 ) -> Result<Vec<f64>, SimError> {
     let mut gmin_extra = opts.gmin_max;
     let target = opts.gmin;
     let mut x = vec![0.0f64; topo.size];
 
     loop {
-        match nr_inner(topo, netlist, devices, ctx, opts, x.clone(), 1.0, gmin_extra) {
+        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(), 1.0, gmin_extra) {
             Ok(x_new) => {
                 x = x_new;
                 if gmin_extra <= target { break; }
@@ -291,16 +294,17 @@ pub fn dc_op_nr_with_registry_opts(
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
     let x0 = build_x0_from_nodeset(netlist, &topo);
+    let solver = opts.linear_solver(topo.size);
 
-    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, x0.clone(), 1.0, 0.0) {
+    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, &*solver, x0.clone(), 1.0, 0.0) {
         return Ok(NrResult { topo, x, iters: 1 });
     }
 
-    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, x0) {
+    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver, x0) {
         return Ok(NrResult { topo, x, iters: 2 });
     }
 
-    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts) {
+    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver) {
         Ok(x) => Ok(NrResult { topo, x, iters: 3 }),
         Err(e) => Err(e),
     }
@@ -327,16 +331,17 @@ pub fn dc_op_nr_with_devices_opts(
     opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
     let x0 = vec![0.0f64; topo.size];
+    let solver = opts.linear_solver(topo.size);
 
-    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, x0.clone(), 1.0, 0.0) {
+    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, &*solver, x0.clone(), 1.0, 0.0) {
         return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
     }
 
-    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, x0) {
+    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver, x0) {
         return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
     }
 
-    match gmin_stepping(topo, netlist, devices, ctx, opts) {
+    match gmin_stepping(topo, netlist, devices, ctx, opts, &*solver) {
         Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
         Err(e) => Err(e),
     }

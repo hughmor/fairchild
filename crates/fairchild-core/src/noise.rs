@@ -25,7 +25,7 @@ use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
-use crate::solver::lu_solve;
+use crate::solver::LinearSolver;
 
 /// Boltzmann's constant in J/K.
 const KB: f64 = 1.380649e-23;
@@ -80,7 +80,9 @@ pub fn noise_analysis(
 
     // DC operating point.
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
-    let x0 = run_dc_op(&topo, netlist, &mut devices, &ctx, opts)?;
+    let dc_solver    = opts.linear_solver(size);
+    let noise_solver = opts.linear_solver(2 * size);
+    let x0 = run_dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
 
     // Real (G) and imaginary-coefficient (C, L⁻¹) parts of Y(jω) = G + j(ωC − L⁻¹/ω).
     let mut g_mat = stamp_netlist_scaled(&topo, netlist, 1.0, &empty, &empty).a;
@@ -159,7 +161,7 @@ pub fn noise_analysis(
         }
         let mut rhs_fwd = vec![0.0f64; n2];
         rhs_fwd[n_nodes + input_vsrc_idx] = 1.0;  // unit AC amplitude on V source
-        let v_fwd = lu_solve(&a_fwd, &rhs_fwd)?;
+        let v_fwd = noise_solver.solve(&a_fwd, &rhs_fwd)?;
         let v_re_fwd = &v_fwd[..size];
         let v_im_fwd = &v_fwd[size..];
         let h_re = pick(v_re_fwd, out_pos_idx) - pick(v_re_fwd, out_neg_idx);
@@ -187,7 +189,7 @@ pub fn noise_analysis(
         // RHS is zero — we observe a real-valued node voltage).
         if let Some(i) = out_pos_idx { rhs_adj[i] += 1.0; }
         if let Some(i) = out_neg_idx { rhs_adj[i] -= 1.0; }
-        let lam = lu_solve(&a_adj, &rhs_adj)?;
+        let lam = noise_solver.solve(&a_adj, &rhs_adj)?;
         let lam_re = &lam[..size];
         let lam_im = &lam[size..];
 
@@ -258,6 +260,7 @@ fn run_dc_op(
     devices: &mut [Box<dyn Device>],
     ctx: &crate::device::SimContext,
     opts: &SimOptions,
+    solver: &dyn LinearSolver,
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
@@ -273,7 +276,7 @@ fn run_dc_op(
         for i in 0..n_nodes {
             mat.a[i][i] += opts.gmin;
         }
-        let x_new = lu_solve(&mat.a, &mat.b)?;
+        let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs()).fold(0.0f64, f64::max);
         let x_next: Vec<f64> = if max_dv > opts.vmax {

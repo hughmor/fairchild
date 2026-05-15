@@ -346,6 +346,9 @@ pub fn tran_nr_with_registry_opts(
     };
 
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    // Topology is fixed across the whole transient — build the linear
+    // solver once and reuse for every NR iter.
+    let solver = opts.linear_solver(topo.size);
 
     // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
     // history is defined before the first step.
@@ -391,7 +394,7 @@ pub fn tran_nr_with_registry_opts(
                 mat.a[i][i] += opts.gmin;
             }
 
-            let x_new = lu_solve(&mat.a, &mat.b)?;
+            let x_new = solver.solve(&mat.a, &mat.b)?;
 
             let max_dv = x_new.iter()
                 .zip(x.iter())
@@ -508,6 +511,7 @@ pub fn tran_nr_with_registry_var_opts(
         (dc.topo, dc.x)
     };
     let mut devices = build_devices(netlist, &topo, &ctx, registry)?;
+    let solver = opts.linear_solver(topo.size);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
@@ -665,7 +669,7 @@ pub fn tran_nr_with_registry_var_opts(
                 mat.a[i][i] += opts.gmin;
             }
 
-            let x_new = lu_solve(&mat.a, &mat.b)?;
+            let x_new = solver.solve(&mat.a, &mat.b)?;
 
             let max_dv = x_new.iter().zip(x_try.iter())
                 .take(n_nodes)

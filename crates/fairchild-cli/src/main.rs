@@ -107,6 +107,13 @@ struct Cli {
     /// failures by surfacing the raw NR step.
     #[arg(long = "no-pnjlim")]
     no_pnjlim: bool,
+
+    /// Linear-system backend.
+    ///   dense  — faer partial-pivot LU (recommended for ≤ ~50 nodes)
+    ///   sparse — faer sparse LU (pure Rust, default at larger N)
+    ///   auto   — pick from system size (default)
+    #[arg(long, value_name = "dense|sparse|auto")]
+    solver: Option<String>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -270,6 +277,7 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
     if let Some(v) = &cli.method   { apply("method",  v); }
     if let Some(v) = &cli.max_step { apply("maxstep", v); }
     if cli.no_pnjlim               { apply("pnjlim",  "0"); }
+    if let Some(v) = &cli.solver   { apply("solver",  v); }
 
     for raw in &cli.options {
         if let Some((k, v)) = raw.split_once('=') {
