@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use fairchild_parser::ModelCard;
 
 use crate::device::{Device, NodeId, SimContext};
-use crate::models::{Mosfet1, ShockleyDiode};
+use crate::models::{Mosfet1, NativeDirectionalCoupler, NativeSplitter, NativeWaveguide, ShockleyDiode};
 
 type Factory =
     Box<dyn Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static>;
@@ -24,7 +24,15 @@ pub struct DeviceRegistry {
 
 impl DeviceRegistry {
     pub fn new() -> Self {
-        Self { factories: HashMap::new(), mosfet_cards: HashMap::new() }
+        let mut reg = Self {
+            factories: HashMap::new(),
+            mosfet_cards: HashMap::new(),
+        };
+        // Native photonic passives are always available — no .model card or
+        // .osdi import required to instantiate `fc_waveguide`, `fc_dcoupler`,
+        // `fc_splitter`.
+        reg.register_native_photonics();
+        reg
     }
 
     /// Register a factory for `name`. Overwrites any previous entry.
@@ -87,6 +95,37 @@ impl DeviceRegistry {
                 (is_pmos, card.params.clone()),
             );
         }
+    }
+
+    /// Register the always-available native photonic passive devices.
+    /// These are addressable by model name in any X-element instance line:
+    ///
+    /// - `fc_waveguide`  — straight waveguide (B3 NativeWaveguide).
+    /// - `fc_dcoupler`   — 2×2 directional coupler.
+    /// - `fc_splitter`   — 1×2 Y-junction (3 dB lossless).
+    ///
+    /// No `.osdi` library or `.model` card is needed — the registry
+    /// constructs them on demand.  Parameters (`L_um`, `n_g`, etc.) are
+    /// applied through `set_real_param` after construction.
+    pub fn register_native_photonics(&mut self) {
+        self.register("fc_waveguide", |terminals, ctx| {
+            let mut d = NativeWaveguide::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_dcoupler", |terminals, ctx| {
+            let mut d = NativeDirectionalCoupler::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_splitter", |terminals, ctx| {
+            let mut d = NativeSplitter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
     }
 
     /// Build a `Mosfet1` for `model_name` with specific instance params (W, L).
