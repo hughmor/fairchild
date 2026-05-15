@@ -33,6 +33,17 @@ pub enum SolverKind {
 
 /// Trait covering the operations every analysis loop needs from its
 /// linear solver: forward solve and (for adjoint / noise) transpose solve.
+///
+/// **Adding a third-party backend** — e.g. KLU via SuiteSparse FFI — is:
+///   1. Add a new dependency behind a cargo feature flag.
+///   2. Implement this trait on a new struct (see `FaerSparseSolver` for
+///      the reference shape).  Override `solve_transpose` if your
+///      factorisation caches an LU so transpose-solve is free.
+///   3. Extend `SolverKind` with a `Klu` variant gated on the feature flag.
+///   4. Add the dispatch to `make_solver`.
+///
+/// The trait is `Send + Sync` so future parallel-frequency AC / parallel-MC
+/// drivers can share one solver across threads.
 pub trait LinearSolver: Send + Sync {
     /// Solve `A · x = b`.  Returns `SingularMatrix` if the result is non-finite.
     fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError>;
