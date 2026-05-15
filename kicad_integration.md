@@ -1,347 +1,304 @@
-# fairchild KiCAD Integration — Setup Guide
+# fairchild ↔ KiCad — Setup Guide
 
-## Overview
+This guide is the **native-device flow**. It assumes you draw a schematic in
+KiCad using symbols from a `fairchild_native.kicad_sym` library whose models
+map onto fairchild's native `fc_*` photonic devices and onto built-in
+electrical primitives (R / L / C / V / I / D / M). The pre-Phase-B path that
+used compiled `.osdi` Verilog-A models is no longer recommended; that file
+lives in git history if you need to refer back to it.
 
-**Split of work:**
+The end-to-end flow:
 
-- **You (KiCAD side):** symbol library, schematics, SPICE export config
-- **Me (fairchild side):** WDM bus vector expansion in the parser, post-processor script for KiCAD → fairchild netlist conversion
+1. Draw the schematic in KiCad, using fairchild-native symbols.
+2. Export to SPICE: `File → Export → Netlist → SPICE`.
+3. Run `scripts/kicad_to_fairchild.py` to produce a wrapper netlist with
+   `.optical_port` declarations and the analysis directive.
+4. Run `fairchild -f run_my_circuit.sp`.
 
-These can proceed in parallel. The validation step at the end brings them together.
+There is no OSDI preamble step, no `.osdi` directives, no 12-pin coupler
+symbol. A directional coupler is a 4-pin symbol, a waveguide is a 2-pin
+symbol, and so on — one KiCad pin per fairchild optical port.
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-- **KiCAD 10** (these instructions reflect KiCAD 10's `Sim.*` simulation model dialog)
-- All fairchild VA models compiled to `.osdi` in `va-models/build/`
-- `fairchild` CLI binary at `target/release/fairchild`
+- **KiCad 10** (uses the `Sim.*` simulation-model dialog)
+- **fairchild** built: `cargo build --release` produces `target/release/fairchild`
+- **Python 3.9+** to run the post-processor
+
+No OpenVAF, no `va-models/build/`, no `.osdi` artefacts are required for the
+native flow.
 
 ---
 
-## 1. Project structure
-
-Create a KiCAD project alongside your fairchild netlists:
+## 2. Project layout
 
 ```
-photonic-circuits/
-├── fairchild_photonics.kicad_sym   ← your symbol library
-├── fairchild_preamble.sp           ← .osdi + .optical declarations (see §4)
-├── my_circuit.kicad_sch            ← schematics
-└── my_circuit.kicad_pro
+my-photonic-project/
+├── fairchild_native.kicad_sym     ← native fc_* symbol library
+├── my_circuit.kicad_sch
+├── my_circuit.kicad_pro
+├── my_circuit.net                 ← KiCad SPICE export (regenerated each save)
+└── run_my_circuit.sp              ← wrapper from kicad_to_fairchild.py
 ```
 
----
-
-## 2. Symbol library — conventions
-
-### Create the library
-
-**Preferences → Manage Symbol Libraries → Project Libraries tab → Add ("+").**  
-Name it `fairchild_photonics`, point it to `fairchild_photonics.kicad_sym`.  
-Then **open the Symbol Editor**, select that library, and create symbols.
-
-### Optical pin convention
-
-Each optical port is represented as **three adjacent KiCAD pins**:
-
-| Suffix | Role | KiCAD Pin Type |
-|--------|------|----------------|
-| `_re` | Real amplitude (√W) | Bidirectional |
-| `_im` | Imaginary amplitude (√W) | Bidirectional |
-| `_wl` | Wavelength (µm) | Bidirectional |
-
-Group these visually on the symbol body — e.g., draw a small `[ ]` bracket on the optical side and label it with the port name. Electrical pins use the standard Input/Output/BiDir types as appropriate.
-
-**Pin naming is critical** — the pin name becomes the net name in the KiCAD schematic, which becomes the node name in the exported SPICE netlist. Use exactly these suffixes (`_re`, `_im`, `_wl`) because the `.optical` directive in the preamble (§4) uses them by pattern.
-
-### SPICE simulation model (KiCAD 10)
-
-On each symbol, press **E** (or right-click → Edit Simulation Model). In the dialog:
-
-1. **Model tab**: select **Raw SPICE Element**
-2. Set **Spice element type** = `X`
-3. Set **Model name** = the OSDI model name (e.g. `cw_laser`)
-4. Leave **Library path** empty — `.osdi` loading is handled by the fairchild wrapper, not KiCAD
-5. In the **Parameter list** below: add each default parameter as `name` / `value` pairs
-6. Switch to the **Pin Assignments tab**: assign node numbers to each KiCAD pin following the VA terminal order tables below
-
-KiCAD auto-creates `Sim.Device = SPICE` and `Sim.Type = X` in the symbol's Fields. `Sim.Params` and `Sim.Pins` are populated from the dialog. You don't need to edit these Fields directly.
-
-**Note on parameter case**: fairchild matches parameters case-insensitively (`Vpi_L` = `vpi_l`). Enter them with the canonical case shown below for readability.
+Add `fairchild_native.kicad_sym` via **Preferences → Manage Symbol Libraries
+→ Project Libraries → Add**. Point it at the file location; if you keep the
+library in this repo, the simplest path is to symlink or copy it into your
+project directory.
 
 ---
 
-## 3. Symbol catalog
+## 3. Symbol library conventions
 
-For each symbol, number pins **strictly in the order the VA module declares them**. The pin number determines its position in the exported SPICE X-element line — position 1 is VA terminal 1, etc.
+### One KiCad pin per fairchild port
 
-### `cw_laser`
+Native fairchild photonic devices treat each optical port as a single bundle
+that the parser expands into `(re, im, λ)` wires under the hood. The KiCad
+symbol therefore has **one pin per optical port**, not three. Electrical pins
+(`anode`, `cathode`, `heat_p`, `heat_n`) are also one pin each.
 
-VA terminals: `out_re, out_im, out_lambda`
+| Card | Optical ports (KiCad pins) | Electrical pins |
+|---|---|---|
+| `fc_cw_laser` | `out` | — |
+| `fc_waveguide` | `in`, `out` | — |
+| `fc_dcoupler` | `a1`, `a2`, `b1`, `b2` | — |
+| `fc_splitter` | `in`, `out_a`, `out_b` | — |
+| `fc_pn_ps` | `in`, `out` | `anode`, `cathode` |
+| `fc_thermal_ps` | `in`, `out` | `heat_p`, `heat_n` |
+| `fc_photodetector` | `in` | `anode`, `cathode` |
 
-| Pin # | Name | Type | Side |
-|-------|------|------|------|
-| 1 | `out_re` | BiDir | Right |
-| 2 | `out_im` | BiDir | Right |
-| 3 | `out_wl` | BiDir | Right |
+Pin **number** order matters — it is the order positional arguments appear
+in the exported SPICE line. The table order above is also the device's
+positional order; pin 1 = first listed, pin 2 = second, etc.
 
-Default parameters: `power_mW=1.0 wavelength_nm=1550.0`
+Use distinct KiCad pin types so optical and electrical pins are visually
+distinguishable on the schematic:
 
-Shape suggestion: rectangle with a laser diode chevron on the left, 3 optical pins on the right.
+- Optical pins: `Bidirectional` (signals propagate both ways through optical
+  components in the SVEA model).
+- Electrical drive pins: `Input` (anode, heat_p) and `Output` for
+  photodetector outputs.
 
----
+### SPICE model in the symbol editor
 
-### `waveguide`
+In the Symbol Editor, **press E** on the symbol → **Simulation Model**:
 
-VA terminals: `in_re, in_im, in_lambda, out_re, out_im, out_lambda`
+1. **Model tab**: choose **Raw SPICE Element**.
+2. **Spice element type** = `X`.
+3. **Model name** = the device card (`fc_dcoupler`, `fc_pn_ps`, etc.).
+4. **Library path**: leave empty. Native devices are built into the
+   `fairchild` binary; no external library file.
+5. **Parameter list**: add each device parameter as `name` / `value` pair
+   (e.g. `kappa_L = 0.336`).
+6. **Pin Assignments tab**: bind each KiCad pin to its positional slot
+   following the order in the table above.
 
-| Pin # | Name | Type | Side |
-|-------|------|------|------|
-| 1 | `in_re` | BiDir | Left |
-| 2 | `in_im` | BiDir | Left |
-| 3 | `in_wl` | BiDir | Left |
-| 4 | `out_re` | BiDir | Right |
-| 5 | `out_im` | BiDir | Right |
-| 6 | `out_wl` | BiDir | Right |
+KiCad will write `Sim.Device = SPICE`, `Sim.Type = X`, and the params to the
+symbol's `Sim.*` fields. You do not need to edit those fields manually.
 
-Default parameters: `L_um=100 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550.0`
+### Parameter reference
 
-Shape suggestion: a horizontal rectangle (bus/wire symbol), inputs left, outputs right.
+Each device's parameter set is documented in
+`crates/fairchild-core/src/models/photonic.rs`. The most common knobs:
 
----
+| Device | Common parameters |
+|---|---|
+| `fc_cw_laser` | `power_mW`, `wavelength_nm` |
+| `fc_waveguide` | `L_um`, `n_g`, `alpha_dB_cm`, `wavelength_nm` |
+| `fc_dcoupler` | `kappa_L` |
+| `fc_pn_ps` | `L_um`, `V_pi_L`, `g_pn`, `dn_dv`, `alpha_dB_cm`, `n_g`, `wavelength_nm` |
+| `fc_thermal_ps` | `L_um`, `R_heater`, `R_thermal`, `dn_dT`, `n_g`, `wavelength_nm` |
+| `fc_photodetector` | `responsivity`, `i_dark_a`, `r_shunt` |
 
-### `directional_coupler`
+Parameter names match case-insensitively but are case-preserved through the
+parser. Use the canonical case shown in the docs.
 
-VA terminals: `a1_re, a1_im, a1_lambda, a2_re, a2_im, a2_lambda, b1_re, b1_im, b1_lambda, b2_re, b2_im, b2_lambda`
+### Electrical primitives
 
-Port labeling: `a1`=input bus in, `a2`=input bus feedback/second port, `b1`=through, `b2`=cross/coupled
-
-| Pin # | Name | Side |
-|-------|------|------|
-| 1–3 | `a1_re`, `a1_im`, `a1_wl` | Left-top |
-| 4–6 | `a2_re`, `a2_im`, `a2_wl` | Left-bottom |
-| 7–9 | `b1_re`, `b1_im`, `b1_wl` | Right-top |
-| 10–12 | `b2_re`, `b2_im`, `b2_wl` | Right-bottom |
-
-Default parameters: `kappa_0=0.5 wavelength_nm=1550.0`
-
-Shape suggestion: two diagonal crossing lines (classic DC symbol) inside a rectangle. Top-left = a1 port group, bottom-left = a2, top-right = b1, bottom-right = b2.
-
----
-
-### `pn_phase_shifter_l1`
-
-VA terminals: `in_re, in_im, in_lambda, out_re, out_im, out_lambda, anode, cathode`
-
-| Pin # | Name | Type | Side |
-|-------|------|------|------|
-| 1–3 | `in_re`, `in_im`, `in_wl` | BiDir | Left |
-| 4–6 | `out_re`, `out_im`, `out_wl` | BiDir | Right |
-| 7 | `anode` | Input | Bottom |
-| 8 | `cathode` | Input | Bottom |
-
-Default parameters: `L_um=500 n_g=4.2 alpha_dB_cm=3.0 Vpi_L=2.0 V_ref=0.0 wavelength_nm=1550.0`
-
----
-
-### `thermo_phase_shifter_l1`
-
-VA terminals: `in_re, in_im, in_lambda, out_re, out_im, out_lambda, heat_p, heat_n`
-
-Same shape as PN PS, but `heat_p`/`heat_n` instead of `anode`/`cathode`. Use a resistor symbol on the bottom to indicate the heater.
-
-Default parameters: `L_um=500 n_g=4.2 alpha_dB_cm=2.5 R_heater=1000 R_thermal=50000 dn_dT=1.86e-4 wavelength_nm=1550.0`
+Use KiCad's stock R / L / C / V / I / D / M / B symbols — their SPICE export
+already produces fairchild-compatible cards. Set `Sim.Device` to `R`, `L`,
+etc. and use the standard SPICE syntax for waveforms (`PULSE`, `SIN`, `PWL`,
+`EXP`, `SFFM`, `AM`).
 
 ---
 
-### `photodetector`
+## 4. SPICE export configuration
 
-VA terminals: `in_re, in_im, in_lambda, anode, cathode`
+**File → Export → Netlist → SPICE tab**:
 
-| Pin # | Name | Type | Side |
-|-------|------|------|------|
-| 1–3 | `in_re`, `in_im`, `in_wl` | BiDir | Left |
-| 4 | `anode` | Output | Right |
-| 5 | `cathode` | Output | Right |
+1. **Output file** → `my_circuit.net` (alongside the schematic).
+2. **Adjust passive symbol values**: ON, so KiCad emits canonical values.
+3. **Save all voltages**: ON (cheap; the wrapper script doesn't filter).
+4. **Save all currents**: ON.
+5. **Prolog text**: **leave empty**. The wrapper script (§5) supplies the
+   analysis and `.optical_port` declarations. KiCad would otherwise inject
+   prolog text into the netlist itself, which is then overwritten on every
+   export.
 
-Default parameters: `responsivity=1.0`
+KiCad emits a file shaped like:
 
-Shape suggestion: photodiode triangle with an arrow for optical input on the left.
-
----
-
-### Monolithic compound models
-
-These are the models to use for MRR and MZI (the compound `.spc` files have a known convergence issue for MZI).
-
-#### `mrr_modulator_l1` (all-pass)
-
-VA terminals: `in_re, in_im, in_lambda, out_re, out_im, out_lambda, anode, cathode`
-
-Same pin layout as `pn_phase_shifter_l1`. Label ports `IN` and `THRU`. Draw a ring resonator glyph inside the symbol body.
-
-Default parameters: `kappa_0=0.1 L_ring_um=100 n_g=4.2 alpha_dB_cm=2.0 Vpi_L=2.0 V_ref=0.0 wavelength_nm=1550.0`
-
-#### `mrr_modulator_l1_adddrop` (add-drop)
-
-VA terminals: `in_re, in_im, in_lambda, th_re, th_im, th_lambda, dp_re, dp_im, dp_lambda, ad_re, ad_im, ad_lambda, anode, cathode`
-
-| Pin group | Nets | Side |
-|-----------|------|------|
-| IN port | `in_re/im/wl` | Left-top |
-| THRU port | `th_re/im/wl` | Right-top |
-| DROP port | `dp_re/im/wl` | Right-bottom |
-| ADD port | `ad_re/im/wl` | Left-bottom |
-| `anode`, `cathode` | — | Bottom |
-
-Default parameters: `kappa_0=0.1 L_ring_um=100 L_coup_um=10 n_g=4.2 alpha_dB_cm=2.0 Vpi_L=2.0 V_ref=0.0 wavelength_nm=1550.0`
-
-#### `mzi_modulator_pn_l1`
-
-VA terminals: `in_re, in_im, in_lambda, bar_re, bar_im, bar_lambda, cross_re, cross_im, cross_lambda, anode, cathode`
-
-| Pin group | Nets | Side |
-|-----------|------|------|
-| IN port | `in_re/im/wl` | Left |
-| BAR port | `bar_re/im/wl` | Right-top |
-| CROSS port | `cross_re/im/wl` | Right-bottom |
-| `anode`, `cathode` | — | Bottom |
-
-Default parameters: `kappa_0=0.5 L_arm_um=500 n_g=4.2 alpha_dB_cm=3.0 Vpi_L=2.0 V_ref=0.0 wavelength_nm=1550.0`
-
-#### `mzi_modulator_thermo_l1`
-
-Same layout as `mzi_modulator_pn_l1` but terminals end with `heat_p, heat_n` instead of `anode, cathode`.
-
----
-
-## 4. Preamble file
-
-KiCAD cannot generate `.osdi` or `.optical` directives. Create `fairchild_preamble.sp` in your project directory:
-
-```spice
-* fairchild_preamble.sp — auto-included by fairchild wrapper netlist
-* Update paths to match your fairchild repo location.
-
-.osdi /path/to/fairchild/va-models/build/cw_laser.osdi
-.osdi /path/to/fairchild/va-models/build/waveguide.osdi
-.osdi /path/to/fairchild/va-models/build/directional_coupler.osdi
-.osdi /path/to/fairchild/va-models/build/pn_phase_shifter_l1.osdi
-.osdi /path/to/fairchild/va-models/build/thermo_phase_shifter_l1.osdi
-.osdi /path/to/fairchild/va-models/build/photodetector.osdi
-.osdi /path/to/fairchild/va-models/build/mrr_modulator_l1.osdi
-.osdi /path/to/fairchild/va-models/build/mrr_modulator_l1_adddrop.osdi
-.osdi /path/to/fairchild/va-models/build/mzi_modulator_pn_l1.osdi
-.osdi /path/to/fairchild/va-models/build/mzi_modulator_thermo_l1.osdi
-
-* Declare optical discipline for all nets that appear in your circuit.
-* Add a .optical line for every optical net group (re/im/wl triples).
-* Example for a single laser → PD circuit:
-* .optical lre lim wl  ore oim
-
-* NOTE: you will need one .optical line listing ALL optical nodes in your schematic.
-* A post-processor script will generate this automatically from the netlist.
 ```
-
-Create a wrapper netlist `run_circuit.sp` that includes both the preamble and the KiCAD export:
-
-```spice
-* run_circuit.sp — wrapper that adds fairchild directives around the KiCAD export
-.include "fairchild_preamble.sp"
-.include "my_circuit.net"     * ← KiCAD-exported SPICE netlist filename
-
-.op
+* my_circuit/my_circuit.kicad_sch
+Xlaser laser_out fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xwg1 laser_out wg1_out fc_waveguide L_um=50 ...
+Xdc wg1_out dc_b dc_c pn_in fc_dcoupler kappa_L=0.336
+Xpn pn_in dc_b vmod 0 fc_pn_ps ...
+Xwg2 dc_c pd_in fc_waveguide L_um=50 ...
+Xpd pd_in pd_anode 0 fc_photodetector responsivity=0.8
+Vbias bias 0 DC 1.0
+Rload pd_anode bias 1k
+Vmod vmod 0 PULSE(0 4 100n 100n 100n 800n 2u)
 .end
 ```
 
-Then run with:
+That file alone is **not yet runnable** — the optical bundle nets need to be
+declared, and an analysis directive is needed. That's the wrapper script's
+job.
+
+---
+
+## 5. The wrapper script
+
+`scripts/kicad_to_fairchild.py` reads the KiCad export, scans for native
+`fc_*` X-elements, looks up each device's port schema, and identifies which
+positional nets are optical bundles. It emits a wrapper file that:
+
+- Declares every bundle net via `.optical_port`.
+- Adds any `.options` you supply (`--opt`, `--method`).
+- Appends the analysis directive (`.op` / `.tran` / `.ac`) **before** the
+  `.include`, because the KiCad netlist conventionally ends with `.end`
+  which terminates parsing.
+- `.include`s the unmodified KiCad netlist.
+
+### Common invocations
+
 ```bash
-DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
-  /path/to/fairchild/target/release/fairchild -f run_circuit.sp --probe "V(ph_a)"
+# DC operating point
+python3 scripts/kicad_to_fairchild.py my_circuit.net -o run_my_circuit.sp
+fairchild -f run_my_circuit.sp
+
+# Transient with GEAR integrator
+python3 scripts/kicad_to_fairchild.py my_circuit.net -o run_my_circuit.sp \
+    --tran "5n 2u" --method gear
+
+# AC sweep with tightened tolerance
+python3 scripts/kicad_to_fairchild.py my_circuit.net -o run_my_circuit.sp \
+    --ac "dec 20 1 1G" --opt reltol=1e-5
+
+# Stream wrapper to stdout (no file)
+python3 scripts/kicad_to_fairchild.py my_circuit.net --op
 ```
+
+### What the script detects
+
+For a KiCad export containing `Xdc wg1_out dc_b dc_c pn_in fc_dcoupler ...`,
+the script knows `fc_dcoupler` has four bundle ports — so `wg1_out`, `dc_b`,
+`dc_c`, and `pn_in` each get a `.optical_port` declaration. For
+`Xpn pn_in dc_b vmod 0 fc_pn_ps ...`, only `pn_in` and `dc_b` are bundles;
+`vmod` and `0` (ground) are scalar electrical nets and are left alone.
+
+The script warns if:
+
+- An `fc_*` instance has the wrong number of positional nets for its model.
+- A bundle pin is wired to ground (likely a wiring mistake — `0` and `gnd`
+  are reserved for electrical references, not optical signals).
+
+Non-`fc_*` X-elements (e.g. `.subckt`-based hierarchical photonic blocks,
+third-party OSDI models) are passed through untouched and reported with an
+info message under `-v`.
+
+### Limits today (first PR scope)
+
+- **WDM**: `.optical_port NAME N` for `N > 1` is supported by the parser
+  (the WDM MRR example uses it) but the wrapper script does not yet
+  auto-detect KiCad bus syntax (`net[0..3]`) and convert to it. For now,
+  WDM circuits should be expressed by replicating the per-channel symbols
+  in the schematic or by hand-editing the wrapper to declare `.optical_port
+  NAME N` with explicit channel-suffixed wiring on lasers and detectors
+  (see `examples/photonic/native_wdm_mrr_modulator.sp` for the pattern).
+  Auto-bus-expansion is the natural follow-up once a single-channel KiCad
+  circuit lands end-to-end.
 
 ---
 
-## 5. KiCAD SPICE export configuration
+## 6. First circuits to build (in order)
 
-1. **File → Export → Netlist → SPICE tab**
-2. Set **Output file** to `my_circuit.net`
-3. In the **"Custom net format"** section:
-   - Leave Format = `SPICE`
-   - **Uncheck** "Use default reference designators" so `Xlaser` comes out as `Xlaser` not `XU1`
-4. **Do NOT** add the prolog text in KiCAD itself — use the wrapper `.sp` approach from §4 instead. This keeps the preamble separate from the auto-generated file (which gets overwritten every export).
-5. Click **Export Netlist**.
+These build progressively, each one exercising one more piece of the flow.
 
-The exported `.net` file will look like:
-```spice
-* Created by KiCAD ...
-Xlaser lre lim wl cw_laser power_mW=1.0 wavelength_nm=1550.0
-Xpd    ore oim wl ph_a 0 photodetector responsivity=1.0
-Rload  ph_a 0 1k
+### Circuit 1 — laser → photodetector (smoke test)
+
 ```
+[fc_cw_laser] ──opt──▶ [fc_photodetector] ──▶ Rload(1k) ──▶ GND
+                                           │
+                                           └─ Vbias = 1.0 V
+```
+
+Validates: symbol library, SPICE export, bundle-net detection, wrapper
+generation, fairchild end-to-end.
+
+Expected V(pd_anode): 1 mW laser × 0.8 A/W responsivity → 0.8 mA into 1 kΩ
+biased at 1 V → **V(pd_anode) ≈ 1.8 V** (off-resonance, full transmission).
+
+### Circuit 2 — laser → waveguide → photodetector
+
+Validates: passive propagation loss + parameter passing.
+
+With `fc_waveguide L_um=1000 alpha_dB_cm=3.0`:
+loss = 10^(−3.0 × 0.1 / 10) ≈ 0.93 → V(pd_anode) ≈ 1.75 V.
+
+### Circuit 3 — micro-ring modulator
+
+Build the topology in `examples/photonic/native_mrr_modulator.sp`:
+laser → wg → directional coupler ⇄ PN phase shifter (ring) → wg → PD →
+Rload + Vbias. Sweep `Vmod` from 0 to 4 V (use `PULSE` or a `.dc` sweep)
+and verify the transmission swing from notch (~1.1 V) to full
+transmission (~1.8 V).
+
+### Circuit 4 — add-drop MRR
+
+Same as Circuit 3 but with the ring's "drop" port routed to a second
+photodetector. Verify that through-port and drop-port outputs sum to the
+input intensity (modulo loss).
+
+### Circuit 5 — Mach-Zehnder modulator
+
+Two `fc_dcoupler` instances with `fc_pn_ps` in each arm. The bar/cross
+outputs swap at `V = V_pi`.
 
 ---
 
-## 6. WDM bus naming convention (Tier 2)
+## 7. Things to watch for
 
-Bus vector expansion (`net[0..3]` → `net_0, net_1, net_2, net_3`) is being added to the fairchild parser. **Use this naming convention in your schematics now** so everything works automatically once it lands.
-
-For a 4-channel WDM bus:
-- Use **net labels** in KiCAD: `opt_re_0`, `opt_re_1`, `opt_re_2`, `opt_re_3` (and `_im_*`, `_wl_*`)
-- Or draw a **bus** in KiCAD with member nets `opt_re[0..3]`, which KiCAD expands to those individual net names in the SPICE export
-
-For the `.optical` directive in the preamble, the pattern will be:
-```spice
-.optical_bus 4  opt_re opt_im opt_wl
-* expands to: .optical opt_re_0 opt_im_0 opt_wl_0 opt_re_1 opt_im_1 opt_wl_1 ...
-```
-
----
-
-## 7. First circuits to build (in order)
-
-Build and test these in sequence to validate the full flow:
-
-### Circuit 1 — laser → PD (smoke test)
-
-Validates: symbol library, SPICE export, preamble, `.optical` declaration.
-
-```
-[cw_laser] --lre,lim,wl--> [photodetector] --> Rload(1k) --> GND
-```
-
-Expected: `V(ph_a) ≈ 1.0` (1 mW × 1 A/W × 1 kΩ = 1 V)
-
-### Circuit 2 — laser → waveguide → PD
-
-Validates: passive propagation loss. With `L_um=1000, alpha_dB_cm=3.0`:
-loss = 10^(−3.0 × 0.01 / 10) ≈ −0.069 dB → V(ph_a) ≈ 0.985 V
-
-### Circuit 3 — all-pass MRR modulator
-
-Use `mrr_modulator_l1` symbol. Sweep wavelength to verify resonance dip at the expected wavelength:
-```
-λ_res = L_ring × n_g / m
-```
-For L=100 µm, n_g=4.2: resonances every ~5.7 nm, nearest to 1550 nm ≈ 1544 nm.
-
-### Circuit 4 — add-drop MRR filter
-
-Use `mrr_modulator_l1_adddrop`. At resonance, power should split between THRU and DROP with the ratio determined by kappa and ring loss. Use Rload on both output PDs and check thru + drop ≈ input.
-
-### Circuit 5 — MZI modulator
-
-Use `mzi_modulator_pn_l1`. With `kappa_0=0.5` (balanced), at `V=0`: bar ≈ 1.0, cross ≈ 0. At `V = Vpi_L / (2 × L_arm_cm)` = 2.0 V·cm / (2 × 500e-4 cm) = 20 V: bar ≈ 0, cross ≈ 1.0.
+- **Pin number order**: the SPICE export uses positional pin numbers, not
+  pin names. Renumbering a pin in the Symbol Editor silently changes the
+  emitted netlist. Always verify by exporting and running through the
+  wrapper script.
+- **Reserved nets**: `0`, `gnd`, `GND` always mean ground. Don't use these
+  as optical bundle names.
+- **One bundle per optical net**: a single KiCad net carries one optical
+  bundle. If you connect three fc_dcoupler outputs to the same KiCad net,
+  you're connecting three optical bundles together — that may be what you
+  want (an N-way merge) but it isn't always.
+- **The `.end` placement**: KiCad emits `.end` at the bottom of the export.
+  The wrapper script puts analysis + `.optical_port` directives **before**
+  the `.include`, so this just works. If you ever hand-edit the wrapper,
+  preserve that ordering.
 
 ---
 
-## 8. Things to watch for
+## 8. Roadmap
 
-**Net name collisions**: KiCAD uses the reference designator prefix in subcircuit expansion. Make sure optical net names in your schematic are unique and don't accidentally match electrical net names.
+The next steps for this integration, in rough order:
 
-**`wl` net sharing**: All devices on the same optical bus MUST share the same `wl` (wavelength) net. In a single-wavelength circuit, use one global `wl` net label and connect it to every optical device's `*_wl` pins.
-
-**`.optical` declaration must list every optical net**: If you forget a net, discipline checking will either error or silently treat it as electrical. The post-processor script will generate this line automatically from the exported netlist.
-
-**ADD port floating**: For the add-drop MRR, the ADD port is normally unused. Float it by connecting `add_re`, `add_im`, `add_wl` to unique undriven nets (not GND — they're optical nodes). In fairchild, undriven optical nets default to zero amplitude, which is correct for an empty input port.
+1. **`fairchild_native.kicad_sym` symbol library** — committed alongside a
+   regression-test schematic.
+2. **Bus-syntax auto-expansion in the wrapper** — translate KiCad buses
+   `opt[0..3]` into `.optical_port opt 4` plus per-channel wiring.
+3. **KiCad action plugin** — adds a "Run fairchild" button to KiCad that
+   invokes the wrapper + simulator + opens a matplotlib plot of the
+   probed signals. Skips the command-line step.
+4. **`fairchild.viewer`** Python helper — wrap matplotlib for common signal
+   shapes (V vs t, optical power vs t for `(re, im)` pairs, AC magnitude /
+   phase, noise PSD).
