@@ -21,7 +21,11 @@ enum RefKind {
     NodeV(NodeId),
     /// `I(vsrc_or_bsrc)` — read `x[n_nodes + idx]`.
     BranchI(usize),
-    /// `TIME` — read from the device context (no x-dependence; constant Jacobian wrt x).
+    /// `TIME` — read from the device context (no x-dependence; constant
+    /// Jacobian wrt x).  Reserved for the future `time` expression
+    /// reference; the match arms below already handle it correctly when
+    /// the parser begins emitting it.
+    #[allow(dead_code)]
     Time,
 }
 

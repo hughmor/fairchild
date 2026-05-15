@@ -11,7 +11,7 @@ use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::options::SimOptions;
-use crate::solver::{lu_solve, LinearSolver};
+use crate::solver::LinearSolver;
 
 /// Result of a nonlinear DC operating-point solve.
 pub struct NrResult {

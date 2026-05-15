@@ -78,6 +78,42 @@ fn mrr_dc_op_off_resonance_full_transmission() {
         "V(pd_anode) = {v_pd:.3} should be ≥ 1.6 V at V_π (full transmission)");
 }
 
+/// Wavelength sweep through resonance.  The PN-PS's propagation phase
+/// must depend on λ (not just V_pn) — otherwise sweeping λ produces a
+/// flat response and the ring isn't really a resonator.  Sample three
+/// wavelengths: on-resonance (1550 nm = the device's reference), and
+/// well off-resonance on either side.  Assert that the off-resonance
+/// values are close to the high-transmission asymptote (~1.8 V) and the
+/// on-resonance value is in the notch (~1.1 V).
+#[test]
+fn mrr_wavelength_sweep_resolves_resonance() {
+    let build = |wl_nm: f64| {
+        let s = mrr_netlist(0.0)
+            .replace("wavelength_nm=1550\n", &format!("wavelength_nm={wl_nm}\n"));
+        parse_spice(&s).unwrap()
+    };
+    let on_res = build(1550.0);
+    let off_res_lo = build(1549.5);
+    let off_res_hi = build(1550.5);
+
+    let r_on  = dc_op_nr_with_registry(&on_res, &DeviceRegistry::new()).unwrap();
+    let r_lo  = dc_op_nr_with_registry(&off_res_lo, &DeviceRegistry::new()).unwrap();
+    let r_hi  = dc_op_nr_with_registry(&off_res_hi, &DeviceRegistry::new()).unwrap();
+
+    let v_on  = r_on .node_voltage("pd_anode").unwrap();
+    let v_lo  = r_lo .node_voltage("pd_anode").unwrap();
+    let v_hi  = r_hi .node_voltage("pd_anode").unwrap();
+
+    // Off-resonance: PD output should be near the full-transmission level.
+    assert!(v_lo > 1.6, "off-res low (λ=1549.5): V(pd_anode)={v_lo}; expected ≳ 1.6 V");
+    assert!(v_hi > 1.6, "off-res high (λ=1550.5): V(pd_anode)={v_hi}; expected ≳ 1.6 V");
+    // On-resonance: deep notch — must be visibly different from off-res.
+    assert!(v_on < v_lo - 0.3,
+        "on-res V(pd_anode)={v_on:.3} should be ≥ 0.3 V below off-res-low {v_lo:.3}");
+    assert!(v_on < v_hi - 0.3,
+        "on-res V(pd_anode)={v_on:.3} should be ≥ 0.3 V below off-res-high {v_hi:.3}");
+}
+
 /// Full transient with a 100 ns rise / 100 ns fall pulse — verify the PD
 /// output traces the pulse and the extinction-ratio swing.
 #[test]

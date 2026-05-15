@@ -278,9 +278,20 @@ impl Device for NativeDirectionalCoupler {
         self.stamp_potential_eq(mat, 4, self.nodes[10], &[
             (self.nodes[4], -t), (self.nodes[0],  s),
         ]);
-        // d_λ  = b_λ              (branch 5)
+        // d_λ  = a_λ              (branch 5)
+        //
+        // For a single-wavelength SVEA model the wavelength wire is a
+        // *carrier* tag: every port of a passive coupler should carry the
+        // same λ.  Routing d_λ = b_λ used to be physically symmetric with
+        // c_λ = a_λ, but in a closed-loop topology (e.g. a micro-ring with
+        // the laser on port-a and ring feedback on port-b) it created a
+        // bind-loop with no driving source: pn_in_λ ← dc_d_λ ← dc_b_λ ←
+        // pn_out_λ ← pn_in_λ.  The PN-PS then read λ ≈ 0 and the wavelength-
+        // dependent propagation phase collapsed.  Tying d_λ to a_λ instead
+        // routes the laser's wavelength into both output ports of the
+        // coupler and through into the ring.
         self.stamp_potential_eq(mat, 5, self.nodes[11], &[
-            (self.nodes[5], -1.0),
+            (self.nodes[2], -1.0),
         ]);
     }
 
@@ -748,6 +759,8 @@ impl NativeThermalPhaseShifter {
 /// `dn_dv`).  Wavelength passes through unchanged.
 pub struct NativePnPhaseShifter {
     length_m: f64,
+    n_g:      f64,           // group index — sets free-running propagation phase
+    wl_ref_m: f64,           // reference wavelength: φ_prop ≡ 0 at λ = wl_ref
     dn_dv:    f64,
     g_pn:     f64,
     alpha_neper_m: f64,
@@ -761,6 +774,8 @@ impl NativePnPhaseShifter {
     pub fn new() -> Self {
         Self {
             length_m: 1e-3,        // 1 mm
+            n_g:      4.2,         // typical silicon group index
+            wl_ref_m: 1.55e-6,     // O/C band reference
             dn_dv:    1e-4,        // small Δn per V
             g_pn:     1e-3,        // 1 mS series conductance
             alpha_neper_m: 0.0,    // lossless by default
@@ -792,15 +807,17 @@ impl Device for NativePnPhaseShifter {
         match name.to_lowercase().as_str() {
             "l_um"   => { self.length_m = value * 1e-6; true }
             "l_m" | "length" => { self.length_m = value; true }
+            "n_g"    => { self.n_g = value; true }
+            "wavelength_nm" => { self.wl_ref_m = value * 1e-9; true }
+            "wavelength_m"  => { self.wl_ref_m = value; true }
             "dn_dv"  => { self.dn_dv = value; true }
             "g_pn"   => { self.g_pn  = value; true }
             "v_pi_l" => {
-                // Vπ·L (V·m): solve for dn_dv such that φ = π at V = Vπ.
-                // 2π·L·dn_dv·Vπ/λ = π → dn_dv = λ / (2·L·Vπ).
-                // λ is taken as the design wavelength (no port read at config time).
-                let lambda_nominal = 1.55e-6;
+                // Vπ·L (V·m): solve for dn_dv such that the EO phase shift
+                // is π at V = Vπ.  2π·L·dn_dv·Vπ/λ_ref = π →
+                // dn_dv = λ_ref / (2·L·Vπ).
                 if value > 0.0 {
-                    self.dn_dv = lambda_nominal / (2.0 * value);
+                    self.dn_dv = self.wl_ref_m / (2.0 * value);
                 }
                 true
             }
@@ -821,16 +838,27 @@ impl Device for NativePnPhaseShifter {
         let v_a = self.nodes[6].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[7].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
-        // Wavelength from input port.
+        // Wavelength from input port.  Bootstrap to the reference wavelength
+        // when the wire hasn't been driven yet (initial NR iterate at x=0).
         let lambda = match self.nodes[2] {
             Some(i) => {
                 let v = x[i];
-                if v.abs() > 1e-9 { v } else { 1.55e-6 }
+                if v.abs() > 1e-9 { v } else { self.wl_ref_m }
             }
-            None => 1.55e-6,
+            None => self.wl_ref_m,
         };
-        let dneff = self.dn_dv * v_pn;
-        let phi   = 2.0 * std::f64::consts::PI * self.length_m * dneff / lambda;
+        // Total round-trip-section phase has two parts:
+        //   1. Free propagation φ_prop = 2π·n_g·L/λ.  We subtract the
+        //      reference-wavelength baseline 2π·n_g·L/λ_ref so that at
+        //      λ = λ_ref the propagation phase is exactly zero — this
+        //      makes the "design" wavelength a resonance point by
+        //      construction (one full FSR per change of 2π in φ_prop).
+        //   2. Electro-optic shift φ_eo = 2π·L·dn_dv·V/λ.
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let phi_prop = two_pi * self.n_g * self.length_m
+                       * (1.0 / lambda - 1.0 / self.wl_ref_m);
+        let phi_eo   = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
+        let phi      = phi_prop + phi_eo;
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
         self.c_cached = t_amp * phi.cos();
         self.s_cached = t_amp * phi.sin();

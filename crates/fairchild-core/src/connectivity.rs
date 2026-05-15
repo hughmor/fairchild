@@ -28,7 +28,7 @@ use crate::error::SimError;
 pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
     // Collect every node mentioned by any element.
     let mut nodes: HashSet<String> = HashSet::new();
-    let mut record = |n: &str, set: &mut HashSet<String>| {
+    let record = |n: &str, set: &mut HashSet<String>| {
         if !n.is_empty() {
             set.insert(n.to_string());
         }
@@ -36,7 +36,7 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
 
     // Build union-find by merging connected groups.
     let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut add_edge = |u: &str, v: &str, m: &mut HashMap<String, HashSet<String>>| {
+    let add_edge = |u: &str, v: &str, m: &mut HashMap<String, HashSet<String>>| {
         m.entry(u.to_string()).or_default().insert(v.to_string());
         m.entry(v.to_string()).or_default().insert(u.to_string());
     };

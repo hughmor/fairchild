@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{EvalFlags, SimContext};
+use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
