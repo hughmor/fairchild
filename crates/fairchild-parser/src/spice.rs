@@ -608,11 +608,31 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
         return Ok(netlist);
     }
 
-    // First logical line is the title.
-    netlist.title = all_lines[0].1.trim().to_string();
+    // First logical line is the title — by SPICE convention.  But that
+    // convention is a foot-gun for programmatically-generated netlists
+    // (Python helpers, code-gen): forget the title comment and your first
+    // `.optical_port` / `.options` / `R1 …` line gets eaten as the title
+    // with no error, producing confusing failures downstream.
+    //
+    // Be forgiving: only consume the first line as a title when it doesn't
+    // look like a directive or an element.  A leading `*` or `;` is the
+    // unambiguous "this is a comment / title" marker; anything else that
+    // starts with `.` (directive) or an alphabetic character (element
+    // prefix) is parsed as a normal body line and the title stays empty.
+    let first_trimmed = all_lines[0].1.trim_start();
+    let first_is_titlish = first_trimmed.is_empty()
+        || first_trimmed.starts_with('*')
+        || first_trimmed.starts_with(';');
+    let body_start = if first_is_titlish {
+        netlist.title = all_lines[0].1.trim().to_string();
+        1
+    } else {
+        // No title: start parsing from line 0.
+        0
+    };
 
     // Pass 1.
-    let (subckt_defs, global_params, main_lines) = collect_defs(&all_lines[1..])?;
+    let (subckt_defs, global_params, main_lines) = collect_defs(&all_lines[body_start..])?;
 
     // Pass 2: parse main body.
     let mut expanding: HashSet<String> = HashSet::new();
@@ -1859,6 +1879,33 @@ mod tests {
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         // At t=td1+tau1 the rise is (1-e^-1) = 0.6321
         assert!((w.at(2e-6) - (1.0 - (-1.0_f64).exp())).abs() < 1e-9);
+    }
+
+    #[test]
+    fn first_line_directive_is_not_swallowed_as_title() {
+        // Programmatically-generated netlists often skip the title comment.
+        // A leading `.optical_port` (or any other directive / element) must
+        // be parsed as such, not silently consumed as the title.
+        let net = parse_spice(
+            ".optical_port portA\n\
+             .optical_port portB\n\
+             Xwg portA portB some_model\n.end\n"
+        ).unwrap();
+        assert_eq!(net.title, "", "no title comment present");
+        assert_eq!(net.optical_ports.len(), 2, "both ports should parse");
+        assert_eq!(net.elements.len(), 1, "Xwg should be present");
+    }
+
+    #[test]
+    fn first_line_comment_is_consumed_as_title() {
+        let net = parse_spice(
+            "* Real title\n\
+             V1 in 0 DC 1\n\
+             R1 in 0 1k\n.op\n.end\n"
+        ).unwrap();
+        assert_eq!(net.title, "* Real title");
+        // V1 and R1 both present in the body.
+        assert_eq!(net.elements.len(), 2);
     }
 
     #[test]

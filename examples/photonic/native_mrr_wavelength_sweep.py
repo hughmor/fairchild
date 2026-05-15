@@ -28,8 +28,15 @@ HERE = pathlib.Path(__file__).resolve().parent
 
 
 def mrr_netlist(wavelength_nm: float, v_pn: float) -> str:
-    """Build the same circuit as native_mrr_modulator.sp, parameterised."""
+    """Build the same circuit as native_mrr_modulator.sp, parameterised.
+
+    SPICE convention: the first logical line is the title (consumed
+    verbatim, even if it looks like a directive).  The `* …` comment
+    below is mandatory — without it, `.optical_port laser_out` would
+    be eaten as the title and the bundle wouldn't expand.
+    """
     return f"""\
+* Native MRR wavelength sweep (parameterised), λ={wavelength_nm} nm, V_pn={v_pn} V
 .optical_port laser_out
 .optical_port wg1_out
 .optical_port dc_b
