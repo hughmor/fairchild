@@ -22,6 +22,15 @@ no Norton hack.  These are the recommended starting points.
   full FSR at V_pn = 0 and V_pn = Vπ, plotting both transmission spectra
   to visualise the resonance and how the PN bias shifts it.
 
+- **`native_wdm_mrr_modulator.{sp,py}`** — two-wavelength WDM extension
+  of the modulator: two lasers (±50 pm around the ring resonance) share
+  one bus through one ring driven by one V_pn.  The two photodetectors
+  show very different transmission profiles — the same modulator
+  produces a sharp notch on the red-side channel while the blue-side
+  channel monotonically rises.  No multiplexer / demultiplexer device
+  is needed: each wavelength is its own bundle channel, and the
+  parser's per-channel replication does the routing automatically.
+
 ## Legacy (`legacy/`)
 
 The older examples use the pre-B1 OSDI-based photonic models with the
