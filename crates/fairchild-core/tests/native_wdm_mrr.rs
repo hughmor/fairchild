@@ -29,10 +29,10 @@ fn wdm_netlist(vmod_dc: f64) -> String {
 Xlaser1 bus_in_re_0 bus_in_im_0 bus_in_wl_0 fc_cw_laser power_mW=1.0 wavelength_nm=1549.95
 Xlaser2 bus_in_re_1 bus_in_im_1 bus_in_wl_1 fc_cw_laser power_mW=1.0 wavelength_nm=1550.05
 
-Xwg1 bus_in wg1_out fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xwg1 bus_in wg1_out fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0
 Xdc wg1_out dc_b dc_c pn_in fc_dcoupler kappa_L=0.336
-Xpn pn_in dc_b vmod 0 fc_pn_ps L_um=500 V_pi_L=2e-3 g_pn=1e-3 alpha_dB_cm=10 n_g=4.2 wavelength_nm=1550
-Xwg2 dc_c pd_in fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xpn pn_in dc_b vmod 0 fc_pn_ps L_um=500 V_pi_L=2e-3 g_pn=1e-3 alpha_dB_cm=10 n_g=4.2
+Xwg2 dc_c pd_in fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0
 
 Xpd1 pd_in_re_0 pd_in_im_0 pd_in_wl_0 pd1_anode 0 fc_photodetector responsivity=0.8 i_dark_a=1e-9 r_shunt=1Meg
 Xpd2 pd_in_re_1 pd_in_im_1 pd_in_wl_1 pd2_anode 0 fc_photodetector responsivity=0.8 i_dark_a=1e-9 r_shunt=1Meg
@@ -96,10 +96,10 @@ fn wdm_transient_two_channels_diverge() {
 
 Xlaser1 bus_in_re_0 bus_in_im_0 bus_in_wl_0 fc_cw_laser power_mW=1.0 wavelength_nm=1549.95
 Xlaser2 bus_in_re_1 bus_in_im_1 bus_in_wl_1 fc_cw_laser power_mW=1.0 wavelength_nm=1550.05
-Xwg1 bus_in wg1_out fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xwg1 bus_in wg1_out fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0
 Xdc wg1_out dc_b dc_c pn_in fc_dcoupler kappa_L=0.336
-Xpn pn_in dc_b vmod 0 fc_pn_ps L_um=500 V_pi_L=2e-3 g_pn=1e-3 alpha_dB_cm=10 n_g=4.2 wavelength_nm=1550
-Xwg2 dc_c pd_in fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xpn pn_in dc_b vmod 0 fc_pn_ps L_um=500 V_pi_L=2e-3 g_pn=1e-3 alpha_dB_cm=10 n_g=4.2
+Xwg2 dc_c pd_in fc_waveguide L_um=50 n_g=4.2 alpha_dB_cm=2.0
 Xpd1 pd_in_re_0 pd_in_im_0 pd_in_wl_0 pd1_anode 0 fc_photodetector responsivity=0.8 i_dark_a=1e-9 r_shunt=1Meg
 Xpd2 pd_in_re_1 pd_in_im_1 pd_in_wl_1 pd2_anode 0 fc_photodetector responsivity=0.8 i_dark_a=1e-9 r_shunt=1Meg
 Vbias bias 0 DC 1.0

@@ -29,7 +29,7 @@ Xl1 ch0 fc_cw_laser power_mW={p1_mw} wavelength_nm=1549.9
 Xl2 ch1 fc_cw_laser power_mW={p2_mw} wavelength_nm=1550.1
 
 Xmux  wdm_bus ch0 ch1 fc_mux
-Xwg   wdm_bus wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xwg   wdm_bus wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
 Xdemux wg_out d0 d1 fc_demux
 
 Xpd1 d0 v_pd1 0 fc_photodetector responsivity=0.8
@@ -205,7 +205,7 @@ Xl2 c2 fc_cw_laser power_mW=3.0 wavelength_nm=1552
 Xl3 c3 fc_cw_laser power_mW=4.0 wavelength_nm=1553
 
 Xmux   bus c0 c1 c2 c3 fc_mux
-Xwg    bus out_bus fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550
+Xwg    bus out_bus fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
 Xdemux out_bus d0 d1 d2 d3 fc_demux
 
 Xpd0 d0 v0 0 fc_photodetector responsivity=0.8

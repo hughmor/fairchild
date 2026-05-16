@@ -96,9 +96,6 @@ impl Device for NativeWaveguide {
             "l_m" | "length"=> { self.length_m       = value;                              true }
             "n_g"           => { self.n_g            = value;                              true }
             "alpha_db_cm"   => { self.alpha_neper_m  = dB_per_cm_to_neper_per_m(value);    true }
-            // Accept but ignore (kept for back-compat with old netlists; the
-            // λ wire from the laser is authoritative — A.3 will drop these).
-            "wavelength_nm" | "wavelength_m" => true,
             _ => false,
         }
     }
@@ -929,9 +926,9 @@ impl Device for NativePnPhaseShifter {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, ctx: &SimContext) {
-        // Default the EO reference wavelength to the band centre.  An explicit
-        // `wavelength_nm=...` param in the netlist overrides via
-        // `set_real_param`, which is called after setup_model.
+        // EO reference wavelength = band centre.  Per-instance overrides via
+        // `wavelength_nm=` were removed in A.3 — devices that don't emit
+        // their own wavelength get it from the bus (driven by the laser).
         self.wl_ref_m = ctx.lambda_center_m;
     }
 
@@ -963,8 +960,6 @@ impl Device for NativePnPhaseShifter {
             "l_um"   => { self.length_m = value * 1e-6; true }
             "l_m" | "length" => { self.length_m = value; true }
             "n_g"    => { self.n_g = value; true }
-            "wavelength_nm" => { self.wl_ref_m = value * 1e-9; true }
-            "wavelength_m"  => { self.wl_ref_m = value; true }
             "dn_dv"  => { self.dn_dv = value; true }
             "g_pn"   => { self.g_pn  = value; true }
             "v_pi_l" => {
@@ -1258,7 +1253,7 @@ mod tests {
              V_im in_im 0 DC 0.0\n\
              V_wl in_wl 0 DC 1.55e-6\n\
              X1 in_re in_im in_wl out_re out_im out_wl fc_waveguide \
-                L_um=100 n_g=4.2 alpha_db_cm=2.0 wavelength_nm=1550\n\
+                L_um=100 n_g=4.2 alpha_db_cm=2.0\n\
              .op\n.end\n"
         ).unwrap();
         let registry = DeviceRegistry::new();
