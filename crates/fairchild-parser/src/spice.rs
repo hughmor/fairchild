@@ -1059,14 +1059,23 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
     match model_name.to_lowercase().as_str() {
         // Bundle bridges — N single-channel ports ↔ one N-channel bus.
         "fc_mux" | "fc_demux" => BundleArity::Bridge,
-        // Bundle-aware — single physical device whose electrical state is
-        // shared across all optical channels.
-        "fc_pn_ps" | "fc_thermal_ps" | "fc_photodetector" => BundleArity::Aware,
-        // Everything else: replicate per channel.  Pure-optical devices
-        // (fc_waveguide, fc_splitter, fc_dcoupler, fc_cw_laser,
-        // fc_grating_coupler) are safe to replicate because they have no
-        // electrical state to over-count.  Pure-electrical devices (R, C,
-        // L, D, MOSFETs) never see bundles.
+        // Bundle-aware — every photonic device is bundle-aware.  Pure-
+        // optical devices (waveguide, splitter, dcoupler, grating coupler)
+        // run independent per-channel propagation; devices with electrical
+        // state (pn_ps, thermal_ps, photodetector) share one physical
+        // electrical interface across all N channels.  WDM is the rule,
+        // not the exception.
+        "fc_waveguide"
+            | "fc_splitter"
+            | "fc_dcoupler"
+            | "fc_grating_coupler"
+            | "fc_pn_ps"
+            | "fc_thermal_ps"
+            | "fc_photodetector" => BundleArity::Aware,
+        // `fc_cw_laser` deliberately stays Scalar — a single laser source
+        // produces one wavelength.  Combine multiple lasers via `fc_mux` for
+        // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
+        // also Scalar.
         _ => BundleArity::Scalar,
     }
 }

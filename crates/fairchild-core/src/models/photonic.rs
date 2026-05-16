@@ -26,66 +26,68 @@ use crate::mna::MnaMatrix;
 ///
 /// Physics: `A_out = A_in · exp(-α·L/2) · exp(-j·β·L)` with `β = 2π·n_g/λ`.
 ///
-/// Implementation: 3 direct-potential equations enforce
-///   V(out_re) = T·(cos(φ)·V(in_re) + sin(φ)·V(in_im))
-///   V(out_im) = T·(-sin(φ)·V(in_re) + cos(φ)·V(in_im))
-///   V(out_λ)  = V(in_λ)
-/// stamped via three auxiliary branch rows reserved at construction time.
+/// Variable-arity bundle-aware device.  Terminal layout for N channels:
+///   [in.0.re, in.0.im, in.0.λ,  ..., in.{N-1}.λ,
+///    out.0.re, out.0.im, out.0.λ, ..., out.{N-1}.λ]   (6·N terminals)
+/// Each channel runs independent re/im/λ propagation using its own input
+/// wavelength wire.  No per-channel state is shared — this is a pure-optical
+/// device — but having one instance for the whole bundle keeps WDM the rule
+/// rather than the exception and simplifies stamping when channel count grows.
 pub struct NativeWaveguide {
-    // Parameters (SI internally; SPICE-style "_um" entry via set_real_param).
     length_m:        f64,
     n_g:             f64,
     alpha_neper_m:   f64,
     // Bootstrap λ for the first NR iterate (x = 0).  Sourced from
-    // `SimContext::lambda_center_m` in `setup_model`; the laser drives the
-    // actual λ wire from iteration 1 onward.  Default 1.55 µm.
+    // `SimContext::lambda_center_m` in `setup_model`.
     lambda_bootstrap_m: f64,
-    // Terminal node indices: [in_re, in_im, in_lambda, out_re, out_im, out_lambda].
-    nodes: [NodeId; 6],
-    // Internal branch rows (one per potential equation).  Populated by
-    // `bind_extra_nodes`.
-    branches: [Option<usize>; 3],
-    // Cached rotation coefficients (computed by `eval`, read by `load_jacobian`).
-    c_cached: f64,
-    s_cached: f64,
+    n_channels:      usize,
+    nodes:    Vec<NodeId>,
+    branches: Vec<Option<usize>>,
+    c_cached: Vec<f64>,
+    s_cached: Vec<f64>,
 }
 
 impl NativeWaveguide {
     pub fn new() -> Self {
         NativeWaveguide {
-            length_m:      100e-6,
-            n_g:           4.2,
-            alpha_neper_m: dB_per_cm_to_neper_per_m(2.0),
+            length_m:           100e-6,
+            n_g:                4.2,
+            alpha_neper_m:      dB_per_cm_to_neper_per_m(2.0),
             lambda_bootstrap_m: 1.55e-6,
-            nodes:    [None; 6],
-            branches: [None; 3],
-            c_cached: 1.0,
-            s_cached: 0.0,
+            n_channels:         0,
+            nodes:              Vec::new(),
+            branches:           Vec::new(),
+            c_cached:           Vec::new(),
+            s_cached:           Vec::new(),
         }
     }
 }
 
 impl Device for NativeWaveguide {
-    fn num_terminals(&self) -> usize { 6 }
+    fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.lambda_bootstrap_m = ctx.lambda_center_m;
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 6,
-            "NativeWaveguide: expected 6 terminals [in_re, in_im, in_λ, out_re, out_im, out_λ]");
-        for i in 0..6 {
-            self.nodes[i] = terminals[i];
-        }
+        assert!(
+            !terminals.is_empty() && terminals.len() % 6 == 0,
+            "fc_waveguide: terminal count must be 6·N for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
+        self.c_cached   = vec![1.0; n];
+        self.s_cached   = vec![0.0; n];
     }
 
-    fn num_extra_nodes(&self) -> usize { 3 }
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        self.branches[0] = Some(first_idx);
-        self.branches[1] = Some(first_idx + 1);
-        self.branches[2] = Some(first_idx + 2);
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -94,105 +96,56 @@ impl Device for NativeWaveguide {
             "l_m" | "length"=> { self.length_m       = value;                              true }
             "n_g"           => { self.n_g            = value;                              true }
             "alpha_db_cm"   => { self.alpha_neper_m  = dB_per_cm_to_neper_per_m(value);    true }
-            // Accept but ignore: pre-Phase-B examples set wavelength_nm here
-            // as a "design wavelength" — it was a bootstrap value only and is
-            // no longer meaningful (the wire λ from the laser is authoritative).
+            // Accept but ignore (kept for back-compat with old netlists; the
+            // λ wire from the laser is authoritative — A.3 will drop these).
             "wavelength_nm" | "wavelength_m" => true,
             _ => false,
         }
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        // Read λ from the input wavelength node.  Bootstrap from the
-        // band-centre default in SimOptions when the wire hasn't been driven
-        // yet (initial NR iterate at x=0); the laser takes over from
-        // iteration 1.
+        let n = self.n_channels;
         let boot = self.lambda_bootstrap_m;
-        let lambda = match self.nodes[2] {
-            Some(i) => {
-                let v = x[i];
-                if v.abs() > boot * 0.5 { v } else { boot }
-            }
-            None => boot,
-        };
-        let beta  = 2.0 * std::f64::consts::PI * self.n_g / lambda;
-        let phi   = beta * self.length_m;
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
-        self.c_cached = t_amp * phi.cos();
-        self.s_cached = t_amp * phi.sin();
+        let two_pi = 2.0 * std::f64::consts::PI;
+        for k in 0..n {
+            let lambda = match self.nodes[3 * k + 2] {
+                Some(i) => {
+                    let v = x[i];
+                    if v.abs() > boot * 0.5 { v } else { boot }
+                }
+                None => boot,
+            };
+            let phi = two_pi * self.n_g * self.length_m / lambda;
+            self.c_cached[k] = t_amp * phi.cos();
+            self.s_cached[k] = t_amp * phi.sin();
+        }
     }
 
-    fn load_residual(&self, b: &mut [f64]) {
-        // All three branch equations are homogeneous (target − Σ k_i·V_i = 0),
-        // so b stays zero.  The branch-flow contribution to terminal-row
-        // KCL is also zero for an ideal passive: net current at any optical
-        // port is by convention zero in this discipline scheme.
-        let _ = b;
-    }
+    fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        self.stamp(mat);
-    }
-
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
-        self.load_residual(b);
-    }
-
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
-        self.load_jacobian(mat);
-    }
-}
-
-impl NativeWaveguide {
-    /// Stamp the three branch equations into the MNA Jacobian using
-    /// coefficients cached by the most recent `eval`.
-    fn stamp(&self, mat: &mut MnaMatrix) {
-        let c = self.c_cached;
-        let s = self.s_cached;
-        // Equation 1: V(out_re) − c·V(in_re) − s·V(in_im) = 0
-        self.stamp_potential_eq(mat, 0, self.nodes[3], &[
-            (self.nodes[0], -c),
-            (self.nodes[1], -s),
-        ]);
-        // Equation 2: V(out_im) + s·V(in_re) − c·V(in_im) = 0
-        self.stamp_potential_eq(mat, 1, self.nodes[4], &[
-            (self.nodes[0],  s),
-            (self.nodes[1], -c),
-        ]);
-        // Equation 3: V(out_λ) − V(in_λ) = 0
-        self.stamp_potential_eq(mat, 2, self.nodes[5], &[
-            (self.nodes[2], -1.0),
-        ]);
-    }
-
-    /// Stamp one direct-potential equation `V(out) = Σ k_i · V(in_i)`.
-    ///
-    /// Allocates one auxiliary branch row at `self.branches[branch_idx]`.
-    /// Stamp pattern:
-    ///   branch row: +1 at out, k_i at each in_i, RHS = 0.
-    ///   KCL at out: +1 at branch column (branch current leaves through out).
-    fn stamp_potential_eq(
-        &self,
-        mat: &mut MnaMatrix,
-        branch_idx: usize,
-        out_node: NodeId,
-        ins: &[(NodeId, f64)],
-    ) {
-        let (Some(out), Some(j)) = (out_node, self.branches[branch_idx]) else {
-            // Output is ground or branch wasn't bound — skip.  Either is a
-            // misconfiguration; let downstream singularity surface it.
-            return;
-        };
-        // Branch row.
-        mat.a[j][out] += 1.0;
-        for &(in_node, k) in ins {
-            if let Some(in_i) = in_node {
-                mat.a[j][in_i] += k;
-            }
+        let n = self.n_channels;
+        for k in 0..n {
+            let in_re  = self.nodes[3 * k];
+            let in_im  = self.nodes[3 * k + 1];
+            let in_l   = self.nodes[3 * k + 2];
+            let out_re = self.nodes[3 * n + 3 * k];
+            let out_im = self.nodes[3 * n + 3 * k + 1];
+            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            let c = self.c_cached[k];
+            let s = self.s_cached[k];
+            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
+                &[(in_re, -c), (in_im, -s)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
+                &[(in_re,  s), (in_im, -c)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+                &[(in_l, -1.0)]);
         }
-        // KCL at output: branch column carries the current that enforces V(out).
-        mat.a[out][j] += 1.0;
     }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -210,13 +163,21 @@ impl NativeWaveguide {
 ///   c_im = t·a_im − s·b_re     d_im = t·b_im − s·a_re
 /// (with t = cos(κL), s = sin(κL)).  Wavelength passes through unchanged
 /// to both outputs from the corresponding input.
+/// Variable-arity bundle-aware directional coupler.  Terminal layout for N
+/// channels (12·N total terminals):
+///   [a.0.re, a.0.im, a.0.λ, ..., a.{N-1}.λ,
+///    b.0.re, b.0.im, b.0.λ, ..., b.{N-1}.λ,
+///    c.0.re, c.0.im, c.0.λ, ..., c.{N-1}.λ,
+///    d.0.re, d.0.im, d.0.λ, ..., d.{N-1}.λ]
+/// Each channel uses the same κ·L (wavelength-independent at this tier).
+/// The wavelength tag on each output channel mirrors port a's λ wire — for
+/// closed-loop topologies that prevents a missing-driver bind-loop on d_λ.
 pub struct NativeDirectionalCoupler {
     kappa_per_m: f64,
     length_m:    f64,
-    // Terminals: [a_re, a_im, a_λ, b_re, b_im, b_λ, c_re, c_im, c_λ, d_re, d_im, d_λ]
-    nodes: [NodeId; 12],
-    // 6 direct potential equations (c_re, c_im, c_λ, d_re, d_im, d_λ).
-    branches: [Option<usize>; 6],
+    n_channels:  usize,
+    nodes:       Vec<NodeId>,
+    branches:    Vec<Option<usize>>,
 }
 
 impl NativeDirectionalCoupler {
@@ -224,26 +185,34 @@ impl NativeDirectionalCoupler {
         Self {
             kappa_per_m: 100.0,    // 100 rad/m — gives κL = 0.5 at L = 5 mm
             length_m:    5e-3,
-            nodes:    [None; 12],
-            branches: [None; 6],
+            n_channels:  0,
+            nodes:       Vec::new(),
+            branches:    Vec::new(),
         }
     }
 }
 
 impl Device for NativeDirectionalCoupler {
-    fn num_terminals(&self) -> usize { 12 }
+    fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, _ctx: &SimContext) {}
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 12);
-        for i in 0..12 { self.nodes[i] = terminals[i]; }
+        assert!(
+            !terminals.is_empty() && terminals.len() % 12 == 0,
+            "fc_dcoupler: terminal count must be 12·N for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 12;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 6 * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { 6 }
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..6 { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -252,7 +221,6 @@ impl Device for NativeDirectionalCoupler {
             "l_um"   => { self.length_m = value * 1e-6; true }
             "l_m" | "length" => { self.length_m = value; true }
             "kappa_l" | "kappal" => {
-                // Direct coupling-angle override — keeps L fixed, scales κ.
                 self.kappa_per_m = if self.length_m > 0.0 { value / self.length_m } else { 0.0 };
                 true
             }
@@ -265,65 +233,41 @@ impl Device for NativeDirectionalCoupler {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n  = self.n_channels;
         let kl = self.kappa_per_m * self.length_m;
-        let t = kl.cos();
-        let s = kl.sin();
-        // c_re = t·a_re + s·b_im   (branch 0)
-        self.stamp_potential_eq(mat, 0, self.nodes[6], &[
-            (self.nodes[0], -t), (self.nodes[4], -s),
-        ]);
-        // c_im = t·a_im − s·b_re   (branch 1)
-        self.stamp_potential_eq(mat, 1, self.nodes[7], &[
-            (self.nodes[1], -t), (self.nodes[3],  s),
-        ]);
-        // c_λ  = a_λ              (branch 2)
-        self.stamp_potential_eq(mat, 2, self.nodes[8], &[
-            (self.nodes[2], -1.0),
-        ]);
-        // d_re = t·b_re + s·a_im   (branch 3)
-        self.stamp_potential_eq(mat, 3, self.nodes[9], &[
-            (self.nodes[3], -t), (self.nodes[1], -s),
-        ]);
-        // d_im = t·b_im − s·a_re   (branch 4)
-        self.stamp_potential_eq(mat, 4, self.nodes[10], &[
-            (self.nodes[4], -t), (self.nodes[0],  s),
-        ]);
-        // d_λ  = a_λ              (branch 5)
-        //
-        // For a single-wavelength SVEA model the wavelength wire is a
-        // *carrier* tag: every port of a passive coupler should carry the
-        // same λ.  Routing d_λ = b_λ used to be physically symmetric with
-        // c_λ = a_λ, but in a closed-loop topology (e.g. a micro-ring with
-        // the laser on port-a and ring feedback on port-b) it created a
-        // bind-loop with no driving source: pn_in_λ ← dc_d_λ ← dc_b_λ ←
-        // pn_out_λ ← pn_in_λ.  The PN-PS then read λ ≈ 0 and the wavelength-
-        // dependent propagation phase collapsed.  Tying d_λ to a_λ instead
-        // routes the laser's wavelength into both output ports of the
-        // coupler and through into the ring.
-        self.stamp_potential_eq(mat, 5, self.nodes[11], &[
-            (self.nodes[2], -1.0),
-        ]);
+        let t  = kl.cos();
+        let s  = kl.sin();
+        for k in 0..n {
+            let a_re = self.nodes[3 * k];
+            let a_im = self.nodes[3 * k + 1];
+            let a_l  = self.nodes[3 * k + 2];
+            let b_re = self.nodes[3 * n + 3 * k];
+            let b_im = self.nodes[3 * n + 3 * k + 1];
+            // b_λ at 3n + 3k + 2 — unused (wavelength tag flows from a side).
+            let c_re = self.nodes[6 * n + 3 * k];
+            let c_im = self.nodes[6 * n + 3 * k + 1];
+            let c_l  = self.nodes[6 * n + 3 * k + 2];
+            let d_re = self.nodes[9 * n + 3 * k];
+            let d_im = self.nodes[9 * n + 3 * k + 1];
+            let d_l  = self.nodes[9 * n + 3 * k + 2];
+            // c_re = t·a_re + s·b_im
+            stamp_potential_eq(mat, &self.branches, 6 * k,     c_re, &[(a_re, -t), (b_im, -s)]);
+            // c_im = t·a_im − s·b_re
+            stamp_potential_eq(mat, &self.branches, 6 * k + 1, c_im, &[(a_im, -t), (b_re,  s)]);
+            // c_λ  = a_λ
+            stamp_potential_eq(mat, &self.branches, 6 * k + 2, c_l,  &[(a_l, -1.0)]);
+            // d_re = t·b_re + s·a_im
+            stamp_potential_eq(mat, &self.branches, 6 * k + 3, d_re, &[(b_re, -t), (a_im, -s)]);
+            // d_im = t·b_im − s·a_re
+            stamp_potential_eq(mat, &self.branches, 6 * k + 4, d_im, &[(b_im, -t), (a_re,  s)]);
+            // d_λ  = a_λ  (closed-loop bind safety; see prior comment in
+            // history for the bug this avoids on micro-rings).
+            stamp_potential_eq(mat, &self.branches, 6 * k + 5, d_l,  &[(a_l, -1.0)]);
+        }
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
-}
-
-impl NativeDirectionalCoupler {
-    fn stamp_potential_eq(
-        &self,
-        mat: &mut MnaMatrix,
-        branch_idx: usize,
-        out_node: NodeId,
-        ins: &[(NodeId, f64)],
-    ) {
-        let (Some(out), Some(j)) = (out_node, self.branches[branch_idx]) else { return };
-        mat.a[j][out] += 1.0;
-        for &(in_node, k) in ins {
-            if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
-        }
-        mat.a[out][j] += 1.0;
-    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -337,39 +281,52 @@ impl NativeDirectionalCoupler {
 /// to `out_b`.  Defaults (α = 1.0, r = 0.5) reproduce the original 3 dB
 /// lossless splitter.  Amplitude coefficients: `k_a = √r`, `k_b = √(α − r)`.
 /// Wavelength duplicated to both outputs.
+/// Variable-arity bundle-aware 1×2 splitter.  Terminal layout for N channels
+/// (9·N total):
+///   [a.0.re, a.0.im, a.0.λ, ..., a.{N-1}.λ,
+///    c.0.re, c.0.im, c.0.λ, ..., c.{N-1}.λ,
+///    d.0.re, d.0.im, d.0.λ, ..., d.{N-1}.λ]
 pub struct NativeSplitter {
-    alpha:    f64,           // intensity transmission, total
-    r:        f64,           // intensity fraction routed to out_a
-    // Terminals: [a_re, a_im, a_λ, c_re, c_im, c_λ, d_re, d_im, d_λ]
-    nodes: [NodeId; 9],
-    branches: [Option<usize>; 6],
+    alpha:      f64,
+    r:          f64,
+    n_channels: usize,
+    nodes:      Vec<NodeId>,
+    branches:   Vec<Option<usize>>,
 }
 
 impl NativeSplitter {
     pub fn new() -> Self {
         Self {
-            alpha:    1.0,
-            r:        0.5,
-            nodes:    [None; 9],
-            branches: [None; 6],
+            alpha:      1.0,
+            r:          0.5,
+            n_channels: 0,
+            nodes:      Vec::new(),
+            branches:   Vec::new(),
         }
     }
 }
 
 impl Device for NativeSplitter {
-    fn num_terminals(&self) -> usize { 9 }
+    fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, _ctx: &SimContext) {}
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 9);
-        for i in 0..9 { self.nodes[i] = terminals[i]; }
+        assert!(
+            !terminals.is_empty() && terminals.len() % 9 == 0,
+            "fc_splitter: terminal count must be 9·N for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 9;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 6 * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { 6 }
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..6 { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -402,88 +359,79 @@ impl Device for NativeSplitter {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        // Amplitude coefficients: |out_a| = √r · |in|, |out_b| = √(α − r) · |in|.
+        let n   = self.n_channels;
         let k_a = self.r.max(0.0).sqrt();
         let k_b = (self.alpha - self.r).max(0.0).sqrt();
-        // c_re = k_a · a_re
-        self.stamp_potential_eq(mat, 0, self.nodes[3], &[(self.nodes[0], -k_a)]);
-        // c_im = k_a · a_im
-        self.stamp_potential_eq(mat, 1, self.nodes[4], &[(self.nodes[1], -k_a)]);
-        // c_λ  = a_λ
-        self.stamp_potential_eq(mat, 2, self.nodes[5], &[(self.nodes[2], -1.0)]);
-        // d_re = k_b · a_re
-        self.stamp_potential_eq(mat, 3, self.nodes[6], &[(self.nodes[0], -k_b)]);
-        // d_im = k_b · a_im
-        self.stamp_potential_eq(mat, 4, self.nodes[7], &[(self.nodes[1], -k_b)]);
-        // d_λ  = a_λ
-        self.stamp_potential_eq(mat, 5, self.nodes[8], &[(self.nodes[2], -1.0)]);
+        for k in 0..n {
+            let a_re = self.nodes[3 * k];
+            let a_im = self.nodes[3 * k + 1];
+            let a_l  = self.nodes[3 * k + 2];
+            let c_re = self.nodes[3 * n + 3 * k];
+            let c_im = self.nodes[3 * n + 3 * k + 1];
+            let c_l  = self.nodes[3 * n + 3 * k + 2];
+            let d_re = self.nodes[6 * n + 3 * k];
+            let d_im = self.nodes[6 * n + 3 * k + 1];
+            let d_l  = self.nodes[6 * n + 3 * k + 2];
+            stamp_potential_eq(mat, &self.branches, 6 * k,     c_re, &[(a_re, -k_a)]);
+            stamp_potential_eq(mat, &self.branches, 6 * k + 1, c_im, &[(a_im, -k_a)]);
+            stamp_potential_eq(mat, &self.branches, 6 * k + 2, c_l,  &[(a_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, 6 * k + 3, d_re, &[(a_re, -k_b)]);
+            stamp_potential_eq(mat, &self.branches, 6 * k + 4, d_im, &[(a_im, -k_b)]);
+            stamp_potential_eq(mat, &self.branches, 6 * k + 5, d_l,  &[(a_l, -1.0)]);
+        }
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
 }
 
-impl NativeSplitter {
-    fn stamp_potential_eq(
-        &self,
-        mat: &mut MnaMatrix,
-        branch_idx: usize,
-        out_node: NodeId,
-        ins: &[(NodeId, f64)],
-    ) {
-        let (Some(out), Some(j)) = (out_node, self.branches[branch_idx]) else { return };
-        mat.a[j][out] += 1.0;
-        for &(in_node, k) in ins {
-            if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
-        }
-        mat.a[out][j] += 1.0;
-    }
-}
-
 // ────────────────────────────────────────────────────────────────────────
 // Native grating coupler — flat insertion loss, zero length
 // ────────────────────────────────────────────────────────────────────────
 
-/// Grating coupler (fibre ↔ chip).  Modelled as a zero-length waveguide
-/// with a flat amplitude attenuation set by `alpha_db` (insertion loss).
-/// Wavelength passes through unchanged; no phase accumulation, no
-/// wavelength-dependent loss bandwidth at this tier.
-///
-/// 6 terminals: [in_re, in_im, in_λ, out_re, out_im, out_λ].
+/// Grating coupler (fibre ↔ chip).  Zero-length waveguide with a flat
+/// amplitude attenuation set by `alpha_db` (insertion loss).  Variable-arity
+/// bundle-aware: 6·N terminals.
 pub struct NativeGratingCoupler {
-    alpha_db: f64,
-    nodes:    [NodeId; 6],
-    branches: [Option<usize>; 3],
+    alpha_db:   f64,
+    n_channels: usize,
+    nodes:      Vec<NodeId>,
+    branches:   Vec<Option<usize>>,
 }
 
 impl NativeGratingCoupler {
     pub fn new() -> Self {
-        // 3 dB typical for a fair grating coupler.
-        Self { alpha_db: 3.0, nodes: [None; 6], branches: [None; 3] }
+        Self { alpha_db: 3.0, n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
     }
 }
 
 impl Device for NativeGratingCoupler {
-    fn num_terminals(&self) -> usize { 6 }
+    fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, _ctx: &SimContext) {}
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 6);
-        for i in 0..6 { self.nodes[i] = terminals[i]; }
+        assert!(
+            !terminals.is_empty() && terminals.len() % 6 == 0,
+            "fc_grating_coupler: terminal count must be 6·N for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = terminals.len() / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { 3 }
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..3 { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         match name.to_lowercase().as_str() {
             "alpha_db" | "alpha_db_il" | "il_db" => { self.alpha_db = value; true }
             "alpha" => {
-                // Amplitude (linear) transmission → equivalent dB.
                 let t = value.max(1e-30);
                 self.alpha_db = -20.0 * t.log10();
                 true
@@ -497,35 +445,23 @@ impl Device for NativeGratingCoupler {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        // Amplitude transmission t = 10^(-IL_dB / 20).
+        let n = self.n_channels;
         let t = 10f64.powf(-self.alpha_db / 20.0);
-        // V(out_re) = t · V(in_re)
-        self.stamp_potential_eq(mat, 0, self.nodes[3], &[(self.nodes[0], -t)]);
-        // V(out_im) = t · V(in_im)
-        self.stamp_potential_eq(mat, 1, self.nodes[4], &[(self.nodes[1], -t)]);
-        // V(out_λ)  = V(in_λ)
-        self.stamp_potential_eq(mat, 2, self.nodes[5], &[(self.nodes[2], -1.0)]);
+        for k in 0..n {
+            let in_re  = self.nodes[3 * k];
+            let in_im  = self.nodes[3 * k + 1];
+            let in_l   = self.nodes[3 * k + 2];
+            let out_re = self.nodes[3 * n + 3 * k];
+            let out_im = self.nodes[3 * n + 3 * k + 1];
+            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re, &[(in_re, -t)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im, &[(in_im, -t)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,  &[(in_l, -1.0)]);
+        }
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
-}
-
-impl NativeGratingCoupler {
-    fn stamp_potential_eq(
-        &self,
-        mat: &mut MnaMatrix,
-        branch_idx: usize,
-        out_node: NodeId,
-        ins: &[(NodeId, f64)],
-    ) {
-        let (Some(out), Some(j)) = (out_node, self.branches[branch_idx]) else { return };
-        mat.a[j][out] += 1.0;
-        for &(in_node, k) in ins {
-            if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
-        }
-        mat.a[out][j] += 1.0;
-    }
 }
 
 // ────────────────────────────────────────────────────────────────────────

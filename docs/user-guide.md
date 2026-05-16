@@ -542,25 +542,33 @@ Every "optical port" is a **3-wire bundle** `(re, im, λ)`:
   wavelength-dependent physics (e.g. waveguide propagation phase) without
   forcing a global parameter.
 
-`.optical_port NAME [N]` declares a bundle. How the parser handles a
-multi-channel bundle depends on the device on it:
+`.optical_port NAME [N]` declares a bundle. **Every photonic device is
+bundle-aware**: a single device instance handles all N optical channels.
+This is the rule, not an exception — WDM operation comes from connecting
+an N-channel `.optical_port` to a device, not from any per-device opt-in.
+The parser dispatches per the centralised `BundleArity` table in
+`fairchild-parser`:
 
-- **Pure-optical devices** (`fc_cw_laser`, `fc_waveguide`, `fc_dcoupler`,
-  `fc_splitter`): the parser replicates the X-element into `N` parallel
-  single-channel instances. Each instance handles one wavelength; they're
-  independent.
-- **Bundle-aware devices with shared electrical state**
-  (`fc_pn_ps`, `fc_thermal_ps`, `fc_photodetector`): the parser does NOT
-  replicate. One device instance handles all `N` optical channels
-  internally while keeping one shared electrical interface
-  (anode/cathode or heat_p/heat_n). This is what makes "single physical
-  modulator, multiple wavelengths" work correctly — the V_pn supply sees
-  one PN junction, not N parallel copies; the photodetector sums
-  photocurrents across channels into one anode current and presents one
-  dark current and one shunt.
-- **Bundle-bridges** (`fc_mux`, `fc_demux`): the parser does NOT replicate
-  and intentionally allows mismatched channel counts on different pins
-  (N-channel bus side + N single-channel pins on the other side).
+- **`BundleArity::Aware`** (default for photonics): `fc_waveguide`,
+  `fc_splitter`, `fc_dcoupler`, `fc_grating_coupler`, `fc_pn_ps`,
+  `fc_thermal_ps`, `fc_photodetector`. The parser flattens every bundle
+  into its underlying wires and emits ONE X-element with the combined
+  terminal vector; the device's `setup_instance` derives the channel
+  count from `terminals.len()`. Pure-optical devices run independent
+  per-channel propagation. Devices with electrical state (`fc_pn_ps`,
+  `fc_thermal_ps`, `fc_photodetector`) keep ONE shared electrical
+  interface — anode/cathode, heat_p/heat_n — so the V_pn supply sees
+  one PN junction (not N parallel ones), the photodetector sums
+  photocurrents into one anode current with one shared dark current
+  and shunt, etc.
+- **`BundleArity::Bridge`** (`fc_mux`, `fc_demux`): also flattens, but
+  also bypasses the channel-count matching check (N-channel bus side
+  ↔ N single-channel pins on the other side).
+- **`BundleArity::Scalar`**: the laser (`fc_cw_laser`) and every non-
+  photonic device. The parser replicates the X-element into N parallel
+  instances when bundles are connected. A laser is fundamentally a
+  single-wavelength source — to drive a WDM bus, instantiate one laser
+  per channel and combine them through `fc_mux`.
 
 Electrical nets and scalar nets (`vmod`, `0`, etc.) wired into a bundle-
 aware device are shared across all channels; the device sees one shared
