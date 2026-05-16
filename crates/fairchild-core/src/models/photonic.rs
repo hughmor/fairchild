@@ -401,6 +401,94 @@ impl NativeSplitter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native grating coupler — flat insertion loss, zero length
+// ────────────────────────────────────────────────────────────────────────
+
+/// Grating coupler (fibre ↔ chip).  Modelled as a zero-length waveguide
+/// with a flat amplitude attenuation set by `alpha_db` (insertion loss).
+/// Wavelength passes through unchanged; no phase accumulation, no
+/// wavelength-dependent loss bandwidth at this tier.
+///
+/// 6 terminals: [in_re, in_im, in_λ, out_re, out_im, out_λ].
+pub struct NativeGratingCoupler {
+    alpha_db: f64,
+    nodes:    [NodeId; 6],
+    branches: [Option<usize>; 3],
+}
+
+impl NativeGratingCoupler {
+    pub fn new() -> Self {
+        // 3 dB typical for a fair grating coupler.
+        Self { alpha_db: 3.0, nodes: [None; 6], branches: [None; 3] }
+    }
+}
+
+impl Device for NativeGratingCoupler {
+    fn num_terminals(&self) -> usize { 6 }
+
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        debug_assert_eq!(terminals.len(), 6);
+        for i in 0..6 { self.nodes[i] = terminals[i]; }
+    }
+
+    fn num_extra_nodes(&self) -> usize { 3 }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..3 { self.branches[i] = Some(first_idx + i); }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "alpha_db" | "alpha_db_il" | "il_db" => { self.alpha_db = value; true }
+            "alpha" => {
+                // Amplitude (linear) transmission → equivalent dB.
+                let t = value.max(1e-30);
+                self.alpha_db = -20.0 * t.log10();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        // Amplitude transmission t = 10^(-IL_dB / 20).
+        let t = 10f64.powf(-self.alpha_db / 20.0);
+        // V(out_re) = t · V(in_re)
+        self.stamp_potential_eq(mat, 0, self.nodes[3], &[(self.nodes[0], -t)]);
+        // V(out_im) = t · V(in_im)
+        self.stamp_potential_eq(mat, 1, self.nodes[4], &[(self.nodes[1], -t)]);
+        // V(out_λ)  = V(in_λ)
+        self.stamp_potential_eq(mat, 2, self.nodes[5], &[(self.nodes[2], -1.0)]);
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+impl NativeGratingCoupler {
+    fn stamp_potential_eq(
+        &self,
+        mat: &mut MnaMatrix,
+        branch_idx: usize,
+        out_node: NodeId,
+        ins: &[(NodeId, f64)],
+    ) {
+        let (Some(out), Some(j)) = (out_node, self.branches[branch_idx]) else { return };
+        mat.a[j][out] += 1.0;
+        for &(in_node, k) in ins {
+            if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
+        }
+        mat.a[out][j] += 1.0;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Native CW laser source
 // ────────────────────────────────────────────────────────────────────────
 
@@ -1194,7 +1282,7 @@ mod tests {
              V_im in_im 0 DC 0.0\n\
              V_wl in_wl 0 DC 1.55e-6\n\
              X1 in_re in_im in_wl out_re out_im out_wl fc_waveguide \
-                L_um=100 n_g=4.2 alpha_dB_cm=2.0 wavelength_nm=1550\n\
+                L_um=100 n_g=4.2 alpha_db_cm=2.0 wavelength_nm=1550\n\
              .op\n.end\n"
         ).unwrap();
         let registry = DeviceRegistry::new();

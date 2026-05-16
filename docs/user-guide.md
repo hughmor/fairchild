@@ -705,6 +705,28 @@ Wavelength duplicated to both outputs. Use for combining MZI arms in
 reverse (with a second `fc_splitter` instance) or for any branching
 topology where you want half-power outputs.
 
+### `fc_grating_coupler` — fibre ↔ chip grating coupler
+
+```
+X<name>  in  out  fc_grating_coupler  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` | bundle, optical input |
+| `out` | bundle, optical output |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `alpha_dB` (or `il_dB`) | 3.0 | Insertion loss in dB (amplitude transmission = 10^(−`alpha_dB`/20)). |
+| `alpha` | — | Linear amplitude transmission (sets `alpha_dB` = −20·log₁₀(`alpha`)). |
+
+Models a zero-length waveguide with flat amplitude attenuation. No phase
+accumulation and no wavelength dependence at this tier; suitable for
+testbench inputs/outputs where coupling efficiency is the only physics
+that matters. Bundle-aware via parser per-channel replication (pure
+optical, no shared electrical).
+
 ### `fc_photodetector` — PIN photodetector
 
 ```
