@@ -1023,6 +1023,54 @@ fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
     })
 }
 
+/// How a device handles WDM bundles, from the *parser's* perspective.  Drives
+/// `expand_optical_ports`: whether to replicate the X-element per channel or
+/// flatten the bundle into one instance.
+///
+/// This is the single source of truth for WDM dispatch.  When you add a new
+/// native photonic device that should be bundle-aware (shared electrical
+/// across channels), add its model name to `bundle_arity_for`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BundleArity {
+    /// Pure-electrical or per-channel-only device — parser replicates the
+    /// X-element into N parallel instances when bundles are connected (one
+    /// per channel).  Each replica gets the channel's underlying 3 wires.
+    Scalar,
+    /// Bundle-aware — parser flattens *every* referenced bundle into its
+    /// underlying wires and emits a SINGLE X-element with the combined
+    /// terminal vector.  The device's `setup_instance` derives the channel
+    /// count from `terminals.len()`.  All referenced bundles must agree on
+    /// their channel count.
+    Aware,
+    /// Bundle bridge (e.g. `fc_mux`, `fc_demux`) — like `Aware`, but skips
+    /// the matching-channel-count check (one side intentionally has N
+    /// channels while the other has N single-channel bundles).
+    Bridge,
+}
+
+/// Return the WDM dispatch policy for a model name.  Centralises the
+/// hard-coded list of bundle-aware native photonics so the parser doesn't
+/// scatter `if model == "fc_pn_ps" || ...` chains.
+///
+/// Future extension: when external (PDK) devices need bundle-awareness, this
+/// can be backed by a registration hook.  Today every bundle-aware model is
+/// shipped in `fairchild-core`, so a static `match` suffices.
+pub fn bundle_arity_for(model_name: &str) -> BundleArity {
+    match model_name.to_lowercase().as_str() {
+        // Bundle bridges — N single-channel ports ↔ one N-channel bus.
+        "fc_mux" | "fc_demux" => BundleArity::Bridge,
+        // Bundle-aware — single physical device whose electrical state is
+        // shared across all optical channels.
+        "fc_pn_ps" | "fc_thermal_ps" | "fc_photodetector" => BundleArity::Aware,
+        // Everything else: replicate per channel.  Pure-optical devices
+        // (fc_waveguide, fc_splitter, fc_dcoupler, fc_cw_laser,
+        // fc_grating_coupler) are safe to replicate because they have no
+        // electrical state to over-count.  Pure-electrical devices (R, C,
+        // L, D, MOSFETs) never see bundles.
+        _ => BundleArity::Scalar,
+    }
+}
+
 /// Expand any tokens in an XOsdi element's net list that match a declared
 /// `.optical_port`.  Returns one XOsdi per channel (most ports have channels
 /// = 1, so most lines return a single element).  Non-XOsdi elements are
@@ -1052,27 +1100,29 @@ fn expand_optical_ports(
         // No port references — return the element unchanged.
         return Ok(vec![Element::XOsdi { name, nets, model_name, params }]);
     }
-    // `fc_mux` and `fc_demux` are bundle-bridging devices: they bridge N
-    // single-channel bundles to one N-channel bundle (or vice versa) in a
-    // single instance. They do NOT replicate per channel, and channel
-    // counts intentionally don't match across their pins.  Skip the
-    // matching check and emit one instance with every bundle flattened to
-    // its underlying wires.  See `NativeMux`/`NativeDemux`.
-    let model_lc = model_name.to_lowercase();
-    if model_lc == "fc_mux" || model_lc == "fc_demux" {
-        let mut flat_nets: Vec<String> = Vec::with_capacity(nets.len() * 3);
+    // Dispatch by WDM policy.  See `BundleArity` for semantics.
+    let arity = bundle_arity_for(&model_name);
+
+    // Helper: flatten every referenced bundle into its underlying wires, in
+    // declaration order, into one combined net vector.
+    let flatten = || -> Vec<String> {
+        let mut flat: Vec<String> = Vec::with_capacity(nets.len() * 3);
         for (net, port_ref) in nets.iter().zip(port_refs.iter()) {
             if let Some(port_idx) = port_ref {
                 let port = &ports[*port_idx];
                 for ch in 0..port.channels {
-                    flat_nets.extend(port.wires_for_channel(ch));
+                    flat.extend(port.wires_for_channel(ch));
                 }
             } else {
-                flat_nets.push(net.clone());
+                flat.push(net.clone());
             }
         }
+        flat
+    };
+
+    if arity == BundleArity::Bridge {
         return Ok(vec![Element::XOsdi {
-            name, nets: flat_nets, model_name, params,
+            name, nets: flatten(), model_name, params,
         }]);
     }
     // Validate consistent channel count when more than one port is involved.
@@ -1086,37 +1136,12 @@ fn expand_optical_ports(
             ),
         });
     }
-    // `fc_pn_ps`, `fc_thermal_ps`, and `fc_photodetector` are bundle-AWARE
-    // devices: they have both optical bundle pins AND shared electrical pins
-    // (anode/cathode, heat_p/heat_n) representing one physical device.
-    // Replicating per channel would create N parallel electrical components
-    // — for PN-PS the same V_pn would drive N parallel conductances drawing
-    // N× the current; for the photodetector the dark current and shunt would
-    // each be N× too large; for thermal PS the heater would dissipate N× the
-    // joule heat for the same drive voltage.  Instead, emit ONE instance
-    // with all bundles flattened and let the device handle the N channels
-    // internally with one shared electrical interface.  See
-    // `NativePnPhaseShifter`, `NativeThermalPhaseShifter`,
-    // `NativePhotodetector`.
-    if model_lc == "fc_pn_ps"
-        || model_lc == "fc_thermal_ps"
-        || model_lc == "fc_photodetector"
-    {
-        let mut flat_nets: Vec<String> = Vec::with_capacity(nets.len() * 3);
-        for (net, port_ref) in nets.iter().zip(port_refs.iter()) {
-            if let Some(port_idx) = port_ref {
-                let port = &ports[*port_idx];
-                for ch in 0..port.channels {
-                    flat_nets.extend(port.wires_for_channel(ch));
-                }
-            } else {
-                flat_nets.push(net.clone());
-            }
-        }
+    if arity == BundleArity::Aware {
         return Ok(vec![Element::XOsdi {
-            name, nets: flat_nets, model_name, params,
+            name, nets: flatten(), model_name, params,
         }]);
     }
+    // BundleArity::Scalar — replicate per channel.
     let mut out = Vec::with_capacity(max_n);
     for ch in 0..max_n {
         let mut expanded_nets: Vec<String> = Vec::new();
