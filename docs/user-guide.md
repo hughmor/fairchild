@@ -689,10 +689,10 @@ the input-arm-`a` wavelength. For asymmetric WDM topologies where you
 genuinely want different wavelengths on the two arms, that's a future
 device — file an issue.
 
-### `fc_splitter` — 1×2 Y-junction (3 dB)
+### `fc_splitter` — 1×2 Y-junction (configurable loss + asymmetry)
 
 ```
-X<name>  in  out_a  out_b  fc_splitter
+X<name>  in  out_a  out_b  fc_splitter  [param=val …]
 ```
 
 | Port | Role |
@@ -700,10 +700,15 @@ X<name>  in  out_a  out_b  fc_splitter
 | `in` | bundle, optical input |
 | `out_a`, `out_b` | bundles, optical outputs |
 
-No parameters. Lossless equal-power split: `out_a = out_b = in / √2`.
-Wavelength duplicated to both outputs. Use for combining MZI arms in
-reverse (with a second `fc_splitter` instance) or for any branching
-topology where you want half-power outputs.
+| Parameter | Default | Description |
+|---|---|---|
+| `alpha` | 1.0 | Total intensity transmission (lossless when 1.0). |
+| `alpha_dB` (or `il_dB`) | — | Insertion loss in dB; sets `alpha` = 10^(−`alpha_dB`/10). |
+| `r` (or `split_ratio`) | 0.5 | Fraction of intensity routed to `out_a`. `out_b` receives `alpha − r`. |
+
+Wavelength duplicated to both outputs. Amplitude transmission to each
+arm is √r (for `out_a`) and √(α − r) (for `out_b`). Defaults reproduce
+the original 3 dB lossless equal-power split.
 
 ### `fc_grating_coupler` — fibre ↔ chip grating coupler
 

@@ -330,8 +330,16 @@ impl NativeDirectionalCoupler {
 // Native 1×2 Y-junction splitter (3 dB lossless)
 // ────────────────────────────────────────────────────────────────────────
 
-/// Equal-power lossless splitter.  c = d = a / √2.  Wavelength duplicated.
+/// 1×2 splitter with optional insertion loss and asymmetric power split.
+///
+/// Total power transmission `α` (intensity, default 1.0 = lossless) is split
+/// across the two outputs with fraction `r` going to `out_a` and `α − r` going
+/// to `out_b`.  Defaults (α = 1.0, r = 0.5) reproduce the original 3 dB
+/// lossless splitter.  Amplitude coefficients: `k_a = √r`, `k_b = √(α − r)`.
+/// Wavelength duplicated to both outputs.
 pub struct NativeSplitter {
+    alpha:    f64,           // intensity transmission, total
+    r:        f64,           // intensity fraction routed to out_a
     // Terminals: [a_re, a_im, a_λ, c_re, c_im, c_λ, d_re, d_im, d_λ]
     nodes: [NodeId; 9],
     branches: [Option<usize>; 6],
@@ -339,7 +347,12 @@ pub struct NativeSplitter {
 
 impl NativeSplitter {
     pub fn new() -> Self {
-        Self { nodes: [None; 9], branches: [None; 6] }
+        Self {
+            alpha:    1.0,
+            r:        0.5,
+            nodes:    [None; 9],
+            branches: [None; 6],
+        }
     }
 }
 
@@ -359,22 +372,49 @@ impl Device for NativeSplitter {
         for i in 0..6 { self.branches[i] = Some(first_idx + i); }
     }
 
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "alpha" => {
+                // Intensity transmission, must be ≤ 1.  Re-anchor r at the
+                // symmetric midpoint (alpha/2) iff the user hasn't already
+                // skewed it — but simplest: if r exceeds the new alpha,
+                // clamp it to alpha/2.  Otherwise leave r alone.
+                self.alpha = value.clamp(0.0, 1.0);
+                if self.r > self.alpha { self.r = self.alpha * 0.5; }
+                true
+            }
+            "alpha_db" | "il_db" => {
+                self.alpha = 10f64.powf(-value / 10.0);
+                if self.r > self.alpha { self.r = self.alpha * 0.5; }
+                true
+            }
+            "r" | "split_ratio" => {
+                // r = fraction of intensity to out_a; clamped to [0, alpha].
+                self.r = value.clamp(0.0, self.alpha);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let k = 1.0 / 2.0_f64.sqrt();
-        // c_re = k · a_re
-        self.stamp_potential_eq(mat, 0, self.nodes[3], &[(self.nodes[0], -k)]);
-        // c_im = k · a_im
-        self.stamp_potential_eq(mat, 1, self.nodes[4], &[(self.nodes[1], -k)]);
+        // Amplitude coefficients: |out_a| = √r · |in|, |out_b| = √(α − r) · |in|.
+        let k_a = self.r.max(0.0).sqrt();
+        let k_b = (self.alpha - self.r).max(0.0).sqrt();
+        // c_re = k_a · a_re
+        self.stamp_potential_eq(mat, 0, self.nodes[3], &[(self.nodes[0], -k_a)]);
+        // c_im = k_a · a_im
+        self.stamp_potential_eq(mat, 1, self.nodes[4], &[(self.nodes[1], -k_a)]);
         // c_λ  = a_λ
         self.stamp_potential_eq(mat, 2, self.nodes[5], &[(self.nodes[2], -1.0)]);
-        // d_re = k · a_re
-        self.stamp_potential_eq(mat, 3, self.nodes[6], &[(self.nodes[0], -k)]);
-        // d_im = k · a_im
-        self.stamp_potential_eq(mat, 4, self.nodes[7], &[(self.nodes[1], -k)]);
+        // d_re = k_b · a_re
+        self.stamp_potential_eq(mat, 3, self.nodes[6], &[(self.nodes[0], -k_b)]);
+        // d_im = k_b · a_im
+        self.stamp_potential_eq(mat, 4, self.nodes[7], &[(self.nodes[1], -k_b)]);
         // d_λ  = a_λ
         self.stamp_potential_eq(mat, 5, self.nodes[8], &[(self.nodes[2], -1.0)]);
     }
