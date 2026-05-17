@@ -7,8 +7,8 @@ use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
     Mosfet1, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
-    NativeMux, NativePhotodetector, NativePnPhaseShifter, NativeSplitter,
-    NativeThermalPhaseShifter, NativeWaveguide,
+    NativeMux, NativePhotodetector, NativePnPhaseShifter, NativePnThermalPhaseShifter,
+    NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
     ShockleyDiode,
 };
 
@@ -198,6 +198,12 @@ impl DeviceRegistry {
         });
         self.register("fc_pn_ps", |terminals, ctx| {
             let mut d = NativePnPhaseShifter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_pn_th_ps", |terminals, ctx| {
+            let mut d = NativePnThermalPhaseShifter::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

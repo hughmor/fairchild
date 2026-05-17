@@ -1070,6 +1070,7 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
             | "fc_dcoupler"
             | "fc_grating_coupler"
             | "fc_pn_ps"
+            | "fc_pn_th_ps"
             | "fc_thermal_ps"
             | "fc_photodetector" => BundleArity::Aware,
         // `fc_cw_laser` deliberately stays Scalar — a single laser source

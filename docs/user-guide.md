@@ -922,6 +922,37 @@ with a B-element converting temperature to equivalent voltage.
 The transfer is `A_out = A_in · exp(−j φ)` — lossless. Wavelength passes
 through unchanged.
 
+### `fc_pn_th_ps` — combined PN + thermal phase shifter
+
+```
+X<name>  in  out  anode  cathode  heat_p  heat_n  fc_pn_th_ps  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` / `out` | bundles, optical pass-through |
+| `anode` / `cathode` | scalar nodes — PN-junction terminals |
+| `heat_p` / `heat_n` | scalar nodes — heater terminals |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `L_um` / `L_m` / `length` | 1 mm | Section length. |
+| `n_g` | 4.2 | Group index. |
+| `dn_dv` | 1e-4 | Effective-index change per applied PN volt. |
+| `V_pi_L` | — | Convenience override (V·m) — sets `dn_dv` to give `Vπ·L`. |
+| `g_pn` | 1e-3 | PN-junction conductance (S) between anode and cathode. |
+| `r_heater` / `r` | 1000 | Heater resistance (Ω) between heat_p and heat_n. |
+| `p_pi` / `p_pi_th` | 10e-3 | Heater power for π phase shift (W). |
+| `alpha_dB_cm` | 0 | Propagation loss along the section. |
+| `level` | 1 | Model tier (1/2/3). L2/L3 keywords accepted with no effect at L1. |
+
+**Physics.** φ_total = φ_prop + φ_eo_pn + φ_th_heater. The two electrical
+interfaces are independent — driving only the PN gives `fc_pn_ps`
+behaviour, driving only the heater gives `fc_thermal_ps`, driving both
+sums the phase shifts. Bundle-aware: ONE physical device handles all N
+optical channels with one shared PN junction AND one shared heater
+resistor.
+
 ### Tiered photonic models (`level=`)
 
 `fc_pn_ps` and `fc_thermal_ps` (and the upcoming `fc_pn_th_ps`) expose

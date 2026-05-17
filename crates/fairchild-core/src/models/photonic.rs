@@ -1133,6 +1133,219 @@ impl Device for NativePnPhaseShifter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native combined PN + thermal phase shifter
+// ────────────────────────────────────────────────────────────────────────
+
+/// Waveguide segment with both a PN junction (electro-optic) AND a thermal
+/// heater driving it.  Δn contributions sum.  Two electrical interfaces
+/// (anode/cathode for the PN, heat_p/heat_n for the heater) are independent
+/// — driving either alone produces only that physics's phase shift; driving
+/// both produces the sum.
+///
+/// Variable-arity bundle-aware.  Terminal layout for N channels
+/// (6·N + 4 total):
+///   [in.0.re..in.{N-1}.λ,  out.0.re..out.{N-1}.λ,
+///    anode, cathode, heat_p, heat_n]
+///
+/// At L1 the physics is the linear sum of fc_pn_ps (small-signal Δn_eff =
+/// dn/dV · V_pn) and fc_thermal_ps (instantaneous Joule heating →
+/// φ_th = π · P / P_pi_th).  L2 will add bias-dependent C_j, tau_th, and
+/// distinct reverse/forward EO coefficients; L3 will add carrier dynamics
+/// and self-heating from optical absorption.
+pub struct NativePnThermalPhaseShifter {
+    length_m:        f64,
+    n_g:             f64,
+    wl_ref_m:        f64,
+    // PN-side params (small-signal electro-optic).
+    dn_dv:           f64,
+    g_pn:            f64,
+    // Heater-side params (Joule → phase).
+    r_heater:        f64,
+    p_pi_th:         f64,
+    // Shared loss along the segment.
+    alpha_neper_m:   f64,
+    // Tier — same convention as fc_pn_ps / fc_thermal_ps.  L2/L3 scaffolded.
+    level:           u32,
+    n_channels:      usize,
+    nodes:           Vec<NodeId>,
+    branches:        Vec<Option<usize>>,
+    c_cached:        Vec<f64>,
+    s_cached:        Vec<f64>,
+}
+
+impl NativePnThermalPhaseShifter {
+    pub fn new() -> Self {
+        Self {
+            length_m:        1e-3,
+            n_g:             4.2,
+            wl_ref_m:        1.55e-6,
+            dn_dv:           1e-4,
+            g_pn:            1e-3,
+            r_heater:        1000.0,
+            p_pi_th:         10e-3,
+            alpha_neper_m:   0.0,
+            level:           1,
+            n_channels:      0,
+            nodes:           Vec::new(),
+            branches:        Vec::new(),
+            c_cached:        Vec::new(),
+            s_cached:        Vec::new(),
+        }
+    }
+}
+
+impl Device for NativePnThermalPhaseShifter {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wl_ref_m = ctx.lambda_center_m;
+    }
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        // 6·N (optical bundles in+out) + 4 (anode, cathode, heat_p, heat_n).
+        assert!(
+            terminals.len() >= 10 && (terminals.len() - 4) % 6 == 0,
+            "fc_pn_th_ps: terminal count must be 6·N + 4 for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = (terminals.len() - 4) / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
+        self.c_cached   = vec![1.0; n];
+        self.s_cached   = vec![0.0; n];
+    }
+
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "l_um"            => { self.length_m = value * 1e-6; true }
+            "l_m" | "length"  => { self.length_m = value;        true }
+            "n_g"             => { self.n_g      = value;        true }
+            "dn_dv"           => { self.dn_dv    = value;        true }
+            "g_pn"            => { self.g_pn     = value;        true }
+            "v_pi_l"          => {
+                if value > 0.0 { self.dn_dv = self.wl_ref_m / (2.0 * value); }
+                true
+            }
+            "r_heater" | "r"  => { self.r_heater = value;        true }
+            "p_pi" | "p_pi_w" | "p_pi_th" => { self.p_pi_th = value; true }
+            "alpha_db_cm"     => {
+                self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
+                true
+            }
+            "level" => {
+                let lvl = value.round() as u32;
+                if !(1..=3).contains(&lvl) {
+                    eprintln!("warning: fc_pn_th_ps level={lvl} out of range [1..=3]; using 1");
+                    self.level = 1;
+                } else {
+                    if lvl > 1 {
+                        eprintln!("warning: fc_pn_th_ps level={lvl} is scaffolded but not yet implemented; falling back to L1");
+                    }
+                    self.level = lvl;
+                }
+                true
+            }
+            // L2/L3 forward-compat keywords (accepted, no effect at L1):
+            "c_j0" | "v_bi" | "m_j" | "da_dv"
+                | "tau_carrier" | "tpa_beta"
+                | "tau_th" | "c_th" | "r_th" | "r_th_carrier"
+                | "alpha_dB_cm_photo" | "responsivity_photo" => true,
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        let n = self.n_channels;
+        // Electrical pins: anode, cathode, heat_p, heat_n live at the END
+        // of the terminal vector (after the optical block).
+        let elec = 6 * n;
+        let v_a    = self.nodes[elec    ].map_or(0.0, |i| x[i]);
+        let v_c    = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        let v_hp   = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
+        let v_hn   = self.nodes[elec + 3].map_or(0.0, |i| x[i]);
+        let v_pn   = v_a  - v_c;
+        let v_h    = v_hp - v_hn;
+        let p_heat = v_h * v_h / self.r_heater;
+        let phi_th = std::f64::consts::PI * p_heat / self.p_pi_th;
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let t_amp  = (-self.alpha_neper_m * self.length_m / 2.0).exp();
+        for k in 0..n {
+            let lambda = match self.nodes[3 * k + 2] {
+                Some(i) => {
+                    let v = x[i];
+                    if v.abs() > 1e-9 { v } else { self.wl_ref_m }
+                }
+                None => self.wl_ref_m,
+            };
+            let phi_prop = two_pi * self.n_g * self.length_m
+                           * (1.0 / lambda - 1.0 / self.wl_ref_m);
+            let phi_eo   = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
+            let phi      = phi_prop + phi_eo + phi_th;
+            self.c_cached[k] = t_amp * phi.cos();
+            self.s_cached[k] = t_amp * phi.sin();
+        }
+    }
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n = self.n_channels;
+        let elec = 6 * n;
+        // Electrical (PN side): ONE g_pn between anode and cathode.
+        let anode = self.nodes[elec];
+        let cath  = self.nodes[elec + 1];
+        let g_pn  = self.g_pn;
+        if let Some(a) = anode {
+            mat.a[a][a] += g_pn;
+            if let Some(c) = cath { mat.a[a][c] -= g_pn; }
+        }
+        if let Some(c) = cath {
+            mat.a[c][c] += g_pn;
+            if let Some(a) = anode { mat.a[c][a] -= g_pn; }
+        }
+        // Electrical (heater side): ONE g_heater between heat_p and heat_n.
+        let hp = self.nodes[elec + 2];
+        let hn = self.nodes[elec + 3];
+        let g_h = 1.0 / self.r_heater;
+        if let Some(a) = hp {
+            mat.a[a][a] += g_h;
+            if let Some(c) = hn { mat.a[a][c] -= g_h; }
+        }
+        if let Some(c) = hn {
+            mat.a[c][c] += g_h;
+            if let Some(a) = hp { mat.a[c][a] -= g_h; }
+        }
+        // Optical: per-channel branch equations using cached rotation.
+        for k in 0..n {
+            let in_re  = self.nodes[3 * k];
+            let in_im  = self.nodes[3 * k + 1];
+            let in_l   = self.nodes[3 * k + 2];
+            let out_re = self.nodes[3 * n + 3 * k];
+            let out_im = self.nodes[3 * n + 3 * k + 1];
+            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            let c = self.c_cached[k];
+            let s = self.s_cached[k];
+            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
+                &[(in_re, -c), (in_im, -s)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
+                &[(in_re,  s), (in_im, -c)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+                &[(in_l, -1.0)]);
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Native WDM multiplexer / demultiplexer
 // ────────────────────────────────────────────────────────────────────────
 //
