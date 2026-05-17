@@ -11,6 +11,7 @@ pub mod models;
 pub mod newton;
 pub mod noise;
 pub mod options;
+pub mod sanity;
 pub mod solver;
 pub mod tran;
 
@@ -31,6 +32,7 @@ pub use newton::{
     NrResult,
 };
 pub use options::SimOptions;
+pub use sanity::check_netlist_sanity;
 pub use solver::lu_solve;
 pub use tran::{
     run_tran, run_tran_tr,

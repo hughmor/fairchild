@@ -434,6 +434,12 @@ pub fn tran_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    // Sanity check fires here when UIC bypasses DC OP; the non-UIC path
+    // gets it via the dc_op call below (and the check is cheap enough
+    // that we don't bother de-duplicating).
+    if opts.sanity_check && opts.uic {
+        crate::sanity::check_netlist_sanity(netlist);
+    }
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let mode = opts.method;
@@ -626,6 +632,9 @@ pub fn tran_nr_with_registry_var_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    if opts.sanity_check && opts.uic {
+        crate::sanity::check_netlist_sanity(netlist);
+    }
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let step = step.min(opts.max_step);

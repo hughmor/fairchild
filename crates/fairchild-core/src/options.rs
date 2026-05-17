@@ -83,6 +83,12 @@ pub struct SimOptions {
     /// 1.55 µm (C-band).
     pub lambda_center_m: f64,
 
+    /// Run the netlist sanity-check preflight pass before analysis begins.
+    /// On by default — emits warnings to stderr for obvious-but-fatal
+    /// netlist errors (R=0, duplicate refdes, fc_* zero-param, etc.).
+    /// Silence with `.options nosanitycheck=1` or `sanity_check=0`.
+    pub sanity_check: bool,
+
     /// Emit diagnostic notes about solver progress to stderr.  Off by default.
     /// When on, the analysis entry points (`dc_op_*`, `tran_*`) print:
     ///   - MNA matrix size, NNZ, sparsity, diagonal magnitude spread (once,
@@ -128,6 +134,7 @@ impl Default for SimOptions {
             lambda_center_m: 1.55e-6,
             bidirectional_propagation: false,
             verbose:        false,
+            sanity_check:   true,
         }
     }
 }
@@ -200,6 +207,16 @@ impl SimOptions {
             "verbose" => {
                 self.verbose = matches!(value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on");
+            }
+            "sanity_check" | "sanitycheck" => {
+                self.sanity_check = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+            }
+            "nosanitycheck" | "no_sanity_check" => {
+                // ngspice-style bare keyword: `.options nosanitycheck` disables.
+                let off = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+                self.sanity_check = !off;
             }
             "enable_bidirectional" | "bidirectional" | "bidirectional_propagation" => {
                 self.bidirectional_propagation = matches!(value.to_lowercase().as_str(),

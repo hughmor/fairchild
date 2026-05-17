@@ -750,6 +750,9 @@ pub fn dc_op_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
+    if opts.sanity_check {
+        crate::sanity::check_netlist_sanity(netlist);
+    }
     check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let mut topo = CircuitTopology::build(netlist);
