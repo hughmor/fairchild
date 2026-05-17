@@ -41,8 +41,9 @@ pub struct NativeWaveguide {
     // `SimContext::lambda_center_m` in `setup_model`.
     lambda_bootstrap_m: f64,
     n_channels:      usize,
+    wpc:             usize,        // wires_per_channel: 3 (unidir) or 5 (bidir)
     nodes:    Vec<NodeId>,
-    branches: Vec<Option<usize>>,
+    branches: Vec<Option<usize>>,  // wpc per channel
     c_cached: Vec<f64>,
     s_cached: Vec<f64>,
 }
@@ -55,6 +56,7 @@ impl NativeWaveguide {
             alpha_neper_m:      dB_per_cm_to_neper_per_m(2.0),
             lambda_bootstrap_m: 1.55e-6,
             n_channels:         0,
+            wpc:                3,
             nodes:              Vec::new(),
             branches:           Vec::new(),
             c_cached:           Vec::new(),
@@ -68,18 +70,22 @@ impl Device for NativeWaveguide {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.lambda_bootstrap_m = ctx.lambda_center_m;
+        self.wpc = ctx.wires_per_channel();
     }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc; // in + out
         assert!(
-            !terminals.is_empty() && terminals.len() % 6 == 0,
-            "fc_waveguide: terminal count must be 6·N for N ≥ 1 channels; got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_waveguide: terminal count must be {stride}·N for N ≥ 1 channels (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 6;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        self.branches   = vec![None; wpc * n];
         self.c_cached   = vec![1.0; n];
         self.s_cached   = vec![0.0; n];
     }
@@ -102,11 +108,14 @@ impl Device for NativeWaveguide {
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         let n = self.n_channels;
+        let wpc = self.wpc;
         let boot = self.lambda_bootstrap_m;
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
         let two_pi = 2.0 * std::f64::consts::PI;
+        // λ wire position within each input channel block: last wire.
+        let lambda_off = wpc - 1;
         for k in 0..n {
-            let lambda = match self.nodes[3 * k + 2] {
+            let lambda = match self.nodes[wpc * k + lambda_off] {
                 Some(i) => {
                     let v = x[i];
                     if v.abs() > boot * 0.5 { v } else { boot }
@@ -122,22 +131,42 @@ impl Device for NativeWaveguide {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let in_block_base  = 0;
+        let out_block_base = wpc * n;
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
             let c = self.c_cached[k];
             let s = self.s_cached[k];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
-                &[(in_re, -c), (in_im, -s)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
-                &[(in_re,  s), (in_im, -c)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+            // Per-channel input / output wires.
+            let in_re_fw  = self.nodes[in_block_base  + wpc * k];
+            let in_im_fw  = self.nodes[in_block_base  + wpc * k + 1];
+            let in_l      = self.nodes[in_block_base  + wpc * k + (wpc - 1)];
+            let out_re_fw = self.nodes[out_block_base + wpc * k];
+            let out_im_fw = self.nodes[out_block_base + wpc * k + 1];
+            let out_l     = self.nodes[out_block_base + wpc * k + (wpc - 1)];
+            // Forward path: out.re_fw = c·in.re_fw + s·in.im_fw etc.
+            stamp_potential_eq(mat, &self.branches, wpc * k,     out_re_fw,
+                &[(in_re_fw, -c), (in_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s), (in_im_fw, -c)]);
+            // λ passes through unchanged.
+            stamp_potential_eq(mat, &self.branches, wpc * k + (wpc - 1), out_l,
                 &[(in_l, -1.0)]);
+            if wpc == 5 {
+                // Backward path mirrors the forward physics with reversed
+                // direction: light at out_bw propagates back to in_bw with
+                // the same c, s.  in.re_bw = c·out.re_bw + s·out.im_bw,
+                // in.im_bw = -s·out.re_bw + c·out.im_bw.
+                let in_re_bw  = self.nodes[in_block_base  + wpc * k + 2];
+                let in_im_bw  = self.nodes[in_block_base  + wpc * k + 3];
+                let out_re_bw = self.nodes[out_block_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_block_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, wpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c), (out_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, wpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s), (out_im_bw, -c)]);
+            }
         }
     }
 
@@ -470,12 +499,17 @@ impl Device for NativeGratingCoupler {
 /// potential contributions — no electrical input.
 ///
 /// `A_re = √P · cos(φ₀)`, `A_im = √P · sin(φ₀)` where `P = power_mW · 1e−3`.
+/// CW laser source.  Drives ONE optical channel's bundle wires: 3 wires
+/// (re, im, λ) under unidirectional propagation, or 5 wires (re_fw, im_fw,
+/// re_bw, im_bw, λ) under bidirectional — the bw wires are forced to 0
+/// because a laser emits in one direction only.
 pub struct NativeCwLaser {
     re_amp:     f64,
     im_amp:     f64,
     wavelen_m:  f64,
-    nodes:    [NodeId; 3],        // [out_re, out_im, out_lambda]
-    branches: [Option<usize>; 3],
+    wpc:        usize,             // 3 (unidir) or 5 (bidir)
+    nodes:      Vec<NodeId>,
+    branches:   Vec<Option<usize>>,
 }
 
 impl NativeCwLaser {
@@ -486,30 +520,35 @@ impl NativeCwLaser {
             re_amp:    p.sqrt(),
             im_amp:    0.0,
             wavelen_m: 1550e-9,
-            nodes:    [None; 3],
-            branches: [None; 3],
+            wpc:       3,
+            nodes:     Vec::new(),
+            branches:  Vec::new(),
         }
     }
 }
 
 impl Device for NativeCwLaser {
-    fn num_terminals(&self) -> usize { 3 }
+    fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, ctx: &SimContext) {
-        // Default output wavelength to the band centre.  Overridden by
-        // `wavelength_nm=...` if set explicitly.
         self.wavelen_m = ctx.lambda_center_m;
+        self.wpc = ctx.wires_per_channel();
     }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 3);
-        for i in 0..3 { self.nodes[i] = terminals[i]; }
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        debug_assert_eq!(terminals.len(), wpc,
+            "fc_cw_laser: expected {wpc} terminals (one channel × wpc); got {}",
+            terminals.len());
+        self.nodes    = terminals.to_vec();
+        self.branches = vec![None; wpc];
     }
 
-    fn num_extra_nodes(&self) -> usize { 3 }
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..3 { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -548,19 +587,26 @@ impl Device for NativeCwLaser {
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, b: &mut [f64]) {
-        // Inhomogeneous branch equations: V(out_re) = re_amp etc. mean
-        // the branch row has b[J] = +re_amp (since residual is target − V).
-        // Convention here: row J = +V_out + (terms) − target;  residual = 0.
-        // To produce V_out = target, we need b[J] = +target (so the linear
-        // system finds V_out − target = 0 → V_out = target).
-        if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
-        if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
-        if let Some(j) = self.branches[2] { b[j] += self.wavelen_m; }
+        // Inhomogeneous branch equations: V(out_re_fw) = re_amp, ...
+        // Wire order: [re_fw, im_fw, re_bw, im_bw, λ] (5-wire bidir) or
+        //             [re,    im,    λ]               (3-wire unidir).
+        if self.wpc == 5 {
+            if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
+            if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
+            // bw wires forced to 0 — no contribution from RHS (branch row
+            // already enforces V = 0 because rhs is 0).
+            if let Some(j) = self.branches[4] { b[j] += self.wavelen_m; }
+        } else {
+            if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
+            if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
+            if let Some(j) = self.branches[2] { b[j] += self.wavelen_m; }
+        }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        // Branch rows: V(out) + 0·V(in) − target = 0.
-        // Stamp +1 at (J, out) and +1 at (out, J).  RHS handled in load_residual.
+        // Branch rows: V(out_wire) - target = 0.  Stamp +1 at (J, out) and
+        // +1 at (out, J).  RHS handled in load_residual.  bw wires use the
+        // same shape, with target = 0 (no explicit RHS contribution).
         for (i, out_node) in self.nodes.iter().enumerate() {
             if let (Some(out), Some(j)) = (*out_node, self.branches[i]) {
                 mat.a[j][out] += 1.0;
@@ -604,19 +650,25 @@ pub struct NativePhotodetector {
     responsivity:  f64,
     i_dark:        f64,
     r_shunt:       f64,
-    r_series:      f64,   // optional series resistance (0 = direct connection)
+    r_series:      f64,
     n_channels:    usize,
+    wpc:           usize,            // 3 (unidir) or 5 (bidir)
     nodes:         Vec<NodeId>,
-    // Internal node (if r_series > 0): one auxiliary MNA row representing
-    // the voltage at the "internal" junction node.  None when r_series = 0.
     v_int_idx:     Option<usize>,
     has_internal:  bool,
-    // Cached operating-point quantities (set by `eval`):
-    i_ph:          f64,            // total photocurrent across channels + i_dark
-    g_re:          Vec<f64>,       // ∂I_ph / ∂V(re_k) = 2 · R · V(re_k)
-    g_im:          Vec<f64>,       // ∂I_ph / ∂V(im_k)
-    v_re_op:       Vec<f64>,
-    v_im_op:       Vec<f64>,
+    i_ph:          f64,
+    // Linearisation coefficients per (channel, direction).  In unidir mode
+    // only g[k].0/.1 are used; in bidir mode the .2/.3 entries cover the bw
+    // wires.  A real PIN absorbs every photon — both fw and bw light heat
+    // the same junction and produce one summed photocurrent.
+    g_re_fw:       Vec<f64>,
+    g_im_fw:       Vec<f64>,
+    g_re_bw:       Vec<f64>,
+    g_im_bw:       Vec<f64>,
+    v_re_fw_op:    Vec<f64>,
+    v_im_fw_op:    Vec<f64>,
+    v_re_bw_op:    Vec<f64>,
+    v_im_bw_op:    Vec<f64>,
     v_j_op:        f64,
 }
 
@@ -628,14 +680,19 @@ impl NativePhotodetector {
             r_shunt:      1e6,
             r_series:     0.0,
             n_channels:   0,
+            wpc:          3,
             nodes:        Vec::new(),
             v_int_idx:    None,
             has_internal: false,
             i_ph:         0.0,
-            g_re:         Vec::new(),
-            g_im:         Vec::new(),
-            v_re_op:      Vec::new(),
-            v_im_op:      Vec::new(),
+            g_re_fw:      Vec::new(),
+            g_im_fw:      Vec::new(),
+            g_re_bw:      Vec::new(),
+            g_im_bw:      Vec::new(),
+            v_re_fw_op:   Vec::new(),
+            v_im_fw_op:   Vec::new(),
+            v_re_bw_op:   Vec::new(),
+            v_im_bw_op:   Vec::new(),
             v_j_op:       0.0,
         }
     }
@@ -644,22 +701,30 @@ impl NativePhotodetector {
 impl Device for NativePhotodetector {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        // Layout: 3·N (bundle inputs) + 2 (anode, cathode) = 3N + 2.
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        // Layout: wpc·N (bundle inputs) + 2 (anode, cathode).
         assert!(
-            terminals.len() >= 5 && (terminals.len() - 2) % 3 == 0,
-            "fc_photodetector: terminal count must be 3·N + 2 for N ≥ 1 channels; got {}",
+            terminals.len() >= wpc + 2 && (terminals.len() - 2) % wpc == 0,
+            "fc_photodetector: terminal count must be {wpc}·N + 2 for N ≥ 1 channels; got {}",
             terminals.len()
         );
-        let n = (terminals.len() - 2) / 3;
+        let n = (terminals.len() - 2) / wpc;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.g_re       = vec![0.0; n];
-        self.g_im       = vec![0.0; n];
-        self.v_re_op    = vec![0.0; n];
-        self.v_im_op    = vec![0.0; n];
+        self.g_re_fw    = vec![0.0; n];
+        self.g_im_fw    = vec![0.0; n];
+        self.g_re_bw    = vec![0.0; n];
+        self.g_im_bw    = vec![0.0; n];
+        self.v_re_fw_op = vec![0.0; n];
+        self.v_im_fw_op = vec![0.0; n];
+        self.v_re_bw_op = vec![0.0; n];
+        self.v_im_bw_op = vec![0.0; n];
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -694,49 +759,64 @@ impl Device for NativePhotodetector {
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        let n = self.n_channels;
-        // Internal junction node: v_int if present, else anode.
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = wpc * n;
         let v_j_node = match self.v_int_idx {
             Some(i) => x[i],
-            None    => self.nodes[3 * n].map_or(0.0, |i| x[i]),
+            None    => self.nodes[elec_base].map_or(0.0, |i| x[i]),
         };
-        let v_c = self.nodes[3 * n + 1].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let mut p_total = 0.0;
         for k in 0..n {
-            let v_re = self.nodes[3 * k].map_or(0.0, |i| x[i]);
-            let v_im = self.nodes[3 * k + 1].map_or(0.0, |i| x[i]);
-            p_total += v_re * v_re + v_im * v_im;
-            self.g_re[k] = 2.0 * self.responsivity * v_re;
-            self.g_im[k] = 2.0 * self.responsivity * v_im;
-            self.v_re_op[k] = v_re;
-            self.v_im_op[k] = v_im;
+            let v_re_fw = self.nodes[wpc * k    ].map_or(0.0, |i| x[i]);
+            let v_im_fw = self.nodes[wpc * k + 1].map_or(0.0, |i| x[i]);
+            p_total += v_re_fw * v_re_fw + v_im_fw * v_im_fw;
+            self.g_re_fw[k] = 2.0 * self.responsivity * v_re_fw;
+            self.g_im_fw[k] = 2.0 * self.responsivity * v_im_fw;
+            self.v_re_fw_op[k] = v_re_fw;
+            self.v_im_fw_op[k] = v_im_fw;
+            if wpc == 5 {
+                let v_re_bw = self.nodes[wpc * k + 2].map_or(0.0, |i| x[i]);
+                let v_im_bw = self.nodes[wpc * k + 3].map_or(0.0, |i| x[i]);
+                p_total += v_re_bw * v_re_bw + v_im_bw * v_im_bw;
+                self.g_re_bw[k] = 2.0 * self.responsivity * v_re_bw;
+                self.g_im_bw[k] = 2.0 * self.responsivity * v_im_bw;
+                self.v_re_bw_op[k] = v_re_bw;
+                self.v_im_bw_op[k] = v_im_bw;
+            }
         }
         self.i_ph   = self.responsivity * p_total + self.i_dark;
         self.v_j_op = v_j_node - v_c;
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        let n = self.n_channels;
-        // Norton-equivalent linear remainder for the (nonlinear) photocurrent.
+        let n   = self.n_channels;
+        let wpc = self.wpc;
         let mut nonlin_remainder = self.i_ph;
         for k in 0..n {
-            nonlin_remainder -= self.g_re[k] * self.v_re_op[k]
-                              + self.g_im[k] * self.v_im_op[k];
+            nonlin_remainder -= self.g_re_fw[k] * self.v_re_fw_op[k]
+                              + self.g_im_fw[k] * self.v_im_fw_op[k];
+            if wpc == 5 {
+                nonlin_remainder -= self.g_re_bw[k] * self.v_re_bw_op[k]
+                                  + self.g_im_bw[k] * self.v_im_bw_op[k];
+            }
         }
         let i_eq = -nonlin_remainder - (self.v_j_op / self.r_shunt);
-        let v_j_node = self.v_int_idx.or(self.nodes[3 * n]);
-        if let Some(j) = v_j_node           { b[j] -= i_eq; }
-        if let Some(c) = self.nodes[3 * n + 1] { b[c] += i_eq; }
+        let elec_base = wpc * n;
+        let v_j_node = self.v_int_idx.or(self.nodes[elec_base]);
+        if let Some(j) = v_j_node              { b[j] -= i_eq; }
+        if let Some(c) = self.nodes[elec_base + 1] { b[c] += i_eq; }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        let a_idx = self.nodes[3 * n];
-        let c_idx = self.nodes[3 * n + 1];
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = wpc * n;
+        let a_idx = self.nodes[elec_base];
+        let c_idx = self.nodes[elec_base + 1];
         let g_sh  = 1.0 / self.r_shunt;
-        // Junction node — v_int if r_series > 0, else anode terminal.
         let j_idx = self.v_int_idx.or(a_idx);
-        // Optional series resistor between anode and v_int.
         if let Some(j) = self.v_int_idx {
             let g_s = 1.0 / self.r_series;
             if let Some(a) = a_idx {
@@ -746,7 +826,6 @@ impl Device for NativePhotodetector {
             }
             mat.a[j][j] += g_s;
         }
-        // Shunt 1/R_shunt between junction node and cathode.
         if let Some(j) = j_idx {
             mat.a[j][j] += g_sh;
             if let Some(c) = c_idx { mat.a[j][c] -= g_sh; }
@@ -755,18 +834,28 @@ impl Device for NativePhotodetector {
             mat.a[c][c] += g_sh;
             if let Some(j) = j_idx { mat.a[c][j] -= g_sh; }
         }
-        // Per-channel photocurrent linearisation: each channel's (V_re, V_im)
-        // couples into the junction-node row and the cathode row.
         for k in 0..n {
-            let r_idx = self.nodes[3 * k];
-            let i_idx = self.nodes[3 * k + 1];
+            let r_fw = self.nodes[wpc * k    ];
+            let i_fw = self.nodes[wpc * k + 1];
             if let Some(j) = j_idx {
-                if let Some(r) = r_idx { mat.a[j][r] -= self.g_re[k]; }
-                if let Some(i) = i_idx { mat.a[j][i] -= self.g_im[k]; }
+                if let Some(r) = r_fw { mat.a[j][r] -= self.g_re_fw[k]; }
+                if let Some(i) = i_fw { mat.a[j][i] -= self.g_im_fw[k]; }
             }
             if let Some(c) = c_idx {
-                if let Some(r) = r_idx { mat.a[c][r] += self.g_re[k]; }
-                if let Some(i) = i_idx { mat.a[c][i] += self.g_im[k]; }
+                if let Some(r) = r_fw { mat.a[c][r] += self.g_re_fw[k]; }
+                if let Some(i) = i_fw { mat.a[c][i] += self.g_im_fw[k]; }
+            }
+            if wpc == 5 {
+                let r_bw = self.nodes[wpc * k + 2];
+                let i_bw = self.nodes[wpc * k + 3];
+                if let Some(j) = j_idx {
+                    if let Some(r) = r_bw { mat.a[j][r] -= self.g_re_bw[k]; }
+                    if let Some(i) = i_bw { mat.a[j][i] -= self.g_im_bw[k]; }
+                }
+                if let Some(c) = c_idx {
+                    if let Some(r) = r_bw { mat.a[c][r] += self.g_re_bw[k]; }
+                    if let Some(i) = i_bw { mat.a[c][i] += self.g_im_bw[k]; }
+                }
             }
         }
     }
