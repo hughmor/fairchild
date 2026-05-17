@@ -77,6 +77,11 @@ impl MnaMatrix {
             b: vec![0.0f64; size],
         }
     }
+
+    /// Build a zero-filled MnaMatrix at the given dimension.  Useful for
+    /// diagnostic passes that need a clean scratch matrix without going
+    /// through the netlist stamper.
+    pub fn zeros(size: usize) -> Self { Self::new(size) }
 }
 
 // ---------------------------------------------------------------------------

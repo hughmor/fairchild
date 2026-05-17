@@ -190,31 +190,40 @@ pub fn build_devices(
 /// Called once at the start of `dc_op_nr_with_registry_opts` when verbose
 /// is enabled — gives a sense of problem size and rough conditioning
 /// before NR even starts.
+/// Returns true if any Jacobian or residual cell at x=0 is NaN/Inf — a
+/// signal that a device is stamping a non-finite value, which will make
+/// LU factorisation fail immediately.  The caller uses this to gate the
+/// (more expensive) per-device finiteness validator.
 fn report_matrix_stats(
     opts: &SimOptions,
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
-) {
-    if !opts.verbose { return; }
+) -> bool {
+    if !opts.verbose { return false; }
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let x0 = vec![0.0f64; topo.size];
     let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
     for dev in devices.iter_mut() {
         dev.eval(&x0, EvalFlags::dc(), ctx);
+        dev.load_residual(&mut mat.b);
         dev.load_jacobian(&mut mat);
     }
     let n = topo.size;
     let mut nnz = 0usize;
     let mut diag_max = 0.0_f64;
     let mut diag_min = f64::INFINITY;
+    let mut nonfinite = false;
     for i in 0..n {
         for j in 0..n {
-            if mat.a[i][j] != 0.0 { nnz += 1; }
+            let v = mat.a[i][j];
+            if v != 0.0 { nnz += 1; }
+            if !v.is_finite() { nonfinite = true; }
         }
+        if !mat.b[i].is_finite() { nonfinite = true; }
         let d = mat.a[i][i].abs();
-        if d > 0.0 {
+        if d.is_finite() && d > 0.0 {
             if d > diag_max { diag_max = d; }
             if d < diag_min { diag_min = d; }
         }
@@ -229,6 +238,165 @@ fn report_matrix_stats(
         eprintln!("info: MNA diagonal magnitude spread (mixed units; large spread \
                    often indicates poor scaling): min={:.2e} max={:.2e} ratio={:.2e}",
             diag_min, diag_max, diag_max / diag_min.max(1e-300));
+    }
+    if nonfinite {
+        eprintln!("info: MNA contains non-finite values at x=0 — running \
+                   per-device finiteness validator to identify the offending \
+                   device(s).");
+    }
+    nonfinite
+}
+
+/// Locate non-finite rows in the cumulative MNA stamp at iterate `x` and
+/// cross-reference each with the netlist elements that touch the matching
+/// net.  Cheaper than a per-device stamping pass — important for very
+/// large circuits where allocating a fresh MnaMatrix per device would
+/// cost N² × N_devices.
+///
+/// Walks the cumulative stamp once (O(N²)), then for each bad row scans
+/// the netlist's elements (O(N_elements × max_nets_per_element)) to find
+/// every X-element / R / L / C / V / I / D / M that mentions the offending
+/// net.  The user gets a short list of suspect refdes per bad net.
+fn validate_devices_finite(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+    x: &[f64],
+) {
+    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    for dev in devices.iter_mut() {
+        dev.eval(x, EvalFlags::dc(), ctx);
+        dev.load_residual(&mut mat.b);
+        dev.load_jacobian(&mut mat);
+    }
+
+    // Identify bad rows once (single pass; checks any non-finite cell in
+    // row r OR a non-finite residual at b[r]).
+    let n = topo.size;
+    let mut bad_rows: Vec<usize> = Vec::new();
+    for r in 0..n {
+        let mut row_bad = !mat.b[r].is_finite();
+        if !row_bad {
+            for c in 0..n {
+                if !mat.a[r][c].is_finite() {
+                    row_bad = true;
+                    break;
+                }
+            }
+        }
+        if row_bad { bad_rows.push(r); }
+    }
+    if bad_rows.is_empty() {
+        eprintln!("info: validator found NO non-finite rows in the cumulative \
+                   device stamp (inf must come from the linear stamp or LU).");
+        return;
+    }
+
+    // Build a reverse lookup: net_index → net_name.
+    let n_nodes = topo.n_nodes();
+    let mut node_name_by_idx: Vec<&str> = vec![""; n_nodes];
+    for (name, &i) in &topo.node_index {
+        if i < n_nodes { node_name_by_idx[i] = name.as_str(); }
+    }
+    let mut vsrc_name_by_idx: Vec<&str> = vec![""; topo.vsrc_index.len()];
+    for (name, &i) in &topo.vsrc_index {
+        if i < vsrc_name_by_idx.len() { vsrc_name_by_idx[i] = name.as_str(); }
+    }
+
+    eprintln!("info: {} MNA row(s) contain non-finite stamps at x=0:",
+        bad_rows.len());
+    const MAX_BAD: usize = 10;
+    for &r in bad_rows.iter().take(MAX_BAD) {
+        let label = if r < n_nodes {
+            format!("v({}) — node {r}", node_name_by_idx[r])
+        } else if r < n_nodes + topo.vsrc_index.len() {
+            format!("i({}) — vsrc branch", vsrc_name_by_idx[r - n_nodes])
+        } else {
+            format!("x[{r}] — device-internal (likely an OSDI flow-branch row)")
+        };
+        eprintln!("info:   row {r}: {label}");
+
+        // Cross-reference netlist elements that touch the named net.
+        if r < n_nodes {
+            let net_name_lc = node_name_by_idx[r].to_lowercase();
+            let mut culprits: Vec<String> = Vec::new();
+            let mut suspects: Vec<String> = Vec::new();
+            for el in &netlist.elements {
+                let (refdes, touches, bad) = element_touches(el, &net_name_lc);
+                if !touches { continue; }
+                match bad {
+                    Some(hint) => culprits.push(format!("{refdes} [{hint}]")),
+                    None => suspects.push(refdes),
+                }
+            }
+            if !culprits.is_empty() {
+                eprintln!("info:     LIKELY CULPRIT(s): {}", culprits.join(", "));
+            }
+            if !suspects.is_empty() {
+                let trunc = if suspects.len() > 8 {
+                    format!("{} (and {} more)",
+                        suspects[..8].join(", "), suspects.len() - 8)
+                } else { suspects.join(", ") };
+                eprintln!("info:     other elements on this net: {trunc}");
+            }
+        }
+    }
+    if bad_rows.len() > MAX_BAD {
+        eprintln!("info:   ... and {} more non-finite row(s) (truncated)",
+            bad_rows.len() - MAX_BAD);
+    }
+}
+
+/// Return (label, touches, bad_stamp_hint) — whether `el` references the
+/// given lowercase net on any of its terminals, plus a hint string if the
+/// element's value alone would stamp a non-finite contribution (e.g. an
+/// R=0 resistor stamps 1/0 = ∞).  Used by the finiteness validator to
+/// surface the exact bad element rather than just the list of suspects.
+fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>) {
+    let net_match = |s: &str| s.to_lowercase() == net_lc;
+    let bad_value = |v: f64, what: &str| -> Option<String> {
+        if v == 0.0 {
+            Some(format!("{what}=0 → stamps 1/0 = ∞"))
+        } else if !v.is_finite() {
+            Some(format!("{what}={v} (non-finite)"))
+        } else {
+            None
+        }
+    };
+    match el {
+        Element::Resistor { name, pos, neg, resistance } => {
+            (name.clone(), net_match(pos) || net_match(neg),
+             bad_value(*resistance, "R"))
+        }
+        Element::Capacitor { name, pos, neg, capacitance } => {
+            (name.clone(), net_match(pos) || net_match(neg),
+             if !capacitance.is_finite() { Some(format!("C={capacitance} (non-finite)")) } else { None })
+        }
+        Element::Inductor { name, pos, neg, inductance } => {
+            (name.clone(), net_match(pos) || net_match(neg),
+             if !inductance.is_finite() { Some(format!("L={inductance} (non-finite)")) } else { None })
+        }
+        Element::VoltageSource { name, pos, neg, .. }
+        | Element::CurrentSource { name, pos, neg, .. } => {
+            (name.clone(), net_match(pos) || net_match(neg), None)
+        }
+        Element::Diode { name, anode, cathode, .. } => {
+            (name.clone(), net_match(anode) || net_match(cathode), None)
+        }
+        Element::Mosfet { name, drain, gate, source, bulk, .. } => {
+            (name.clone(),
+             net_match(drain) || net_match(gate) || net_match(source) || net_match(bulk),
+             None)
+        }
+        Element::Behavioral { name, pos, neg, .. } => {
+            (name.clone(), net_match(pos) || net_match(neg), None)
+        }
+        Element::XOsdi { name, nets, model_name, .. } => {
+            let hits = nets.iter().any(|n| net_match(n));
+            (format!("{name} ({model_name})"), hits, None)
+        }
     }
 }
 
@@ -398,7 +566,17 @@ fn nr_inner(
             mat.a[i][i] += opts.gmin + gmin_extra;
         }
 
-        let x_new = solver.solve(&mat.a, &mat.b)?;
+        let x_new = match solver.solve(&mat.a, &mat.b) {
+            Ok(v) => v,
+            Err(e) => {
+                if opts.verbose && !phase.is_empty() {
+                    eprintln!("info: linear solve failed in {phase}: {e}");
+                    report_failure(phase, opts, topo, netlist, devices, dev_names,
+                                   ctx, &x, source_scale, gmin_extra);
+                }
+                return Err(e);
+            }
+        };
 
         let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
             .map(|(n, o)| (n - o).abs())
@@ -582,7 +760,11 @@ pub fn dc_op_nr_with_registry_opts(
     let solver = opts.linear_solver(topo.size);
 
     if opts.verbose {
-        report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);
+        let nonfinite = report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);
+        if nonfinite {
+            let x_probe = vec![0.0f64; topo.size];
+            validate_devices_finite(&topo, netlist, &mut devices, &ctx, &x_probe);
+        }
         eprintln!("info: DC OP: trying direct Newton-Raphson from \
                    {} seed...",
             if !netlist.nodeset.is_empty() {"nodeset"} else {"x=0"});
