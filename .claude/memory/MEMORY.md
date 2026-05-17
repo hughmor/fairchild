@@ -8,3 +8,4 @@
 - [Testing philosophy](feedback_testing.md) — every new capability needs an ngspice golden test in the same commit; golden_test! macro, 10 ppm tolerance
 - [Commit workflow](feedback_workflow.md) — bite-sized commits per logical unit; commit cadence and ordering preferences
 - [Example conventions](feedback_examples.md) — plots from example scripts go into docs/plots/
+- [KiCad export-format quirk](project_kicad_export_quirk.md) — KiCad emits X-elements in two shapes (kwarg-style with type=X; X-prefix-positional without); the transpiler must handle both
