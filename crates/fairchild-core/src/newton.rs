@@ -309,6 +309,52 @@ fn report_failure(
     }
 }
 
+/// Compute the L2 norm of the nonlinear residual f(x) = J(x)·x − b(x)
+/// at iterate `x`.  Requires a full eval + stamp at `x` — only call when
+/// running line search on a clamped step.
+///
+/// The Norton-equivalent MNA stamp returns (J, b) such that the linearised
+/// solve J·x_{k+1} = b yields the Newton step x_{k+1} − x_k = −J⁻¹·f(x_k);
+/// equivalently f(x) = J(x)·x − b(x), zero at the true operating point.
+fn residual_l2(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+    opts: &SimOptions,
+    source_scale: f64,
+    gmin_extra: f64,
+    x: &[f64],
+) -> f64 {
+    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+    for dev in devices.iter_mut() {
+        dev.eval(x, EvalFlags::dc(), ctx);
+        dev.load_residual(&mut mat.b);
+        dev.load_jacobian(&mut mat);
+    }
+    let n_nodes = topo.n_nodes();
+    for i in 0..n_nodes {
+        mat.a[i][i] += opts.gmin + gmin_extra;
+    }
+    let vsrc_end = n_nodes + topo.vsrc_index.len();
+    for i in vsrc_end..topo.size {
+        mat.a[i][i] += opts.gmin + gmin_extra;
+    }
+    let n = topo.size;
+    let mut sumsq = 0.0_f64;
+    for i in 0..n {
+        let mut row = 0.0_f64;
+        let a_row = &mat.a[i];
+        for j in 0..n {
+            row += a_row[j] * x[j];
+        }
+        let fi = row - mat.b[i];
+        sumsq += fi * fi;
+    }
+    sumsq.sqrt()
+}
+
 /// Core Newton-Raphson loop at a fixed source scale and gmin.
 ///
 /// `dev_names` and `phase` are only used to emit verbose diagnostics on
@@ -358,9 +404,44 @@ fn nr_inner(
             .map(|(n, o)| (n - o).abs())
             .fold(0.0f64, f64::max);
 
+        // Damping path. When the proposed Newton step is small enough that
+        // every node's update is below the `vmax` clamp threshold, take it
+        // verbatim — happy-path circuits incur zero extra cost. Otherwise
+        // clamp the step to `vmax` (the existing trust-region bound) and
+        // run Armijo backtracking on the L2 residual norm: pick the
+        // largest α ∈ {1, 1/2, 1/4, 1/8, 1/16} for which
+        //     ‖f(x + α·Δ)‖ ≤ (1 − c·α)·‖f(x)‖
+        // with c = 1e-4. If no α in the budget satisfies it, fall through
+        // with α_min — the next iteration's stamp will see the partial
+        // step and try again.
+        //
+        // Residual is f(x) = J(x)·x − b(x); evaluating it requires a full
+        // restamp at the trial point, so the line search costs up to 5
+        // extra eval+stamp passes on each clamped iteration.
         let x_next: Vec<f64> = if max_dv > opts.vmax {
             let scale = opts.vmax / max_dv;
-            x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
+            // Clamped Newton step: at α=1 this is the existing vmax-clamped
+            // update; Armijo lets us back off when the residual would grow.
+            let delta: Vec<f64> = x.iter().zip(x_new.iter())
+                .map(|(o, n)| scale * (n - o)).collect();
+
+            let f_prev = residual_l2(topo, netlist, devices, ctx, opts,
+                                     source_scale, gmin_extra, &x);
+            const C_ARMIJO: f64 = 1e-4;
+            const ALPHA_MIN: f64 = 1.0 / 16.0;
+            let mut alpha = 1.0_f64;
+            let mut x_trial: Vec<f64>;
+            loop {
+                x_trial = x.iter().zip(delta.iter())
+                    .map(|(o, d)| o + alpha * d).collect();
+                let f_trial = residual_l2(topo, netlist, devices, ctx, opts,
+                                          source_scale, gmin_extra, &x_trial);
+                if f_trial <= (1.0 - C_ARMIJO * alpha) * f_prev || alpha <= ALPHA_MIN {
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            x_trial
         } else {
             x_new
         };
