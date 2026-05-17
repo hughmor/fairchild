@@ -9,13 +9,13 @@ use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::EvalFlags;
+use crate::device::{Device, EvalFlags, ReactiveKind};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
     cap_companion, cap_companion_be_to_tr, cap_companion_gear2, cap_companion_tr_advance,
     ind_companion, ind_companion_be_to_tr, ind_companion_gear2, ind_companion_tr_advance,
-    stamp_netlist, CircuitTopology,
+    stamp_netlist, CircuitTopology, MnaMatrix,
 };
 use crate::newton::{build_devices, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
@@ -283,6 +283,115 @@ fn advance_companions(
     }
 }
 
+/// Seed device-internal reactive-branch companion state from the DC OP.
+///
+/// For each device, queries `reactive_branches()` once and computes the
+/// initial (G_eq, I_hist) using the DC-OP voltage across the branch's
+/// (pos, neg) terminals.  Returned as `[dev_idx][branch_idx] -> (G_eq, I_hist)`.
+fn init_device_reactive_state(
+    devices: &[Box<dyn Device>],
+    x: &[f64],
+    step: f64,
+    _mode: IntegratorMode,
+) -> Vec<Vec<(f64, f64)>> {
+    let mut out = Vec::with_capacity(devices.len());
+    for dev in devices {
+        let branches = dev.reactive_branches();
+        let mut dev_states = Vec::with_capacity(branches.len());
+        for br in &branches {
+            let v = match (br.pos, br.neg) {
+                (Some(p), Some(n)) => x[p] - x[n],
+                (Some(p), None)    => x[p],
+                (None,    Some(n)) => -x[n],
+                (None,    None)    => 0.0,
+            };
+            // TR always begins with a BE step for stability at discontinuities
+            // — mirrors the built-in Element::Capacitor handling.
+            let companion = match br.kind {
+                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
+                ReactiveKind::Inductor  => ind_companion(br.value, step, 0.0),
+            };
+            dev_states.push(companion);
+        }
+        out.push(dev_states);
+    }
+    out
+}
+
+/// Stamp the companion-model contributions of every device-internal
+/// reactive branch into `mat`.  Called inside the NR loop, AFTER each
+/// device's `load_jacobian_tran` (so the device's eval cache reflects the
+/// current iterate before the integrator re-queries the value).
+fn stamp_device_reactive_companions(
+    devices: &[Box<dyn Device>],
+    state: &[Vec<(f64, f64)>],
+    mat: &mut MnaMatrix,
+    step: f64,
+) {
+    for (dev_idx, dev) in devices.iter().enumerate() {
+        let branches = dev.reactive_branches();
+        for (br_idx, br) in branches.iter().enumerate() {
+            // Re-compute companion params using the CURRENT (per-NR-iter)
+            // device value, but reuse I_hist from the previous timestep.
+            let (_g_old, i_hist) = state[dev_idx][br_idx];
+            let g_eq = match br.kind {
+                ReactiveKind::Capacitor => br.value / step,
+                ReactiveKind::Inductor  => step / br.value.max(1e-30),
+            };
+            // Stamp G_eq between pos and neg (resistor pattern) and inject
+            // ±I_hist into the corresponding KCL rows.  For an inductor the
+            // current is i = G_eq · v + I_hist (history adds, doesn't subtract).
+            let i_sign = match br.kind {
+                ReactiveKind::Capacitor =>  1.0,
+                ReactiveKind::Inductor  => -1.0,
+            };
+            if let Some(p) = br.pos {
+                mat.a[p][p] += g_eq;
+                if let Some(n) = br.neg { mat.a[p][n] -= g_eq; }
+                mat.b[p] += i_sign * i_hist;
+            }
+            if let Some(n) = br.neg {
+                mat.a[n][n] += g_eq;
+                if let Some(p) = br.pos { mat.a[n][p] -= g_eq; }
+                mat.b[n] -= i_sign * i_hist;
+            }
+        }
+    }
+}
+
+/// Advance the device-internal reactive companion state after a successful
+/// timestep.  Reads V_C / I_L from the converged `x` and computes the next
+/// (G_eq, I_hist) using the device's reported value at the new operating
+/// point (already updated via `commit_timestep` + the next NR loop's eval).
+fn advance_device_reactive_state(
+    devices: &[Box<dyn Device>],
+    x: &[f64],
+    state: &mut [Vec<(f64, f64)>],
+    step: f64,
+) {
+    for (dev_idx, dev) in devices.iter().enumerate() {
+        let branches = dev.reactive_branches();
+        for (br_idx, br) in branches.iter().enumerate() {
+            let v = match (br.pos, br.neg) {
+                (Some(p), Some(n)) => x[p] - x[n],
+                (Some(p), None)    => x[p],
+                (None,    Some(n)) => -x[n],
+                (None,    None)    => 0.0,
+            };
+            let next = match br.kind {
+                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
+                ReactiveKind::Inductor  => {
+                    // i_L = G_eq · v_L + I_hist (history), then form next companion.
+                    let (g_eq, i_hist) = state[dev_idx][br_idx];
+                    let i_l = g_eq * v + i_hist;
+                    ind_companion(br.value, step, i_l)
+                }
+            };
+            state[dev_idx][br_idx] = next;
+        }
+    }
+}
+
 /// Append one time-point to a TranResult.
 fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
     result.time.push(t);
@@ -368,6 +477,11 @@ pub fn tran_nr_with_registry_opts(
 
     // Reactive companion state seeded from the DC OP.
     let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x, mode);
+    // Device-internal reactive branches (e.g., bias-dependent C_j on a
+    // depletion-mode PN-PS).  One companion-state pair per device per
+    // declared branch.  Indexed as dev_reactive_state[dev_idx][branch_idx].
+    let mut dev_reactive_state: Vec<Vec<(f64, f64)>> =
+        init_device_reactive_state(&devices, &x, step, mode);
 
     let n_steps = ((stop / step).ceil() as usize) + 2;
     let mut result = TranResult {
@@ -396,6 +510,11 @@ pub fn tran_nr_with_registry_opts(
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
+            // Stamp integrator-managed reactive companions for every
+            // device-declared linear reactive branch (uses the device's
+            // current bias-dependent value AND the history from the
+            // previous accepted timestep).
+            stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, step);
 
             for i in 0..topo.n_nodes() {
                 mat.a[i][i] += opts.gmin;
@@ -437,6 +556,7 @@ pub fn tran_nr_with_registry_opts(
 
         if t >= stop { break; }
         advance_companions(netlist, &topo, step, &x, &mut cap_state, &mut ind_state, mode, first_tr);
+        advance_device_reactive_state(&devices, &x, &mut dev_reactive_state, step);
         first_tr = false;
         t = (t + step).min(stop);
     }

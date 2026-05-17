@@ -54,6 +54,42 @@ impl SimContext {
     }
 }
 
+/// Kind of a device-internal reactive branch the integrator should manage
+/// with its companion-model machinery.  See [`ReactiveBranchSpec`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactiveKind {
+    Capacitor,
+    Inductor,
+}
+
+/// Specification for a linear (or quasi-linear) reactive branch contributed
+/// by a device.  The integrator owns the companion-model state for each
+/// branch — the device only declares "I have a capacitor between (pos, neg)
+/// with current value C(V_op)" and the transient solver does the BE / TR /
+/// BDF-2 companion stamping AND advance from the post-converged solution.
+///
+/// `value` is queried EVERY NR iteration via [`Device::reactive_branches`],
+/// so bias-dependent capacitance (e.g., depletion C_j(V) on a PN junction)
+/// works naturally — return `C_j(V_pn)` evaluated at the device's current
+/// cached operating-point voltage.  Newton converges through the value's
+/// nonlinearity the same way it converges through I(V) nonlinearity in
+/// `load_residual` / `load_jacobian`.
+///
+/// For state-variable physics that doesn't reduce to a linear C·dV/dt
+/// (carrier dynamics, thermal RC with self-heating from absorbed light),
+/// the device instead owns its own state through `commit_timestep` and
+/// stamps the discretised state equation directly in `load_jacobian_tran`.
+/// See the L3 PN-PS implementation for the canonical example (when it lands).
+#[derive(Clone, Copy, Debug)]
+pub struct ReactiveBranchSpec {
+    pub kind: ReactiveKind,
+    pub pos:  NodeId,
+    pub neg:  NodeId,
+    /// Current capacitance (F) or inductance (H) at the device's cached
+    /// operating point.  Re-queried per NR iteration.
+    pub value: f64,
+}
+
 /// Bit-flags controlling which contributions `eval` should compute.
 pub struct EvalFlags {
     /// Compute resistive (DC / quasi-static) contributions — I(V) and dI/dV.
@@ -113,6 +149,18 @@ pub trait Device: Send + Sync {
     /// Called once per accepted timestep in the variable-step integrator.
     /// Default is a no-op (correct for resistive-only and built-in devices).
     fn commit_timestep(&mut self, _x: &[f64]) {}
+
+    /// Linear (or bias-dependent linear) reactive branches the device
+    /// contributes to the MNA matrix.  The integrator stamps companion-
+    /// model (G_eq, I_hist) between (pos, neg) of each branch every NR
+    /// iteration in transient analysis, using the device-reported `value`
+    /// (typically C(V_op) at the current iterate).  After each successful
+    /// timestep the integrator reads V_C = x[pos] − x[neg] from the
+    /// converged solution and updates the history.
+    ///
+    /// Default empty.  Override for devices with linear C(V) or L(I)
+    /// contributions (depletion C_j on a PN, parasitic c_par on a PD).
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> { Vec::new() }
 
     /// Set a named real-valued parameter on this device instance.
     ///

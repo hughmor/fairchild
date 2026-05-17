@@ -1106,6 +1106,7 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
             | "fc_dcoupler"
             | "fc_grating_coupler"
             | "fc_pn_ps"
+            | "fc_pn_ps_cap"
             | "fc_pn_th_ps"
             | "fc_thermal_ps"
             | "fc_mzm"

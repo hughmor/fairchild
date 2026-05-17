@@ -8,7 +8,8 @@ use crate::mna::MnaMatrix;
 use crate::models::{
     Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
     NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter,
-    NativePnThermalPhaseShifter, NativeSplitter, NativeThermalPhaseShifter, NativeWaveguide,
+    NativePnPhaseShifterCap, NativePnThermalPhaseShifter, NativeSplitter,
+    NativeThermalPhaseShifter, NativeWaveguide,
     ShockleyDiode,
 };
 
@@ -198,6 +199,12 @@ impl DeviceRegistry {
         });
         self.register("fc_pn_ps", |terminals, ctx| {
             let mut d = NativePnPhaseShifter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_pn_ps_cap", |terminals, ctx| {
+            let mut d = NativePnPhaseShifterCap::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

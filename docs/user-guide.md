@@ -979,6 +979,52 @@ transmission `t_amp = √T`. Use this as the source-side MZM in a
 testbench schematic; for a chip-level MZI you'd combine
 `fc_splitter` + two `fc_pn_th_ps` arms + a second `fc_splitter`.
 
+### `fc_pn_ps_cap` — depletion-mode PN phase shifter with C_j(V)
+
+```
+X<name>  in  out  anode  cathode  fc_pn_ps_cap  [param=val …]
+```
+
+Same pin layout as `fc_pn_ps` (bundle-aware optical in/out plus PN
+anode/cathode).  Adds bias-dependent junction capacitance and an
+optional linear loss-vs-bias coefficient on top of the small-signal
+`dn_dv` from `fc_pn_ps`.
+
+| Parameter | Default | Description |
+|---|---|---|
+| (all `fc_pn_ps` params) | — | `L_um`, `n_g`, `dn_dv`, `g_pn`, `V_pi_L`, `alpha_dB_cm` carry over. |
+| `c_j0` | 20 fF | Zero-bias junction capacitance (F). |
+| `v_bi` | 0.7 | Built-in voltage (V) — knee at V_pn = V_bi/2. |
+| `m_j` | 0.5 | Grading coefficient (0.5 = abrupt junction). |
+| `da_dv` | 0 | Linear loss-vs-bias coefficient (Np/m per V); adds extra propagation absorption in reverse bias. |
+
+**Physics.** `C_j(V_pn) = C_j0 / (1 − V_pn/V_bi)^m_j` for V_pn ≤ V_bi/2,
+linearly continued above the knee for NR stability when the user drives
+the junction into forward bias.  The integrator owns the companion-model
+state for this junction capacitance via the new `Device::reactive_branches`
+hook (a single Capacitor branch between anode and cathode, value
+re-queried per NR iteration).  Forward-injection physics (high dn/dV,
+carrier recombination time constants, large da/dV) is reserved for a
+future `fc_pn_ps_inj` class.
+
+### Device-internal reactive state (for custom-device authors)
+
+`fc_pn_ps_cap` is the first device to use the new integrator-managed
+reactive-branch path.  If you're writing a custom photonic device that
+needs a linear (or bias-dependent linear) capacitance / inductance with
+proper BE / TR / BDF-2 companion handling, override
+`Device::reactive_branches` to return a `Vec<ReactiveBranchSpec>` — the
+transient solver in `tran.rs` does the rest (companion stamping each NR
+iteration AND state advance after each successful timestep).  See
+`NativePnPhaseShifterCap` for the canonical pattern.
+
+For nonlinear state coupled to the rest of the system (carrier density
+N(t), waveguide temperature T(t) with self-heating from optical
+absorption — i.e., the planned `fc_pn_ps_carrier` class), the device
+owns its own state through the existing `commit_timestep` hook and
+stamps the discretised state equation in `load_jacobian_tran` directly.
+That path is documented but not yet exercised by an upstream device.
+
 ### `fc_circulator` — 3-port bidirectional circulator
 
 ```

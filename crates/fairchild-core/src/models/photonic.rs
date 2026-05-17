@@ -15,7 +15,7 @@
 //! public textbook formulas (Saleh-Teich, Heuck-Englund, Pozar) and carry
 //! no PDK-specific calibration.
 
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1306,6 +1306,241 @@ impl Device for NativePnPhaseShifter {
                     &[(out_re_bw,  s), (out_im_bw, -c)]);
             }
         }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Native PN-junction phase shifter — depletion (L2 with bias-dependent C_j)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Depletion-mode PN-junction phase shifter with bias-dependent junction
+/// capacitance.  Same optical/electrical port layout and stamping as
+/// `fc_pn_ps`, plus:
+///   - `C_j(V) = C_j0 / (1 − V_pn/V_bi)^m_j` for V_pn ≤ V_bi/2 (depletion),
+///     linearly continued above the singularity to keep NR stable when
+///     the user wanders into forward bias.  The integrator owns the
+///     companion-model state for this capacitance via
+///     `Device::reactive_branches`.
+///   - `da/dV` — linear loss-vs-bias coefficient (free-carrier absorption
+///     in moderate forward bias).
+///
+/// Tier convention: this is a separate device class, not a `level=` switch
+/// on `fc_pn_ps`.  Forward-injection physics (higher dn/dV, large da/dV,
+/// carrier-injection time constants) belongs in a future `fc_pn_ps_inj`.
+pub struct NativePnPhaseShifterCap {
+    length_m:      f64,
+    n_g:           f64,
+    wl_ref_m:      f64,
+    dn_dv:         f64,
+    g_pn:          f64,
+    alpha_neper_m: f64,
+    // Bias-dependent C_j parameters.
+    c_j0:          f64,    // F at V_pn = 0
+    v_bi:          f64,    // V — built-in voltage (knee)
+    m_j:           f64,    // grading coefficient
+    // Linear da/dV loss-vs-bias (Np/m per V).  Default 0.
+    da_dv:         f64,
+    n_channels:    usize,
+    wpc:           usize,
+    nodes:         Vec<NodeId>,
+    branches:      Vec<Option<usize>>,
+    c_cached:      Vec<f64>,
+    s_cached:      Vec<f64>,
+    // Cached per-NR-iteration values used to re-feed the integrator's
+    // companion model AND the per-channel optical loss factor.
+    c_j_cached:    f64,
+    alpha_eff_neper_m: f64,
+}
+
+impl NativePnPhaseShifterCap {
+    pub fn new() -> Self {
+        Self {
+            length_m:      1e-3,
+            n_g:           4.2,
+            wl_ref_m:      1.55e-6,
+            dn_dv:         1e-4,
+            g_pn:          1e-3,
+            alpha_neper_m: 0.0,
+            c_j0:          20e-15,
+            v_bi:          0.7,
+            m_j:           0.5,
+            da_dv:         0.0,
+            n_channels:    0,
+            wpc:           3,
+            nodes:         Vec::new(),
+            branches:      Vec::new(),
+            c_cached:      Vec::new(),
+            s_cached:      Vec::new(),
+            c_j_cached:    20e-15,
+            alpha_eff_neper_m: 0.0,
+        }
+    }
+}
+
+impl Device for NativePnPhaseShifterCap {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wl_ref_m = ctx.lambda_center_m;
+        self.wpc      = ctx.wires_per_channel();
+        self.alpha_eff_neper_m = self.alpha_neper_m;
+    }
+
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
+        assert!(
+            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            "fc_pn_ps_cap: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
+            terminals.len()
+        );
+        let n = (terminals.len() - 2) / stride;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
+        self.c_cached   = vec![1.0; n];
+        self.s_cached   = vec![0.0; n];
+    }
+
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "l_um"   => { self.length_m = value * 1e-6; true }
+            "l_m" | "length" => { self.length_m = value; true }
+            "n_g"    => { self.n_g = value; true }
+            "dn_dv"  => { self.dn_dv = value; true }
+            "g_pn"   => { self.g_pn  = value; true }
+            "v_pi_l" => {
+                if value > 0.0 { self.dn_dv = self.wl_ref_m / (2.0 * value); }
+                true
+            }
+            "alpha_db_cm" => {
+                self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
+                true
+            }
+            "c_j0"   => { self.c_j0 = value.max(0.0); true }
+            "v_bi"   => { self.v_bi = value.max(1e-3); true }
+            "m_j"    => { self.m_j  = value.clamp(0.0, 0.99); true }
+            "da_dv"  => { self.da_dv = value; true }
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = 2 * wpc * n;
+        let v_a = self.nodes[elec_base    ].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
+        let v_pn = v_a - v_c;
+
+        // C_j(V_pn) with linear continuation above the depletion singularity.
+        // Knee chosen at V_bi/2 — matches SPICE diode convention.
+        let v_knee = 0.5 * self.v_bi;
+        self.c_j_cached = if v_pn < v_knee {
+            self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
+        } else {
+            // Linear extrapolation: c(V_knee) + (dc/dV at knee) · (V_pn − V_knee).
+            let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
+            let dc_dv  = c_knee * self.m_j / (self.v_bi - v_knee);
+            c_knee + dc_dv * (v_pn - v_knee)
+        };
+        // Bias-dependent loss: α(V) = α_0 + (da/dV) · max(0, −V_pn) — only
+        // adds extra absorption in reverse bias (free-carrier-like).
+        let v_rev = (-v_pn).max(0.0);
+        self.alpha_eff_neper_m = self.alpha_neper_m + self.da_dv * v_rev;
+        let t_amp  = (-self.alpha_eff_neper_m * self.length_m / 2.0).exp();
+
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let lam = wpc - 1;
+        for k in 0..n {
+            let lambda = match self.nodes[wpc * k + lam] {
+                Some(i) => {
+                    let v = x[i];
+                    if v.abs() > 1e-9 { v } else { self.wl_ref_m }
+                }
+                None => self.wl_ref_m,
+            };
+            let phi_prop = two_pi * self.n_g * self.length_m
+                           * (1.0 / lambda - 1.0 / self.wl_ref_m);
+            let phi_eo   = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
+            let phi      = phi_prop + phi_eo;
+            self.c_cached[k] = t_amp * phi.cos();
+            self.s_cached[k] = t_amp * phi.sin();
+        }
+    }
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base  = wpc * n;
+        let elec_base = 2 * wpc * n;
+        let g = self.g_pn;
+        let anode = self.nodes[elec_base];
+        let cath  = self.nodes[elec_base + 1];
+        if let Some(a) = anode {
+            mat.a[a][a] += g;
+            if let Some(c) = cath { mat.a[a][c] -= g; }
+        }
+        if let Some(c) = cath {
+            mat.a[c][c] += g;
+            if let Some(a) = anode { mat.a[c][a] -= g; }
+        }
+        for k in 0..n {
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            let c = self.c_cached[k];
+            let s = self.s_cached[k];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c), (in_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s), (in_im_fw, -c)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
+                &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c), (out_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s), (out_im_bw, -c)]);
+            }
+        }
+    }
+
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        // ONE shared depletion capacitance between anode and cathode (the
+        // single physical junction).  Bias-dependent value re-queried per
+        // NR iteration; the integrator owns the companion-model state.
+        let elec_base = 2 * self.wpc * self.n_channels;
+        let anode = self.nodes.get(elec_base    ).copied().flatten();
+        let cath  = self.nodes.get(elec_base + 1).copied().flatten();
+        vec![ReactiveBranchSpec {
+            kind:  ReactiveKind::Capacitor,
+            pos:   anode,
+            neg:   cath,
+            value: self.c_j_cached,
+        }]
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
