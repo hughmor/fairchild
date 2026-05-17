@@ -1109,6 +1109,7 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
             | "fc_pn_ps_cap"
             | "fc_pn_th_ps"
             | "fc_thermal_ps"
+            | "fc_thermal_ps_rc"
             | "fc_mzm"
             | "fc_photodetector"
             | "fc_circulator" => BundleArity::Aware,

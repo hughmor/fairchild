@@ -9,7 +9,7 @@ use crate::models::{
     Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
     NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter,
     NativePnPhaseShifterCap, NativePnThermalPhaseShifter, NativeSplitter,
-    NativeThermalPhaseShifter, NativeWaveguide,
+    NativeThermalPhaseShifter, NativeThermalPhaseShifterRc, NativeWaveguide,
     ShockleyDiode,
 };
 
@@ -193,6 +193,12 @@ impl DeviceRegistry {
         });
         self.register("fc_thermal_ps", |terminals, ctx| {
             let mut d = NativeThermalPhaseShifter::new();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            Box::new(d) as Box<dyn Device>
+        });
+        self.register("fc_thermal_ps_rc", |terminals, ctx| {
+            let mut d = NativeThermalPhaseShifterRc::new();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

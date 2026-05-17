@@ -1007,6 +1007,33 @@ re-queried per NR iteration).  Forward-injection physics (high dn/dV,
 carrier recombination time constants, large da/dV) is reserved for a
 future `fc_pn_ps_inj` class.
 
+### `fc_thermal_ps_rc` — thermal phase shifter with τ_th
+
+```
+X<name>  in  out  heat_p  heat_n  fc_thermal_ps_rc  [param=val …]
+```
+
+Same pin layout as `fc_thermal_ps`.  Adds a first-order thermal RC: the
+optical phase shift tracks the *filtered* heater dissipation rather than
+the instantaneous Joule power, so transient warm-up / cool-down on the
+thermo-optic time scale shows up in the simulation.
+
+| Parameter | Default | Description |
+|---|---|---|
+| (all `fc_thermal_ps` params) | — | `r_heater` / `r`, `p_pi` carry over. |
+| `tau_th` (or `tau`) | 10 µs | Thermal time constant (s). |
+
+**Physics.** `dT/dt = (P − T) / tau_th`, with T in normalised "power-
+equivalent" units so steady-state φ = π · T / P_pi matches the L1
+model.  In transient, an abrupt change in V_h propagates to T (and
+hence to φ) through the LPF.  At DC the state equation reduces to
+T = P and the optical output is identical to `fc_thermal_ps`.
+
+This is the canonical "path B" device — T(t) lives as an MNA state row
+the device allocates via `num_extra_nodes` and stamps a discretised
+state equation in `load_jacobian_tran`.  The previous-timestep T_old
+is captured via `commit_timestep`.
+
 ### Device-internal reactive state (for custom-device authors)
 
 `fc_pn_ps_cap` is the first device to use the new integrator-managed

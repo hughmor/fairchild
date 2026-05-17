@@ -1105,6 +1105,255 @@ impl Device for NativeThermalPhaseShifter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native thermal phase shifter with thermal time constant (L2 — path B)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Thermal phase shifter with a first-order thermal RC.  Same pin layout
+/// as `fc_thermal_ps`.  Adds:
+///   - `tau_th` — thermal time constant (s).  The optical phase shift
+///     tracks the FILTERED heater power rather than the instantaneous
+///     Joule dissipation: `dT/dt = (P − T) / tau_th`, with T in
+///     normalised "power-equivalent" units so the steady-state phase
+///     equals the L1 model's φ = π · P / P_pi.
+///
+/// Implementation: T is a *state variable* on the MNA matrix — the
+/// device allocates one extra row (above its optical branches) and
+/// stamps the BE-discretised state equation directly.  This is the
+/// "path B" pattern for nonlinear / nonlinear-coupled state, complementary
+/// to the linear-companion path A (used by `fc_pn_ps_cap` for C_j(V)).
+/// The previous-timestep T is captured via `commit_timestep` after each
+/// successful NR convergence.
+pub struct NativeThermalPhaseShifterRc {
+    r_heater:   f64,
+    p_pi:       f64,
+    tau_th:     f64,
+    n_channels: usize,
+    wpc:        usize,
+    nodes:      Vec<NodeId>,
+    /// Optical branch rows (re/im/λ per channel).  Same as L1.
+    branches:   Vec<Option<usize>>,
+    /// State row for T(t) (single MNA index allocated alongside branches).
+    t_state_idx: Option<usize>,
+    /// Previous-timestep value of T, captured by `commit_timestep`.
+    t_old:      f64,
+    /// Cached operating-point quantities (per NR iteration).
+    t_op:       f64,
+    v_h_op:     f64,
+    c_cached:   f64,
+    s_cached:   f64,
+}
+
+impl NativeThermalPhaseShifterRc {
+    pub fn new() -> Self {
+        Self {
+            r_heater:    1000.0,
+            p_pi:        10e-3,
+            tau_th:      10e-6,    // 10 µs typical waveguide heater
+            n_channels:  0,
+            wpc:         3,
+            nodes:       Vec::new(),
+            branches:    Vec::new(),
+            t_state_idx: None,
+            t_old:       0.0,
+            t_op:        0.0,
+            v_h_op:      0.0,
+            c_cached:    1.0,
+            s_cached:    0.0,
+        }
+    }
+}
+
+impl Device for NativeThermalPhaseShifterRc {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
+
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
+        assert!(
+            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            "fc_thermal_ps_rc: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
+            terminals.len()
+        );
+        let n = (terminals.len() - 2) / stride;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
+    }
+
+    fn num_extra_nodes(&self) -> usize {
+        // Optical branches + 1 state row for T(t).
+        self.branches.len() + 1
+    }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        let n = self.branches.len();
+        for i in 0..n { self.branches[i] = Some(first_idx + i); }
+        self.t_state_idx = Some(first_idx + n);
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "r_heater" | "r" => { self.r_heater = value; true }
+            "p_pi" | "p_pi_w" => { self.p_pi = value; true }
+            "tau_th" | "tau" => { self.tau_th = value.max(1e-30); true }
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = 2 * wpc * n;
+        let v_a = self.nodes[elec_base    ].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
+        self.v_h_op = v_a - v_c;
+        // Read T from the state row.
+        self.t_op = self.t_state_idx.map_or(0.0, |i| x[i]);
+        // Phase from T (filtered power).
+        let phi = std::f64::consts::PI * self.t_op / self.p_pi;
+        self.c_cached = phi.cos();
+        self.s_cached = phi.sin();
+    }
+
+    fn load_residual(&self, b: &mut [f64]) {
+        // DC: T = P (steady state).  Linearised: T − P_lin(V_h) = 0
+        // where P_lin = 2·V_h_op·V_h/R − V_h_op²/R, so
+        //   T − 2·V_h_op·V_h/R + V_h_op²/R = 0
+        //   ⇒ rearranged with V_h_op² constant on RHS:  b[t_idx] = −V_h_op²/R.
+        if let Some(t_idx) = self.t_state_idx {
+            let p_op = self.v_h_op * self.v_h_op / self.r_heater;
+            b[t_idx] -= p_op;
+        }
+    }
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base  = wpc * n;
+        let elec_base = 2 * wpc * n;
+        // Electrical: shared heater conductance.
+        let g = 1.0 / self.r_heater;
+        let p = self.nodes[elec_base];
+        let m = self.nodes[elec_base + 1];
+        if let Some(a) = p { mat.a[a][a] += g; if let Some(c) = m { mat.a[a][c] -= g; } }
+        if let Some(c) = m { mat.a[c][c] += g; if let Some(a) = p { mat.a[c][a] -= g; } }
+        // State row for T (DC: T = P, i.e., T - P_linearised = 0).
+        // Stamp: row = +1·T - (2·V_h_op/R)·V_hp + (2·V_h_op/R)·V_hn = +V_h_op²/R
+        if let Some(t_idx) = self.t_state_idx {
+            mat.a[t_idx][t_idx] += 1.0;
+            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            if let Some(hp) = p { mat.a[t_idx][hp] -= two_vop_over_r; }
+            if let Some(hn) = m { mat.a[t_idx][hn] += two_vop_over_r; }
+        }
+        // Optical branches: identical structure to fc_thermal_ps but using
+        // c_cached/s_cached derived from T (state).
+        let c_cos = self.c_cached;
+        let s_sin = self.s_cached;
+        for k in 0..n {
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c_cos), (in_im_fw, -s_sin)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s_sin), (in_im_fw, -c_cos)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
+                &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c_cos), (out_im_bw, -s_sin)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s_sin), (out_im_bw, -c_cos)]);
+            }
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        // BE-discretised state-row RHS:  b[t_idx] = T_old·α − V_h_op²/(R·τ).
+        // (The −V_h_op² term is the linearisation remainder of P_lin =
+        //  2·V_h_op·V_h/R − V_h_op²/R; the 2·V_h_op·V_h part is in the
+        //  Jacobian.)  Optical branch rows are homogeneous (no residual).
+        if let Some(t_idx) = self.t_state_idx {
+            let inv_tau = 1.0 / self.tau_th;
+            let p_op = self.v_h_op * self.v_h_op / self.r_heater;
+            b[t_idx] += self.t_old * alpha - p_op * inv_tau;
+        }
+    }
+
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base  = wpc * n;
+        let elec_base = 2 * wpc * n;
+        // Electrical: shared heater conductance.
+        let g = 1.0 / self.r_heater;
+        let p = self.nodes[elec_base];
+        let m = self.nodes[elec_base + 1];
+        if let Some(a) = p { mat.a[a][a] += g; if let Some(c) = m { mat.a[a][c] -= g; } }
+        if let Some(c) = m { mat.a[c][c] += g; if let Some(a) = p { mat.a[c][a] -= g; } }
+        // BE state-row Jacobian: T_new·(α + 1/τ) − 2·V_h_op·V_h/(R·τ) = …
+        if let Some(t_idx) = self.t_state_idx {
+            let inv_tau = 1.0 / self.tau_th;
+            mat.a[t_idx][t_idx] += alpha + inv_tau;
+            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            if let Some(hp) = p { mat.a[t_idx][hp] -= two_vop_over_r * inv_tau; }
+            if let Some(hn) = m { mat.a[t_idx][hn] += two_vop_over_r * inv_tau; }
+        }
+        // Optical branches (same as DC, c/s from cached T).
+        let c_cos = self.c_cached;
+        let s_sin = self.s_cached;
+        for k in 0..n {
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c_cos), (in_im_fw, -s_sin)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s_sin), (in_im_fw, -c_cos)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
+                &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c_cos), (out_im_bw, -s_sin)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s_sin), (out_im_bw, -c_cos)]);
+            }
+        }
+    }
+
+    fn commit_timestep(&mut self, x: &[f64]) {
+        // Snapshot T for use as T_old on the next timestep's BE stamp.
+        if let Some(idx) = self.t_state_idx {
+            self.t_old = x[idx];
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Native PN-junction phase shifter
 // ────────────────────────────────────────────────────────────────────────
 
