@@ -287,6 +287,7 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
         }
     }
 
+    if cli.verbose { opts.verbose = true; }
     opts
 }
 

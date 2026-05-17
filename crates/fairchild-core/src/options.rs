@@ -83,6 +83,18 @@ pub struct SimOptions {
     /// 1.55 µm (C-band).
     pub lambda_center_m: f64,
 
+    /// Emit diagnostic notes about solver progress to stderr.  Off by default.
+    /// When on, the analysis entry points (`dc_op_*`, `tran_*`) print:
+    ///   - MNA matrix size, NNZ, sparsity, diagonal magnitude spread (once,
+    ///     before NR begins);
+    ///   - which convergence phase ran (direct NR, source-stepping, gmin-
+    ///     stepping) and which one ultimately succeeded;
+    ///   - on NR non-convergence: the top-5 rows of the residual vector with
+    ///     node / source-branch names, and the device contributing the
+    ///     largest residual to each.
+    /// Set via `.options verbose=1`, CLI `--verbose`, or pyo3 `verbose=True`.
+    pub verbose: bool,
+
     /// Enable bidirectional optical propagation.  When off (default),
     /// optical bundles carry (re, im, λ) per channel — light only flows
     /// forward in the direction the device's port topology implies.  When
@@ -115,6 +127,7 @@ impl Default for SimOptions {
             solver:         SolverKind::Auto,
             lambda_center_m: 1.55e-6,
             bidirectional_propagation: false,
+            verbose:        false,
         }
     }
 }
@@ -183,6 +196,10 @@ impl SimOptions {
             }
             "lambda_center_m"  => {
                 self.lambda_center_m = parse_num(value).unwrap_or(self.lambda_center_m);
+            }
+            "verbose" => {
+                self.verbose = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
             }
             "enable_bidirectional" | "bidirectional" | "bidirectional_propagation" => {
                 self.bidirectional_propagation = matches!(value.to_lowercase().as_str(),

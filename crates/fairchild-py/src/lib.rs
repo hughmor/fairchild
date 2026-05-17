@@ -780,7 +780,7 @@ fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> P
         const OPTION_KEYS: &[&str] = &[
             "reltol", "abstol", "vntol", "vmax", "gmin",
             "itl1", "itl4", "maxstep", "max_step", "gmin_max", "srcsteps",
-            "method", "uic", "temp", "pnjlim", "solver",
+            "method", "uic", "temp", "pnjlim", "solver", "verbose",
         ];
         for key in OPTION_KEYS {
             if let Some(v) = kw.get_item(key)? {

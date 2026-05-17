@@ -87,6 +87,31 @@ impl NrResult {
     }
 }
 
+/// Return refdes/instance names for each device in the order that
+/// `build_devices` produces them.  Used by the verbose failure-reporter
+/// to attribute residual rows to a named device.
+pub fn build_device_names(netlist: &Netlist) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Diode { name, model_name, .. } => {
+                names.push(format!("{name} ({model_name})"));
+            }
+            Element::Mosfet { name, model_name, .. } => {
+                names.push(format!("{name} ({model_name})"));
+            }
+            Element::Behavioral { name, kind, .. } => {
+                names.push(format!("{name} ({kind:?})"));
+            }
+            Element::XOsdi { name, model_name, .. } => {
+                names.push(format!("{name} ({model_name})"));
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Build device instances from the elements in a netlist via the registry.
 pub fn build_devices(
     netlist: &Netlist,
@@ -161,7 +186,133 @@ pub fn build_devices(
     Ok(devices)
 }
 
+/// Report MNA matrix size, NNZ, sparsity, and diagonal magnitude spread.
+/// Called once at the start of `dc_op_nr_with_registry_opts` when verbose
+/// is enabled — gives a sense of problem size and rough conditioning
+/// before NR even starts.
+fn report_matrix_stats(
+    opts: &SimOptions,
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+) {
+    if !opts.verbose { return; }
+    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let x0 = vec![0.0f64; topo.size];
+    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    for dev in devices.iter_mut() {
+        dev.eval(&x0, EvalFlags::dc(), ctx);
+        dev.load_jacobian(&mut mat);
+    }
+    let n = topo.size;
+    let mut nnz = 0usize;
+    let mut diag_max = 0.0_f64;
+    let mut diag_min = f64::INFINITY;
+    for i in 0..n {
+        for j in 0..n {
+            if mat.a[i][j] != 0.0 { nnz += 1; }
+        }
+        let d = mat.a[i][i].abs();
+        if d > 0.0 {
+            if d > diag_max { diag_max = d; }
+            if d < diag_min { diag_min = d; }
+        }
+    }
+    let total = (n as f64) * (n as f64);
+    let sparsity_pct = 100.0 * (1.0 - (nnz as f64) / total.max(1.0));
+    eprintln!("info: MNA size: {n} rows ({} nodes + {} vsrc + {} extras); \
+               nnz={nnz} ({sparsity_pct:.1}% sparse)",
+        topo.n_nodes(), topo.vsrc_index.len(),
+        n - topo.n_nodes() - topo.vsrc_index.len());
+    if diag_min < f64::INFINITY {
+        eprintln!("info: MNA diagonal magnitude spread (mixed units; large spread \
+                   often indicates poor scaling): min={:.2e} max={:.2e} ratio={:.2e}",
+            diag_min, diag_max, diag_max / diag_min.max(1e-300));
+    }
+}
+
+/// Reverse-lookup an MNA row index → human-readable name.
+fn row_name(topo: &CircuitTopology, r: usize) -> String {
+    let n_nodes = topo.n_nodes();
+    if r < n_nodes {
+        for (name, &i) in &topo.node_index {
+            if i == r { return format!("v({name})"); }
+        }
+    } else if r < n_nodes + topo.vsrc_index.len() {
+        for (name, &i) in &topo.vsrc_index {
+            if i + n_nodes == r { return format!("i({name})"); }
+        }
+    } else {
+        return format!("x[{r}] (device-internal)");
+    }
+    format!("x[{r}]")
+}
+
+/// Print the top-K rows of the residual vector with names and the
+/// dominant-contributing device for each, plus the offending iterate's
+/// most-changed nodes.
+fn report_failure(
+    phase: &str,
+    opts: &SimOptions,
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    dev_names: &[String],
+    ctx: &SimContext,
+    x: &[f64],
+    source_scale: f64,
+    gmin_extra: f64,
+) {
+    if !opts.verbose { return; }
+    // Recompute the residual at the failed iterate `x` so we can attribute
+    // rows to devices.
+    let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
+    let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+    for dev in devices.iter_mut() {
+        dev.eval(x, EvalFlags::dc(), ctx);
+        dev.load_residual(&mut mat.b);
+    }
+    let b = mat.b.clone();
+
+    // Score each row's dominant device by probing each device into a scratch
+    // residual.  O(N_devices × N_rows) but only runs on failure.
+    let mut row_owner: Vec<Option<usize>> = vec![None; b.len()];
+    let mut row_owner_mag: Vec<f64> = vec![0.0; b.len()];
+    let mut scratch = vec![0.0f64; b.len()];
+    for (di, dev) in devices.iter_mut().enumerate() {
+        scratch.iter_mut().for_each(|v| *v = 0.0);
+        dev.eval(x, EvalFlags::dc(), ctx);
+        dev.load_residual(&mut scratch);
+        for (r, &v) in scratch.iter().enumerate() {
+            if v.abs() > row_owner_mag[r] {
+                row_owner_mag[r] = v.abs();
+                row_owner[r] = Some(di);
+            }
+        }
+    }
+
+    let mut idx: Vec<usize> = (0..b.len()).collect();
+    idx.sort_by(|&a, &c| b[c].abs().partial_cmp(&b[a].abs()).unwrap());
+
+    let l2: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    eprintln!("info: NR did NOT converge in {phase} (residual L2 = {l2:.3e}, \
+               source_scale={source_scale:.3}, gmin_extra={gmin_extra:.2e})");
+    eprintln!("info: top 5 residual rows:");
+    for &r in idx.iter().take(5) {
+        let owner = match row_owner[r] {
+            Some(d) if d < dev_names.len() => dev_names[d].as_str(),
+            _ => "(linear stamp)",
+        };
+        eprintln!("info:   {:>4}  {:<35}  b={:>11.3e}  x={:>11.3e}  dom: {}",
+            r, row_name(topo, r), b[r], x[r], owner);
+    }
+}
+
 /// Core Newton-Raphson loop at a fixed source scale and gmin.
+///
+/// `dev_names` and `phase` are only used to emit verbose diagnostics on
+/// non-convergence.  Pass an empty slice + "" to suppress.
 fn nr_inner(
     topo: &CircuitTopology,
     netlist: &Netlist,
@@ -172,6 +323,8 @@ fn nr_inner(
     mut x: Vec<f64>,
     source_scale: f64,
     gmin_extra: f64,
+    dev_names: &[String],
+    phase: &str,
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
@@ -220,6 +373,10 @@ fn nr_inner(
             return Ok(x);
         }
     }
+    if opts.verbose && !phase.is_empty() {
+        report_failure(phase, opts, topo, netlist, devices, dev_names, ctx,
+                       &x, source_scale, gmin_extra);
+    }
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }
 
@@ -232,6 +389,7 @@ fn source_stepping(
     opts: &SimOptions,
     solver: &dyn LinearSolver,
     x0: Vec<f64>,
+    dev_names: &[String],
 ) -> Result<Vec<f64>, SimError> {
     let mut x = x0;
     let mut scale = 0.0_f64;
@@ -240,7 +398,11 @@ fn source_stepping(
 
     while scale < 1.0 {
         let next = (scale + ds).min(1.0);
-        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(), next, 0.0) {
+        // Suppress per-step failure reports during the inner stepping
+        // loop — most failures are recoverable by halving ds.  Only the
+        // outer give-up below is worth reporting.
+        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(),
+                       next, 0.0, &[], "") {
             Ok(x_new) => {
                 x = x_new;
                 scale = next;
@@ -249,6 +411,17 @@ fn source_stepping(
             Err(_) => {
                 ds *= 0.5;
                 if ds < min_ds {
+                    if opts.verbose {
+                        eprintln!("info: source-stepping gave up at scale={scale:.3} \
+                                   (ds shrank to {ds:.2e} < {min_ds:.0e}); \
+                                   replaying last failing step for diagnosis");
+                        // Replay the last failing step with reporting on.
+                        let _ = nr_inner(topo, netlist, devices, ctx, opts, solver,
+                                         x.clone(), (scale + ds*2.0).min(1.0), 0.0,
+                                         dev_names,
+                                         &format!("source-stepping @ scale={:.3}",
+                                                  (scale + ds*2.0).min(1.0)));
+                    }
                     return Err(SimError::NoConvergence { iters: opts.itl1 });
                 }
             }
@@ -265,19 +438,29 @@ fn gmin_stepping(
     ctx: &SimContext,
     opts: &SimOptions,
     solver: &dyn LinearSolver,
+    dev_names: &[String],
 ) -> Result<Vec<f64>, SimError> {
     let mut gmin_extra = opts.gmin_max;
     let target = opts.gmin;
     let mut x = vec![0.0f64; topo.size];
 
     loop {
-        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(), 1.0, gmin_extra) {
+        // Quiet during the inner ramp; only the outer failure is reported.
+        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(),
+                       1.0, gmin_extra, &[], "") {
             Ok(x_new) => {
                 x = x_new;
                 if gmin_extra <= target { break; }
                 gmin_extra = (gmin_extra * 0.1).max(target);
             }
             Err(_) => {
+                if opts.verbose {
+                    eprintln!("info: gmin-stepping FAILED at gmin_extra={gmin_extra:.2e} \
+                               (target gmin={target:.2e}); replaying for diagnosis");
+                    let _ = nr_inner(topo, netlist, devices, ctx, opts, solver,
+                                     x.clone(), 1.0, gmin_extra, dev_names,
+                                     &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"));
+                }
                 return Err(SimError::NoConvergence { iters: opts.itl1 });
             }
         }
@@ -313,19 +496,35 @@ pub fn dc_op_nr_with_registry_opts(
     let mut topo = CircuitTopology::build(netlist);
 
     let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let dev_names = build_device_names(netlist);
     let x0 = build_x0_from_nodeset(netlist, &topo);
     let solver = opts.linear_solver(topo.size);
 
-    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, &*solver, x0.clone(), 1.0, 0.0) {
+    if opts.verbose {
+        report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);
+        eprintln!("info: DC OP: trying direct Newton-Raphson from \
+                   {} seed...",
+            if !netlist.nodeset.is_empty() {"nodeset"} else {"x=0"});
+    }
+    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, &*solver,
+                            x0.clone(), 1.0, 0.0, &dev_names, "direct NR (DC OP)") {
+        if opts.verbose { eprintln!("info: DC OP: direct NR succeeded"); }
         return Ok(NrResult { topo, x, iters: 1 });
     }
 
-    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver, x0) {
+    if opts.verbose { eprintln!("info: DC OP: direct NR failed; trying source-stepping..."); }
+    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver,
+                                   x0, &dev_names) {
+        if opts.verbose { eprintln!("info: DC OP: source-stepping succeeded"); }
         return Ok(NrResult { topo, x, iters: 2 });
     }
 
-    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver) {
-        Ok(x) => Ok(NrResult { topo, x, iters: 3 }),
+    if opts.verbose { eprintln!("info: DC OP: source-stepping failed; trying gmin-stepping..."); }
+    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver, &dev_names) {
+        Ok(x) => {
+            if opts.verbose { eprintln!("info: DC OP: gmin-stepping succeeded"); }
+            Ok(NrResult { topo, x, iters: 3 })
+        }
         Err(e) => Err(e),
     }
 }
@@ -352,16 +551,19 @@ pub fn dc_op_nr_with_devices_opts(
 ) -> Result<NrResult, SimError> {
     let x0 = vec![0.0f64; topo.size];
     let solver = opts.linear_solver(topo.size);
+    let dev_names = build_device_names(netlist);
 
-    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, &*solver, x0.clone(), 1.0, 0.0) {
+    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, &*solver,
+                            x0.clone(), 1.0, 0.0, &dev_names, "direct NR (DC OP)") {
         return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
     }
 
-    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver, x0) {
+    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver,
+                                   x0, &dev_names) {
         return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
     }
 
-    match gmin_stepping(topo, netlist, devices, ctx, opts, &*solver) {
+    match gmin_stepping(topo, netlist, devices, ctx, opts, &*solver, &dev_names) {
         Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
         Err(e) => Err(e),
     }
