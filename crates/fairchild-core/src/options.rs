@@ -82,6 +82,16 @@ pub struct SimOptions {
     /// lambda_center_nm=1310` (O-band) or `lambda_center_m=…`.  Default
     /// 1.55 µm (C-band).
     pub lambda_center_m: f64,
+
+    /// Enable bidirectional optical propagation.  When off (default),
+    /// optical bundles carry (re, im, λ) per channel — light only flows
+    /// forward in the direction the device's port topology implies.  When
+    /// on, bundles carry (re_fw, im_fw, re_bw, im_bw, λ) per channel, and
+    /// every photonic device stamps independent forward + backward paths;
+    /// circulators, terminators, and reflective devices become meaningful.
+    /// Set via `.options enable_bidirectional=1` or `--opt
+    /// enable_bidirectional=1`.
+    pub bidirectional_propagation: bool,
 }
 
 impl Default for SimOptions {
@@ -104,6 +114,7 @@ impl Default for SimOptions {
             pnjlim:         true,
             solver:         SolverKind::Auto,
             lambda_center_m: 1.55e-6,
+            bidirectional_propagation: false,
         }
     }
 }
@@ -137,6 +148,7 @@ impl SimOptions {
             omega_0: 0.0,
             jlim_enabled: self.pnjlim,
             lambda_center_m: self.lambda_center_m,
+            bidirectional_propagation: self.bidirectional_propagation,
         }
     }
 
@@ -171,6 +183,10 @@ impl SimOptions {
             }
             "lambda_center_m"  => {
                 self.lambda_center_m = parse_num(value).unwrap_or(self.lambda_center_m);
+            }
+            "enable_bidirectional" | "bidirectional" | "bidirectional_propagation" => {
+                self.bidirectional_propagation = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
             }
             "max_rejections" => self.max_rejections = parse_int(value).unwrap_or(self.max_rejections),
             "method" => {

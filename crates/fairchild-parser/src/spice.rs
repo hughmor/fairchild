@@ -634,6 +634,14 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     // Pass 1.
     let (subckt_defs, global_params, main_lines) = collect_defs(&all_lines[body_start..])?;
 
+    // Pre-scan for `.options enable_bidirectional=…` so we know how to size
+    // optical-port wires when we see `.optical_port` directives in pass 2.
+    // The flag is sticky — first match wins; later `.options` lines that
+    // override the value still take effect through `SimOptions::from_netlist`
+    // at the consumer side, but the parser-emitted wire names are fixed at
+    // parse time.
+    let bidirectional = scan_bidirectional(&main_lines);
+
     // Pass 2: parse main body.
     let mut expanding: HashSet<String> = HashSet::new();
     let mut current_alter: Option<crate::AlterBlock> = None;
@@ -678,7 +686,7 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 } else {
                     1
                 };
-                let port = crate::OpticalPort { name, channels };
+                let port = crate::OpticalPort { name, channels, bidirectional };
                 for w in port.all_wires() {
                     netlist.optical_nets.push(w);
                 }
@@ -1021,6 +1029,34 @@ fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
         fstart: parse_value(tokens[3], lineno)?,
         fstop:  parse_value(tokens[4], lineno)?,
     })
+}
+
+/// Scan main-body lines for `.options enable_bidirectional=…` and return the
+/// resulting flag.  Matches `enable_bidirectional`, `bidirectional`, and
+/// `bidirectional_propagation` (mirrors `SimOptions::set`).  Last match wins.
+fn scan_bidirectional(main_lines: &[(usize, String)]) -> bool {
+    let mut bidir = false;
+    for (_, line) in main_lines {
+        let trimmed = line.trim();
+        let lc = trimmed.to_lowercase();
+        if !lc.starts_with(".options") && !lc.starts_with(".option") {
+            continue;
+        }
+        for tok in trimmed.split_whitespace().skip(1) {
+            let (k, v) = if let Some((k, v)) = tok.split_once('=') {
+                (k.to_lowercase(), v.to_string())
+            } else {
+                (tok.to_lowercase(), String::new())
+            };
+            if k == "enable_bidirectional" || k == "bidirectional"
+                || k == "bidirectional_propagation"
+            {
+                bidir = matches!(v.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+            }
+        }
+    }
+    bidir
 }
 
 /// How a device handles WDM bundles, from the *parser's* perspective.  Drives

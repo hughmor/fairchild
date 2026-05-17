@@ -51,29 +51,51 @@ pub struct Netlist {
 
 /// A bundle optical port declared via `.optical_port NAME [N]`.
 ///
-/// A reference to `NAME` in an X-element net list expands to N copies of the
-/// 3-wire `(NAME_re_i, NAME_im_i, NAME_wl_i)` tuple; the device instance is
-/// replicated once per channel when `channels > 1`.
+/// Each channel expands to either a 3-wire `(NAME_re_i, NAME_im_i,
+/// NAME_wl_i)` tuple (unidirectional, default) or a 5-wire `(NAME_re_fw_i,
+/// NAME_im_fw_i, NAME_re_bw_i, NAME_im_bw_i, NAME_wl_i)` tuple when
+/// bidirectional propagation is enabled via
+/// `.options enable_bidirectional=1`.  The `bidirectional` flag is set by
+/// the parser after reading `.options`; downstream `wires_for_channel` /
+/// `all_wires` honour it transparently.
 #[derive(Debug, Clone)]
 pub struct OpticalPort {
     pub name: String,
     pub channels: usize,
+    pub bidirectional: bool,
 }
 
 impl OpticalPort {
+    /// Number of underlying wires per channel — 3 for unidirectional,
+    /// 5 for bidirectional.
+    pub fn wires_per_channel(&self) -> usize {
+        if self.bidirectional { 5 } else { 3 }
+    }
+
     /// Underlying wire names for channel `ch` of this port.
-    pub fn wires_for_channel(&self, ch: usize) -> [String; 3] {
-        [
-            format!("{}_re_{}", self.name, ch),
-            format!("{}_im_{}", self.name, ch),
-            format!("{}_wl_{}", self.name, ch),
-        ]
+    pub fn wires_for_channel(&self, ch: usize) -> Vec<String> {
+        if self.bidirectional {
+            vec![
+                format!("{}_re_fw_{}", self.name, ch),
+                format!("{}_im_fw_{}", self.name, ch),
+                format!("{}_re_bw_{}", self.name, ch),
+                format!("{}_im_bw_{}", self.name, ch),
+                format!("{}_wl_{}", self.name, ch),
+            ]
+        } else {
+            vec![
+                format!("{}_re_{}", self.name, ch),
+                format!("{}_im_{}", self.name, ch),
+                format!("{}_wl_{}", self.name, ch),
+            ]
+        }
     }
 
     /// Every underlying wire across every channel.  Used to register the
     /// port's wires as optical nets for discipline-check purposes.
     pub fn all_wires(&self) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.channels * 3);
+        let stride = self.wires_per_channel();
+        let mut out = Vec::with_capacity(self.channels * stride);
         for ch in 0..self.channels {
             out.extend(self.wires_for_channel(ch));
         }

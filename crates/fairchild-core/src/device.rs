@@ -19,6 +19,12 @@ pub struct SimContext {
     /// the actual wire value wins.  Set via `.options lambda_center_nm=1310`
     /// for O-band designs, `lambda_center_nm=1550` (default) for C-band.
     pub lambda_center_m: f64,
+    /// When true, optical bundles carry 5 wires per channel
+    /// (re_fw, im_fw, re_bw, im_bw, λ) and every photonic device stamps
+    /// both forward and backward paths.  When false (default), bundles
+    /// carry 3 wires (re, im, λ) and devices only stamp the forward
+    /// direction.  Sourced from `SimOptions::bidirectional_propagation`.
+    pub bidirectional_propagation: bool,
 }
 
 impl Default for SimContext {
@@ -28,6 +34,7 @@ impl Default for SimContext {
             omega_0: 0.0,
             jlim_enabled: true,
             lambda_center_m: 1.55e-6,
+            bidirectional_propagation: false,
         }
     }
 }
@@ -36,6 +43,14 @@ impl SimContext {
     /// Thermal voltage kT/q in volts.
     pub fn vt(&self) -> f64 {
         K_BOLTZMANN * self.temperature / Q_ELECTRON
+    }
+
+    /// Number of underlying SVEA wires that a single bundle channel occupies.
+    /// 3 for unidirectional (re, im, λ); 5 for bidirectional (re_fw, im_fw,
+    /// re_bw, im_bw, λ).  Photonic devices that derive `n_channels` from
+    /// `terminals.len()` should query this to know the per-channel stride.
+    pub fn wires_per_channel(&self) -> usize {
+        if self.bidirectional_propagation { 5 } else { 3 }
     }
 }
 

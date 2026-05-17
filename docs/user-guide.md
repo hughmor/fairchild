@@ -1012,6 +1012,41 @@ and reference it on instances via a `params=fast_pn` symbol field
 (separate from `model=`, which still names the device class). This is
 optional — instance-side params alone are the common case.
 
+### Bidirectional propagation (`enable_bidirectional`)
+
+By default fairchild's photonic discipline is unidirectional: each
+`.optical_port` channel carries 3 wires (`re`, `im`, `λ`) and light
+only flows in the direction the device's port topology implies.
+
+Enable bidirectional propagation with
+
+```spice
+.options enable_bidirectional=1
+```
+
+(or `bidirectional=1`, or via `--opt enable_bidirectional=1` / Python
+kwarg). Each channel then carries 5 wires (`re_fw`, `im_fw`, `re_bw`,
+`im_bw`, `λ`) and every bundle-aware photonic device stamps an
+independent forward path and backward path. The wavelength wire is
+shared between the two directions.
+
+Wire-name convention under bidir:
+
+| Direction | Wires |
+|---|---|
+| Unidirectional (default) | `<port>_re_<k>`, `<port>_im_<k>`, `<port>_wl_<k>` |
+| Bidirectional            | `<port>_re_fw_<k>`, `<port>_im_fw_<k>`, `<port>_re_bw_<k>`, `<port>_im_bw_<k>`, `<port>_wl_<k>` |
+
+**Backscattering is not modelled at this tier.** Even with bidir on,
+no device couples the forward and backward paths through a scattering
+matrix — they're independent. That means you can drive a ring in
+either direction and read it out from the appropriate side without
+re-wiring the schematic, but reflections off endpoints or coupling
+from forward into backward inside a device aren't represented.
+`fc_circulator` lets you route light through a directional path on a
+testbench; an unconnected port acts as a perfect terminator (no
+device drives the floating wires).
+
 ### Combined-physics rule for shared-state devices
 
 A bundle-aware device like `fc_pn_ps` represents ONE physical PN
