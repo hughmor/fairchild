@@ -798,10 +798,6 @@ impl Device for NativePhotodetector {
 pub struct NativeThermalPhaseShifter {
     r_heater: f64,
     p_pi:     f64,
-    // Tier of the thermal-PS model: 1 (instantaneous Joule heating →
-    // phase), 2 (thermal time constant tau_th), 3 (N-doped photoconductive
-    // heater — separate device).  Scaffolded; L2/L3 not yet wired.
-    level:    u32,
     n_channels: usize,
     nodes:    Vec<NodeId>,
     branches: Vec<Option<usize>>,
@@ -814,7 +810,6 @@ impl NativeThermalPhaseShifter {
         Self {
             r_heater: 1000.0,
             p_pi:     10e-3,
-            level:    1,
             n_channels: 0,
             nodes:    Vec::new(),
             branches: Vec::new(),
@@ -853,21 +848,6 @@ impl Device for NativeThermalPhaseShifter {
         match name.to_lowercase().as_str() {
             "r_heater" | "r" => { self.r_heater = value; true }
             "p_pi" | "p_pi_w" => { self.p_pi = value; true }
-            "level" => {
-                let lvl = value.round() as u32;
-                if lvl < 1 || lvl > 3 {
-                    eprintln!("warning: fc_thermal_ps level={} out of range [1..=3]; using 1", lvl);
-                    self.level = 1;
-                } else {
-                    if lvl > 1 {
-                        eprintln!("warning: fc_thermal_ps level={} is scaffolded but not yet implemented; falling back to L1", lvl);
-                    }
-                    self.level = lvl;
-                }
-                true
-            }
-            // Forward-compat L2/L3 keywords (accepted, no effect at L1):
-            "tau_th" | "c_th" | "r_th" | "alpha_dB_cm_photo" | "responsivity_photo" => true,
             _ => false,
         }
     }
@@ -962,11 +942,6 @@ pub struct NativePnPhaseShifter {
     dn_dv:    f64,
     g_pn:     f64,
     alpha_neper_m: f64,
-    // Tier of the PN-PS model: 1 (current first-pass), 2 (bias-dependent
-    // C_j + dn/dV + da/dV), 3 (full carrier dynamics + TPA + photocurrent).
-    // L2/L3 implementations are scaffolded but not yet wired into the
-    // stamping paths — current code path treats every level as L1.
-    level:    u32,
     n_channels: usize,
     nodes:    Vec<NodeId>,
     branches: Vec<Option<usize>>,
@@ -983,7 +958,6 @@ impl NativePnPhaseShifter {
             dn_dv:    1e-4,        // small Δn per V
             g_pn:     1e-3,        // 1 mS series conductance
             alpha_neper_m: 0.0,    // lossless by default
-            level:    1,
             n_channels: 0,
             nodes:    Vec::new(),
             branches: Vec::new(),
@@ -1031,22 +1005,6 @@ impl Device for NativePnPhaseShifter {
             "l_um"   => { self.length_m = value * 1e-6; true }
             "l_m" | "length" => { self.length_m = value; true }
             "n_g"    => { self.n_g = value; true }
-            "level"  => {
-                let lvl = value.round() as u32;
-                if lvl < 1 || lvl > 3 {
-                    eprintln!("warning: fc_pn_ps level={} out of range [1..=3]; using 1", lvl);
-                    self.level = 1;
-                } else {
-                    if lvl > 1 {
-                        eprintln!("warning: fc_pn_ps level={} is scaffolded but not yet implemented; falling back to L1", lvl);
-                    }
-                    self.level = lvl;
-                }
-                true
-            }
-            // Forward-compat L2/L3 keywords (accepted, no effect at L1):
-            "c_j0" | "v_bi" | "m_j" | "da_dv"
-                | "tau_carrier" | "tpa_beta" | "c_th" | "r_th_carrier" => true,
             "dn_dv"  => { self.dn_dv = value; true }
             "g_pn"   => { self.g_pn  = value; true }
             "v_pi_l" => {
@@ -1164,8 +1122,6 @@ pub struct NativePnThermalPhaseShifter {
     p_pi_th:         f64,
     // Shared loss along the segment.
     alpha_neper_m:   f64,
-    // Tier — same convention as fc_pn_ps / fc_thermal_ps.  L2/L3 scaffolded.
-    level:           u32,
     n_channels:      usize,
     nodes:           Vec<NodeId>,
     branches:        Vec<Option<usize>>,
@@ -1184,7 +1140,6 @@ impl NativePnThermalPhaseShifter {
             r_heater:        1000.0,
             p_pi_th:         10e-3,
             alpha_neper_m:   0.0,
-            level:           1,
             n_channels:      0,
             nodes:           Vec::new(),
             branches:        Vec::new(),
@@ -1239,24 +1194,6 @@ impl Device for NativePnThermalPhaseShifter {
                 self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
                 true
             }
-            "level" => {
-                let lvl = value.round() as u32;
-                if !(1..=3).contains(&lvl) {
-                    eprintln!("warning: fc_pn_th_ps level={lvl} out of range [1..=3]; using 1");
-                    self.level = 1;
-                } else {
-                    if lvl > 1 {
-                        eprintln!("warning: fc_pn_th_ps level={lvl} is scaffolded but not yet implemented; falling back to L1");
-                    }
-                    self.level = lvl;
-                }
-                true
-            }
-            // L2/L3 forward-compat keywords (accepted, no effect at L1):
-            "c_j0" | "v_bi" | "m_j" | "da_dv"
-                | "tau_carrier" | "tpa_beta"
-                | "tau_th" | "c_th" | "r_th" | "r_th_carrier"
-                | "alpha_dB_cm_photo" | "responsivity_photo" => true,
             _ => false,
         }
     }

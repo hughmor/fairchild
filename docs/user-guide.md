@@ -799,7 +799,6 @@ X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
 | `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
 | `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. ONE conductance shared across all N optical channels — see WDM note below. |
 | `alpha_dB_cm` | 0 | Propagation loss along the PN section. For a closed-loop ring this loss sets the extinction ratio of the resonance dip — without it the ring is all-pass. |
-| `level` | 1 | Model tier (1/2/3 — see "Tiered photonic models" below). L2/L3 keywords (`c_j0`, `v_bi`, `m_j`, `da_dv`, `tau_carrier`, `tpa_beta`, `c_th`, `r_th_carrier`) are accepted at L1 with no effect, so a schematic that opts into L2 today won't need re-editing when L2 ships. |
 
 **WDM behaviour.** `fc_pn_ps` is bundle-aware. On an N-channel optical
 bus, ONE `fc_pn_ps` instance handles all N optical paths and presents ONE
@@ -905,7 +904,6 @@ X<name>  in  out  heat_p  heat_n  fc_thermal_ps  [param=val …]
 |---|---|---|
 | `r_heater` / `r` | 1000 | Heater resistance (Ω). |
 | `p_pi` / `p_pi_w` | 10e-3 | Heater power for π phase shift (W). |
-| `level` | 1 | Model tier (1/2/3). L2 keywords (`tau_th`, `c_th`, `r_th`) and L3 keywords (`alpha_dB_cm_photo`, `responsivity_photo`) are accepted at L1 with no effect. |
 
 **WDM behaviour.** Like `fc_pn_ps`, this is bundle-aware. One device, one
 shared heater, all N optical channels see the same phase shift (no
@@ -944,7 +942,6 @@ X<name>  in  out  anode  cathode  heat_p  heat_n  fc_pn_th_ps  [param=val …]
 | `r_heater` / `r` | 1000 | Heater resistance (Ω) between heat_p and heat_n. |
 | `p_pi` / `p_pi_th` | 10e-3 | Heater power for π phase shift (W). |
 | `alpha_dB_cm` | 0 | Propagation loss along the section. |
-| `level` | 1 | Model tier (1/2/3). L2/L3 keywords accepted with no effect at L1. |
 
 **Physics.** φ_total = φ_prop + φ_eo_pn + φ_th_heater. The two electrical
 interfaces are independent — driving only the PN gives `fc_pn_ps`
@@ -982,46 +979,60 @@ transmission `t_amp = √T`. Use this as the source-side MZM in a
 testbench schematic; for a chip-level MZI you'd combine
 `fc_splitter` + two `fc_pn_th_ps` arms + a second `fc_splitter`.
 
-### Tiered photonic models (`level=`)
+### Tiered photonic models (separate device classes)
 
-`fc_pn_ps` and `fc_thermal_ps` (and the upcoming `fc_pn_th_ps`) expose
-a `level=` instance parameter, following the MOSFET tier convention:
+`fc_pn_ps`, `fc_thermal_ps`, and `fc_pn_th_ps` ship today as the basic
+linearised first-pass models. Richer physics is exposed by *separate
+model names* — not by a `level=` switch. Reasons:
 
-- **L1** (default): the current first-pass linearised models. Small-
-  signal `dn/dV`, constant junction conductance, instantaneous Joule
-  heating. Fast and good enough for topology validation and
-  small-signal AC.
-- **L2** *(scaffolded; impl in progress)*: bias-dependent junction
-  capacitance `C_j(V)`, distinct reverse / forward `dn/dV` and `dα/dV`,
-  thermal time constant `tau_th` for the heater. Captures bandwidth
-  rolloff, swing-asymmetry, and warm-up transients.
-- **L3** *(planned)*: full carrier dynamics (carrier-density state
-  variable in the MNA matrix, recombination time, two-photon
-  absorption, self-heating from linear + nonlinear loss), and the
-  N-doped photoconductive heater as a separate physics regime of the
-  thermal-PS family.
+- Tiers aren't strictly linear: a future model may add carrier
+  dynamics without adding C_j(V), or vice versa.
+- Side variants (forward-only vs. reverse-only PN, photoconductive vs.
+  ohmic heater) deserve their own names, not a flag on a base type.
+- Selection happens in one place — the KiCad symbol's `model=` field —
+  so users still edit one property to choose physics.
 
-L2/L3 keywords (`c_j0`, `v_bi`, `m_j`, `da_dv`, `tau_carrier`,
-`tpa_beta`, `c_th`, `r_th_carrier`, `tau_th`, …) are accepted at every
-level — they're no-ops below the tier that consumes them. That means a
-schematic written for L2 *today* (with `level=2 c_j0=20f tau_carrier=1n
-…`) runs correctly under L1 fallback semantics until L2 lands, then
-upgrades automatically — no schematic edit required.
+Planned upcoming classes (subject to refinement as L2/L3 land):
 
-**KiCad workflow.** Every photonic family is one symbol. Set
-`level=` and any tier params directly on the symbol instance — the
-common-case UX is "edit one place, the symbol". For circuits with
-many instances sharing the same physics tier and params, drop a
-SPICE-native `.model` card on the sheet as a text element:
+- `fc_pn_ps_cap` — small-signal `dn/dV` + bias-dependent depletion C_j(V).
+- `fc_pn_ps_carrier` — full carrier dynamics, TPA, self-heating from
+  linear + nonlinear loss, photocurrent at the electrodes.
+- `fc_thermal_ps_rc` — heater with thermal time constant tau_th.
+- `fc_thermal_ps_photo` — N-doped photoconductive heater (a different
+  physics regime, not just a tier increment of `fc_thermal_ps`).
+
+**SPICE `.model` cards** are supported as a sharing mechanism — drop
+a text element on the schematic like
 
 ```
-.model fast_pn fc_pn_ps level=2 c_j0=20f tau_carrier=1n
+.model fast_pn fc_pn_ps_cap c_j0=20f v_bi=0.7
 ```
 
-and point each instance at it via a `params=fast_pn` field (separate
-KiCad property from `model=fc_pn_ps`, which still names the device
-family). Per-instance params override card params. This is purely
-optional — instance-side params alone cover most setups.
+and reference it on instances via a `params=fast_pn` symbol field
+(separate from `model=`, which still names the device class). This is
+optional — instance-side params alone are the common case.
+
+### Combined-physics rule for shared-state devices
+
+A bundle-aware device like `fc_pn_ps` represents ONE physical PN
+junction interacting with multiple optical modes (channels +, once
+implemented, directions). The shared physics MUST integrate across all
+modes:
+
+- The single V_pn drives one current — N parallel channels do NOT
+  create N parallel conductances. (Already enforced.)
+- When future tiers add thermal state from absorbed power, the heat
+  generated is the SUM of absorbed power across every channel and
+  direction, and the resulting Δn applies to EVERY channel/direction.
+- When future tiers add carrier dynamics, the free-carrier density is
+  driven by absorption from ALL modes; the resulting Δn and Δα affect
+  ALL modes.
+
+This is the natural consequence of "one physical device handles all
+the modes" — it shouldn't require special user awareness, just correct
+implementation. Bundle-aware stamps already sum currents across
+channels into the shared electrical nodes; the same pattern extends to
+shared thermal and carrier states.
 
 ### Registering PDK-specific aliases
 
