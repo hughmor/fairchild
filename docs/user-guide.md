@@ -979,6 +979,32 @@ transmission `t_amp = √T`. Use this as the source-side MZM in a
 testbench schematic; for a chip-level MZI you'd combine
 `fc_splitter` + two `fc_pn_th_ps` arms + a second `fc_splitter`.
 
+### `fc_circulator` — 3-port bidirectional circulator
+
+```
+X<name>  p1  p2  p3  fc_circulator
+```
+
+Routes light cyclically: incoming at port 1 exits port 2, incoming at
+port 2 exits port 3, incoming at port 3 exits port 1. **Requires
+`enable_bidirectional=1`** — without it the device errors out on
+instantiation (a circulator is meaningless in unidirectional mode).
+
+Wire convention at every port: `re_fw` / `im_fw` flow INWARD (incoming
+to the device); `re_bw` / `im_bw` flow OUTWARD (leaving toward whatever
+is connected). λ is tied across all three ports.
+
+Typical use — round-trip monitoring of a device-under-test (DUT):
+
+```
+[laser] → port 1 (drive p1_re_fw_*)
+port 2 ↔ [DUT]   (forward stimulus + reflected return)
+port 3 → [PD]    (PD reads p3_re_bw_*: only the reflection back from p2)
+```
+
+No insertion loss or isolation parameters at this tier — the model is
+an ideal 3-port circulator.
+
 ### Tiered photonic models (separate device classes)
 
 `fc_pn_ps`, `fc_thermal_ps`, and `fc_pn_th_ps` ship today as the basic
