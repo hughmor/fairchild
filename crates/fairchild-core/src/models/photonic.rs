@@ -202,6 +202,7 @@ pub struct NativeDirectionalCoupler {
     kappa_per_m: f64,
     length_m:    f64,
     n_channels:  usize,
+    wpc:         usize,            // 3 or 5
     nodes:       Vec<NodeId>,
     branches:    Vec<Option<usize>>,
 }
@@ -209,9 +210,10 @@ pub struct NativeDirectionalCoupler {
 impl NativeDirectionalCoupler {
     pub fn new() -> Self {
         Self {
-            kappa_per_m: 100.0,    // 100 rad/m — gives κL = 0.5 at L = 5 mm
+            kappa_per_m: 100.0,
             length_m:    5e-3,
             n_channels:  0,
+            wpc:         3,
             nodes:       Vec::new(),
             branches:    Vec::new(),
         }
@@ -221,18 +223,26 @@ impl NativeDirectionalCoupler {
 impl Device for NativeDirectionalCoupler {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 4 * wpc; // 4 ports per channel
         assert!(
-            !terminals.is_empty() && terminals.len() % 12 == 0,
-            "fc_dcoupler: terminal count must be 12·N for N ≥ 1 channels; got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_dcoupler: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 12;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 6 * n];
+        // Per channel: 4 fw branches (re, im for c and d) + (if bidir) 4 bw
+        // branches (re, im for a and b) + 2 λ branches (c_λ, d_λ).
+        let bpc = if wpc == 5 { 10 } else { 6 };
+        self.branches   = vec![None; bpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -259,36 +269,62 @@ impl Device for NativeDirectionalCoupler {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n  = self.n_channels;
-        let kl = self.kappa_per_m * self.length_m;
-        let t  = kl.cos();
-        let s  = kl.sin();
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let kl  = self.kappa_per_m * self.length_m;
+        let t   = kl.cos();
+        let s   = kl.sin();
+        let bpc = if wpc == 5 { 10 } else { 6 };
+        let lam = wpc - 1;
+        let port_b = wpc * n;
+        let port_c = 2 * wpc * n;
+        let port_d = 3 * wpc * n;
         for k in 0..n {
-            let a_re = self.nodes[3 * k];
-            let a_im = self.nodes[3 * k + 1];
-            let a_l  = self.nodes[3 * k + 2];
-            let b_re = self.nodes[3 * n + 3 * k];
-            let b_im = self.nodes[3 * n + 3 * k + 1];
-            // b_λ at 3n + 3k + 2 — unused (wavelength tag flows from a side).
-            let c_re = self.nodes[6 * n + 3 * k];
-            let c_im = self.nodes[6 * n + 3 * k + 1];
-            let c_l  = self.nodes[6 * n + 3 * k + 2];
-            let d_re = self.nodes[9 * n + 3 * k];
-            let d_im = self.nodes[9 * n + 3 * k + 1];
-            let d_l  = self.nodes[9 * n + 3 * k + 2];
-            // c_re = t·a_re + s·b_im
-            stamp_potential_eq(mat, &self.branches, 6 * k,     c_re, &[(a_re, -t), (b_im, -s)]);
-            // c_im = t·a_im − s·b_re
-            stamp_potential_eq(mat, &self.branches, 6 * k + 1, c_im, &[(a_im, -t), (b_re,  s)]);
-            // c_λ  = a_λ
-            stamp_potential_eq(mat, &self.branches, 6 * k + 2, c_l,  &[(a_l, -1.0)]);
-            // d_re = t·b_re + s·a_im
-            stamp_potential_eq(mat, &self.branches, 6 * k + 3, d_re, &[(b_re, -t), (a_im, -s)]);
-            // d_im = t·b_im − s·a_re
-            stamp_potential_eq(mat, &self.branches, 6 * k + 4, d_im, &[(b_im, -t), (a_re,  s)]);
-            // d_λ  = a_λ  (closed-loop bind safety; see prior comment in
-            // history for the bug this avoids on micro-rings).
-            stamp_potential_eq(mat, &self.branches, 6 * k + 5, d_l,  &[(a_l, -1.0)]);
+            let a_re_fw = self.nodes[wpc * k];
+            let a_im_fw = self.nodes[wpc * k + 1];
+            let a_l     = self.nodes[wpc * k + lam];
+            let b_re_fw = self.nodes[port_b + wpc * k];
+            let b_im_fw = self.nodes[port_b + wpc * k + 1];
+            let c_re_fw = self.nodes[port_c + wpc * k];
+            let c_im_fw = self.nodes[port_c + wpc * k + 1];
+            let c_l     = self.nodes[port_c + wpc * k + lam];
+            let d_re_fw = self.nodes[port_d + wpc * k];
+            let d_im_fw = self.nodes[port_d + wpc * k + 1];
+            let d_l     = self.nodes[port_d + wpc * k + lam];
+            // Forward: c, d are outputs computed from a, b inputs.
+            stamp_potential_eq(mat, &self.branches, bpc * k,     c_re_fw,
+                &[(a_re_fw, -t), (b_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, c_im_fw,
+                &[(a_im_fw, -t), (b_re_fw,  s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 2, d_re_fw,
+                &[(b_re_fw, -t), (a_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 3, d_im_fw,
+                &[(b_im_fw, -t), (a_re_fw,  s)]);
+            // λ wires: c_λ = a_λ, d_λ = a_λ (closed-loop bind safety).
+            stamp_potential_eq(mat, &self.branches, bpc * k + 4, c_l,
+                &[(a_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l,
+                &[(a_l, -1.0)]);
+            if wpc == 5 {
+                // Bw: a, b are outputs computed from c, d inputs (same matrix,
+                // reciprocal coupler).
+                let a_re_bw = self.nodes[wpc * k + 2];
+                let a_im_bw = self.nodes[wpc * k + 3];
+                let b_re_bw = self.nodes[port_b + wpc * k + 2];
+                let b_im_bw = self.nodes[port_b + wpc * k + 3];
+                let c_re_bw = self.nodes[port_c + wpc * k + 2];
+                let c_im_bw = self.nodes[port_c + wpc * k + 3];
+                let d_re_bw = self.nodes[port_d + wpc * k + 2];
+                let d_im_bw = self.nodes[port_d + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 6, a_re_bw,
+                    &[(c_re_bw, -t), (d_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 7, a_im_bw,
+                    &[(c_im_bw, -t), (d_re_bw,  s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 8, b_re_bw,
+                    &[(d_re_bw, -t), (c_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 9, b_im_bw,
+                    &[(d_im_bw, -t), (c_re_bw,  s)]);
+            }
         }
     }
 
@@ -316,6 +352,7 @@ pub struct NativeSplitter {
     alpha:      f64,
     r:          f64,
     n_channels: usize,
+    wpc:        usize,
     nodes:      Vec<NodeId>,
     branches:   Vec<Option<usize>>,
 }
@@ -326,6 +363,7 @@ impl NativeSplitter {
             alpha:      1.0,
             r:          0.5,
             n_channels: 0,
+            wpc:        3,
             nodes:      Vec::new(),
             branches:   Vec::new(),
         }
@@ -335,18 +373,28 @@ impl NativeSplitter {
 impl Device for NativeSplitter {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 3 * wpc; // 3 ports per channel
         assert!(
-            !terminals.is_empty() && terminals.len() % 9 == 0,
-            "fc_splitter: terminal count must be 9·N for N ≥ 1 channels; got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_splitter: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 9;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 6 * n];
+        // Per channel: 4 fw branches (re, im for out_a + out_b) + 2 λ +
+        // (if bidir) 2 bw branches (re, im for in_a).  Note: under bidir the
+        // splitter behaves like a combiner in reverse — bw light from out_a
+        // and out_b combine back into in.  re_bw_in = k_a · re_bw_a + k_b · re_bw_b.
+        let bpc = if wpc == 5 { 8 } else { 6 };
+        self.branches   = vec![None; bpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -386,24 +434,46 @@ impl Device for NativeSplitter {
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 8 } else { 6 };
+        let lam = wpc - 1;
+        let port_c = wpc * n;
+        let port_d = 2 * wpc * n;
         let k_a = self.r.max(0.0).sqrt();
         let k_b = (self.alpha - self.r).max(0.0).sqrt();
         for k in 0..n {
-            let a_re = self.nodes[3 * k];
-            let a_im = self.nodes[3 * k + 1];
-            let a_l  = self.nodes[3 * k + 2];
-            let c_re = self.nodes[3 * n + 3 * k];
-            let c_im = self.nodes[3 * n + 3 * k + 1];
-            let c_l  = self.nodes[3 * n + 3 * k + 2];
-            let d_re = self.nodes[6 * n + 3 * k];
-            let d_im = self.nodes[6 * n + 3 * k + 1];
-            let d_l  = self.nodes[6 * n + 3 * k + 2];
-            stamp_potential_eq(mat, &self.branches, 6 * k,     c_re, &[(a_re, -k_a)]);
-            stamp_potential_eq(mat, &self.branches, 6 * k + 1, c_im, &[(a_im, -k_a)]);
-            stamp_potential_eq(mat, &self.branches, 6 * k + 2, c_l,  &[(a_l, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, 6 * k + 3, d_re, &[(a_re, -k_b)]);
-            stamp_potential_eq(mat, &self.branches, 6 * k + 4, d_im, &[(a_im, -k_b)]);
-            stamp_potential_eq(mat, &self.branches, 6 * k + 5, d_l,  &[(a_l, -1.0)]);
+            let a_re_fw = self.nodes[wpc * k];
+            let a_im_fw = self.nodes[wpc * k + 1];
+            let a_l     = self.nodes[wpc * k + lam];
+            let c_re_fw = self.nodes[port_c + wpc * k];
+            let c_im_fw = self.nodes[port_c + wpc * k + 1];
+            let c_l     = self.nodes[port_c + wpc * k + lam];
+            let d_re_fw = self.nodes[port_d + wpc * k];
+            let d_im_fw = self.nodes[port_d + wpc * k + 1];
+            let d_l     = self.nodes[port_d + wpc * k + lam];
+            // Forward: c, d are scaled outputs of a.
+            stamp_potential_eq(mat, &self.branches, bpc * k,     c_re_fw, &[(a_re_fw, -k_a)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, c_im_fw, &[(a_im_fw, -k_a)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 2, c_l,     &[(a_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 3, d_re_fw, &[(a_re_fw, -k_b)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 4, d_im_fw, &[(a_im_fw, -k_b)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l,     &[(a_l, -1.0)]);
+            if wpc == 5 {
+                // Backward: in.bw is the (reciprocal) combination of out_a.bw and out_b.bw.
+                // The same coupling matrix applies on the way back:
+                //   a.re_bw = k_a · c.re_bw + k_b · d.re_bw
+                //   a.im_bw = k_a · c.im_bw + k_b · d.im_bw
+                let a_re_bw = self.nodes[wpc * k + 2];
+                let a_im_bw = self.nodes[wpc * k + 3];
+                let c_re_bw = self.nodes[port_c + wpc * k + 2];
+                let c_im_bw = self.nodes[port_c + wpc * k + 3];
+                let d_re_bw = self.nodes[port_d + wpc * k + 2];
+                let d_im_bw = self.nodes[port_d + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 6, a_re_bw,
+                    &[(c_re_bw, -k_a), (d_re_bw, -k_b)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 7, a_im_bw,
+                    &[(c_im_bw, -k_a), (d_im_bw, -k_b)]);
+            }
         }
     }
 
@@ -421,31 +491,38 @@ impl Device for NativeSplitter {
 pub struct NativeGratingCoupler {
     alpha_db:   f64,
     n_channels: usize,
+    wpc:        usize,
     nodes:      Vec<NodeId>,
     branches:   Vec<Option<usize>>,
 }
 
 impl NativeGratingCoupler {
     pub fn new() -> Self {
-        Self { alpha_db: 3.0, n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
+        Self { alpha_db: 3.0, n_channels: 0, wpc: 3, nodes: Vec::new(), branches: Vec::new() }
     }
 }
 
 impl Device for NativeGratingCoupler {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
         assert!(
-            !terminals.is_empty() && terminals.len() % 6 == 0,
-            "fc_grating_coupler: terminal count must be 6·N for N ≥ 1 channels; got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_grating_coupler: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 6;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -471,18 +548,30 @@ impl Device for NativeGratingCoupler {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base = wpc * n;
         let t = 10f64.powf(-self.alpha_db / 20.0);
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re, &[(in_re, -t)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im, &[(in_im, -t)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,  &[(in_l, -1.0)]);
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw, &[(in_re_fw, -t)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw, &[(in_im_fw, -t)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l, &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw, &[(out_re_bw, -t)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw, &[(out_im_bw, -t)]);
+            }
         }
     }
 
@@ -888,9 +977,10 @@ pub struct NativeThermalPhaseShifter {
     r_heater: f64,
     p_pi:     f64,
     n_channels: usize,
+    wpc:      usize,
     nodes:    Vec<NodeId>,
     branches: Vec<Option<usize>>,
-    c_cached: f64,    // shared across channels (no wavelength dependence)
+    c_cached: f64,
     s_cached: f64,
 }
 
@@ -900,6 +990,7 @@ impl NativeThermalPhaseShifter {
             r_heater: 1000.0,
             p_pi:     10e-3,
             n_channels: 0,
+            wpc:      3,
             nodes:    Vec::new(),
             branches: Vec::new(),
             c_cached: 1.0,
@@ -911,18 +1002,24 @@ impl NativeThermalPhaseShifter {
 impl Device for NativeThermalPhaseShifter {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
         assert!(
-            terminals.len() >= 8 && (terminals.len() - 2) % 6 == 0,
-            "fc_thermal_ps: terminal count must be 6·N + 2 for N ≥ 1 channels; got {}",
+            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            "fc_thermal_ps: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = (terminals.len() - 2) / 6;
+        let n = (terminals.len() - 2) / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -942,14 +1039,14 @@ impl Device for NativeThermalPhaseShifter {
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        let n = self.n_channels;
-        let v_a = self.nodes[6 * n].map_or(0.0, |i| x[i]);
-        let v_c = self.nodes[6 * n + 1].map_or(0.0, |i| x[i]);
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = 2 * wpc * n;
+        let v_a = self.nodes[elec_base    ].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let v   = v_a - v_c;
         let p   = v * v / self.r_heater;
         let phi = std::f64::consts::PI * p / self.p_pi;
-        // Same phase shift on every channel — thermo-optic shift is
-        // wavelength-independent in this first-pass model.
         self.c_cached = phi.cos();
         self.s_cached = phi.sin();
     }
@@ -957,11 +1054,16 @@ impl Device for NativeThermalPhaseShifter {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        // Electrical: ONE shared resistor.
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base  = wpc * n;
+        let elec_base = 2 * wpc * n;
+        // Electrical: ONE shared heater resistor.
         let g = 1.0 / self.r_heater;
-        let p = self.nodes[6 * n];
-        let m = self.nodes[6 * n + 1];
+        let p = self.nodes[elec_base];
+        let m = self.nodes[elec_base + 1];
         if let Some(a) = p {
             mat.a[a][a] += g;
             if let Some(c) = m { mat.a[a][c] -= g; }
@@ -970,22 +1072,31 @@ impl Device for NativeThermalPhaseShifter {
             mat.a[c][c] += g;
             if let Some(a) = p { mat.a[c][a] -= g; }
         }
-        // Optical: per-channel branch equations.
         let c_cos = self.c_cached;
         let s_sin = self.s_cached;
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
-                &[(in_re, -c_cos), (in_im, -s_sin)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
-                &[(in_re,  s_sin), (in_im, -c_cos)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c_cos), (in_im_fw, -s_sin)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s_sin), (in_im_fw, -c_cos)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
                 &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c_cos), (out_im_bw, -s_sin)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s_sin), (out_im_bw, -c_cos)]);
+            }
         }
     }
 
@@ -1026,12 +1137,13 @@ impl Device for NativeThermalPhaseShifter {
 /// wavelengths pass through.
 pub struct NativePnPhaseShifter {
     length_m: f64,
-    n_g:      f64,           // group index — sets free-running propagation phase
-    wl_ref_m: f64,           // reference wavelength: φ_prop ≡ 0 at λ = wl_ref
+    n_g:      f64,
+    wl_ref_m: f64,
     dn_dv:    f64,
     g_pn:     f64,
     alpha_neper_m: f64,
     n_channels: usize,
+    wpc:      usize,                 // 3 or 5
     nodes:    Vec<NodeId>,
     branches: Vec<Option<usize>>,
     c_cached: Vec<f64>,
@@ -1041,13 +1153,14 @@ pub struct NativePnPhaseShifter {
 impl NativePnPhaseShifter {
     pub fn new() -> Self {
         Self {
-            length_m: 1e-3,        // 1 mm
-            n_g:      4.2,         // typical silicon group index
-            wl_ref_m: 1.55e-6,     // C-band reference
-            dn_dv:    1e-4,        // small Δn per V
-            g_pn:     1e-3,        // 1 mS series conductance
-            alpha_neper_m: 0.0,    // lossless by default
+            length_m: 1e-3,
+            n_g:      4.2,
+            wl_ref_m: 1.55e-6,
+            dn_dv:    1e-4,
+            g_pn:     1e-3,
+            alpha_neper_m: 0.0,
             n_channels: 0,
+            wpc:      3,
             nodes:    Vec::new(),
             branches: Vec::new(),
             c_cached: Vec::new(),
@@ -1060,23 +1173,25 @@ impl Device for NativePnPhaseShifter {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
     fn setup_model(&mut self, ctx: &SimContext) {
-        // EO reference wavelength = band centre.  Per-instance overrides via
-        // `wavelength_nm=` were removed in A.3 — devices that don't emit
-        // their own wavelength get it from the bus (driven by the laser).
         self.wl_ref_m = ctx.lambda_center_m;
+        self.wpc = ctx.wires_per_channel();
     }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        // Layout: 3·N (in bundle) + 3·N (out bundle) + 2 (anode, cathode) = 6N + 2.
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc; // in + out bundle
+        // Layout: wpc·N (in) + wpc·N (out) + 2 (anode, cathode).
         assert!(
-            terminals.len() >= 8 && (terminals.len() - 2) % 6 == 0,
-            "fc_pn_ps: terminal count must be 6·N + 2 for N ≥ 1 channels; got {}",
+            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            "fc_pn_ps: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = (terminals.len() - 2) / 6;
+        let n = (terminals.len() - 2) / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        let bpc = if wpc == 5 { 5 } else { 3 }; // branches per channel
+        self.branches   = vec![None; bpc * n];
         self.c_cached   = vec![1.0; n];
         self.s_cached   = vec![0.0; n];
     }
@@ -1114,17 +1229,17 @@ impl Device for NativePnPhaseShifter {
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        let n = self.n_channels;
-        // Electrical pins are the last two terminals; same V_pn drives every channel.
-        let v_a = self.nodes[6 * n].map_or(0.0, |i| x[i]);
-        let v_c = self.nodes[6 * n + 1].map_or(0.0, |i| x[i]);
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = 2 * wpc * n;
+        let v_a = self.nodes[elec_base    ].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
         let two_pi = 2.0 * std::f64::consts::PI;
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
-
+        let lam = wpc - 1;
         for k in 0..n {
-            // Per-channel λ wire (input bundle for channel k, third wire).
-            let lambda = match self.nodes[3 * k + 2] {
+            let lambda = match self.nodes[wpc * k + lam] {
                 Some(i) => {
                     let v = x[i];
                     if v.abs() > 1e-9 { v } else { self.wl_ref_m }
@@ -1143,11 +1258,16 @@ impl Device for NativePnPhaseShifter {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        // ── Electrical: ONE linear PN-junction conductance shared across channels.
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base  = wpc * n;
+        let elec_base = 2 * wpc * n;
+        // Electrical: ONE shared PN-junction conductance.
         let g = self.g_pn;
-        let anode = self.nodes[6 * n];
-        let cath  = self.nodes[6 * n + 1];
+        let anode = self.nodes[elec_base];
+        let cath  = self.nodes[elec_base + 1];
         if let Some(a) = anode {
             mat.a[a][a] += g;
             if let Some(c) = cath { mat.a[a][c] -= g; }
@@ -1156,22 +1276,35 @@ impl Device for NativePnPhaseShifter {
             mat.a[c][c] += g;
             if let Some(a) = anode { mat.a[c][a] -= g; }
         }
-        // ── Optical: per-channel branch equations (3 per channel).
+        // Optical: per-channel branch equations.
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
             let c = self.c_cached[k];
             let s = self.s_cached[k];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
-                &[(in_re, -c), (in_im, -s)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
-                &[(in_re,  s), (in_im, -c)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c), (in_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s), (in_im_fw, -c)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
                 &[(in_l, -1.0)]);
+            if wpc == 5 {
+                // Backward path mirrors fw: bw entering at out exits at in
+                // with same propagation + EO phase shift (one physical
+                // junction; same Δn applies to either direction).
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c), (out_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s), (out_im_bw, -c)]);
+            }
         }
     }
 
@@ -1212,6 +1345,7 @@ pub struct NativePnThermalPhaseShifter {
     // Shared loss along the segment.
     alpha_neper_m:   f64,
     n_channels:      usize,
+    wpc:             usize,
     nodes:           Vec<NodeId>,
     branches:        Vec<Option<usize>>,
     c_cached:        Vec<f64>,
@@ -1230,6 +1364,7 @@ impl NativePnThermalPhaseShifter {
             p_pi_th:         10e-3,
             alpha_neper_m:   0.0,
             n_channels:      0,
+            wpc:             3,
             nodes:           Vec::new(),
             branches:        Vec::new(),
             c_cached:        Vec::new(),
@@ -1243,19 +1378,23 @@ impl Device for NativePnThermalPhaseShifter {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wl_ref_m = ctx.lambda_center_m;
+        self.wpc = ctx.wires_per_channel();
     }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        // 6·N (optical bundles in+out) + 4 (anode, cathode, heat_p, heat_n).
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
         assert!(
-            terminals.len() >= 10 && (terminals.len() - 4) % 6 == 0,
-            "fc_pn_th_ps: terminal count must be 6·N + 4 for N ≥ 1 channels; got {}",
+            terminals.len() >= stride + 4 && (terminals.len() - 4) % stride == 0,
+            "fc_pn_th_ps: terminal count must be {stride}·N + 4 (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = (terminals.len() - 4) / 6;
+        let n = (terminals.len() - 4) / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
         self.c_cached   = vec![1.0; n];
         self.s_cached   = vec![0.0; n];
     }
@@ -1288,10 +1427,9 @@ impl Device for NativePnThermalPhaseShifter {
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        let n = self.n_channels;
-        // Electrical pins: anode, cathode, heat_p, heat_n live at the END
-        // of the terminal vector (after the optical block).
-        let elec = 6 * n;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec = 2 * wpc * n;
         let v_a    = self.nodes[elec    ].map_or(0.0, |i| x[i]);
         let v_c    = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_hp   = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
@@ -1302,8 +1440,9 @@ impl Device for NativePnThermalPhaseShifter {
         let phi_th = std::f64::consts::PI * p_heat / self.p_pi_th;
         let two_pi = 2.0 * std::f64::consts::PI;
         let t_amp  = (-self.alpha_neper_m * self.length_m / 2.0).exp();
+        let lam = wpc - 1;
         for k in 0..n {
-            let lambda = match self.nodes[3 * k + 2] {
+            let lambda = match self.nodes[wpc * k + lam] {
                 Some(i) => {
                     let v = x[i];
                     if v.abs() > 1e-9 { v } else { self.wl_ref_m }
@@ -1322,8 +1461,12 @@ impl Device for NativePnThermalPhaseShifter {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        let elec = 6 * n;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base = wpc * n;
+        let elec = 2 * wpc * n;
         // Electrical (PN side): ONE g_pn between anode and cathode.
         let anode = self.nodes[elec];
         let cath  = self.nodes[elec + 1];
@@ -1350,20 +1493,30 @@ impl Device for NativePnThermalPhaseShifter {
         }
         // Optical: per-channel branch equations using cached rotation.
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
             let c = self.c_cached[k];
             let s = self.s_cached[k];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re,
-                &[(in_re, -c), (in_im, -s)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im,
-                &[(in_re,  s), (in_im, -c)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw,
+                &[(in_re_fw, -c), (in_im_fw, -s)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw,
+                &[(in_re_fw,  s), (in_im_fw, -c)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l,
                 &[(in_l, -1.0)]);
+            if wpc == 5 {
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw,
+                    &[(out_re_bw, -c), (out_im_bw, -s)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw,
+                    &[(out_re_bw,  s), (out_im_bw, -c)]);
+            }
         }
     }
 
@@ -1399,24 +1552,25 @@ impl Device for NativePnThermalPhaseShifter {
 /// instantaneously regardless of f_c.
 pub struct NativeMzm {
     v_pi:         f64,
-    alpha_int:    f64,        // intensity transmission max (= 10^(-IL/10))
-    e_r:          f64,        // extinction ratio (linear, ≥ 1)
-    f_c:          f64,        // EO cutoff Hz — accepted, not yet used
+    alpha_int:    f64,
+    e_r:          f64,
+    f_c:          f64,
     n_channels:   usize,
+    wpc:          usize,
     nodes:        Vec<NodeId>,
     branches:     Vec<Option<usize>>,
-    // Cached at eval():
     t_amp_cached: f64,
 }
 
 impl NativeMzm {
     pub fn new() -> Self {
         Self {
-            v_pi:         3.0,      // typical lab-bench MZM Vπ
-            alpha_int:    1.0,      // lossless
-            e_r:          1.0e3,    // 30 dB extinction
-            f_c:          1.0e10,   // 10 GHz cutoff (not yet used)
+            v_pi:         3.0,
+            alpha_int:    1.0,
+            e_r:          1.0e3,
+            f_c:          1.0e10,
             n_channels:   0,
+            wpc:          3,
             nodes:        Vec::new(),
             branches:     Vec::new(),
             t_amp_cached: 1.0,
@@ -1427,19 +1581,24 @@ impl NativeMzm {
 impl Device for NativeMzm {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        // 3·N (in) + 3·N (out) + 2 (sig, gnd) = 6·N + 2 terminals.
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
         assert!(
-            terminals.len() >= 8 && (terminals.len() - 2) % 6 == 0,
-            "fc_mzm: terminal count must be 6·N + 2 for N ≥ 1 channels; got {}",
+            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            "fc_mzm: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
-        let n = (terminals.len() - 2) / 6;
+        let n = (terminals.len() - 2) / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        self.branches   = vec![None; bpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -1470,11 +1629,12 @@ impl Device for NativeMzm {
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        let n = self.n_channels;
-        let v_sig = self.nodes[6 * n].map_or(0.0, |i| x[i]);
-        let v_gnd = self.nodes[6 * n + 1].map_or(0.0, |i| x[i]);
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let elec_base = 2 * wpc * n;
+        let v_sig = self.nodes[elec_base    ].map_or(0.0, |i| x[i]);
+        let v_gnd = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let v_mod = v_sig - v_gnd;
-        // Intensity transmission T(V).
         let cos_term = (std::f64::consts::PI * v_mod / self.v_pi).cos();
         let inv_er   = 1.0 / self.e_r;
         let t_int    = self.alpha_int * ((1.0 - inv_er) * 0.5 * (1.0 + cos_term) + inv_er);
@@ -1484,18 +1644,31 @@ impl Device for NativeMzm {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
+        let bpc = if wpc == 5 { 5 } else { 3 };
+        let lam = wpc - 1;
+        let out_base = wpc * n;
         let t = self.t_amp_cached;
         for k in 0..n {
-            let in_re  = self.nodes[3 * k];
-            let in_im  = self.nodes[3 * k + 1];
-            let in_l   = self.nodes[3 * k + 2];
-            let out_re = self.nodes[3 * n + 3 * k];
-            let out_im = self.nodes[3 * n + 3 * k + 1];
-            let out_l  = self.nodes[3 * n + 3 * k + 2];
-            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re, &[(in_re, -t)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im, &[(in_im, -t)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,  &[(in_l, -1.0)]);
+            let in_re_fw  = self.nodes[wpc * k];
+            let in_im_fw  = self.nodes[wpc * k + 1];
+            let in_l      = self.nodes[wpc * k + lam];
+            let out_re_fw = self.nodes[out_base + wpc * k];
+            let out_im_fw = self.nodes[out_base + wpc * k + 1];
+            let out_l     = self.nodes[out_base + wpc * k + lam];
+            stamp_potential_eq(mat, &self.branches, bpc * k,     out_re_fw, &[(in_re_fw, -t)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw, &[(in_im_fw, -t)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + (bpc - 1), out_l, &[(in_l, -1.0)]);
+            if wpc == 5 {
+                // MZM is reciprocal: same t_amp applies to backward path.
+                let in_re_bw  = self.nodes[wpc * k + 2];
+                let in_im_bw  = self.nodes[wpc * k + 3];
+                let out_re_bw = self.nodes[out_base + wpc * k + 2];
+                let out_im_bw = self.nodes[out_base + wpc * k + 3];
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw, &[(out_re_bw, -t)]);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw, &[(out_im_bw, -t)]);
+            }
         }
     }
 
@@ -1534,31 +1707,38 @@ impl Device for NativeMzm {
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
 pub struct NativeMux {
     n_channels: usize,
+    wpc:        usize,
     nodes:      Vec<NodeId>,
     branches:   Vec<Option<usize>>,
 }
 
 impl NativeMux {
     pub fn new() -> Self {
-        Self { n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
+        Self { n_channels: 0, wpc: 3, nodes: Vec::new(), branches: Vec::new() }
     }
 }
 
 impl Device for NativeMux {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc; // bus channel (wpc) + per-channel wires (wpc)
         assert!(
-            !terminals.is_empty() && terminals.len() % 6 == 0,
-            "fc_mux: terminal count must be a positive multiple of 6 (1 bus + N channels × 3 wires each); got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_mux: terminal count must be a positive multiple of {stride} \
+             (wpc={wpc}: bus wires + per-channel wires); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 6;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        self.branches   = vec![None; wpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -1574,21 +1754,16 @@ impl Device for NativeMux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
         for k in 0..n {
-            // Bus wires for channel k.
-            let bus_re = self.nodes[3 * k];
-            let bus_im = self.nodes[3 * k + 1];
-            let bus_l  = self.nodes[3 * k + 2];
-            // Single-channel input k (offset by the N-channel bus block).
-            let off = 3 * (n + k);
-            let ch_re = self.nodes[off];
-            let ch_im = self.nodes[off + 1];
-            let ch_l  = self.nodes[off + 2];
-            // Bus drives FROM channel: V(bus_k.*) = V(ch_k.*).
-            stamp_potential_eq(mat, &self.branches, 3 * k,     bus_re, &[(ch_re, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, bus_im, &[(ch_im, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, bus_l,  &[(ch_l,  -1.0)]);
+            for w in 0..wpc {
+                let bus_w = self.nodes[wpc * k + w];
+                let ch_w  = self.nodes[wpc * (n + k) + w];
+                // Identity-route every wire (fw, bw, λ) — bus reads from channel.
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w,
+                    &[(ch_w, -1.0)]);
+            }
         }
     }
 
@@ -1600,31 +1775,38 @@ impl Device for NativeMux {
 /// bundles.  Pin 1 (and the first bundle wire block) is the bus input.
 pub struct NativeDemux {
     n_channels: usize,
+    wpc:        usize,
     nodes:      Vec<NodeId>,
     branches:   Vec<Option<usize>>,
 }
 
 impl NativeDemux {
     pub fn new() -> Self {
-        Self { n_channels: 0, nodes: Vec::new(), branches: Vec::new() }
+        Self { n_channels: 0, wpc: 3, nodes: Vec::new(), branches: Vec::new() }
     }
 }
 
 impl Device for NativeDemux {
     fn num_terminals(&self) -> usize { self.nodes.len() }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wpc = ctx.wires_per_channel();
+    }
 
-    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        let stride = 2 * wpc;
         assert!(
-            !terminals.is_empty() && terminals.len() % 6 == 0,
-            "fc_demux: terminal count must be a positive multiple of 6 (1 bus + N channels × 3 wires each); got {}",
+            !terminals.is_empty() && terminals.len() % stride == 0,
+            "fc_demux: terminal count must be a positive multiple of {stride} \
+             (wpc={wpc}: bus wires + per-channel wires); got {}",
             terminals.len()
         );
-        let n = terminals.len() / 6;
+        let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 3 * n];
+        self.branches   = vec![None; wpc * n];
     }
 
     fn num_extra_nodes(&self) -> usize { self.branches.len() }
@@ -1640,19 +1822,16 @@ impl Device for NativeDemux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
+        let n   = self.n_channels;
+        let wpc = self.wpc;
         for k in 0..n {
-            let bus_re = self.nodes[3 * k];
-            let bus_im = self.nodes[3 * k + 1];
-            let bus_l  = self.nodes[3 * k + 2];
-            let off = 3 * (n + k);
-            let ch_re = self.nodes[off];
-            let ch_im = self.nodes[off + 1];
-            let ch_l  = self.nodes[off + 2];
-            // Channels drive FROM bus: V(ch_k.*) = V(bus_k.*).
-            stamp_potential_eq(mat, &self.branches, 3 * k,     ch_re, &[(bus_re, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 1, ch_im, &[(bus_im, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, 3 * k + 2, ch_l,  &[(bus_l,  -1.0)]);
+            for w in 0..wpc {
+                let bus_w = self.nodes[wpc * k + w];
+                let ch_w  = self.nodes[wpc * (n + k) + w];
+                // Channels drive FROM bus.
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w,
+                    &[(bus_w, -1.0)]);
+            }
         }
     }
 
