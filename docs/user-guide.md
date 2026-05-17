@@ -799,6 +799,7 @@ X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
 | `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
 | `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. ONE conductance shared across all N optical channels — see WDM note below. |
 | `alpha_dB_cm` | 0 | Propagation loss along the PN section. For a closed-loop ring this loss sets the extinction ratio of the resonance dip — without it the ring is all-pass. |
+| `level` | 1 | Model tier (1/2/3 — see "Tiered photonic models" below). L2/L3 keywords (`c_j0`, `v_bi`, `m_j`, `da_dv`, `tau_carrier`, `tpa_beta`, `c_th`, `r_th_carrier`) are accepted at L1 with no effect, so a schematic that opts into L2 today won't need re-editing when L2 ships. |
 
 **WDM behaviour.** `fc_pn_ps` is bundle-aware. On an N-channel optical
 bus, ONE `fc_pn_ps` instance handles all N optical paths and presents ONE
@@ -904,6 +905,7 @@ X<name>  in  out  heat_p  heat_n  fc_thermal_ps  [param=val …]
 |---|---|---|
 | `r_heater` / `r` | 1000 | Heater resistance (Ω). |
 | `p_pi` / `p_pi_w` | 10e-3 | Heater power for π phase shift (W). |
+| `level` | 1 | Model tier (1/2/3). L2 keywords (`tau_th`, `c_th`, `r_th`) and L3 keywords (`alpha_dB_cm_photo`, `responsivity_photo`) are accepted at L1 with no effect. |
 
 **WDM behaviour.** Like `fc_pn_ps`, this is bundle-aware. One device, one
 shared heater, all N optical channels see the same phase shift (no
@@ -919,6 +921,47 @@ with a B-element converting temperature to equivalent voltage.
 
 The transfer is `A_out = A_in · exp(−j φ)` — lossless. Wavelength passes
 through unchanged.
+
+### Tiered photonic models (`level=`)
+
+`fc_pn_ps` and `fc_thermal_ps` (and the upcoming `fc_pn_th_ps`) expose
+a `level=` instance parameter, following the MOSFET tier convention:
+
+- **L1** (default): the current first-pass linearised models. Small-
+  signal `dn/dV`, constant junction conductance, instantaneous Joule
+  heating. Fast and good enough for topology validation and
+  small-signal AC.
+- **L2** *(scaffolded; impl in progress)*: bias-dependent junction
+  capacitance `C_j(V)`, distinct reverse / forward `dn/dV` and `dα/dV`,
+  thermal time constant `tau_th` for the heater. Captures bandwidth
+  rolloff, swing-asymmetry, and warm-up transients.
+- **L3** *(planned)*: full carrier dynamics (carrier-density state
+  variable in the MNA matrix, recombination time, two-photon
+  absorption, self-heating from linear + nonlinear loss), and the
+  N-doped photoconductive heater as a separate physics regime of the
+  thermal-PS family.
+
+L2/L3 keywords (`c_j0`, `v_bi`, `m_j`, `da_dv`, `tau_carrier`,
+`tpa_beta`, `c_th`, `r_th_carrier`, `tau_th`, …) are accepted at every
+level — they're no-ops below the tier that consumes them. That means a
+schematic written for L2 *today* (with `level=2 c_j0=20f tau_carrier=1n
+…`) runs correctly under L1 fallback semantics until L2 lands, then
+upgrades automatically — no schematic edit required.
+
+**KiCad workflow.** Every photonic family is one symbol. Set
+`level=` and any tier params directly on the symbol instance — the
+common-case UX is "edit one place, the symbol". For circuits with
+many instances sharing the same physics tier and params, drop a
+SPICE-native `.model` card on the sheet as a text element:
+
+```
+.model fast_pn fc_pn_ps level=2 c_j0=20f tau_carrier=1n
+```
+
+and point each instance at it via a `params=fast_pn` field (separate
+KiCad property from `model=fc_pn_ps`, which still names the device
+family). Per-instance params override card params. This is purely
+optional — instance-side params alone cover most setups.
 
 ### Registering PDK-specific aliases
 
