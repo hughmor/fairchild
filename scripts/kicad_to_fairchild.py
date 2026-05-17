@@ -57,13 +57,22 @@ from typing import Dict, List, Optional, Tuple
 # crates/fairchild-core/src/device_registry.rs.
 
 PORT_SCHEMA: Dict[str, List[str]] = {
-    "fc_cw_laser":      ["bundle"],                                   # out
-    "fc_waveguide":     ["bundle", "bundle"],                         # in, out
-    "fc_dcoupler":      ["bundle", "bundle", "bundle", "bundle"],     # a1, a2, b1, b2
-    "fc_splitter":      ["bundle", "bundle", "bundle"],               # in, out_a, out_b
-    "fc_photodetector": ["bundle", "scalar", "scalar"],               # in, anode, cathode
-    "fc_pn_ps":         ["bundle", "bundle", "scalar", "scalar"],     # in, out, anode, cathode
-    "fc_thermal_ps":    ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n
+    "fc_cw_laser":        ["bundle"],                                   # out
+    "fc_waveguide":       ["bundle", "bundle"],                         # in, out
+    "fc_grating_coupler": ["bundle", "bundle"],                         # in, out
+    "fc_dcoupler":        ["bundle", "bundle", "bundle", "bundle"],     # a1, a2, b1, b2
+    "fc_splitter":        ["bundle", "bundle", "bundle"],               # in, out_a, out_b
+    "fc_photodetector":   ["bundle", "scalar", "scalar"],               # in, anode, cathode
+    "fc_pn_ps":           ["bundle", "bundle", "scalar", "scalar"],     # in, out, anode, cathode
+    "fc_pn_ps_cap":       ["bundle", "bundle", "scalar", "scalar"],     # in, out, anode, cathode (L2)
+    "fc_thermal_ps":      ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n
+    "fc_thermal_ps_rc":   ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n (L2)
+    "fc_pn_th_ps":        ["bundle", "bundle", "scalar", "scalar",
+                           "scalar", "scalar"],                          # in, out, anode, cathode, heat_p, heat_n
+    "fc_mzm":             ["bundle", "bundle", "scalar", "scalar"],     # in, out, sig, gnd
+    # `fc_circulator` requires bidirectional propagation; pin count 3,
+    # all bundle.  Included for completeness.
+    "fc_circulator":      ["bundle", "bundle", "bundle"],
 }
 
 # `fc_mux` / `fc_demux` are variable-arity bundle bridges. Pin 1 is the
@@ -122,24 +131,25 @@ def try_transpile_x_element(
     s: str,
 ) -> Optional[Tuple[str, str, List[str]]]:
     """
-    Try to interpret `s` as a KiCad-style X-element. KiCad emits a line like:
+    Try to interpret `s` as an X-element in either:
 
-        REFDES net1 net2 ... type=X model=NAME k1=v1 k2=v2 ...
+      (a) KiCad format:        REFDES net1 net2 ... type=X model=NAME k1=v1 ...
+      (b) fairchild format:    XREFDES net1 net2 ... NAME k1=v1 ...
 
-    On success, returns (transpiled_line, model_lowercase, [nets]).
-    On failure (not an X-element), returns None.
+    On success, returns (transpiled_line, model_lowercase, [nets]).  The
+    transpiled line is always in fairchild format (X-prefix, positional
+    model name after the nets) so the bundle-width inference and the
+    fairchild parser both see a consistent shape.
 
-    The transpiled line has the form:
-
-        XREFDES net1 net2 ... NAME k1=v1 k2=v2 ...
-
-    so fairchild's parser dispatches correctly on the leading `X`.
+    Format (b) recognition: a line whose first token starts with `X` and
+    whose model token (a positional token matching a known native model
+    name, typically `fc_*`) appears among the positional tokens.
     """
     tokens = s.split()
     if len(tokens) < 2:
         return None
 
-    # Scan kwargs for `type=X` and `model=NAME`.
+    # ── Format (a): KiCad type=X / model=NAME ───────────────────────────
     has_type_x = False
     model: Optional[str] = None
     for t in tokens[1:]:
@@ -152,27 +162,51 @@ def try_transpile_x_element(
         elif kl == "model":
             model = v.strip()
 
-    if not has_type_x or model is None:
+    if has_type_x and model is not None:
+        refdes = tokens[0]
+        nets: List[str] = []
+        other_kwargs: List[str] = []
+        for t in tokens[1:]:
+            if "=" not in t:
+                nets.append(t)
+            else:
+                k, _ = t.split("=", 1)
+                if k.lower() in ("type", "model"):
+                    continue
+                other_kwargs.append(t)
+        if not refdes.lower().startswith("x"):
+            refdes = "X" + refdes
+        new_line = " ".join([refdes] + nets + [model] + other_kwargs)
+        return new_line, model.lower(), nets
+
+    # ── Format (b): fairchild-style X-prefix positional model ───────────
+    # Refdes must start with X (case-insensitive).  Find the rightmost
+    # positional token (no '=') that matches a known native model name
+    # — that's the model; everything between refdes and it is nets;
+    # everything after it (with '=') is kwargs.
+    if not tokens[0].lower().startswith("x"):
         return None
-
-    # Split positional nets from "other" kwargs (drop type= and model=).
-    refdes = tokens[0]
-    nets: List[str] = []
-    other_kwargs: List[str] = []
-    for t in tokens[1:]:
+    positional: List[Tuple[int, str]] = []
+    for i, t in enumerate(tokens[1:], start=1):
         if "=" not in t:
-            nets.append(t)
-        else:
-            k, _ = t.split("=", 1)
-            if k.lower() in ("type", "model"):
-                continue
-            other_kwargs.append(t)
-
-    if not refdes.lower().startswith("x"):
-        refdes = "X" + refdes
-
-    new_line = " ".join([refdes] + nets + [model] + other_kwargs)
-    return new_line, model.lower(), nets
+            positional.append((i, t))
+    # Find a positional token that matches a known model (PORT_SCHEMA or
+    # BUNDLE_BRIDGE_MODELS).  Look from right to left so model that
+    # appears at the end (the standard placement) is picked first.
+    model_token: Optional[Tuple[int, str]] = None
+    for idx, tok in reversed(positional):
+        tl = tok.lower()
+        if tl in PORT_SCHEMA or tl in BUNDLE_BRIDGE_MODELS:
+            model_token = (idx, tok)
+            break
+    if model_token is None:
+        return None
+    midx, mtok = model_token
+    nets = [t for i, t in positional if i < midx]
+    other_kwargs = [t for t in tokens[1:] if "=" in t]
+    # Already fairchild format; keep refdes as-is.
+    new_line = " ".join([tokens[0]] + nets + [mtok] + other_kwargs)
+    return new_line, mtok.lower(), nets
 
 
 # ── Bundle-net detection ────────────────────────────────────────────────────
