@@ -127,43 +127,103 @@ def join_continuations(raw_lines: List[str]) -> List[str]:
 
 # ── KiCad X-element detection + transpilation ───────────────────────────────
 
+# Result tuple from try_transpile_x_element:
+#   (transpiled_line, model_lc, base_model_lc, [nets])
+# `model_lc` is the model name written on the instance (e.g. "fc_my_pn" for a
+# user `.model fc_my_pn fc_pn_ps ...` alias). `base_model_lc` is the model
+# whose port schema applies — built-in `fc_*` directly, or the `kind` from
+# the `.model` declaration when the user aliased. They're the same for
+# instances that reference built-ins directly.
+
+
+def _builtin_models() -> set:
+    return set(PORT_SCHEMA.keys()) | BUNDLE_BRIDGE_MODELS
+
+
+def collect_user_model_aliases(logical_lines: List[str]) -> Dict[str, str]:
+    """Scan `.model NAME BASE_KIND ...` directives and return
+    {name_lc: base_kind_lc}, restricted to bases the transpiler recognises.
+
+    A user can write `.model fc_my_pn fc_pn_ps Vpi=…`; downstream we need
+    to know that `fc_my_pn` instances obey `fc_pn_ps`'s port schema.
+    Unknown bases (e.g. user-defined OSDI bases) are dropped — those X-
+    elements stay as pass-throughs in the transpiler."""
+    builtins = _builtin_models()
+    out: Dict[str, str] = {}
+    for line in logical_lines:
+        s = line.strip()
+        if not s.lower().startswith(".model"):
+            continue
+        toks = s.split()
+        if len(toks) < 3:
+            continue
+        name_lc = toks[1].lower()
+        base_lc = toks[2].lower().rstrip("(")  # `.model x y(...)` form
+        if base_lc in builtins:
+            out[name_lc] = base_lc
+    return out
+
+
 def try_transpile_x_element(
     s: str,
-) -> Optional[Tuple[str, str, List[str]]]:
+    known_models: Dict[str, str],
+    warn,
+) -> Optional[Tuple[str, str, str, List[str]]]:
     """
     Try to interpret `s` as an X-element in either:
 
       (a) KiCad format:        REFDES net1 net2 ... type=X model=NAME k1=v1 ...
       (b) fairchild format:    XREFDES net1 net2 ... NAME k1=v1 ...
 
-    On success, returns (transpiled_line, model_lowercase, [nets]).  The
-    transpiled line is always in fairchild format (X-prefix, positional
-    model name after the nets) so the bundle-width inference and the
-    fairchild parser both see a consistent shape.
+    `known_models` maps {model_name_lc: base_model_lc}. Both built-in
+    `fc_*` names (mapped to themselves) and user `.model` aliases (mapped
+    to their base kind) must be present.
 
-    Format (b) recognition: a line whose first token starts with `X` and
-    whose model token (a positional token matching a known native model
-    name, typically `fc_*`) appears among the positional tokens.
+    On success, returns (transpiled_line, model_lc, base_model_lc, [nets]).
+    Returns None if the line is not an X-element (no type=X and refdes
+    doesn't start with X), so the caller can pass it through unchanged.
+
+    If the line *looks* like an X-element but the model can't be resolved
+    (unknown name, ambiguous positional, missing `model=` in format (a)),
+    emits a warning via `warn(...)` and returns None — the caller passes
+    it through with a comment so the fairchild parser sees the raw text
+    and either handles it (e.g. XBJT, XSubcircuit) or errors with a clear
+    line reference.
     """
     tokens = s.split()
     if len(tokens) < 2:
         return None
 
-    # ── Format (a): KiCad type=X / model=NAME ───────────────────────────
-    has_type_x = False
-    model: Optional[str] = None
-    for t in tokens[1:]:
-        if "=" not in t:
-            continue
-        k, v = t.split("=", 1)
-        kl = k.lower()
-        if kl == "type" and v.strip().upper() == "X":
-            has_type_x = True
-        elif kl == "model":
-            model = v.strip()
+    # ── Detect X-element-ness up front ──────────────────────────────────
+    has_type_x = any(
+        t.split("=", 1)[0].lower() == "type" and t.split("=", 1)[1].strip().upper() == "X"
+        for t in tokens[1:] if "=" in t
+    )
+    starts_with_x = tokens[0].lower().startswith("x")
+    if not (has_type_x or starts_with_x):
+        return None
 
-    if has_type_x and model is not None:
-        refdes = tokens[0]
+    refdes = tokens[0]
+
+    # ── Format (a): explicit type=X with model= kwarg ───────────────────
+    if has_type_x:
+        model_kwarg: Optional[str] = None
+        for t in tokens[1:]:
+            if "=" in t:
+                k, v = t.split("=", 1)
+                if k.lower() == "model":
+                    model_kwarg = v.strip()
+                    break
+        if model_kwarg is None:
+            warn(f"{refdes}: type=X but no model= kwarg; passing through unchanged")
+            return None
+        model_lc = model_kwarg.lower()
+        base_lc = known_models.get(model_lc, model_lc)
+        if model_lc not in known_models and base_lc not in _builtin_models():
+            warn(f"{refdes} ({model_kwarg}): unknown model — no PORT_SCHEMA or .model "
+                 f"declaration; passing through (bundle widths will not be inferred)")
+            # Still rewrite to fairchild format so the parser dispatches it,
+            # but flag it has unknown arity.
         nets: List[str] = []
         other_kwargs: List[str] = []
         for t in tokens[1:]:
@@ -176,43 +236,49 @@ def try_transpile_x_element(
                 other_kwargs.append(t)
         if not refdes.lower().startswith("x"):
             refdes = "X" + refdes
-        new_line = " ".join([refdes] + nets + [model] + other_kwargs)
-        return new_line, model.lower(), nets
+        new_line = " ".join([refdes] + nets + [model_kwarg] + other_kwargs)
+        return new_line, model_lc, base_lc, nets
 
-    # ── Format (b): fairchild-style X-prefix positional model ───────────
-    # Refdes must start with X (case-insensitive).  Find the rightmost
-    # positional token (no '=') that matches a known native model name
-    # — that's the model; everything between refdes and it is nets;
-    # everything after it (with '=') is kwargs.
-    if not tokens[0].lower().startswith("x"):
-        return None
+    # ── Format (b): X-prefix refdes, positional model ───────────────────
+    # Among positional tokens (no '='), find ALL that resolve to a known
+    # model. Ambiguity (>1 match) is fatal — warn so the user can rename
+    # one of them. Zero matches means this is probably a user X-element
+    # with a non-builtin model (XBJT, XSubcircuit, custom OSDI); we pass
+    # it through.
     positional: List[Tuple[int, str]] = []
     for i, t in enumerate(tokens[1:], start=1):
         if "=" not in t:
             positional.append((i, t))
-    # Find a positional token that matches a known model (PORT_SCHEMA or
-    # BUNDLE_BRIDGE_MODELS).  Look from right to left so model that
-    # appears at the end (the standard placement) is picked first.
-    model_token: Optional[Tuple[int, str]] = None
-    for idx, tok in reversed(positional):
-        tl = tok.lower()
-        if tl in PORT_SCHEMA or tl in BUNDLE_BRIDGE_MODELS:
-            model_token = (idx, tok)
-            break
-    if model_token is None:
+    matches = [(idx, tok) for idx, tok in positional if tok.lower() in known_models]
+    if not matches:
+        # Maybe a user-defined X-element with an unknown model. Emit a
+        # one-time-per-line info-level note via warn (the caller decides
+        # severity); pass through.
+        warn(f"{refdes}: X-element with no recognised model token among positional "
+             f"args; passing through (bundle widths will not be inferred for this instance)")
         return None
-    midx, mtok = model_token
+    if len(matches) > 1:
+        names = ", ".join(tok for _, tok in matches)
+        warn(f"{refdes}: ambiguous — multiple positional tokens match known models "
+             f"({names}); pick the model token's position unambiguously or rename. "
+             f"Passing through.")
+        return None
+
+    midx, mtok = matches[0]
+    model_lc = mtok.lower()
+    base_lc = known_models[model_lc]
     nets = [t for i, t in positional if i < midx]
-    other_kwargs = [t for t in tokens[1:] if "=" in t]
-    # Already fairchild format; keep refdes as-is.
-    new_line = " ".join([tokens[0]] + nets + [mtok] + other_kwargs)
-    return new_line, mtok.lower(), nets
+    # Tokens after the model (positional or kwarg) are passed through as kwargs;
+    # any stray positional after the model is unusual but preserved verbatim.
+    trailing = [t for i, t in enumerate(tokens[1:], start=1) if i > midx]
+    new_line = " ".join([refdes] + nets + [mtok] + trailing)
+    return new_line, model_lc, base_lc, nets
 
 
 # ── Bundle-net detection ────────────────────────────────────────────────────
 
 def collect_bundle_nets(
-    x_elements: List[Tuple[str, str, List[str]]],
+    x_elements: List[Tuple[str, str, str, List[str]]],
     warn,
 ) -> Tuple[List[Tuple[str, int]], List[str]]:
     """
@@ -220,6 +286,12 @@ def collect_bundle_nets(
     the set of nets that appear in a bundle position. Returns
     (bundle_nets_with_width, unknown_models) where bundle_nets_with_width is
     an ordered list of (net_name, channel_count) pairs.
+
+    Each `x_elements` tuple is (refdes, model_lc, base_model_lc, nets).
+    `base_model_lc` is the PORT_SCHEMA / BUNDLE_BRIDGE_MODELS key — for
+    built-in instances the two are equal; for user `.model fc_my_pn fc_pn_ps …`
+    aliases, `base_model_lc` is the schema key. We look up arity against
+    `base_model_lc` so user aliases inherit the right port shape.
 
     Channel-count inference:
       - `fc_mux` / `fc_demux` with M positional nets implies N = M − 1
@@ -253,8 +325,8 @@ def collect_bundle_nets(
                 pass
 
     # ── Pass 1: fc_mux / fc_demux first — bus widths are authoritative.
-    for refdes, model, nets in x_elements:
-        if model not in BUNDLE_BRIDGE_MODELS:
+    for refdes, model, base, nets in x_elements:
+        if base not in BUNDLE_BRIDGE_MODELS:
             continue
         if len(nets) < 2:
             warn(f"{refdes} ({model}): need ≥ 2 nets (1 bus + ≥ 1 channels); got {len(nets)}")
@@ -266,13 +338,13 @@ def collect_bundle_nets(
             record(ch_net, 1, authoritative=True)
 
     # ── Pass 2: regular devices, default to width 1.
-    for refdes, model, nets in x_elements:
-        if model in BUNDLE_BRIDGE_MODELS:
+    for refdes, model, base, nets in x_elements:
+        if base in BUNDLE_BRIDGE_MODELS:
             continue
-        if model not in PORT_SCHEMA:
+        if base not in PORT_SCHEMA:
             unknown.append(model)
             continue
-        schema = PORT_SCHEMA[model]
+        schema = PORT_SCHEMA[base]
         if len(nets) != len(schema):
             warn(
                 f"{refdes} ({model}): expected {len(schema)} positional nets, "
@@ -294,10 +366,10 @@ def collect_bundle_nets(
     changed = True
     while changed:
         changed = False
-        for refdes, model, nets in x_elements:
-            if model in BUNDLE_BRIDGE_MODELS or model not in PORT_SCHEMA:
+        for refdes, model, base, nets in x_elements:
+            if base in BUNDLE_BRIDGE_MODELS or base not in PORT_SCHEMA:
                 continue
-            schema = PORT_SCHEMA[model]
+            schema = PORT_SCHEMA[base]
             if len(nets) != len(schema):
                 continue
             bundle_pins = [n for kind, n in zip(schema, nets) if kind == "bundle"]
@@ -343,8 +415,14 @@ def emit_wrapper(
     warnings: List[str] = []
     warn = warnings.append
 
+    # Build the known-models discriminator: built-in fc_* + every
+    # `.model NAME BASE_KIND …` whose BASE_KIND is one of ours.
+    user_aliases = collect_user_model_aliases(logical)
+    known_models: Dict[str, str] = {m: m for m in _builtin_models()}
+    known_models.update(user_aliases)
+
     transpiled_body: List[str] = []
-    x_elements: List[Tuple[str, str, List[str]]] = []
+    x_elements: List[Tuple[str, str, str, List[str]]] = []
     n_transpiled = 0
 
     for line in logical:
@@ -368,12 +446,12 @@ def emit_wrapper(
             continue
 
         # Try KiCad-style X-element transpile.
-        result = try_transpile_x_element(s)
+        result = try_transpile_x_element(s, known_models, warn)
         if result is not None:
-            new_line, model, nets = result
+            new_line, model, base, nets = result
             transpiled_body.append(new_line)
             refdes = new_line.split(maxsplit=1)[0]
-            x_elements.append((refdes, model, nets))
+            x_elements.append((refdes, model, base, nets))
             n_transpiled += 1
             continue
 
