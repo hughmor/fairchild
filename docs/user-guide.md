@@ -756,6 +756,8 @@ X<name>  in  anode  cathode  fc_photodetector  [param=val …]
 | `responsivity` | 1.0 | A/W. |
 | `i_dark` / `i_dark_a` | 1e-9 | Dark current (A). |
 | `r_shunt` | 1e6 | Shunt resistance (Ω) — junction non-idealness. |
+| `r_series` (or `r_s`) | 0.0 | Series resistance (Ω) in line with the anode. Allocates an internal junction node and routes the photocurrent through it. |
+| `c_par` (or `c_j0`) | — | Accepted for forward-compatibility; deferred to the L2 PD model with bias-dependent junction capacitance. No effect at this tier. |
 
 **WDM behaviour.** Bundle-aware. On an N-channel optical input, ONE
 `fc_photodetector` instance handles all N channels: it sums the photocurrents

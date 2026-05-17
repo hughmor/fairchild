@@ -604,8 +604,13 @@ pub struct NativePhotodetector {
     responsivity:  f64,
     i_dark:        f64,
     r_shunt:       f64,
+    r_series:      f64,   // optional series resistance (0 = direct connection)
     n_channels:    usize,
     nodes:         Vec<NodeId>,
+    // Internal node (if r_series > 0): one auxiliary MNA row representing
+    // the voltage at the "internal" junction node.  None when r_series = 0.
+    v_int_idx:     Option<usize>,
+    has_internal:  bool,
     // Cached operating-point quantities (set by `eval`):
     i_ph:          f64,            // total photocurrent across channels + i_dark
     g_re:          Vec<f64>,       // ∂I_ph / ∂V(re_k) = 2 · R · V(re_k)
@@ -621,8 +626,11 @@ impl NativePhotodetector {
             responsivity: 1.0,
             i_dark:       1e-9,
             r_shunt:      1e6,
+            r_series:     0.0,
             n_channels:   0,
             nodes:        Vec::new(),
+            v_int_idx:    None,
+            has_internal: false,
             i_ph:         0.0,
             g_re:         Vec::new(),
             g_im:         Vec::new(),
@@ -659,13 +667,39 @@ impl Device for NativePhotodetector {
             "responsivity" => { self.responsivity = value; true }
             "i_dark" | "i_dark_a" => { self.i_dark = value; true }
             "r_shunt" => { self.r_shunt = value; true }
+            "r_series" | "r_s" => { self.r_series = value.max(0.0); true }
+            // `c_par` (and a bias-dependent C_j(V)) lands with the L2 PD
+            // model — it needs device-internal reactive state which the
+            // current Device trait doesn't expose.  Accept the keyword to
+            // keep schematics forward-compatible; document as no-op.
+            "c_par" | "c_j0" | "c_par_f" => true,
             _ => false,
+        }
+    }
+
+    fn num_extra_nodes(&self) -> usize {
+        // Allocate one internal MNA row (the "junction node" between r_series
+        // and the parallel R_sh || I_ph stack) when r_series is non-zero.
+        if self.r_series > 0.0 { 1 } else { 0 }
+    }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        if self.r_series > 0.0 {
+            self.v_int_idx    = Some(first_idx);
+            self.has_internal = true;
+        } else {
+            self.v_int_idx    = None;
+            self.has_internal = false;
         }
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         let n = self.n_channels;
-        let v_a = self.nodes[3 * n].map_or(0.0, |i| x[i]);
+        // Internal junction node: v_int if present, else anode.
+        let v_j_node = match self.v_int_idx {
+            Some(i) => x[i],
+            None    => self.nodes[3 * n].map_or(0.0, |i| x[i]),
+        };
         let v_c = self.nodes[3 * n + 1].map_or(0.0, |i| x[i]);
         let mut p_total = 0.0;
         for k in 0..n {
@@ -677,22 +711,21 @@ impl Device for NativePhotodetector {
             self.v_re_op[k] = v_re;
             self.v_im_op[k] = v_im;
         }
-        // ONE photocurrent term — sum across channels, single dark current.
-        self.i_ph = self.responsivity * p_total + self.i_dark;
-        self.v_j_op = v_a - v_c;
+        self.i_ph   = self.responsivity * p_total + self.i_dark;
+        self.v_j_op = v_j_node - v_c;
     }
 
     fn load_residual(&self, b: &mut [f64]) {
         let n = self.n_channels;
-        // Norton-equivalent linear remainder: I_op − Σ g_i·V_i_op.  Photocurrent
-        // is the SUM across channels; subtract every channel's linearised term.
+        // Norton-equivalent linear remainder for the (nonlinear) photocurrent.
         let mut nonlin_remainder = self.i_ph;
         for k in 0..n {
             nonlin_remainder -= self.g_re[k] * self.v_re_op[k]
                               + self.g_im[k] * self.v_im_op[k];
         }
         let i_eq = -nonlin_remainder - (self.v_j_op / self.r_shunt);
-        if let Some(a) = self.nodes[3 * n]     { b[a] -= i_eq; }
+        let v_j_node = self.v_int_idx.or(self.nodes[3 * n]);
+        if let Some(j) = v_j_node           { b[j] -= i_eq; }
         if let Some(c) = self.nodes[3 * n + 1] { b[c] += i_eq; }
     }
 
@@ -701,23 +734,35 @@ impl Device for NativePhotodetector {
         let a_idx = self.nodes[3 * n];
         let c_idx = self.nodes[3 * n + 1];
         let g_sh  = 1.0 / self.r_shunt;
-        // Shunt: ONE 1/R_shunt between anode and cathode.
-        if let Some(a) = a_idx {
-            mat.a[a][a] += g_sh;
-            if let Some(c) = c_idx { mat.a[a][c] -= g_sh; }
+        // Junction node — v_int if r_series > 0, else anode terminal.
+        let j_idx = self.v_int_idx.or(a_idx);
+        // Optional series resistor between anode and v_int.
+        if let Some(j) = self.v_int_idx {
+            let g_s = 1.0 / self.r_series;
+            if let Some(a) = a_idx {
+                mat.a[a][a] += g_s;
+                mat.a[a][j] -= g_s;
+                mat.a[j][a] -= g_s;
+            }
+            mat.a[j][j] += g_s;
+        }
+        // Shunt 1/R_shunt between junction node and cathode.
+        if let Some(j) = j_idx {
+            mat.a[j][j] += g_sh;
+            if let Some(c) = c_idx { mat.a[j][c] -= g_sh; }
         }
         if let Some(c) = c_idx {
             mat.a[c][c] += g_sh;
-            if let Some(a) = a_idx { mat.a[c][a] -= g_sh; }
+            if let Some(j) = j_idx { mat.a[c][j] -= g_sh; }
         }
-        // Per-channel photocurrent linearisation — each channel's (V_re, V_im)
-        // couples into both anode and cathode rows.
+        // Per-channel photocurrent linearisation: each channel's (V_re, V_im)
+        // couples into the junction-node row and the cathode row.
         for k in 0..n {
             let r_idx = self.nodes[3 * k];
             let i_idx = self.nodes[3 * k + 1];
-            if let Some(a) = a_idx {
-                if let Some(r) = r_idx { mat.a[a][r] -= self.g_re[k]; }
-                if let Some(i) = i_idx { mat.a[a][i] -= self.g_im[k]; }
+            if let Some(j) = j_idx {
+                if let Some(r) = r_idx { mat.a[j][r] -= self.g_re[k]; }
+                if let Some(i) = i_idx { mat.a[j][i] -= self.g_im[k]; }
             }
             if let Some(c) = c_idx {
                 if let Some(r) = r_idx { mat.a[c][r] += self.g_re[k]; }
