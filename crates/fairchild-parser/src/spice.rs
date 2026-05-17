@@ -1072,6 +1072,7 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
             | "fc_pn_ps"
             | "fc_pn_th_ps"
             | "fc_thermal_ps"
+            | "fc_mzm"
             | "fc_photodetector" => BundleArity::Aware,
         // `fc_cw_laser` deliberately stays Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for

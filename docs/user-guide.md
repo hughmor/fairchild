@@ -953,6 +953,35 @@ sums the phase shifts. Bundle-aware: ONE physical device handles all N
 optical channels with one shared PN junction AND one shared heater
 resistor.
 
+### `fc_mzm` — idealised testbench Mach-Zehnder modulator
+
+```
+X<name>  in  out  sig  gnd  fc_mzm  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `in` / `out` | bundles, optical pass-through |
+| `sig` / `gnd` | scalar electrical nodes (modulation drive: `V_mod = V(sig) − V(gnd)`) |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `V_pi` | 3.0 | Half-wave voltage (DC + AC). |
+| `alpha` | 1.0 | Intensity transmission at the bright point (V_mod=0). |
+| `alpha_dB` (or `il_dB`) | — | Insertion loss in dB; sets `alpha` = 10^(−`alpha_dB`/10). |
+| `e_r` (or `er`) | 1000 | Extinction ratio (linear). |
+| `e_r_dB` | — | Extinction ratio in dB; sets `e_r` = 10^(`e_r_dB`/10). |
+| `f_c` | 1e10 | First-order EO cutoff frequency (Hz). **Accepted but not yet active** — the V_sig path is instantaneous; f_c lands when device-internal reactive state is wired up. |
+
+**Physics.** Intensity transmission:
+```
+T(V_mod) = α · [(1 − 1/E_r) · (1 + cos(π V_mod / V_π)) / 2  +  1/E_r]
+```
+ranges from `α` (bright, V_mod=0) to `α/E_r` (dark, V_mod=V_π). Amplitude
+transmission `t_amp = √T`. Use this as the source-side MZM in a
+testbench schematic; for a chip-level MZI you'd combine
+`fc_splitter` + two `fc_pn_th_ps` arms + a second `fc_splitter`.
+
 ### Tiered photonic models (`level=`)
 
 `fc_pn_ps` and `fc_thermal_ps` (and the upcoming `fc_pn_th_ps`) expose

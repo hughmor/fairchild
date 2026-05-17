@@ -1346,6 +1346,138 @@ impl Device for NativePnThermalPhaseShifter {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Native testbench MZM (idealised Mach-Zehnder modulator)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Testbench MZM — represents an idealised lab-bench Mach-Zehnder modulator
+/// (free-space or fibre-pigtailed), NOT a real on-chip MZI.  Use this to
+/// model the modulator instrument feeding a chip, or as a reference against
+/// which to compare a chip-level MZI built from `fc_splitter` +
+/// `fc_pn_th_ps` + `fc_splitter` (the "real" MZI lives in the schematic).
+///
+/// Pins (4 + 6·N for N optical channels):
+///   1  in     — optical bundle input
+///   2  out    — optical bundle output
+///   3  sig    — electrical drive (sig − gnd is the modulation voltage)
+///   4  gnd    — modulation return
+///
+/// Intensity transmission as a function of V_sig:
+///   T(V) = α · [ (1 − 1/E_r) · (1 + cos(π V_sig / V_π)) / 2  +  1/E_r ]
+/// with α = 10^(−`alpha_dB`/10) (intensity) and E_r the extinction ratio.
+/// T(V) ranges from α (V=0) to α/E_r (V = V_π).  Amplitude transmission
+/// `t_amp = √T`.  Wavelength passes through unchanged.
+///
+/// `f_c` (first-order EO cutoff) is accepted but not yet wired into the
+/// signal path — it requires device-internal reactive state which lands
+/// with the L2 framework.  At this commit `V_sig` reaches the modulator
+/// instantaneously regardless of f_c.
+pub struct NativeMzm {
+    v_pi:         f64,
+    alpha_int:    f64,        // intensity transmission max (= 10^(-IL/10))
+    e_r:          f64,        // extinction ratio (linear, ≥ 1)
+    f_c:          f64,        // EO cutoff Hz — accepted, not yet used
+    n_channels:   usize,
+    nodes:        Vec<NodeId>,
+    branches:     Vec<Option<usize>>,
+    // Cached at eval():
+    t_amp_cached: f64,
+}
+
+impl NativeMzm {
+    pub fn new() -> Self {
+        Self {
+            v_pi:         3.0,      // typical lab-bench MZM Vπ
+            alpha_int:    1.0,      // lossless
+            e_r:          1.0e3,    // 30 dB extinction
+            f_c:          1.0e10,   // 10 GHz cutoff (not yet used)
+            n_channels:   0,
+            nodes:        Vec::new(),
+            branches:     Vec::new(),
+            t_amp_cached: 1.0,
+        }
+    }
+}
+
+impl Device for NativeMzm {
+    fn num_terminals(&self) -> usize { self.nodes.len() }
+
+    fn setup_model(&mut self, _ctx: &SimContext) {}
+
+    fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
+        // 3·N (in) + 3·N (out) + 2 (sig, gnd) = 6·N + 2 terminals.
+        assert!(
+            terminals.len() >= 8 && (terminals.len() - 2) % 6 == 0,
+            "fc_mzm: terminal count must be 6·N + 2 for N ≥ 1 channels; got {}",
+            terminals.len()
+        );
+        let n = (terminals.len() - 2) / 6;
+        self.n_channels = n;
+        self.nodes      = terminals.to_vec();
+        self.branches   = vec![None; 3 * n];
+    }
+
+    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "v_pi" | "vpi" => { self.v_pi = value.max(1e-30); true }
+            "alpha" => {
+                self.alpha_int = value.clamp(0.0, 1.0);
+                true
+            }
+            "alpha_db" | "il_db" => {
+                self.alpha_int = 10f64.powf(-value / 10.0);
+                true
+            }
+            "e_r" | "er" => { self.e_r = value.max(1.0); true }
+            "e_r_db" | "er_db" => {
+                self.e_r = 10f64.powf(value / 10.0).max(1.0);
+                true
+            }
+            "f_c" | "fc" => { self.f_c = value.max(0.0); true }
+            _ => false,
+        }
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        let n = self.n_channels;
+        let v_sig = self.nodes[6 * n].map_or(0.0, |i| x[i]);
+        let v_gnd = self.nodes[6 * n + 1].map_or(0.0, |i| x[i]);
+        let v_mod = v_sig - v_gnd;
+        // Intensity transmission T(V).
+        let cos_term = (std::f64::consts::PI * v_mod / self.v_pi).cos();
+        let inv_er   = 1.0 / self.e_r;
+        let t_int    = self.alpha_int * ((1.0 - inv_er) * 0.5 * (1.0 + cos_term) + inv_er);
+        self.t_amp_cached = t_int.max(0.0).sqrt();
+    }
+
+    fn load_residual(&self, _b: &mut [f64]) {}
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        let n = self.n_channels;
+        let t = self.t_amp_cached;
+        for k in 0..n {
+            let in_re  = self.nodes[3 * k];
+            let in_im  = self.nodes[3 * k + 1];
+            let in_l   = self.nodes[3 * k + 2];
+            let out_re = self.nodes[3 * n + 3 * k];
+            let out_im = self.nodes[3 * n + 3 * k + 1];
+            let out_l  = self.nodes[3 * n + 3 * k + 2];
+            stamp_potential_eq(mat, &self.branches, 3 * k,     out_re, &[(in_re, -t)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 1, out_im, &[(in_im, -t)]);
+            stamp_potential_eq(mat, &self.branches, 3 * k + 2, out_l,  &[(in_l, -1.0)]);
+        }
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Native WDM multiplexer / demultiplexer
 // ────────────────────────────────────────────────────────────────────────
 //
