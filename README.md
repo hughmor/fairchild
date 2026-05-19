@@ -12,10 +12,12 @@ photonics in lockstep.
 
 **Status.** Solver foundations complete (`.options`, `.dc`, `.ic`, `.measure`,
 `.lib`, `.noise`, `.alter`, `.temp`, B-element behavioral sources, GEAR/BDF-2,
-sparse LU, junction limiting). Photonic discipline rebuilt around native Rust
-devices and bundle-port syntax. Python bindings cover every analysis the CLI
-does. See [`sotu.md`](sotu.md) for the project state-of-the-union and
-[`PLAN.md`](PLAN.md) for the architectural plan.
+sparse LU, junction limiting, Armijo-damped Newton, verbose diagnostics).
+Photonic discipline rebuilt around 14 native Rust devices, bundle-port
+syntax with WDM as the default, and optional bidirectional propagation.
+KiCad schematic capture wired up around native devices. Python bindings
+cover every analysis the CLI does. See [`sotu.md`](sotu.md) for the project
+state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
 
 ---
 
@@ -49,10 +51,20 @@ expansion.
 | Waveguide | `fc_waveguide` |
 | 2×2 directional coupler | `fc_dcoupler` |
 | Y-splitter | `fc_splitter` |
+| Grating coupler | `fc_grating_coupler` |
+| 3-port circulator (bidir) | `fc_circulator` |
+| WDM mux / demux | `fc_mux` / `fc_demux` |
 | PN-junction phase shifter | `fc_pn_ps` |
+| PN phase shifter + C_j(V) | `fc_pn_ps_cap` |
 | Thermo-optic phase shifter | `fc_thermal_ps` |
+| Thermo-optic PS + τ_th | `fc_thermal_ps_rc` |
+| Combined PN + thermal PS | `fc_pn_th_ps` |
+| Idealised testbench MZM | `fc_mzm` |
 | Photodetector | `fc_photodetector` |
 
+Every bundle-aware device handles WDM by default: N-channel optical bus
+in, N parallel propagation paths inside, one shared electrical interface.
+Bidirectional propagation is enabled with `.options enable_bidirectional=1`.
 Higher-level structures (micro-ring resonators, MZIs) are composed in the
 netlist from these primitives; see `examples/photonic/`.
 
@@ -178,8 +190,8 @@ crates/
 examples/             Ready-to-run SPICE netlists + Python driver scripts.
 docs/                 user-guide.md, photonic_models.md (legacy OSDI catalog),
                       generated comparison plots.
-scripts/              kicad_to_fairchild.py (KiCad netlist post-processor —
-                      due for rewrite around native devices).
+scripts/              kicad_to_fairchild.py (KiCad netlist post-processor;
+                      native fc_* devices).
 va-models/            Legacy Verilog-A photonic models + build scripts.
 ```
 
@@ -191,15 +203,16 @@ See [`sotu.md`](sotu.md) for the live status list.
 
 The major work ahead, in rough order:
 
-1. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
+1. **Benchmark suite + CI** — head-to-head accuracy and performance
+   comparisons against ngspice (and HSPICE / PrimeSim where licences allow),
+   nightly in CI. The repo currently has comparison plots only for tiny
+   circuits; a credible benchmark page is the cheapest move with the biggest
+   visibility return.
+2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.
-2. **Remaining analog elements** — BJT (Gummel-Poon), `K` coupled inductors,
+3. **Remaining analog elements** — BJT (Gummel-Poon), `K` coupled inductors,
    switches, transmission lines.
-3. **KiCad integration around native `fc_*` devices** — symbol library
-   rewrite, post-processor rewrite, action-plugin prototype. The current
-   `scripts/kicad_to_fairchild.py` and `kicad_integration.md` are built
-   around OSDI and need redoing.
 4. **Adjoint sensitivity** (the original Phase 4 differentiator).
 5. **Tier-2 moats**: envelope-following, S-parameter Touchstone blocks with
    time-domain convolution, harmonic balance / PSS, WDM cross-channel
