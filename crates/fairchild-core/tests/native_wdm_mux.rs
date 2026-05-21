@@ -92,7 +92,7 @@ fn wdm_pn_ps_electrical_is_shared_across_channels() {
 .optical_port ch0
 .optical_port out0
 Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
-Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100 g_pn=1e-3
+Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100 g_pn=1e-3 pin_at_ref=1 alpha_dB_cm=0
 Vmod vmod 0 DC 1.0
 .op
 .end
@@ -107,7 +107,7 @@ Vmod vmod 0 DC 1.0
 Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xl1 ch1 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmux bus ch0 ch1 fc_mux
-Xpn bus out_bus vmod 0 fc_pn_ps L_um=100 g_pn=1e-3
+Xpn bus out_bus vmod 0 fc_pn_ps L_um=100 g_pn=1e-3 pin_at_ref=1 alpha_dB_cm=0
 Xdemux out_bus out0 out1 fc_demux
 Vmod vmod 0 DC 1.0
 .op
@@ -168,7 +168,7 @@ fn lambda_center_nm_drives_default_wavelength() {
 .optical_port ch0
 .optical_port out0
 Xl0 ch0 fc_cw_laser power_mW=1.0
-Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100
+Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100 pin_at_ref=1 alpha_dB_cm=0
 Xpd out0 pd_a 0 fc_photodetector responsivity=0.8
 Vmod vmod 0 DC 0.0
 Vb bias 0 DC 1.0

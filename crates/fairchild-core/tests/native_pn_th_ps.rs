@@ -13,7 +13,7 @@ fn pn_th_ps_zero_bias_passes_through() {
 .optical_port ch0
 .optical_port out0
 Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
-Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m
+Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m pin_at_ref=1 alpha_dB_cm=0
 Vmod vmod 0 DC 0.0
 Vh vh 0 DC 0.0
 .op
@@ -48,7 +48,7 @@ fn pn_th_ps_phases_add() {
 .optical_port ch0
 .optical_port out0
 Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
-Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m
+Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m pin_at_ref=1 alpha_dB_cm=0
 Vmod vmod 0 DC {v_pn_for_pi_over_2}
 Vh vh 0 DC {v_h_for_pi_over_2}
 .op
@@ -75,7 +75,7 @@ fn pn_th_ps_electrical_interfaces_independent() {
 .optical_port ch0
 .optical_port out0
 Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
-Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m
+Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k p_pi=10m pin_at_ref=1 alpha_dB_cm=0
 Vmod vmod 0 DC 1.0
 Vh vh 0 DC 0.0
 .op

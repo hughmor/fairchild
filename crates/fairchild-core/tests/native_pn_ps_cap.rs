@@ -23,8 +23,8 @@ Vmod vmod 0 DC 0.5
 .op
 .end
 ");
-    let n1 = parse_spice(&common("fc_pn_ps")).unwrap();
-    let n2 = parse_spice(&common("fc_pn_ps_cap")).unwrap();
+    let n1 = parse_spice(&common("fc_pn_ps pin_at_ref=1")).unwrap();
+    let n2 = parse_spice(&common("fc_pn_ps_cap pin_at_ref=1")).unwrap();
     let r1 = dc_op_nr_with_registry(&n1, &DeviceRegistry::new()).unwrap();
     let r2 = dc_op_nr_with_registry(&n2, &DeviceRegistry::new()).unwrap();
     let v1 = r1.node_voltage("out0_re_0").unwrap();
