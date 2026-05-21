@@ -635,7 +635,6 @@ fn run_corners_parallel(
             // only need a few fields, so pass them explicitly via a
             // miniature struct rather than threading the whole Cli through.
             let ctx = CornerCtx {
-                quiet: cli_quiet,
                 verbose: cli_verbose,
                 format: &cli_format,
             };
@@ -650,7 +649,6 @@ fn run_corners_parallel(
 /// fields per-worker instead of an entire `Cli` (which holds owned
 /// `String` / `Vec<String>` that would force cloning per corner).
 struct CornerCtx<'a> {
-    quiet:   bool,
     verbose: bool,
     format:  &'a Format,
 }
@@ -661,7 +659,7 @@ fn run_corner_analyses(
     probe_list: &[String], title: &str, cli: &Cli,
     w: &mut dyn Write,
 ) -> bool {
-    let ctx = CornerCtx { quiet: cli.quiet, verbose: cli.verbose, format: &cli.format };
+    let ctx = CornerCtx { verbose: cli.verbose, format: &cli.format };
     run_corner_analyses_ctx(corner, registry, probe_list, title, &ctx, w)
 }
 
@@ -829,6 +827,5 @@ fn run_corner_analyses_ctx(
             }
         }
     }
-    let _ = ctx.quiet;  // currently unused but kept for symmetry with build_registry
     ran_something
 }

@@ -98,6 +98,10 @@ cargo test
 # on macOS or `apt install libsuitesparse-dev` on Debian/Ubuntu):
 cargo build --release --features klu
 ./target/release/fairchild -f examples/electronic/rc_bode.sp --solver klu
+
+# Python bindings with KLU (in your active virtualenv):
+cd crates/fairchild-py && maturin develop --release --features klu
+python -c "import fairchild; c = fairchild.Circuit(); c.load_str('...'); c.run('op', solver='klu')"
 ```
 
 OpenVAF-Reloaded: `/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r`
