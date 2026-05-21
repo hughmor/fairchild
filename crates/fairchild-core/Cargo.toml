@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 fairchild-parser = { workspace = true }
 faer.workspace = true
+rayon            = { workspace = true }
 thiserror        = { workspace = true }
 indexmap         = { workspace = true }
 

@@ -6,6 +6,7 @@
 //! be written as CSV or Nutmeg.
 
 use indexmap::IndexMap;
+use rayon::prelude::*;
 
 use fairchild_parser::{Element, Netlist, Waveform};
 
@@ -194,26 +195,53 @@ pub fn dc_sweep_with_registry_opts(
     let probe = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
     let topo  = probe.topo;
 
-    let mut node_voltages: IndexMap<String, Vec<f64>> = topo.node_index.keys()
-        .map(|k| (k.clone(), Vec::with_capacity(total))).collect();
-    let mut vsrc_currents: IndexMap<String, Vec<f64>> = topo.vsrc_index.keys()
-        .map(|k| (k.clone(), Vec::with_capacity(total))).collect();
+    // Each sweep point is independent: clone the netlist, override the
+    // swept source(s), run a fresh DC OP.  Solve all points in parallel
+    // (rayon), then write into pre-sized result vectors by linear index
+    // so the outer-major layout that `write_csv` / `write_nutmeg` expect
+    // is preserved.  Under `--verbose` we fall back to serial — the
+    // per-point NR diagnostics would otherwise interleave across threads.
+    let inner_len = inner_vals.len();
+    let mut points: Vec<(usize, f64, f64)> = Vec::with_capacity(total);
+    for (i, &ov) in outer_vals.iter().enumerate() {
+        for (j, &iv) in inner_vals.iter().enumerate() {
+            points.push((i * inner_len + j, ov, iv));
+        }
+    }
 
-    for &v_outer in &outer_vals {
-        for &v_inner in &inner_vals {
-            let mut nl = netlist.clone();
-            override_source_dc(&mut nl, src, v_outer);
-            if let Some(axis) = &inner {
-                override_source_dc(&mut nl, &axis.src, v_inner);
-            }
-            let r = dc_op_nr_with_registry_opts(&nl, registry, opts)?;
-            for (name, idx_map_idx) in &topo.node_index {
-                node_voltages.get_mut(name).unwrap().push(r.x[*idx_map_idx]);
-            }
-            let n_nodes = topo.n_nodes();
-            for (name, idx) in &topo.vsrc_index {
-                vsrc_currents.get_mut(name).unwrap().push(r.x[n_nodes + *idx]);
-            }
+    let solve_one = |outer_v: f64, inner_v: f64| -> Result<Vec<f64>, SimError> {
+        let mut nl = netlist.clone();
+        override_source_dc(&mut nl, src, outer_v);
+        if let Some(axis) = &inner {
+            override_source_dc(&mut nl, &axis.src, inner_v);
+        }
+        let r = dc_op_nr_with_registry_opts(&nl, registry, opts)?;
+        Ok(r.x)
+    };
+
+    let solved: Vec<Result<(usize, Vec<f64>), SimError>> = if opts.verbose {
+        points.iter()
+            .map(|&(idx, ov, iv)| solve_one(ov, iv).map(|x| (idx, x)))
+            .collect()
+    } else {
+        points.par_iter()
+            .map(|&(idx, ov, iv)| solve_one(ov, iv).map(|x| (idx, x)))
+            .collect()
+    };
+    let solved: Vec<(usize, Vec<f64>)> = solved.into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut node_voltages: IndexMap<String, Vec<f64>> = topo.node_index.keys()
+        .map(|k| (k.clone(), vec![0.0; total])).collect();
+    let mut vsrc_currents: IndexMap<String, Vec<f64>> = topo.vsrc_index.keys()
+        .map(|k| (k.clone(), vec![0.0; total])).collect();
+    let n_nodes = topo.n_nodes();
+    for (idx, x) in solved {
+        for (name, &node_idx) in &topo.node_index {
+            node_voltages.get_mut(name).unwrap()[idx] = x[node_idx];
+        }
+        for (name, &vsrc_idx) in &topo.vsrc_index {
+            vsrc_currents.get_mut(name).unwrap()[idx] = x[n_nodes + vsrc_idx];
         }
     }
 

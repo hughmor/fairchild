@@ -17,6 +17,7 @@
 /// where B = ωC − L/ω.
 
 use indexmap::IndexMap;
+use rayon::prelude::*;
 
 use fairchild_parser::{Element, Netlist};
 
@@ -224,54 +225,68 @@ pub fn ac_analysis_opts(
     let b_ac_re = build_ac_rhs(&topo, netlist, ac_source, 1.0, 0.0); // unit amplitude, 0° phase
     let b_ac_im = vec![0.0f64; size];
 
-    // --- Sweep ---
-    let mut result = AcResult {
-        freq: freqs.to_vec(),
-        voltages: topo.node_index.keys()
-            .map(|k| (k.clone(), Vec::with_capacity(freqs.len())))
-            .collect(),
-    };
+    // --- Sweep (parallel across frequencies) ---
+    //
+    // Each frequency builds its own 2N×2N block system and solves it.  The
+    // assembled G / C / L matrices, the RHS vectors, and the linear solver
+    // are all read-only inside the loop, so rayon can fan out one frequency
+    // per worker.  Results are collected in input order via `par_iter().map()
+    // .collect::<Vec<_>>()` and then written into the result IndexMap by
+    // index — same observable output as the sequential path.
+    let solver_ref: &dyn LinearSolver = &*ac_solver;
+    let per_freq: Vec<Result<Vec<(f64, f64)>, SimError>> = freqs.par_iter()
+        .map(|&f| {
+            let omega = 2.0 * std::f64::consts::PI * f;
 
-    for &f in freqs {
-        let omega = 2.0 * std::f64::consts::PI * f;
-
-        // B matrix = ωC − L/ω  (susceptance)
-        let mut b_mat = vec![vec![0.0f64; size]; size];
-        for i in 0..size {
-            for j in 0..size {
-                b_mat[i][j] = omega * c_mat[i][j] - l_mat[i][j] / omega;
+            // B matrix = ωC − L/ω  (susceptance)
+            let mut b_mat = vec![vec![0.0f64; size]; size];
+            for i in 0..size {
+                for j in 0..size {
+                    b_mat[i][j] = omega * c_mat[i][j] - l_mat[i][j] / omega;
+                }
             }
-        }
 
-        // Build 2N×2N block system:
-        //   [ G  -B ] [V_re]   [I_re]
-        //   [ B   G ] [V_im] = [I_im]
-        let n2 = 2 * size;
-        let mut a2 = vec![vec![0.0f64; n2]; n2];
-        let mut rhs = vec![0.0f64; n2];
+            // Build 2N×2N block system:
+            //   [ G  -B ] [V_re]   [I_re]
+            //   [ B   G ] [V_im] = [I_im]
+            let n2 = 2 * size;
+            let mut a2 = vec![vec![0.0f64; n2]; n2];
+            let mut rhs = vec![0.0f64; n2];
 
-        for i in 0..size {
-            for j in 0..size {
-                a2[i][j] = g_mat[i][j];          // top-left G
-                a2[i][size + j] = -b_mat[i][j];  // top-right -B
-                a2[size + i][j] = b_mat[i][j];   // bottom-left B
-                a2[size + i][size + j] = g_mat[i][j]; // bottom-right G
+            for i in 0..size {
+                for j in 0..size {
+                    a2[i][j] = g_mat[i][j];
+                    a2[i][size + j] = -b_mat[i][j];
+                    a2[size + i][j] = b_mat[i][j];
+                    a2[size + i][size + j] = g_mat[i][j];
+                }
+                rhs[i] = b_ac_re[i];
+                rhs[size + i] = b_ac_im[i];
             }
-            rhs[i] = b_ac_re[i];
-            rhs[size + i] = b_ac_im[i];
-        }
 
-        let x = ac_solver.solve(&a2, &rhs)?;
-        let x_re = &x[..size];
-        let x_im = &x[size..];
+            let x = solver_ref.solve(&a2, &rhs)?;
+            let row: Vec<(f64, f64)> = topo.node_index.values()
+                .map(|&idx| (x[idx], x[size + idx]))
+                .collect();
+            Ok(row)
+        })
+        .collect();
 
-        for (name, &idx) in &topo.node_index {
-            result.voltages.get_mut(name).unwrap()
-                .push((x_re[idx], x_im[idx]));
+    // Bail on the first error to mirror the historic short-circuit behaviour.
+    let per_freq: Vec<Vec<(f64, f64)>> = per_freq.into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Transpose: per_freq is [freq_idx][node_idx], result wants [node][freq_idx].
+    let mut voltages: IndexMap<String, Vec<(f64, f64)>> = topo.node_index.keys()
+        .map(|k| (k.clone(), Vec::with_capacity(freqs.len())))
+        .collect();
+    for row in &per_freq {
+        for (series, &pair) in voltages.values_mut().zip(row.iter()) {
+            series.push(pair);
         }
     }
 
-    Ok(result)
+    Ok(AcResult { freq: freqs.to_vec(), voltages })
 }
 
 // ---------------------------------------------------------------------------
