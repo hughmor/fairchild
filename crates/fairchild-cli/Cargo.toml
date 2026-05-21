@@ -12,6 +12,7 @@ fairchild-core   = { workspace = true }
 fairchild-parser = { workspace = true }
 fairchild-osdi   = { workspace = true }
 clap             = { workspace = true }
+rayon            = { workspace = true }
 
 [features]
 # Forwards to fairchild-core/klu — see that crate for prerequisites

@@ -1,10 +1,11 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
+use rayon::prelude::*;
 
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
@@ -116,6 +117,17 @@ struct Cli {
     ///   auto   — pick from system size (default)
     #[arg(long, value_name = "dense|sparse|klu|auto")]
     solver: Option<String>,
+
+    /// Bundle all `.alter` × `.temp` corner outputs into the single
+    /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
+    /// preserving the historic concatenated layout.
+    ///
+    /// Default behaviour when `--output` is given: write one file per
+    /// corner (e.g. `out.alter_pvtfast.temp_-40c.csv`) and run the
+    /// corners in parallel.  With `--single-output`, runs are serial
+    /// so headers and rows stay in deterministic order.
+    #[arg(long)]
+    single_output: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -422,20 +434,6 @@ fn main() {
             opts.reltol, opts.gmin, opts.method, opts.itl1, opts.itl4);
     }
 
-    let writer: Box<dyn Write> = match &cli.output {
-        Some(path) => {
-            let f = fs::File::create(path).unwrap_or_else(|e| {
-                eprintln!("error: cannot create {:?}: {e}", path);
-                std::process::exit(1);
-            });
-            Box::new(BufWriter::new(f))
-        }
-        None => Box::new(BufWriter::new(io::stdout())),
-    };
-    let mut w = writer;
-
-    let mut ran_something = false;
-
     // .temp <T1> [<T2> ...] sweep: re-run every analysis once per temperature.
     // Empty `temps` ⇒ single pass at whatever `opts.temp_k` already is.
     let temp_sweep: Vec<f64> = if netlist.temps.len() > 1 {
@@ -444,8 +442,6 @@ fn main() {
         vec![opts.temp_k]
     };
     // .alter sweep: base run + one re-run per .alter block.
-    // We materialise the netlists up front so the analysis loop doesn't have
-    // to know about block iteration.
     let mut alter_runs: Vec<(String, Netlist)> = vec![("base".into(), netlist.clone())];
     for block in &netlist.alters {
         let mut patched = netlist.clone();
@@ -453,87 +449,283 @@ fn main() {
         alter_runs.push((block.label.clone(), patched));
     }
 
-    for (ai, (alter_label, netlist)) in alter_runs.iter().enumerate() {
-        if alter_runs.len() > 1 {
-            writeln!(w, "# alter={alter_label} (block {}/{})",
-                ai + 1, alter_runs.len())
+    // Flatten the (alter × temp) grid into a list of corners.  Each
+    // corner is an independent simulation; we either run them serially
+    // into one shared writer (`--single-output`, no `--output`, only
+    // one corner, or `--verbose`) or in parallel into per-corner files.
+    let mut corners: Vec<Corner> = Vec::with_capacity(alter_runs.len() * temp_sweep.len());
+    for (ai, (alter_label, alter_netlist)) in alter_runs.iter().enumerate() {
+        for (ti, &temp_k) in temp_sweep.iter().enumerate() {
+            let mut corner_opts = opts.clone();
+            corner_opts.temp_k = temp_k;
+            corners.push(Corner {
+                alter_idx: ai,
+                temp_idx: ti,
+                alter_label: alter_label.clone(),
+                temp_k,
+                netlist: alter_netlist.clone(),
+                opts: corner_opts,
+            });
+        }
+    }
+
+    let n_alters = alter_runs.len();
+    let n_temps = temp_sweep.len();
+    let n_corners = corners.len();
+
+    // Dispatch: file-per-corner only when (a) an output path is given,
+    // (b) we have more than one corner, (c) the user hasn't asked for
+    // the single-output bundle, and (d) verbose is off (otherwise the
+    // interleaved per-corner NR diagnostics would be unreadable).
+    let parallel_eligible = cli.output.is_some()
+        && n_corners > 1
+        && !cli.single_output
+        && !cli.verbose;
+
+    let ran_something = if parallel_eligible {
+        run_corners_parallel(
+            &corners, n_alters, n_temps,
+            netlist_dir.as_ref(), &probe_list, &title, &cli,
+        )
+    } else {
+        run_corners_serial(
+            &corners, n_alters, n_temps,
+            netlist_dir.as_ref(), &probe_list, &title, &cli,
+        )
+    };
+
+    if !ran_something && !cli.quiet {
+        eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Corner sweep — `.alter` × `.temp` grid
+// ---------------------------------------------------------------------------
+
+/// One leaf of the `.alter` × `.temp` grid: a fully-resolved netlist
+/// plus a `SimOptions` carrying the per-corner temperature.
+struct Corner {
+    alter_idx:  usize,
+    temp_idx:   usize,
+    alter_label: String,
+    temp_k:     f64,
+    netlist:    Netlist,
+    opts:       SimOptions,
+}
+
+/// Derive a per-corner output path by suffixing the base `--output`
+/// path with `.alter_<label>` and `.temp_<C>c` where the corresponding
+/// sweep is non-trivial.  Single-corner runs pass through unchanged.
+fn corner_path(base: &Path, alter_label: &str, n_alters: usize, temp_k: f64, n_temps: usize) -> PathBuf {
+    if n_alters <= 1 && n_temps <= 1 {
+        return base.to_path_buf();
+    }
+    let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext  = base.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let mut name = stem;
+    if n_alters > 1 {
+        name.push_str(".alter_");
+        name.push_str(&sanitize_label(alter_label));
+    }
+    if n_temps > 1 {
+        let temp_c = temp_k - 273.15;
+        // `{:+.0}` keeps the sign so `-40c` and `27c` are immediately
+        // distinguishable, while `{:.0}` collapses 26.9°C to "27c".
+        name.push_str(&format!(".temp_{:.0}c", temp_c));
+    }
+    if !ext.is_empty() {
+        name.push('.');
+        name.push_str(&ext);
+    }
+    parent.join(name)
+}
+
+/// Replace whitespace and path separators in `.alter` labels so they
+/// produce valid filename suffixes.
+fn sanitize_label(s: &str) -> String {
+    s.chars().map(|c| match c {
+        ' ' | '\t' | '/' | '\\' | ':' => '_',
+        _ => c,
+    }).collect()
+}
+
+fn open_writer(path: &Path) -> Box<dyn Write + Send> {
+    let f = fs::File::create(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot create {path:?}: {e}");
+        std::process::exit(1);
+    });
+    Box::new(BufWriter::new(f))
+}
+
+/// Run every corner sequentially into a single shared writer.  Used
+/// when `--single-output` is given, when there's only one corner,
+/// when no `--output` was specified (writes go to stdout), or under
+/// `--verbose` (per-corner diagnostics would otherwise interleave).
+fn run_corners_serial(
+    corners: &[Corner], n_alters: usize, n_temps: usize,
+    netlist_dir: Option<&PathBuf>, probe_list: &[String], title: &str, cli: &Cli,
+) -> bool {
+    let mut w: Box<dyn Write> = match &cli.output {
+        Some(path) => open_writer(path),
+        None       => Box::new(BufWriter::new(io::stdout())),
+    };
+    let mut ran_something = false;
+    let mut last_alter: Option<usize> = None;
+    let mut registry: Option<DeviceRegistry> = None;
+    for corner in corners {
+        // Rebuild registry on every new alter block (model overrides may
+        // differ); reuse across temperature sweep points within a block.
+        if last_alter != Some(corner.alter_idx) {
+            registry = Some(build_registry(&corner.netlist, netlist_dir, cli.quiet));
+            last_alter = Some(corner.alter_idx);
+        }
+        if n_alters > 1 {
+            writeln!(w, "# alter={} (block {}/{})",
+                corner.alter_label, corner.alter_idx + 1, n_alters)
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
             if cli.verbose {
-                eprintln!("info: .alter block {}/{}: '{alter_label}'",
-                    ai + 1, alter_runs.len());
+                eprintln!("info: .alter block {}/{}: '{}'",
+                    corner.alter_idx + 1, n_alters, corner.alter_label);
             }
         }
-        // Rebuild the device registry for this alter pass — `.model`
-        // overrides inside the block need to make it into the built-in
-        // model registry.  OSDI shared-library handles are recomputed too;
-        // that's a small redundancy worth the simplicity.
-        let registry = build_registry(netlist, netlist_dir.as_ref(), cli.quiet);
-    for (ti, &temp_k) in temp_sweep.iter().enumerate() {
-        let mut opts = opts.clone();
-        opts.temp_k = temp_k;
-        if temp_sweep.len() > 1 {
-            // Header so concatenated CSVs are bisectable.
+        if n_temps > 1 {
             writeln!(w, "# temp_c={:.3} (point {}/{})",
-                temp_k - 273.15, ti + 1, temp_sweep.len())
+                corner.temp_k - 273.15, corner.temp_idx + 1, n_temps)
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
             if cli.verbose {
                 eprintln!("info: temperature sweep point {}/{}: {:.2} °C",
-                    ti + 1, temp_sweep.len(), temp_k - 273.15);
+                    corner.temp_idx + 1, n_temps, corner.temp_k - 273.15);
             }
         }
+        if run_corner_analyses(
+            corner, registry.as_ref().unwrap(),
+            probe_list, title, cli, &mut w,
+        ) {
+            ran_something = true;
+        }
+    }
+    ran_something
+}
 
+/// Run every corner on its own thread, writing to per-corner files
+/// derived from the base `--output` path.  Each thread builds its own
+/// device registry so OSDI library handles aren't shared (the OSDI
+/// loader uses `dlopen` which is process-global, but each registry
+/// owns its own `OsdiLibrary` handles).
+fn run_corners_parallel(
+    corners: &[Corner], n_alters: usize, n_temps: usize,
+    netlist_dir: Option<&PathBuf>, probe_list: &[String], title: &str, cli: &Cli,
+) -> bool {
+    let base = cli.output.as_ref().expect("--output required for parallel mode");
+    let netlist_dir = netlist_dir.cloned();
+    let probe_list = probe_list.to_vec();
+    let title = title.to_string();
+    let cli_quiet = cli.quiet;
+    let cli_verbose = cli.verbose;
+    let cli_format = cli.format.clone();
+
+    let ran: Vec<bool> = corners.par_iter()
+        .map(|corner| {
+            let out_path = corner_path(base, &corner.alter_label, n_alters, corner.temp_k, n_temps);
+            let mut w: Box<dyn Write> = open_writer(&out_path);
+            let registry = build_registry(&corner.netlist, netlist_dir.as_ref(), cli_quiet);
+            // Build a synthetic Cli reference for run_corner_analyses; we
+            // only need a few fields, so pass them explicitly via a
+            // miniature struct rather than threading the whole Cli through.
+            let ctx = CornerCtx {
+                quiet: cli_quiet,
+                verbose: cli_verbose,
+                format: &cli_format,
+            };
+            run_corner_analyses_ctx(corner, &registry, &probe_list, &title, &ctx, &mut w)
+        })
+        .collect();
+    ran.into_iter().any(|x| x)
+}
+
+/// Minimal subset of CLI flags that `run_corner_analyses_ctx` actually
+/// needs.  Used so the parallel path can pass small `Copy`/borrowed
+/// fields per-worker instead of an entire `Cli` (which holds owned
+/// `String` / `Vec<String>` that would force cloning per corner).
+struct CornerCtx<'a> {
+    quiet:   bool,
+    verbose: bool,
+    format:  &'a Format,
+}
+
+/// Convenience wrapper for the serial path that has a `&Cli` available.
+fn run_corner_analyses(
+    corner: &Corner, registry: &DeviceRegistry,
+    probe_list: &[String], title: &str, cli: &Cli,
+    w: &mut dyn Write,
+) -> bool {
+    let ctx = CornerCtx { quiet: cli.quiet, verbose: cli.verbose, format: &cli.format };
+    run_corner_analyses_ctx(corner, registry, probe_list, title, &ctx, w)
+}
+
+/// Run every `Analysis` declared on this corner's netlist, writing
+/// results to `w`.  Returns `true` if anything was emitted.
+fn run_corner_analyses_ctx(
+    corner: &Corner, registry: &DeviceRegistry,
+    probe_list: &[String], title: &str, ctx: &CornerCtx,
+    w: &mut dyn Write,
+) -> bool {
+    let netlist = &corner.netlist;
+    let opts = &corner.opts;
+    let mut ran_something = false;
     for analysis in &netlist.analyses {
         match analysis {
             Analysis::Op => {
-                if cli.verbose { eprintln!("info: running DC operating-point analysis..."); }
+                if ctx.verbose { eprintln!("info: running DC operating-point analysis..."); }
                 let t0 = Instant::now();
-                let result = dc_op_nr_with_registry_opts(&netlist, &registry, &opts).unwrap_or_else(|e| {
+                let result = dc_op_nr_with_registry_opts(netlist, registry, opts).unwrap_or_else(|e| {
                     eprintln!("error: DC op failed: {e}");
                     std::process::exit(1);
                 });
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: DC op converged in {} iteration(s) [{:.1} ms]",
                         result.iters, t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                match cli.format {
+                match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
                         result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, &probe_list);
+                        let filtered = filter_csv(&csv, probe_list);
                         w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
             }
 
             Analysis::Tran { step, stop } => {
-                if cli.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?})...", opts.method); }
+                if ctx.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?})...", opts.method); }
                 let t0 = Instant::now();
-                let result = tran_nr_with_registry_opts(&netlist, *step, *stop, &registry, &opts).unwrap_or_else(|e| {
+                let result = tran_nr_with_registry_opts(netlist, *step, *stop, registry, opts).unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: transient complete: {} time-points [{:.1} ms]",
                         result.time.len(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                match cli.format {
+                match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
                         result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, &probe_list);
+                        let filtered = filter_csv(&csv, probe_list);
                         w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
-                // Evaluate `.measure` directives on the just-finished tran run.
                 if !netlist.measurements.is_empty() {
                     let ms = evaluate_measurements(&netlist.measurements, &result);
                     for m in ms {
@@ -544,7 +736,7 @@ fn main() {
             }
 
             Analysis::Dc { src, start, stop, step, nested } => {
-                if cli.verbose {
+                if ctx.verbose {
                     let extra = match nested {
                         Some(n) => format!(" × {} {}..{}", n.src, n.start, n.stop),
                         None    => String::new(),
@@ -554,63 +746,63 @@ fn main() {
                 let t0 = Instant::now();
                 let nested_arg = nested.as_ref().map(|n| (n.src.as_str(), n.start, n.stop, n.step));
                 let result = dc_sweep_with_registry_opts(
-                    &netlist, src, *start, *stop, *step, nested_arg, &registry, &opts
+                    netlist, src, *start, *stop, *step, nested_arg, registry, opts
                 ).unwrap_or_else(|e| {
                     eprintln!("error: DC sweep failed: {e}");
                     std::process::exit(1);
                 });
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: DC sweep complete: {} point(s) [{:.1} ms]",
                         result.n_points(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                match cli.format {
+                match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
                         result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, &probe_list);
+                        let filtered = filter_csv(&csv, probe_list);
                         w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
             }
 
             Analysis::Ac { variation, points, fstart, fstop } => {
-                if cli.verbose { eprintln!("info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."); }
+                if ctx.verbose { eprintln!("info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."); }
                 let t0 = Instant::now();
                 let freqs = match variation {
                     AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
                     AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
                     AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
                 };
-                let result = ac_analysis_opts(&netlist, &freqs, None, &registry, &opts).unwrap_or_else(|e| {
+                let result = ac_analysis_opts(netlist, &freqs, None, registry, opts).unwrap_or_else(|e| {
                     eprintln!("error: AC analysis failed: {e}");
                     std::process::exit(1);
                 });
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: AC analysis complete: {} frequency points [{:.1} ms]",
                         freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                match cli.format {
+                match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
                         result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, &probe_list);
+                        let filtered = filter_csv(&csv, probe_list);
                         w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut w, &title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
             }
 
             Analysis::Noise { out_pos, out_neg, input_src, variation, points, fstart, fstop } => {
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: running noise analysis V({out_pos},{out_neg}) on {input_src} \
                               ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)...");
                 }
@@ -621,12 +813,12 @@ fn main() {
                     AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
                 };
                 let result = fairchild_core::noise_analysis(
-                    &netlist, &freqs, out_pos, out_neg, input_src, &registry, &opts,
+                    netlist, &freqs, out_pos, out_neg, input_src, registry, opts,
                 ).unwrap_or_else(|e| {
                     eprintln!("error: noise analysis failed: {e}");
                     std::process::exit(1);
                 });
-                if cli.verbose {
+                if ctx.verbose {
                     eprintln!("info: noise analysis complete: {} pts [{:.1} ms]",
                         freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -637,10 +829,6 @@ fn main() {
             }
         }
     }
-    }  // end .temp sweep loop
-    }  // end .alter sweep loop
-
-    if !ran_something && !cli.quiet {
-        eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");
-    }
+    let _ = ctx.quiet;  // currently unused but kept for symmetry with build_registry
+    ran_something
 }
