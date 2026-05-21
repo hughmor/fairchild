@@ -510,13 +510,18 @@ pub fn tran_nr_with_registry_opts(
     // rebuild) on every NR iteration of every timestep.
     let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
 
+    // One MnaMatrix reused across every NR iteration of every timestep —
+    // for a 10 k-step transient with ~3 NR iters each this skips 30 k ×
+    // (N+1) heap allocations.
+    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+
     let mut t = step;
     let mut first_tr = true;
     loop {
         // --- NR loop for this time step ---
         let alpha = 1.0 / step;
         for _iter in 0..opts.itl4 {
-            let mut mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
+            crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t, &cap_state, &ind_state);
 
             for dev in &mut devices {
                 dev.eval(&x, EvalFlags::tran(), &ctx);
@@ -742,6 +747,9 @@ pub fn tran_nr_with_registry_var_opts(
     // isation is amortised over thousands of refactors.
     let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
 
+    // Reusable MnaMatrix — see fixed-step path for rationale.
+    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+
     'outer: loop {
         if t >= stop { break; }
 
@@ -821,7 +829,7 @@ pub fn tran_nr_with_registry_var_opts(
         let mut nr_converged = false;
 
         for _iter in 0..opts.itl4 {
-            let mut mat = stamp_netlist(&topo, netlist, t_next, &cap_state, &ind_state);
+            crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t_next, &cap_state, &ind_state);
 
             for dev in devices.iter_mut() {
                 dev.eval(&x_try, EvalFlags::tran(), &ctx);

@@ -551,8 +551,14 @@ fn nr_inner(
     // runs `sp_lu` since faer 0.24 has no separate refactor primitive).
     let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
 
+    // Reuse one MnaMatrix across iterations — saves N+1 heap allocations
+    // per NR step versus rebuilding from scratch each time.
+    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+
     for _ in 0..opts.itl1 {
-        let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+        crate::mna::stamp_netlist_scaled_in_place(
+            &mut mat, topo, netlist, source_scale, &empty, &empty,
+        );
 
         for dev in devices.iter_mut() {
             dev.eval(&x, EvalFlags::dc(), ctx);

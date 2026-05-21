@@ -82,16 +82,65 @@ impl MnaMatrix {
     /// diagnostic passes that need a clean scratch matrix without going
     /// through the netlist stamper.
     pub fn zeros(size: usize) -> Self { Self::new(size) }
+
+    /// Zero every cell of `a` and every entry of `b` in place.  Used by
+    /// the hot NR / transient loops to reuse a single `MnaMatrix`
+    /// allocation across iterations instead of paying N+1 heap
+    /// allocations per stamp.
+    pub fn clear(&mut self) {
+        for row in self.a.iter_mut() {
+            row.fill(0.0);
+        }
+        self.b.fill(0.0);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // DC stamp (time-independent elements, or companion equivalents for C/L)
 // ---------------------------------------------------------------------------
 
-/// Like `stamp_netlist` but scales all independent source amplitudes by `source_scale`.
-///
-/// Used by source-stepping homotopy: call with source_scale ∈ [0,1] to ramp
-/// voltage/current sources from zero to their nominal values.
+/// In-place version of [`stamp_netlist_scaled`].  `mat` is cleared and
+/// then filled — the caller owns the allocation and reuses it across NR
+/// iterations to avoid the N+1 heap allocations per stamp.
+pub fn stamp_netlist_scaled_in_place(
+    mat: &mut MnaMatrix,
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    source_scale: f64,
+    cap_state: &IndexMap<String, (f64, f64)>,
+    ind_state: &IndexMap<String, (f64, f64)>,
+) {
+    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state);
+    if (source_scale - 1.0).abs() < 1e-15 {
+        return;
+    }
+    let n_nodes = topo.n_nodes();
+    for (name, &vi_idx) in &topo.vsrc_index {
+        let vi = n_nodes + vi_idx;
+        if let Some(el) = netlist.elements.iter().find(|e| {
+            matches!(e, Element::VoltageSource { name: n, .. } if n == name)
+        }) {
+            if let Element::VoltageSource { waveform, .. } = el {
+                let v_full = waveform.at(0.0);
+                mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
+            }
+        }
+    }
+    for el in &netlist.elements {
+        if let Element::CurrentSource { pos, neg, waveform, .. } = el {
+            let i_full = waveform.at(0.0);
+            if i_full == 0.0 { continue; }
+            let delta = i_full * (source_scale - 1.0);
+            if let Some(&p) = topo.node_index.get(pos) { mat.b[p] -= delta; }
+            if let Some(&n) = topo.node_index.get(neg) { mat.b[n] += delta; }
+        }
+    }
+}
+
+/// Allocating variant: produces a fresh `MnaMatrix`.  Kept for non-hot
+/// call sites (one-off diagnostics, AC side-car G assembly).  The NR
+/// inner loops should call [`stamp_netlist_scaled_in_place`] against a
+/// reused matrix instead.
 pub fn stamp_netlist_scaled(
     topo: &CircuitTopology,
     netlist: &Netlist,
@@ -133,7 +182,23 @@ pub fn stamp_netlist_scaled(
     mat
 }
 
-/// Stamp the full MNA system for DC operating-point or a single transient step.
+/// In-place stamp.  Clears `mat` then fills the full MNA system.  The
+/// caller owns the allocation — used by the NR / transient inner loops
+/// to skip per-iteration heap allocation.
+pub fn stamp_netlist_in_place(
+    mat: &mut MnaMatrix,
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    t: f64,
+    cap_state: &IndexMap<String, (f64, f64)>,
+    ind_state: &IndexMap<String, (f64, f64)>,
+) {
+    mat.clear();
+    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state);
+}
+
+/// Allocating variant: produces a fresh `MnaMatrix`.  Kept for non-hot
+/// callers (DC OP one-shots, AC G-matrix assembly, diagnostic dumps).
 ///
 /// `t`           — current simulation time (used for PULSE sources)
 /// `cap_state`   — map from capacitor name → (G_eq, I_hist) BE companion pair
@@ -146,6 +211,20 @@ pub fn stamp_netlist(
     ind_state: &IndexMap<String, (f64, f64)>,
 ) -> MnaMatrix {
     let mut mat = MnaMatrix::new(topo.size);
+    stamp_netlist_into(&mut mat, topo, netlist, t, cap_state, ind_state);
+    mat
+}
+
+/// Internal shared stamping body.  Assumes `mat` is already zeroed at
+/// the right size (caller responsibility).
+fn stamp_netlist_into(
+    mat: &mut MnaMatrix,
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    t: f64,
+    cap_state: &IndexMap<String, (f64, f64)>,
+    ind_state: &IndexMap<String, (f64, f64)>,
+) {
     let n_nodes = topo.n_nodes();
 
     for el in &netlist.elements {
@@ -188,8 +267,6 @@ pub fn stamp_netlist(
             }
         }
     }
-
-    mat
 }
 
 // ---------------------------------------------------------------------------
