@@ -250,6 +250,7 @@ impl SimOptions {
                 self.solver = match value.to_lowercase().as_str() {
                     "dense"  => SolverKind::Dense,
                     "sparse" | "faer-sparse" | "faer_sparse" => SolverKind::Sparse,
+                    "klu" | "suitesparse" | "suitesparse-klu" => SolverKind::Klu,
                     "auto"   => SolverKind::Auto,
                     _ => return false,
                 };

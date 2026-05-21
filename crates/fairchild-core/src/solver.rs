@@ -27,6 +27,11 @@ pub enum SolverKind {
     Dense,
     /// Sparse LU via `faer::sparse`.  Pure-Rust default at larger N.
     Sparse,
+    /// SuiteSparse KLU.  Sparse direct LU specialised for circuit
+    /// matrices (BTF + dense LU on diagonal blocks).  Typically 2-5×
+    /// faster than the faer-sparse path on circuit problems.  Requires
+    /// the `klu` cargo feature and a system install of SuiteSparse.
+    Klu,
     /// Pick automatically from system size (Dense if n < 50, else Sparse).
     Auto,
 }
@@ -136,12 +141,38 @@ impl LinearSolver for FaerSparseSolver {
     }
 }
 
+/// SuiteSparse KLU backend — sparse direct LU with BTF preordering.
+///
+/// Like `FaerSparseSolver`, this currently converts the dense input to
+/// CSC on every call; the symbolic / numeric factorisation split that
+/// makes KLU's repeated-pattern fast path pay off is added by the
+/// follow-on `LinearSolver` trait extension (factorisation cache).
+#[cfg(feature = "klu")]
+pub struct KluSolver;
+
+#[cfg(feature = "klu")]
+impl LinearSolver for KluSolver {
+    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        fairchild_klu::klu_solve_dense(a, b).map_err(|_| SimError::SingularMatrix)
+    }
+}
+
 /// Construct a solver for a system of the given estimated size.  Drives
 /// `SolverKind::Auto`'s dense / sparse crossover.
 pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
     match kind {
         SolverKind::Dense  => Box::new(DenseSolver),
         SolverKind::Sparse => Box::new(FaerSparseSolver::default()),
+        SolverKind::Klu    => {
+            #[cfg(feature = "klu")]
+            { Box::new(KluSolver) }
+            #[cfg(not(feature = "klu"))]
+            {
+                eprintln!("warning: KLU backend requested but `klu` cargo feature \
+                           is not enabled; falling back to faer-sparse.");
+                Box::new(FaerSparseSolver::default())
+            }
+        }
         SolverKind::Auto   => {
             if n < 50 { Box::new(DenseSolver) }
             else      { Box::new(FaerSparseSolver::default()) }

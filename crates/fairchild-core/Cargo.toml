@@ -5,10 +5,17 @@ edition = "2021"
 
 [dependencies]
 fairchild-parser = { workspace = true }
+fairchild-klu    = { workspace = true, optional = true }
 faer.workspace = true
 rayon            = { workspace = true }
 thiserror        = { workspace = true }
 indexmap         = { workspace = true }
+
+[features]
+# Enable the SuiteSparse KLU sparse-direct LU backend.  Requires a
+# system install of SuiteSparse (`brew install suite-sparse` on macOS,
+# `apt install libsuitesparse-dev` on Debian/Ubuntu).
+klu = ["dep:fairchild-klu"]
 
 [dev-dependencies]
 tempfile = "3"

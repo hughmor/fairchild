@@ -12,3 +12,8 @@ fairchild-core   = { workspace = true }
 fairchild-parser = { workspace = true }
 fairchild-osdi   = { workspace = true }
 clap             = { workspace = true }
+
+[features]
+# Forwards to fairchild-core/klu — see that crate for prerequisites
+# (system suite-sparse install).
+klu = ["fairchild-core/klu"]

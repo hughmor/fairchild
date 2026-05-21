@@ -4,6 +4,7 @@ members = [
     "crates/fairchild-parser",
     "crates/fairchild-cli",
     "crates/fairchild-osdi",
+    "crates/fairchild-klu",
     "crates/osdi-mock",
     "crates/fairchild-py",
 ]
@@ -13,6 +14,7 @@ resolver = "2"
 fairchild-core   = { path = "crates/fairchild-core" }
 fairchild-parser = { path = "crates/fairchild-parser" }
 fairchild-osdi   = { path = "crates/fairchild-osdi" }
+fairchild-klu    = { path = "crates/fairchild-klu" }
 
 faer        = "0.24"
 rayon       = "1"

@@ -25,6 +25,8 @@ First open-source **time-domain electro-optic co-simulator**: a Rust SPICE engin
 | **Tier 1 — Analog essentials** | ✅ done 2026-05-15 | GEAR/BDF-2 with order control; MOSFET fetlim + `SimOptions.pnjlim`; `.noise` (adjoint-method framework + resistor 4kT/R + diode 2qId + MOSFET 8kTgm/3 via Device trait hook); `.temp` directive + sweep; `.alter` corner-run blocks; `LinearSolver` trait with `faer-sparse` backend (KLU FFI deferred); MC deferred (Python loop today). |
 | **Tier 1.5 — Solver diagnostics + damping** | ✅ done 2026-05-17 | `SimOptions.verbose` (CLI `--verbose`, `.options verbose=1`, pyo3 `verbose=True`) → MNA stats (size, NNZ, sparsity, diagonal magnitude spread); phase-aware NR progress ("direct NR → source-stepping → gmin-stepping"); on non-convergence, top-5 residual rows with `v(node)`/`i(vsrc)` names + dominant device contributor. Newton damping upgraded from plain `vmax` clamp to clamp + Armijo line search on ‖f‖₂ (α ∈ {1,½,¼,⅛,1/16}, c = 1e-4); kicks in only when the proposed step exceeds vmax, so happy path is zero-overhead. Transpiler bug-fix shipped same day: unified model-discriminator that handles `.model fc_x fc_pn_ps …` aliases and both KiCad export shapes (`type=X model=NAME` vs. X-prefix-positional). |
 | **B — Photonic refactor** | 🚧 in progress | **B1** ✅ potential-only `optical_field`/`optical_lambda` disciplines; OSDI internal-node MNA plumbing (`Device::num_extra_nodes` + `bind_extra_nodes`); waveguide/cw_laser/photodetector VA models migrated; Norton hack retired for these three. **B2** ✅ `.optical_port NAME [N]` bundle-port netlist syntax (3·N wires per port, instance replicated per channel for N>1). **B3** ✅ native Rust passives: `fc_waveguide`, `fc_dcoupler`, `fc_splitter`. **B4** ✅ native Rust actives (first pass): `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`. **B5** ✅ OSDI demoted to compatibility shim — `fairchild-osdi/src/lib.rs` has the deprecation rationale at the crate docstring, CLI prints a one-shot info hint when photonic `.osdi` libraries are loaded. **B6** pending — PDK adapter hook so private forks can map foundry device taxonomies to fairchild native devices without leaking PDK details into master. |
+| **Perf-0 — Parallel sweeps** | ✅ done 2026-05-21 | Rayon-parallel AC frequency sweep (`ac.rs`) + DC sweep points (`dc_sweep.rs`). Each independent solve runs on its own worker; results collected in input order and written by index so CSV/Nutmeg layouts are unchanged. DC sweep falls back to serial under `--verbose` to keep per-point NR diagnostics ordered. `.alter` / `.temp` corner runs deferred to Perf-3 (CLI-level). |
+| **Perf-1 — KLU FFI backend** | ✅ done 2026-05-21 | Hand-rolled SuiteSparse KLU bindings in new `fairchild-klu` crate (~360 lines: opaque `klu_common` buffer + RAII handles for symbolic/numeric, `build.rs` auto-detects via `KLU_LIB_DIR` env / `pkg-config klu` / Homebrew default / Linux fallbacks). `SolverKind::Klu` variant gated on `klu` cargo feature (off by default; `cargo build --features klu` or feature-passthrough from CLI/Python). Three-surface: `.options solver=klu` parser, `--solver klu` CLI, `solver="klu"` Python kwarg (auto via existing `opts.set` plumbing). Requires `brew install suite-sparse` (macOS) or `libsuitesparse-dev` (Debian/Ubuntu). |
 | 4 — Differentiable sim | 📋 planned | See `phase_4.md` |
 | 5+ — PDK, model zoo | 📋 planned | See PLAN.md Parts 3/5-7 |
 
@@ -38,6 +40,7 @@ crates/
   fairchild-parser/   # SPICE parser: R,L,C,V,I,M,D; DC/PULSE/PWL; .op/.tran/.ac/.model
   fairchild-cli/      # Binary: -f netlist.sp, --format nutmeg, --probe, --param, --check
   fairchild-osdi/     # OSDI v0.4 runtime: dlopen, OsdiDevice wraps *const OsdiDescriptor
+  fairchild-klu/      # SuiteSparse KLU bindings (feature-gated; `klu` cargo feature)
   fairchild-py/       # PyO3 Python package: Circuit/SimResult/WaveformSource, maturin build
 ```
 
@@ -87,6 +90,11 @@ crates/
 cargo build --release
 cargo test
 ./target/release/fairchild -f examples/rc_step.sp
+
+# With SuiteSparse KLU sparse-direct backend (requires `brew install suite-sparse`
+# on macOS or `apt install libsuitesparse-dev` on Debian/Ubuntu):
+cargo build --release --features klu
+./target/release/fairchild -f examples/electronic/rc_bode.sp --solver klu
 ```
 
 OpenVAF-Reloaded: `/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r`
