@@ -649,7 +649,9 @@ X<name>  in  out  fc_waveguide  [param=val …]
 |---|---|---|
 | `L_um` | 100 | Length, µm. |
 | `L_m` / `length` | — | Length, m (overrides `L_um`). |
-| `n_g` | 4.2 | Group index. |
+| `n_eff` | 2.445 | Effective index at `wl_ref_nm` (sets the accumulated phase per unit length). |
+| `n_g` | 4.2 | Group index at `wl_ref_nm` (sets the dispersion slope dn_eff/dλ). |
+| `wl_ref_nm` | 1550 | Reference wavelength at which `n_eff` and `n_g` are quoted. Alias: `wl_ref_m` in metres. Defaults from `.options lambda_center_nm`. |
 | `alpha_dB_cm` | 2.0 | Power loss (dB/cm). |
 
 The `wavelength_nm` parameter is accepted for backward compatibility but
@@ -659,11 +661,30 @@ was configured with. A hard-coded 1.55 µm is used only to seed the very
 first NR iterate (where the wire is still at 0 V); after iteration 1 the
 laser's value wins.
 
-**Physics.** `A_out = A_in · exp(−α L / 2) · exp(−j β L)` with `β = 2π n_g / λ`
-and `α` in nepers/m (the `alpha_dB_cm` value is converted internally). The
-`λ` wire is read at evaluation time, so wavelength-dependent propagation
-phase is captured automatically — this is what makes the ring resonator
-example see a true resonance dip when you sweep the laser wavelength.
+**Physics.** `A_out = A_in · exp(−α L / 2) · exp(−j β L)` with
+`β = 2π · n_eff(λ) / λ` and `α` in nepers/m (the `alpha_dB_cm` value is
+converted internally). The effective index is first-order dispersion-
+corrected from the (`n_eff`, `n_g`) pair at `wl_ref_nm`:
+
+```
+n_eff(λ) = n_eff(λ_0) + (λ − λ_0) · (n_eff(λ_0) − n_g(λ_0)) / λ_0
+```
+
+so that `n_g(λ_0) = n_eff − λ · dn_eff/dλ` reproduces by construction.
+This is the correct physics for ring resonator FSR / Q calculations and
+for any wavelength sweep where the propagation phase is the observable.
+The `λ` wire is read at evaluation time, so wavelength-dependent
+propagation phase is captured automatically — this is what makes the
+ring resonator example see a true resonance dip when you sweep the
+laser wavelength.
+
+The corresponding group delay `τ_g = L · n_g / c` is computed at setup
+time and stored on the device. It is informational at this tier — the
+waveguide currently stamps an instantaneous envelope transfer (no time-
+domain delay line); τ_g matters only when modulation bandwidth is
+comparable to 1/τ_g (typically tens to hundreds of GHz on chip), which
+this device's first-pass model does not yet reproduce. A future
+transmission-line device will use τ_g directly.
 
 ### `fc_dcoupler` — 2×2 directional coupler
 
@@ -793,8 +814,9 @@ X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
 |---|---|---|
 | `L_um` | 1000 (1 mm) | PN-section length, µm. |
 | `L_m` / `length` | — | Same, in metres. |
-| `n_g` | 4.2 | Group index (sets the wavelength-dependent propagation phase). |
-| `wavelength_nm` | 1550 | Reference wavelength: propagation phase is zero at `λ = wavelength_nm`. Pin this to your laser's λ so the device is "on resonance" by default. |
+| `n_eff` | 2.445 | Effective index at `wl_ref_nm` (sets the propagation phase). |
+| `n_g` | 4.2 | Group index at `wl_ref_nm` (sets the dispersion slope so `n_eff(λ) = n_eff + (λ−λ_0)·(n_eff−n_g)/λ_0`). |
+| `wavelength_nm` | 1550 | Reference wavelength: propagation phase is zero at `λ = wavelength_nm`. Pin this to your laser's λ so the device is "on resonance" by default. (Alias: `wl_ref_nm`.) |
 | `dn_dv` | 1e-4 | Effective-index change per applied volt (small-signal). |
 | `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
 | `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. ONE conductance shared across all N optical channels — see WDM note below. |

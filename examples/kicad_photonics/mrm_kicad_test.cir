@@ -1,11 +1,19 @@
 .title KiCad schematic
-V2 /Vmod GND DC 0 SIN( 0 1 1Meg 0 0 0 ) AC 1  
-PD1 /PN_MRM/out VDD Net-_PD1-cathode_ type=X model=fc_photodetector responsivity=0.7 i_dark_a=1e-9 r_shunt=20k
-CWL1 /PN_MRM/in type=X model=fc_cw_laser power_mW=1.0 wavelength_nm=1550.0
-R1 Net-_PD1-cathode_ GND 1k
+PD2 DROP_OPT VDD V_DROP type=X model=fc_photodetector responsivity=0.7 i_dark_a=1e-9 r_shunt=20k
+R2 V_DROP GND 1k
+CWL1 Net-_CWL1-out_ type=X model=fc_cw_laser power_mW=1.0 wavelength_nm=1550.0
+MZM1 Net-_CWL1-out_ IN_OPT /Vmzm GND type=X model=fc_mzm V_pi=1.0 f_c=10e9 alpha_dB=0.0 e_r_dB=20.0
+PD1 THRU_OPT VDD V_THRU type=X model=fc_photodetector responsivity=0.7 i_dark_a=1e-9 r_shunt=20k
+R1 V_THRU GND 1k
+V3 /Vmzm GND DC 1 SIN( 1 1 2Meg 0 0 0 ) AC 1  
+V2 /Vmod GND DC 2 SIN( 2 2 1Meg 0 0 0 ) AC 1  
 V1 VDD GND DC 2 
+CPL2 Net-_CPL2-a1_ Net-_CPL2-a2_ Net-_CPL2-b1_ Net-_CPL2-b2_ type=X model=fc_dcoupler kappa_L=0.05
+WG4 ADD_OPT Net-_CPL2-a2_ type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
 CPL1 Net-_CPL1-a1_ Net-_CPL1-a2_ Net-_CPL1-b1_ Net-_CPL1-b2_ type=X model=fc_dcoupler kappa_L=0.05
-PS_PN1 Net-_CPL1-b2_ Net-_CPL1-a2_ GND /Vmod type=X model=fc_pn_ps l_um=8u n_g=4.2 alpha_dB_cm=1.0 V_pi_L=1.0
-WG2 Net-_CPL1-b1_ /PN_MRM/out type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
-WG1 /PN_MRM/in Net-_CPL1-a1_ type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
+WG1 IN_OPT Net-_CPL1-a1_ type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
+PS_PN2 Net-_CPL2-b1_ Net-_CPL1-a2_ GND /Vmod type=X model=fc_pn_ps L_m=25e-6 n_g=4.2 alpha_dB_cm=1.0 V_pi_L=1.0
+WG3 Net-_CPL2-b2_ DROP_OPT type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
+PS_PN1 Net-_CPL1-b2_ Net-_CPL2-a1_ GND /Vmod type=X model=fc_pn_ps L_m=25e-6 n_g=4.2 alpha_dB_cm=1.0 V_pi_L=1.0
+WG2 Net-_CPL1-b1_ THRU_OPT type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
 .end

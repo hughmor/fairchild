@@ -21,6 +21,9 @@ examples/kicad_photonics/*.kicad_sch
 examples/kicad_photonics/*.kicad_prl
 examples/kicad_photonics/*.kicad_pro*
 examples/kicad_photonics/sym-lib-table
+examples/kicad_photonics/*.cir
+examples/kicad_photonics/*.sp
+examples/kicad_photonics/results/
 
 # kicad_to_fairchild.py transpiled wrappers + sim outputs
 *_transpiled_netlist.sp
