@@ -741,6 +741,20 @@ pub fn tran_nr_with_registry_var_opts(
     let mut x_prev = x.clone();
     let mut consecutive_rejects = 0usize;
 
+    // Set to `true` whenever an accepted step lands on a known waveform
+    // breakpoint (slope discontinuity).  The linear predictor / LTE
+    // estimator cannot see through a kink — they assume the system
+    // evolves smoothly, so using x_prev from the steep-slope side
+    // pushes x_pred far away from x_try and the LTE refuses to drop
+    // below 1 no matter how small h becomes (the error isn't from h,
+    // it's from the predictor extrapolating across the kink).
+    //
+    // When the flag is set, the *next* step uses zeroth-order
+    // prediction (x_pred = x) and bypasses the LTE check entirely,
+    // accepting whatever NR converges to.  This matches SPICE's
+    // standard breakpoint-restart behaviour.
+    let mut just_crossed_breakpoint = false;
+
     // Cached factorisation across the variable-step transient run —
     // see the fixed-step path above for the same pattern; the sparsity
     // is fixed across the entire integration so one symbolic factor-
@@ -815,8 +829,10 @@ pub fn tran_nr_with_registry_var_opts(
             }
         }
 
-        // Predictor: linear extrapolation. Zero-order on the first step (no history).
-        let x_pred: Vec<f64> = if h_prev > 0.0 {
+        // Predictor: linear extrapolation. Zero-order on the first step
+        // (no history) and immediately after crossing a waveform
+        // breakpoint (history is on the wrong side of a slope kink).
+        let x_pred: Vec<f64> = if h_prev > 0.0 && !just_crossed_breakpoint {
             let scale = h_actual / h_prev;
             x.iter().zip(x_prev.iter()).map(|(xi, xp)| xi + scale * (xi - xp)).collect()
         } else {
@@ -886,8 +902,12 @@ pub fn tran_nr_with_registry_var_opts(
             continue 'outer;
         }
 
-        // LTE estimate: skipped on first step (h_prev == 0, no predictor history).
-        let lte_norm: f64 = if h_prev > 0.0 {
+        // LTE estimate: skipped on the first step (no predictor history)
+        // and on the step right after crossing a waveform breakpoint
+        // (predictor is intentionally zeroth-order there, so the
+        // difference `x_try - x_pred` reflects the slope discontinuity
+        // rather than integration error).
+        let lte_norm: f64 = if h_prev > 0.0 && !just_crossed_breakpoint {
             x_try.iter().zip(x_pred.iter())
                 .enumerate()
                 .take(n_nodes)
@@ -906,6 +926,18 @@ pub fn tran_nr_with_registry_var_opts(
             x_prev = std::mem::replace(&mut x, x_try);
             h_prev = h_actual;
             t = t_next;
+
+            // Did this step land on (or close to) a waveform breakpoint?
+            // If so, the next step starts on the other side of a slope
+            // discontinuity — disable the linear predictor + LTE for
+            // that step.  `next_bp` was computed at the top of this
+            // iteration relative to the *old* `t`; t_next equals it
+            // (within float epsilon) exactly when the breakpoint
+            // clamp determined h_actual.
+            just_crossed_breakpoint = match next_bp {
+                Some(bp) => (t - bp).abs() <= h_actual * 1e-9 + h_min,
+                None     => false,
+            };
 
             // Update raw companion state from accepted solution.
             // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
