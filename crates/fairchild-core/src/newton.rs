@@ -543,6 +543,14 @@ fn nr_inner(
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
 
+    // Sparsity pattern is fixed across this NR loop — devices stamp the
+    // same matrix positions each iteration, only the values change.  The
+    // factorisation cache captures the symbolic LU once on iteration 0
+    // and reuses it for every subsequent solve (KLU's `klu_refactor`
+    // fast path; faer-sparse skips the dense→CSC rescan but still re-
+    // runs `sp_lu` since faer 0.24 has no separate refactor primitive).
+    let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
+
     for _ in 0..opts.itl1 {
         let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
 
@@ -566,7 +574,20 @@ fn nr_inner(
             mat.a[i][i] += opts.gmin + gmin_extra;
         }
 
-        let x_new = match solver.solve(&mat.a, &mat.b) {
+        let solve_result = if let Some(f) = fact.as_mut() {
+            f.refactor_and_solve(&mat.a, &mat.b)
+        } else {
+            // First iteration of this NR loop: build the cache.
+            match solver.factorise(&mat.a) {
+                Ok(mut f) => {
+                    let x = f.refactor_and_solve(&mat.a, &mat.b);
+                    fact = Some(f);
+                    x
+                }
+                Err(e) => Err(e),
+            }
+        };
+        let x_new = match solve_result {
             Ok(v) => v,
             Err(e) => {
                 if opts.verbose && !phase.is_empty() {

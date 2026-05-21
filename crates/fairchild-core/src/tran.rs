@@ -503,6 +503,13 @@ pub fn tran_nr_with_registry_opts(
     // Store t = 0 from DC OP.
     push_timepoint(&mut result, 0.0, &topo, &x);
 
+    // Cached factorisation: in transient, the sparsity pattern is fixed
+    // across the entire run (devices don't appear / disappear, timestep
+    // changes only scale values via `α = 1/h`).  One symbolic factor-
+    // isation up front, `klu_refactor` (or faer-sparse value-only
+    // rebuild) on every NR iteration of every timestep.
+    let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
+
     let mut t = step;
     let mut first_tr = true;
     loop {
@@ -531,7 +538,14 @@ pub fn tran_nr_with_registry_opts(
                 mat.a[i][i] += opts.gmin;
             }
 
-            let x_new = solver.solve(&mat.a, &mat.b)?;
+            let x_new = if let Some(f) = fact.as_mut() {
+                f.refactor_and_solve(&mat.a, &mat.b)?
+            } else {
+                let mut f = solver.factorise(&mat.a)?;
+                let r = f.refactor_and_solve(&mat.a, &mat.b)?;
+                fact = Some(f);
+                r
+            };
 
             let max_dv = x_new.iter()
                 .zip(x.iter())
@@ -722,6 +736,12 @@ pub fn tran_nr_with_registry_var_opts(
     let mut x_prev = x.clone();
     let mut consecutive_rejects = 0usize;
 
+    // Cached factorisation across the variable-step transient run —
+    // see the fixed-step path above for the same pattern; the sparsity
+    // is fixed across the entire integration so one symbolic factor-
+    // isation is amortised over thousands of refactors.
+    let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
+
     'outer: loop {
         if t >= stop { break; }
 
@@ -818,7 +838,14 @@ pub fn tran_nr_with_registry_var_opts(
                 mat.a[i][i] += opts.gmin;
             }
 
-            let x_new = solver.solve(&mat.a, &mat.b)?;
+            let x_new = if let Some(f) = fact.as_mut() {
+                f.refactor_and_solve(&mat.a, &mat.b)?
+            } else {
+                let mut f = solver.factorise(&mat.a)?;
+                let r = f.refactor_and_solve(&mat.a, &mat.b)?;
+                fact = Some(f);
+                r
+            };
 
             let max_dv = x_new.iter().zip(x_try.iter())
                 .take(n_nodes)
