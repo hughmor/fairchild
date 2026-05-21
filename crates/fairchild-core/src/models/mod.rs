@@ -6,6 +6,7 @@ pub use mosfet1::Mosfet1;
 pub use photonic::{
     NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
     NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter, NativePnPhaseShifterCap,
-    NativePnThermalPhaseShifter, NativeSplitter, NativeThermalPhaseShifter,
-    NativeThermalPhaseShifterRc, NativeWaveguide,
+    NativePnPhaseShifterFull, NativePnPhaseShifterInj, NativePnThermalPhaseShifter,
+    NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj,
+    NativeSplitter, NativeThermalPhaseShifter, NativeThermalPhaseShifterRc, NativeWaveguide,
 };
