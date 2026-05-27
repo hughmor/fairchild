@@ -51,11 +51,14 @@ ACCURACY_PANELS = [
 
 # Scaling circuits: (netlist, stages)
 SCALING_CIRCUITS = [
-    ("ring_osc_3.sp",   3),
-    ("ring_osc_5.sp",   5),
-    ("ring_osc_11.sp",  11),
-    ("ring_osc_21.sp",  21),
-    ("ring_osc_51.sp",  51),
+    ("ring_osc_3.sp",    3),
+    ("ring_osc_5.sp",    5),
+    ("ring_osc_11.sp",   11),
+    ("ring_osc_21.sp",   21),
+    ("ring_osc_51.sp",   51),
+    ("ring_osc_101.sp",  101),
+    ("ring_osc_201.sp",  201),
+    ("ring_osc_499.sp",  499),
 ]
 
 N_TIMING_RUNS = 3   # median of this many runs for wall-clock timing

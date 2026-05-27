@@ -164,9 +164,10 @@ Head-to-head accuracy and performance vs ngspice. See [`docs/benchmarks.md`](doc
 ![Accuracy overlay](docs/plots/accuracy_analog.png)
 
 Linear circuits (RC, RLC, diode) match ngspice to sub-1 mV RMS. Switching
-circuits (CMOS inverter, BJT CE amp) show higher RMS error due to missing
-junction capacitances (Cgs/Cgd and CJE/CJC — known limitation, next
-correctness priority).
+circuits (CMOS inverter, BJT CE amp) show higher RMS error from edge-timing
+offset: the MOSFET Level 1 model stamps Meyer gate caps and depletion junction
+caps (Cbs/Cbd), but the benchmark model cards omit CGSO/CGDO/CJ/CJSW, leaving
+those caps at zero. BJT CJE/CJC are not yet stamped.
 
 ### Performance scaling
 
@@ -234,8 +235,9 @@ See [`sotu.md`](sotu.md) for the live status list.
 
 The major work ahead, in rough order:
 
-1. **MOSFET + BJT junction capacitances** — Cgs/Cgd/Cbs/Cbd and CJE/CJC
-   are parsed but not yet stamped. Required for correct switching edge timing.
+1. **BJT CJE/CJC junction capacitances** — not yet stamped; required for
+   correct BJT switching edge timing. (MOSFET Meyer gate caps and Cbs/Cbd are
+   fully implemented; add CGSO/CGDO/CJ/CJSW to model cards to activate them.)
 2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.

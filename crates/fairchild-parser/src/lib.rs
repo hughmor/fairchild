@@ -685,6 +685,8 @@ pub enum Analysis {
     Tran {
         step: f64,
         stop: f64,
+        /// True when the `.tran` line carried the `UIC` keyword.
+        uic: bool,
     },
     /// `.ac DEC|OCT|LIN <points> <fstart> <fstop>`
     Ac {

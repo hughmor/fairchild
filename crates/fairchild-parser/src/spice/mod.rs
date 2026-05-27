@@ -483,9 +483,10 @@ mod tests {
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         match &netlist.analyses[0] {
-            Analysis::Tran { step, stop } => {
+            Analysis::Tran { step, stop, uic } => {
                 assert!((step - 1e-6).abs() < 1e-12);
                 assert!((stop - 5e-3).abs() < 1e-12);
+                assert!(!uic);
             }
             _ => panic!("expected Tran analysis"),
         }

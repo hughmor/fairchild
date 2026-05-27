@@ -348,9 +348,11 @@ pub(super) fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseErr
             line: lineno,
         });
     }
+    let uic = tokens.iter().any(|t| t.eq_ignore_ascii_case("uic"));
     Ok(Analysis::Tran {
         step: parse_value(tokens[1], lineno)?,
         stop: parse_value(tokens[2], lineno)?,
+        uic,
     })
 }
 
