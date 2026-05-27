@@ -24,6 +24,10 @@ examples/kicad_photonics/sym-lib-table
 examples/kicad_photonics/*.cir
 examples/kicad_photonics/*.sp
 examples/kicad_photonics/results/
+examples/kicad_photonics/giona_out
+examples/kicad_photonics/giona_ff_transient.py
+examples/kicad_photonics/~*
+
 
 # kicad_to_fairchild.py transpiled wrappers + sim outputs
 *_transpiled_netlist.sp
