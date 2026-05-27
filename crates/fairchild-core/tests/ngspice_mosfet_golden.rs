@@ -2,9 +2,11 @@
 //! Compares fairchild dc_op_nr against ngspice within tolerance.
 //! Tests are skipped (not failed) when ngspice is absent.
 
+use std::collections::HashMap;
+use std::io::Write;
 use std::process::Command;
 
-use fairchild_core::dc_op_nr;
+use fairchild_core::{dc_op_nr, options::SimOptions, tran_nr_with_registry_opts, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 const REL_TOL: f64 = 2e-3; // 0.2% — Level 1 has some param differences from ngspice
@@ -174,5 +176,83 @@ fn cmos_inverter_low_output() {
             err < tol,
             "CMOS low: fairchild={vout:.6e}  ngspice={vout_ng:.6e}  err={err:.2e}"
         );
+    }
+}
+
+/// Run ngspice in batch mode on a netlist containing `.meas tran` statements.
+/// Returns a map of measurement name → value, or `None` if ngspice is absent.
+fn ngspice_meas_tran(netlist: &str) -> Option<HashMap<String, f64>> {
+    let ngspice = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    write!(tmp, "{netlist}").ok()?;
+    let output = Command::new(&ngspice)
+        .arg("-b")
+        .arg(tmp.path())
+        .output()
+        .ok()?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut map = HashMap::new();
+    for line in combined.lines() {
+        let line = line.trim();
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim().to_lowercase();
+            if key.starts_with("v_") {
+                if let Ok(v) = val.trim().split_whitespace().next().unwrap_or("").parse::<f64>() {
+                    map.insert(key, v);
+                }
+            }
+        }
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
+#[test]
+fn cmos_inverter_caps_switching_time() {
+    // CMOS inverter with junction + Meyer overlap capacitances and a 10pF load.
+    // At t=15ns the input has just gone high (rise starts at 10ns, 1ns rise time).
+    // The output should be mid-transition due to the capacitive load — not yet at
+    // a rail — confirming that the cap model is slowing the switching edge.
+    let netlist_str = "* CMOS inverter — switching time with junction+Meyer caps\n\
+        .model nm NMOS (VTO=0.7 KP=100u CGSO=2.5e-10 CGDO=2.5e-10 CJ=2e-4 CJSW=5e-10)\n\
+        .model pm PMOS (VTO=-0.7 KP=100u CGSO=2.5e-10 CGDO=2.5e-10 CJ=2e-4 CJSW=5e-10)\n\
+        VDD vdd 0 DC 3.3\n\
+        VIN in 0 PULSE(0 3.3 10n 1n 1n 40n 100n)\n\
+        MN out in 0 0 nm W=10u L=1u AS=50p AD=50p PS=20u PD=20u\n\
+        MP out in vdd vdd pm W=10u L=1u AS=50p AD=50p PS=20u PD=20u\n\
+        CL out 0 10p\n\
+        .tran 100p 120n\n\
+        .meas tran v_15n FIND V(out) AT=15n\n\
+        .end\n";
+
+    let netlist = parse_spice(netlist_str).unwrap();
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_mosfets(&netlist.models);
+    let opts = SimOptions::from_netlist(&netlist);
+    let result = tran_nr_with_registry_opts(&netlist, 100e-12, 120e-9, &registry, &opts).unwrap();
+    let fc_v = result.voltage_at("out", 15e-9).unwrap();
+
+    // Shape check: output must be mid-transition (not stuck at either rail).
+    assert!(
+        fc_v >= 0.3 && fc_v <= 3.0,
+        "V(out) at t=15ns = {fc_v:.4}V — expected mid-transition [0.3, 3.0]V; \
+        caps (CGSO/CGDO/CJ/CJSW on MOSFETs + CL=10p) are required to slow the edge \
+        enough that the output is still switching at 15ns"
+    );
+
+    // ngspice comparison (skipped if ngspice absent).
+    if let Some(meas) = ngspice_meas_tran(netlist_str) {
+        if let Some(&ng_v) = meas.get("v_15n") {
+            let err = (fc_v - ng_v).abs();
+            let tol = f64::max(0.15, 0.05 * ng_v.abs());
+            assert!(
+                err <= tol,
+                "V(out) at 15ns: fairchild={fc_v:.6e}  ngspice={ng_v:.6e}  \
+                err={err:.3e}  tol={tol:.3e}"
+            );
+        }
     }
 }

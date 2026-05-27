@@ -72,7 +72,7 @@ show similar scaling exponents, indicating equivalent algorithmic complexity.
 
 ## Known gaps
 
-- **MOSFET Cgs/Cgd/Cbs/Cbd** are implemented but benchmark model cards omit CGSO/CGDO/CJ/CJSW → caps are zero in the runs above.
+- **MOSFET Cgs/Cgd/Cbs/Cbd** — benchmark model card now includes CGSO/CGDO/CJ/CJSW + AS/AD/PS/PD; caps are active. Edge timing comparison vs ngspice covered by `cmos_inverter_caps_switching_time` test.
 - **BJT CJE/CJC** are now implemented but the benchmark model card omits them → switching edges are unphysically fast in this run.
 - Ring oscillator benchmark uses synthetic circuits; no real-circuit scaling data yet.
 - ngspice comparison is on macOS developer hardware, not the CI runner.
