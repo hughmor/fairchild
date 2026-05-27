@@ -1,6 +1,6 @@
+use super::stamp_potential_eq;
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
-use super::stamp_potential_eq;
 
 // ────────────────────────────────────────────────────────────────────────
 // Native WDM multiplexer / demultiplexer
@@ -33,19 +33,26 @@ use super::stamp_potential_eq;
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
 pub struct NativeMux {
     n_channels: usize,
-    wpc:        usize,
-    nodes:      Vec<NodeId>,
-    branches:   Vec<Option<usize>>,
+    wpc: usize,
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
 }
 
 impl NativeMux {
     pub fn new() -> Self {
-        Self { n_channels: 0, wpc: 3, nodes: Vec::new(), branches: Vec::new() }
+        Self {
+            n_channels: 0,
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
+        }
     }
 }
 
 impl Device for NativeMux {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
@@ -63,11 +70,13 @@ impl Device for NativeMux {
         );
         let n = terminals.len() / stride;
         self.n_channels = n;
-        self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; wpc * n];
+        self.nodes = terminals.to_vec();
+        self.branches = vec![None; wpc * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
         for i in 0..self.branches.len() {
@@ -80,40 +89,50 @@ impl Device for NativeMux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n   = self.n_channels;
+        let n = self.n_channels;
         let wpc = self.wpc;
         for k in 0..n {
             for w in 0..wpc {
                 let bus_w = self.nodes[wpc * k + w];
-                let ch_w  = self.nodes[wpc * (n + k) + w];
+                let ch_w = self.nodes[wpc * (n + k) + w];
                 // Identity-route every wire (fw, bw, λ) — bus reads from channel.
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w,
-                    &[(ch_w, -1.0)]);
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w, &[(ch_w, -1.0)]);
             }
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
 
 /// Identity-routing splitter: 1 N-channel optical bundle → N single-channel
 /// bundles.  Pin 1 (and the first bundle wire block) is the bus input.
 pub struct NativeDemux {
     n_channels: usize,
-    wpc:        usize,
-    nodes:      Vec<NodeId>,
-    branches:   Vec<Option<usize>>,
+    wpc: usize,
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
 }
 
 impl NativeDemux {
     pub fn new() -> Self {
-        Self { n_channels: 0, wpc: 3, nodes: Vec::new(), branches: Vec::new() }
+        Self {
+            n_channels: 0,
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
+        }
     }
 }
 
 impl Device for NativeDemux {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
@@ -131,11 +150,13 @@ impl Device for NativeDemux {
         );
         let n = terminals.len() / stride;
         self.n_channels = n;
-        self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; wpc * n];
+        self.nodes = terminals.to_vec();
+        self.branches = vec![None; wpc * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
         for i in 0..self.branches.len() {
@@ -148,20 +169,22 @@ impl Device for NativeDemux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n   = self.n_channels;
+        let n = self.n_channels;
         let wpc = self.wpc;
         for k in 0..n {
             for w in 0..wpc {
                 let bus_w = self.nodes[wpc * k + w];
-                let ch_w  = self.nodes[wpc * (n + k) + w];
+                let ch_w = self.nodes[wpc * (n + k) + w];
                 // Channels drive FROM bus.
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w,
-                    &[(bus_w, -1.0)]);
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w, &[(bus_w, -1.0)]);
             }
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
-

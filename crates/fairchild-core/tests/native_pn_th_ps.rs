@@ -1,7 +1,7 @@
 //! Regression tests for fc_pn_th_ps — combined PN-junction + thermal
 //! heater phase shifter.  Verify the two physics add linearly.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// At V_pn = V_h = 0 the combined device must be identical to a passive
@@ -23,10 +23,13 @@ Vh vh 0 DC 0.0
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let v_re = r.node_voltage("out0_re_0").unwrap();
     let v_im = r.node_voltage("out0_im_0").unwrap();
-    let amp  = (v_re * v_re + v_im * v_im).sqrt();
+    let amp = (v_re * v_re + v_im * v_im).sqrt();
     let p_in = 1e-3_f64;
-    assert!((amp - p_in.sqrt()).abs() < 1e-6,
-        "zero-bias output amp = {amp:.6}, expected {:.6}", p_in.sqrt());
+    assert!(
+        (amp - p_in.sqrt()).abs() < 1e-6,
+        "zero-bias output amp = {amp:.6}, expected {:.6}",
+        p_in.sqrt()
+    );
 }
 
 /// Driving the heater alone produces the same phase shift as fc_thermal_ps
@@ -61,8 +64,11 @@ Vh vh 0 DC {v_h_for_pi_over_2}
     // Total φ = π (mod 2π): re = -A_in, im ≈ 0.
     let p_in: f64 = 1e-3;
     let amp_in = p_in.sqrt();
-    assert!((v_re - (-amp_in)).abs() < 1e-4,
-        "out.re = {v_re}; expected ≈ {} for combined φ = π", -amp_in);
+    assert!(
+        (v_re - (-amp_in)).abs() < 1e-4,
+        "out.re = {v_re}; expected ≈ {} for combined φ = π",
+        -amp_in
+    );
     assert!(v_im.abs() < 1e-4, "out.im = {v_im}; expected ≈ 0");
 }
 
@@ -84,9 +90,12 @@ Vh vh 0 DC 0.0
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let i_pn = r.vsrc_current("vmod").unwrap().abs();
-    let i_h  = r.vsrc_current("vh").unwrap().abs();
+    let i_h = r.vsrc_current("vh").unwrap().abs();
     // PN draws 1 V · 1 mS = 1 mA.
-    assert!((i_pn - 1e-3).abs() < 1e-9, "I(Vmod) = {i_pn}; expected 1 mA");
+    assert!(
+        (i_pn - 1e-3).abs() < 1e-9,
+        "I(Vmod) = {i_pn}; expected 1 mA"
+    );
     // Heater draws nothing at V_h = 0.
     assert!(i_h < 1e-9, "I(Vh) = {i_h}; expected ~0");
 }

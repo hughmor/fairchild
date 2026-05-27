@@ -9,7 +9,7 @@
 use fairchild_parser::Netlist;
 
 use crate::device::SimContext;
-use crate::solver::{LinearSolver, SolverKind, make_solver};
+use crate::solver::{make_solver, LinearSolver, SolverKind};
 use crate::tran::IntegratorMode;
 
 /// Numerical options consumed by every analysis entry point.
@@ -123,27 +123,27 @@ pub struct SimOptions {
 impl Default for SimOptions {
     fn default() -> Self {
         SimOptions {
-            reltol:         1e-3,
-            abstol:         1e-12,
-            vntol:          1e-6,
-            vmax:           0.5,
-            gmin:           1e-12,
-            itl1:           150,
-            itl4:           150,
+            reltol: 1e-3,
+            abstol: 1e-12,
+            vntol: 1e-6,
+            vmax: 0.5,
+            gmin: 1e-12,
+            itl1: 150,
+            itl4: 150,
             max_rejections: 30,
-            method:         IntegratorMode::Trapezoidal,
-            max_step:       f64::INFINITY,
-            gmin_max:       1.0,
-            srcsteps:       10,
-            temp_k:         300.15,
-            uic:            false,
-            pnjlim:         true,
-            solver:         SolverKind::Auto,
+            method: IntegratorMode::Trapezoidal,
+            max_step: f64::INFINITY,
+            gmin_max: 1.0,
+            srcsteps: 10,
+            temp_k: 300.15,
+            uic: false,
+            pnjlim: true,
+            solver: SolverKind::Auto,
             lambda_center_m: 1.55e-6,
             bidirectional_propagation: false,
-            verbose:        false,
-            sanity_check:   true,
-            variable_step:  false,
+            verbose: false,
+            sanity_check: true,
+            variable_step: false,
         }
     }
 }
@@ -194,83 +194,99 @@ impl SimOptions {
     pub fn set(&mut self, key: &str, value: &str) -> bool {
         let key_lc = key.to_lowercase();
         match key_lc.as_str() {
-            "reltol"  => self.reltol  = parse_num(value).unwrap_or(self.reltol),
-            "abstol"  => self.abstol  = parse_num(value).unwrap_or(self.abstol),
-            "vntol"   => self.vntol   = parse_num(value).unwrap_or(self.vntol),
-            "vmax"    => self.vmax    = parse_num(value).unwrap_or(self.vmax),
-            "gmin"    => self.gmin    = parse_num(value).unwrap_or(self.gmin),
-            "itl1"    => self.itl1    = parse_int(value).unwrap_or(self.itl1),
-            "itl4"    => self.itl4    = parse_int(value).unwrap_or(self.itl4),
+            "reltol" => self.reltol = parse_num(value).unwrap_or(self.reltol),
+            "abstol" => self.abstol = parse_num(value).unwrap_or(self.abstol),
+            "vntol" => self.vntol = parse_num(value).unwrap_or(self.vntol),
+            "vmax" => self.vmax = parse_num(value).unwrap_or(self.vmax),
+            "gmin" => self.gmin = parse_num(value).unwrap_or(self.gmin),
+            "itl1" => self.itl1 = parse_int(value).unwrap_or(self.itl1),
+            "itl4" => self.itl4 = parse_int(value).unwrap_or(self.itl4),
             "maxstep" | "max_step" => self.max_step = parse_num(value).unwrap_or(self.max_step),
             "gmin_max" | "gminmax" => self.gmin_max = parse_num(value).unwrap_or(self.gmin_max),
-            "srcsteps" | "srcmax"  => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
-            "temp"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
-            "tnom"    => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "srcsteps" | "srcmax" => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
+            "temp" => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "tnom" => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
             "lambda_center_nm" => {
-                self.lambda_center_m = parse_num(value).map(|nm| nm * 1e-9)
+                self.lambda_center_m = parse_num(value)
+                    .map(|nm| nm * 1e-9)
                     .unwrap_or(self.lambda_center_m);
             }
-            "lambda_center_m"  => {
+            "lambda_center_m" => {
                 self.lambda_center_m = parse_num(value).unwrap_or(self.lambda_center_m);
             }
             "verbose" => {
-                self.verbose = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                self.verbose = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
             }
             "sanity_check" | "sanitycheck" => {
-                self.sanity_check = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                self.sanity_check = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
             }
             "nosanitycheck" | "no_sanity_check" => {
                 // ngspice-style bare keyword: `.options nosanitycheck` disables.
-                let off = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                let off = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
                 self.sanity_check = !off;
             }
             "enable_bidirectional" | "bidirectional" | "bidirectional_propagation" => {
-                self.bidirectional_propagation = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                self.bidirectional_propagation = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
             }
             "variable_step" | "variablestep" => {
-                self.variable_step = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                self.variable_step = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
             }
-            "max_rejections" => self.max_rejections = parse_int(value).unwrap_or(self.max_rejections),
-            "method" => {
-                match value.to_lowercase().as_str() {
-                    "be" | "backwardeuler" | "gear1" => self.method = IntegratorMode::BackwardEuler,
-                    "tr" | "trap" | "trapezoidal"    => self.method = IntegratorMode::Trapezoidal,
-                    "gear" | "gear2" | "bdf2"        => self.method = IntegratorMode::Gear,
-                    _ => return false,
-                }
+            "max_rejections" => {
+                self.max_rejections = parse_int(value).unwrap_or(self.max_rejections)
             }
+            "method" => match value.to_lowercase().as_str() {
+                "be" | "backwardeuler" | "gear1" => self.method = IntegratorMode::BackwardEuler,
+                "tr" | "trap" | "trapezoidal" => self.method = IntegratorMode::Trapezoidal,
+                "gear" | "gear2" | "bdf2" => self.method = IntegratorMode::Gear,
+                _ => return false,
+            },
             "uic" => {
-                self.uic = matches!(value.to_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on");
+                self.uic = matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on");
             }
             "pnjlim" => {
-                self.pnjlim = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                self.pnjlim = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
             }
             "nopnjlim" => {
                 // ngspice-style bare keyword: `.options nopnjlim` disables limiting.
                 // Bare token comes in with empty value, treated as "on".
-                let off = matches!(value.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                let off = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
                 self.pnjlim = !off;
             }
             "solver" => {
                 self.solver = match value.to_lowercase().as_str() {
-                    "dense"  => SolverKind::Dense,
+                    "dense" => SolverKind::Dense,
                     "sparse" | "faer-sparse" | "faer_sparse" => SolverKind::Sparse,
                     "klu" | "suitesparse" | "suitesparse-klu" => {
                         // Reject at options-parse time when KLU feature is absent so
                         // callers (Python, CLI) can surface a clear error rather than
                         // silently falling back to faer-sparse.
-                        if cfg!(not(feature = "klu")) { return false; }
+                        if cfg!(not(feature = "klu")) {
+                            return false;
+                        }
                         SolverKind::Klu
                     }
-                    "auto"   => SolverKind::Auto,
+                    "auto" => SolverKind::Auto,
                     _ => return false,
                 };
             }
@@ -283,19 +299,30 @@ impl SimOptions {
 /// Parse a SPICE-style number with optional suffix (k, meg, m, u, n, p, f).
 fn parse_num(s: &str) -> Option<f64> {
     let s_lc = s.to_lowercase();
-    let (num, mult) = if let Some(n) = s_lc.strip_suffix("meg") { (n, 1e6) }
-        else if let Some(n) = s_lc.strip_suffix('k') { (n, 1e3) }
-        else if let Some(n) = s_lc.strip_suffix('m') { (n, 1e-3) }
-        else if let Some(n) = s_lc.strip_suffix('u') { (n, 1e-6) }
-        else if let Some(n) = s_lc.strip_suffix('n') { (n, 1e-9) }
-        else if let Some(n) = s_lc.strip_suffix('p') { (n, 1e-12) }
-        else if let Some(n) = s_lc.strip_suffix('f') { (n, 1e-15) }
-        else { (s_lc.as_str(), 1.0) };
+    let (num, mult) = if let Some(n) = s_lc.strip_suffix("meg") {
+        (n, 1e6)
+    } else if let Some(n) = s_lc.strip_suffix('k') {
+        (n, 1e3)
+    } else if let Some(n) = s_lc.strip_suffix('m') {
+        (n, 1e-3)
+    } else if let Some(n) = s_lc.strip_suffix('u') {
+        (n, 1e-6)
+    } else if let Some(n) = s_lc.strip_suffix('n') {
+        (n, 1e-9)
+    } else if let Some(n) = s_lc.strip_suffix('p') {
+        (n, 1e-12)
+    } else if let Some(n) = s_lc.strip_suffix('f') {
+        (n, 1e-15)
+    } else {
+        (s_lc.as_str(), 1.0)
+    };
     num.parse::<f64>().ok().map(|v| v * mult)
 }
 
 fn parse_int(s: &str) -> Option<usize> {
-    s.parse::<usize>().ok().or_else(|| parse_num(s).map(|v| v as usize))
+    s.parse::<usize>()
+        .ok()
+        .or_else(|| parse_num(s).map(|v| v as usize))
 }
 
 #[cfg(test)]
@@ -360,8 +387,9 @@ mod tests {
         // .temp 75 should set temp_k to 75 + 273.15 K, threaded through the
         // SimContext so device evals see the right thermal voltage.
         let net = fairchild_parser::parse_spice(
-            "* tempd\nV1 in 0 DC 0.7\nR1 in out 1k\n.temp 75\n.op\n.end\n"
-        ).unwrap();
+            "* tempd\nV1 in 0 DC 0.7\nR1 in out 1k\n.temp 75\n.op\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.temps.len(), 1);
         assert!((net.temps[0] - 348.15).abs() < 1e-9);
         let opts = SimOptions::from_netlist(&net);
@@ -372,8 +400,9 @@ mod tests {
     #[test]
     fn temp_list_parsed_for_sweep() {
         let net = fairchild_parser::parse_spice(
-            "* tempd\nV1 in 0 DC 1\n.temp -40 27 85 125\n.op\n.end\n"
-        ).unwrap();
+            "* tempd\nV1 in 0 DC 1\n.temp -40 27 85 125\n.op\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.temps.len(), 4);
         assert!((net.temps[0] - 233.15).abs() < 1e-9);
         assert!((net.temps[3] - 398.15).abs() < 1e-9);
@@ -382,7 +411,10 @@ mod tests {
     #[test]
     fn pnjlim_flag_default_on() {
         let o = SimOptions::default();
-        assert!(o.pnjlim, "pnjlim must default to on (matches ngspice/hspice)");
+        assert!(
+            o.pnjlim,
+            "pnjlim must default to on (matches ngspice/hspice)"
+        );
         let ctx = o.sim_context();
         assert!(ctx.jlim_enabled);
     }
@@ -390,7 +422,7 @@ mod tests {
     #[test]
     fn nopnjlim_bare_keyword_disables() {
         let mut o = SimOptions::default();
-        assert!(o.set("nopnjlim", ""));   // bare token
+        assert!(o.set("nopnjlim", "")); // bare token
         assert!(!o.pnjlim);
         // also via pnjlim=0
         let mut o2 = SimOptions::default();
@@ -402,8 +434,9 @@ mod tests {
     fn from_netlist_picks_up_options_directive() {
         let net = fairchild_parser::parse_spice(
             "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
-             .options reltol=1e-5 gmin=1p method=be itl1=300\n.op\n.end\n"
-        ).unwrap();
+             .options reltol=1e-5 gmin=1p method=be itl1=300\n.op\n.end\n",
+        )
+        .unwrap();
         let o = SimOptions::from_netlist(&net);
         assert!((o.reltol - 1e-5).abs() < 1e-18);
         assert!((o.gmin - 1e-12).abs() < 1e-18);
@@ -415,9 +448,14 @@ mod tests {
     fn from_netlist_later_overrides_earlier() {
         let net = fairchild_parser::parse_spice(
             "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
-             .options reltol=1e-3\n.options reltol=1e-7\n.op\n.end\n"
-        ).unwrap();
+             .options reltol=1e-3\n.options reltol=1e-7\n.op\n.end\n",
+        )
+        .unwrap();
         let o = SimOptions::from_netlist(&net);
-        assert!((o.reltol - 1e-7).abs() < 1e-18, "expected last value, got {}", o.reltol);
+        assert!(
+            (o.reltol - 1e-7).abs() < 1e-18,
+            "expected last value, got {}",
+            o.reltol
+        );
     }
 }

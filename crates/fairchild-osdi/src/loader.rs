@@ -1,4 +1,4 @@
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -39,7 +39,9 @@ impl OsdiLibrary {
 
         let handle = libc::dlopen(path_c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if handle.is_null() {
-            let msg = CStr::from_ptr(libc::dlerror()).to_string_lossy().into_owned();
+            let msg = CStr::from_ptr(libc::dlerror())
+                .to_string_lossy()
+                .into_owned();
             return Err(OsdiError::DlOpen(msg));
         }
 
@@ -79,8 +81,7 @@ impl OsdiLibrary {
         }
 
         // dlsym returns the address of the first element of OSDI_DESCRIPTORS.
-        let descriptors_base =
-            dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
+        let descriptors_base = dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
 
         Ok(Self {
             handle,
@@ -160,9 +161,11 @@ unsafe fn dlsym_or_err(
         };
         // name is always a 'static byte literal from our call sites, so the
         // resulting &str is also 'static.
-        let sym_name: &'static str =
-            std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("?");
-        Err(OsdiError::Symbol { symbol: sym_name, detail })
+        let sym_name: &'static str = std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("?");
+        Err(OsdiError::Symbol {
+            symbol: sym_name,
+            detail,
+        })
     } else {
         Ok(ptr)
     }

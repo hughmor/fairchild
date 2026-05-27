@@ -3,7 +3,6 @@
 /// `run_tran` / `run_tran_tr` — linear-only (R, L, C, V, I).
 /// `tran_nr` / `tran_nr_tr`   — fixed-step nonlinear.
 /// `tran_nr_var`              — variable-step nonlinear with LTE control.
-
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
@@ -47,7 +46,9 @@ impl TranResult {
     /// Node voltage at a specific time, with linear interpolation.
     /// Returns None if the node is unknown or t is out of range.
     pub fn voltage_at(&self, node: &str, t: f64) -> Option<f64> {
-        if node == "0" || node == "gnd" { return Some(0.0); }
+        if node == "0" || node == "gnd" {
+            return Some(0.0);
+        }
         let v_series = self.node_voltages.get(node)?;
         interp(&self.time, v_series, t)
     }
@@ -125,9 +126,15 @@ impl TranResult {
 }
 
 fn interp(xs: &[f64], ys: &[f64], x: f64) -> Option<f64> {
-    if xs.is_empty() { return None; }
-    if x <= xs[0] { return Some(ys[0]); }
-    if x >= *xs.last().unwrap() { return Some(*ys.last().unwrap()); }
+    if xs.is_empty() {
+        return None;
+    }
+    if x <= xs[0] {
+        return Some(ys[0]);
+    }
+    if x >= *xs.last().unwrap() {
+        return Some(*ys.last().unwrap());
+    }
     let i = xs.partition_point(|&xi| xi <= x).saturating_sub(1);
     let t = (x - xs[i]) / (xs[i + 1] - xs[i]);
     Some(ys[i] + t * (ys[i + 1] - ys[i]))
@@ -161,10 +168,14 @@ fn run_tran_mode(
     let n_steps = ((stop / step).ceil() as usize) + 2;
     let mut result = TranResult {
         time: Vec::with_capacity(n_steps),
-        node_voltages: topo.node_index.keys()
+        node_voltages: topo
+            .node_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
             .collect(),
-        vsrc_currents: topo.vsrc_index.keys()
+        vsrc_currents: topo
+            .vsrc_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
             .collect(),
     };
@@ -182,8 +193,19 @@ fn run_tran_mode(
         let mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
         x = lu_solve(&mat.a, &mat.b)?;
         push_timepoint(&mut result, t, &topo, &x);
-        if t >= stop { break; }
-        advance_companions(netlist, &topo, step, &x, &mut cap_state, &mut ind_state, mode, first_tr);
+        if t >= stop {
+            break;
+        }
+        advance_companions(
+            netlist,
+            &topo,
+            step,
+            &x,
+            &mut cap_state,
+            &mut ind_state,
+            mode,
+            first_tr,
+        );
         first_tr = false;
         t = (t + step).min(stop);
     }
@@ -210,13 +232,20 @@ fn init_companions(
     let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
     for el in &netlist.elements {
         match el {
-            Element::Capacitor { name, pos, neg, capacitance } => {
+            Element::Capacitor {
+                name,
+                pos,
+                neg,
+                capacitance,
+            } => {
                 let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
                 // TR always begins with a BE step for stability at discontinuities.
                 cap_state.insert(name.clone(), cap_companion(*capacitance, step, vc));
             }
-            Element::Inductor { name, inductance, .. } => {
+            Element::Inductor {
+                name, inductance, ..
+            } => {
                 // TR always begins with a BE step for stability at discontinuities.
                 ind_state.insert(name.clone(), ind_companion(*inductance, step, 0.0));
             }
@@ -243,18 +272,25 @@ fn advance_companions(
     // Snapshot i_hist values BEFORE the main loop advances them.
     // Needed by the K-element post-pass which must read old history.
     use std::collections::HashMap;
-    let i_hist_snapshot: HashMap<String, f64> = ind_state.iter()
+    let i_hist_snapshot: HashMap<String, f64> = ind_state
+        .iter()
         .map(|(k, &(_, ih))| (k.clone(), ih))
         .collect();
 
     for el in &netlist.elements {
         match el {
-            Element::Capacitor { name, pos, neg, capacitance } => {
+            Element::Capacitor {
+                name,
+                pos,
+                neg,
+                capacitance,
+            } => {
                 let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
                 let next = match mode {
-                    IntegratorMode::BackwardEuler
-                    | IntegratorMode::Gear => cap_companion(*capacitance, step, vc),
+                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
+                        cap_companion(*capacitance, step, vc)
+                    }
                     IntegratorMode::Trapezoidal if first_tr => {
                         let (g_eq_be, i_hist_be) = cap_state[name];
                         cap_companion_be_to_tr(g_eq_be, i_hist_be, vc)
@@ -266,22 +302,24 @@ fn advance_companions(
                 };
                 cap_state.insert(name.clone(), next);
             }
-            Element::Inductor { name, pos, neg, inductance } => {
+            Element::Inductor {
+                name,
+                pos,
+                neg,
+                inductance,
+            } => {
                 let (g_eq, i_hist) = ind_state[name];
                 let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
                 let next = match mode {
-                    IntegratorMode::BackwardEuler
-                    | IntegratorMode::Gear => {
+                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
                         let il = g_eq * vl + i_hist;
                         ind_companion(*inductance, step, il)
                     }
                     IntegratorMode::Trapezoidal if first_tr => {
                         ind_companion_be_to_tr(g_eq, i_hist, vl)
                     }
-                    IntegratorMode::Trapezoidal => {
-                        ind_companion_tr_advance(g_eq, i_hist, vl)
-                    }
+                    IntegratorMode::Trapezoidal => ind_companion_tr_advance(g_eq, i_hist, vl),
                 };
                 ind_state.insert(name.clone(), next);
             }
@@ -303,65 +341,84 @@ fn advance_companions(
     // incompatible with the BE-derived G11/G22/G12 stamps.  Silently skipping
     // avoids wrong numbers; a proper TR K correction is a future TODO.
     if matches!(mode, IntegratorMode::BackwardEuler | IntegratorMode::Gear) {
-    let mut ind_vals_local: HashMap<String, f64> = HashMap::new();
-    for el in &netlist.elements {
-        if let Element::Inductor { name, inductance, .. } = el {
-            ind_vals_local.insert(name.clone(), *inductance);
+        let mut ind_vals_local: HashMap<String, f64> = HashMap::new();
+        for el in &netlist.elements {
+            if let Element::Inductor {
+                name, inductance, ..
+            } = el
+            {
+                ind_vals_local.insert(name.clone(), *inductance);
+            }
         }
-    }
 
-    for el in &netlist.elements {
-        if let Element::CoupledInductors { l1, l2, coupling, .. } = el {
-            let Some(&val1) = ind_vals_local.get(l1) else { continue; };
-            let Some(&val2) = ind_vals_local.get(l2) else { continue; };
-            // g_eq1 after the main loop advance = h/val1 (unchanged by the main loop
-            // since ind_companion preserves the g_eq formula).
-            let Some(&(g_eq1, _)) = ind_state.get(l1) else { continue; };
-            let Some(&(g_eq2, _)) = ind_state.get(l2) else { continue; };
-            let i_hist1 = i_hist_snapshot.get(l1).copied().unwrap_or(0.0);
-            let i_hist2 = i_hist_snapshot.get(l2).copied().unwrap_or(0.0);
+        for el in &netlist.elements {
+            if let Element::CoupledInductors {
+                l1, l2, coupling, ..
+            } = el
+            {
+                let Some(&val1) = ind_vals_local.get(l1) else {
+                    continue;
+                };
+                let Some(&val2) = ind_vals_local.get(l2) else {
+                    continue;
+                };
+                // g_eq1 after the main loop advance = h/val1 (unchanged by the main loop
+                // since ind_companion preserves the g_eq formula).
+                let Some(&(g_eq1, _)) = ind_state.get(l1) else {
+                    continue;
+                };
+                let Some(&(g_eq2, _)) = ind_state.get(l2) else {
+                    continue;
+                };
+                let i_hist1 = i_hist_snapshot.get(l1).copied().unwrap_or(0.0);
+                let i_hist2 = i_hist_snapshot.get(l2).copied().unwrap_or(0.0);
 
-            // Find terminal nodes for voltage lookup.
-            let vl1 = {
-                let (pos1, neg1) = find_inductor_terminals_by_name(netlist, l1);
-                topo.node_voltage(pos1, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg1, x).unwrap_or(0.0)
-            };
-            let vl2 = {
-                let (pos2, neg2) = find_inductor_terminals_by_name(netlist, l2);
-                topo.node_voltage(pos2, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg2, x).unwrap_or(0.0)
-            };
+                // Find terminal nodes for voltage lookup.
+                let vl1 = {
+                    let (pos1, neg1) = find_inductor_terminals_by_name(netlist, l1);
+                    topo.node_voltage(pos1, x).unwrap_or(0.0)
+                        - topo.node_voltage(neg1, x).unwrap_or(0.0)
+                };
+                let vl2 = {
+                    let (pos2, neg2) = find_inductor_terminals_by_name(netlist, l2);
+                    topo.node_voltage(pos2, x).unwrap_or(0.0)
+                        - topo.node_voltage(neg2, x).unwrap_or(0.0)
+                };
 
-            let k = *coupling;
-            let m = k * (val1 * val2).sqrt();
-            let det = val1 * val2 - m * m;
-            if det.abs() < 1e-40 { continue; }
+                let k = *coupling;
+                let m = k * (val1 * val2).sqrt();
+                let det = val1 * val2 - m * m;
+                if det.abs() < 1e-40 {
+                    continue;
+                }
 
-            // h = g_eq * L  (g_eq = h/L)
-            let h = g_eq1 * val1;
-            let g11 = h * val2 / det;
-            let g22 = h * val1 / det;
-            let g12 = -h * m / det;
+                // h = g_eq * L  (g_eq = h/L)
+                let h = g_eq1 * val1;
+                let g11 = h * val2 / det;
+                let g22 = h * val1 / det;
+                let g12 = -h * m / det;
 
-            let il1 = g11 * vl1 + g12 * vl2 + i_hist1;
-            let il2 = g12 * vl1 + g22 * vl2 + i_hist2;
+                let il1 = g11 * vl1 + g12 * vl2 + i_hist1;
+                let il2 = g12 * vl1 + g22 * vl2 + i_hist2;
 
-            // Overwrite with corrected currents.
-            ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
-            ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
+                // Overwrite with corrected currents.
+                ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
+                ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
 
-            // Suppress unused variable warnings for g_eq2.
-            let _ = g_eq2;
+                // Suppress unused variable warnings for g_eq2.
+                let _ = g_eq2;
+            }
         }
-    }
     } // end if BackwardEuler | Gear
 }
 
 /// Find the (pos, neg) terminal names for a named inductor — tran.rs variant.
 fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a str, &'a str) {
     for el in &netlist.elements {
-        if let Element::Inductor { name: n, pos, neg, .. } = el {
+        if let Element::Inductor {
+            name: n, pos, neg, ..
+        } = el
+        {
             if n == name {
                 return (pos, neg);
             }
@@ -388,15 +445,15 @@ fn init_device_reactive_state(
         for br in &branches {
             let v = match (br.pos, br.neg) {
                 (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None)    => x[p],
-                (None,    Some(n)) => -x[n],
-                (None,    None)    => 0.0,
+                (Some(p), None) => x[p],
+                (None, Some(n)) => -x[n],
+                (None, None) => 0.0,
             };
             // TR always begins with a BE step for stability at discontinuities
             // — mirrors the built-in Element::Capacitor handling.
             let companion = match br.kind {
                 ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor  => ind_companion(br.value, step, 0.0),
+                ReactiveKind::Inductor => ind_companion(br.value, step, 0.0),
             };
             dev_states.push(companion);
         }
@@ -423,23 +480,27 @@ fn stamp_device_reactive_companions(
             let (_g_old, i_hist) = state[dev_idx][br_idx];
             let g_eq = match br.kind {
                 ReactiveKind::Capacitor => br.value / step,
-                ReactiveKind::Inductor  => step / br.value.max(1e-30),
+                ReactiveKind::Inductor => step / br.value.max(1e-30),
             };
             // Stamp G_eq between pos and neg (resistor pattern) and inject
             // ±I_hist into the corresponding KCL rows.  For an inductor the
             // current is i = G_eq · v + I_hist (history adds, doesn't subtract).
             let i_sign = match br.kind {
-                ReactiveKind::Capacitor =>  1.0,
-                ReactiveKind::Inductor  => -1.0,
+                ReactiveKind::Capacitor => 1.0,
+                ReactiveKind::Inductor => -1.0,
             };
             if let Some(p) = br.pos {
                 mat.a[p][p] += g_eq;
-                if let Some(n) = br.neg { mat.a[p][n] -= g_eq; }
+                if let Some(n) = br.neg {
+                    mat.a[p][n] -= g_eq;
+                }
                 mat.b[p] += i_sign * i_hist;
             }
             if let Some(n) = br.neg {
                 mat.a[n][n] += g_eq;
-                if let Some(p) = br.pos { mat.a[n][p] -= g_eq; }
+                if let Some(p) = br.pos {
+                    mat.a[n][p] -= g_eq;
+                }
                 mat.b[n] -= i_sign * i_hist;
             }
         }
@@ -461,13 +522,13 @@ fn advance_device_reactive_state(
         for (br_idx, br) in branches.iter().enumerate() {
             let v = match (br.pos, br.neg) {
                 (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None)    => x[p],
-                (None,    Some(n)) => -x[n],
-                (None,    None)    => 0.0,
+                (Some(p), None) => x[p],
+                (None, Some(n)) => -x[n],
+                (None, None) => 0.0,
             };
             let next = match br.kind {
                 ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor  => {
+                ReactiveKind::Inductor => {
                     // i_L = G_eq · v_L + I_hist (history), then form next companion.
                     let (g_eq, i_hist) = state[dev_idx][br_idx];
                     let i_l = g_eq * v + i_hist;
@@ -579,10 +640,14 @@ pub fn tran_nr_with_registry_opts(
     let n_steps = ((stop / step).ceil() as usize) + 2;
     let mut result = TranResult {
         time: Vec::with_capacity(n_steps),
-        node_voltages: topo.node_index.keys()
+        node_voltages: topo
+            .node_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
             .collect(),
-        vsrc_currents: topo.vsrc_index.keys()
+        vsrc_currents: topo
+            .vsrc_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
             .collect(),
     };
@@ -640,7 +705,8 @@ pub fn tran_nr_with_registry_opts(
                 r
             };
 
-            let max_dv = x_new.iter()
+            let max_dv = x_new
+                .iter()
                 .zip(x.iter())
                 .take(topo.n_nodes())
                 .map(|(n, o)| (n - o).abs())
@@ -648,17 +714,24 @@ pub fn tran_nr_with_registry_opts(
 
             let x_next: Vec<f64> = if max_dv > opts.vmax {
                 let scale = opts.vmax / max_dv;
-                x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
+                x.iter()
+                    .zip(x_new.iter())
+                    .map(|(o, n)| o + scale * (n - o))
+                    .collect()
             } else {
                 x_new
             };
 
-            let converged = x_next.iter()
+            let converged = x_next
+                .iter()
                 .zip(x.iter())
                 .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
             x = x_next;
-            if converged { step_converged = true; break; }
+            if converged {
+                step_converged = true;
+                break;
+            }
         }
 
         if !step_converged {
@@ -671,8 +744,19 @@ pub fn tran_nr_with_registry_opts(
             dev.commit_timestep(&x);
         }
 
-        if t >= stop { break; }
-        advance_companions(netlist, &topo, step, &x, &mut cap_state, &mut ind_state, mode, first_tr);
+        if t >= stop {
+            break;
+        }
+        advance_companions(
+            netlist,
+            &topo,
+            step,
+            &x,
+            &mut cap_state,
+            &mut ind_state,
+            mode,
+            first_tr,
+        );
         advance_device_reactive_state(&devices, &x, &mut dev_reactive_state, step);
         first_tr = false;
         t = (t + step).min(stop);
@@ -724,7 +808,13 @@ pub fn tran_nr_with_registry_var(
     stop: f64,
     registry: &DeviceRegistry,
 ) -> Result<TranResult, SimError> {
-    tran_nr_with_registry_var_opts(netlist, step, stop, registry, &SimOptions::from_netlist(netlist))
+    tran_nr_with_registry_var_opts(
+        netlist,
+        step,
+        stop,
+        registry,
+        &SimOptions::from_netlist(netlist),
+    )
 }
 
 /// Variable-step transient with explicit `SimOptions`.
@@ -773,11 +863,15 @@ pub fn tran_nr_with_registry_var_opts(
 
     // Nodes constrained by voltage sources are excluded from LTE: their voltages
     // change due to the source waveform, not integration error.
-    let forced_nodes: HashSet<usize> = netlist.elements.iter()
+    let forced_nodes: HashSet<usize> = netlist
+        .elements
+        .iter()
         .filter_map(|el| {
             if let Element::VoltageSource { pos, neg, .. } = el {
-                Some([topo.node_index.get(pos).copied(),
-                      topo.node_index.get(neg).copied()])
+                Some([
+                    topo.node_index.get(pos).copied(),
+                    topo.node_index.get(neg).copied(),
+                ])
             } else {
                 None
             }
@@ -818,10 +912,14 @@ pub fn tran_nr_with_registry_var_opts(
     let n_hint = ((stop / step).ceil() as usize) + 2;
     let mut result = TranResult {
         time: Vec::with_capacity(n_hint),
-        node_voltages: topo.node_index.keys()
+        node_voltages: topo
+            .node_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
             .collect(),
-        vsrc_currents: topo.vsrc_index.keys()
+        vsrc_currents: topo
+            .vsrc_index
+            .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
             .collect(),
     };
@@ -857,13 +955,17 @@ pub fn tran_nr_with_registry_var_opts(
     let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
 
     'outer: loop {
-        if t >= stop { break; }
+        if t >= stop {
+            break;
+        }
 
         // Clamp h to the next waveform slope discontinuity so we always land on it.
-        let next_bp: Option<f64> = netlist.elements.iter()
+        let next_bp: Option<f64> = netlist
+            .elements
+            .iter()
             .filter_map(|el| match el {
-                Element::VoltageSource { waveform, .. } |
-                Element::CurrentSource { waveform, .. } => waveform.next_breakpoint(t),
+                Element::VoltageSource { waveform, .. }
+                | Element::CurrentSource { waveform, .. } => waveform.next_breakpoint(t),
                 _ => None,
             })
             .reduce(f64::min);
@@ -883,7 +985,11 @@ pub fn tran_nr_with_registry_var_opts(
         let history_ready = h_prev_accepted > 0.0
             && cap_v.keys().all(|n| cap_v_prev2.contains_key(n))
             && ind_i.keys().all(|n| ind_i_prev2.contains_key(n));
-        let step_ratio = if h_prev_accepted > 0.0 { h_actual / h_prev_accepted } else { 1.0 };
+        let step_ratio = if h_prev_accepted > 0.0 {
+            h_actual / h_prev_accepted
+        } else {
+            1.0
+        };
         let use_gear2 = matches!(opts.method, IntegratorMode::Gear)
             && history_ready
             && consecutive_rejects == 0
@@ -895,22 +1001,38 @@ pub fn tran_nr_with_registry_var_opts(
         let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
         for el in &netlist.elements {
             match el {
-                Element::Capacitor { name, capacitance, .. } => {
+                Element::Capacitor {
+                    name, capacitance, ..
+                } => {
                     if let Some(&vc) = cap_v.get(name) {
                         let stamp = if use_gear2 {
                             let vc_prev2 = cap_v_prev2.get(name).copied().unwrap_or(vc);
-                            cap_companion_gear2(*capacitance, h_actual, h_prev_accepted, vc, vc_prev2)
+                            cap_companion_gear2(
+                                *capacitance,
+                                h_actual,
+                                h_prev_accepted,
+                                vc,
+                                vc_prev2,
+                            )
                         } else {
                             cap_companion(*capacitance, h_actual, vc)
                         };
                         cap_state.insert(name.clone(), stamp);
                     }
                 }
-                Element::Inductor { name, inductance, .. } => {
+                Element::Inductor {
+                    name, inductance, ..
+                } => {
                     if let Some(&il) = ind_i.get(name) {
                         let stamp = if use_gear2 {
                             let il_prev2 = ind_i_prev2.get(name).copied().unwrap_or(il);
-                            ind_companion_gear2(*inductance, h_actual, h_prev_accepted, il, il_prev2)
+                            ind_companion_gear2(
+                                *inductance,
+                                h_actual,
+                                h_prev_accepted,
+                                il,
+                                il_prev2,
+                            )
                         } else {
                             ind_companion(*inductance, h_actual, il)
                         };
@@ -926,7 +1048,10 @@ pub fn tran_nr_with_registry_var_opts(
         // breakpoint (history is on the wrong side of a slope kink).
         let x_pred: Vec<f64> = if h_prev > 0.0 && !just_crossed_breakpoint {
             let scale = h_actual / h_prev;
-            x.iter().zip(x_prev.iter()).map(|(xi, xp)| xi + scale * (xi - xp)).collect()
+            x.iter()
+                .zip(x_prev.iter())
+                .map(|(xi, xp)| xi + scale * (xi - xp))
+                .collect()
         } else {
             x.clone()
         };
@@ -937,7 +1062,9 @@ pub fn tran_nr_with_registry_var_opts(
         let mut nr_converged = false;
 
         for _iter in 0..opts.itl4 {
-            crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t_next, &cap_state, &ind_state);
+            crate::mna::stamp_netlist_in_place(
+                &mut mat, &topo, netlist, t_next, &cap_state, &ind_state,
+            );
 
             for dev in devices.iter_mut() {
                 dev.eval(&x_try, EvalFlags::tran(), &ctx);
@@ -963,19 +1090,27 @@ pub fn tran_nr_with_registry_var_opts(
                 r
             };
 
-            let max_dv = x_new.iter().zip(x_try.iter())
+            let max_dv = x_new
+                .iter()
+                .zip(x_try.iter())
                 .take(n_nodes)
                 .map(|(n, o)| (n - o).abs())
                 .fold(0.0f64, f64::max);
 
             let x_next: Vec<f64> = if max_dv > opts.vmax {
                 let scale = opts.vmax / max_dv;
-                x_try.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
+                x_try
+                    .iter()
+                    .zip(x_new.iter())
+                    .map(|(o, n)| o + scale * (n - o))
+                    .collect()
             } else {
                 x_new
             };
 
-            let converged = x_next.iter().zip(x_try.iter())
+            let converged = x_next
+                .iter()
+                .zip(x_try.iter())
                 .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
             x_try = x_next;
@@ -1000,13 +1135,13 @@ pub fn tran_nr_with_registry_var_opts(
         // difference `x_try - x_pred` reflects the slope discontinuity
         // rather than integration error).
         let lte_norm: f64 = if h_prev > 0.0 && !just_crossed_breakpoint {
-            x_try.iter().zip(x_pred.iter())
+            x_try
+                .iter()
+                .zip(x_pred.iter())
                 .enumerate()
                 .take(n_nodes)
                 .filter(|(idx, _)| !forced_nodes.contains(idx))
-                .map(|(_, (xc, xp))| {
-                    (xc - xp).abs() * 0.5 / (opts.vntol + opts.reltol * xc.abs())
-                })
+                .map(|(_, (xc, xp))| (xc - xp).abs() * 0.5 / (opts.vntol + opts.reltol * xc.abs()))
                 .fold(0.0f64, f64::max)
         } else {
             0.0
@@ -1028,7 +1163,7 @@ pub fn tran_nr_with_registry_var_opts(
             // clamp determined h_actual.
             just_crossed_breakpoint = match next_bp {
                 Some(bp) => (t - bp).abs() <= h_actual * 1e-9 + h_min,
-                None     => false,
+                None => false,
             };
 
             // Update raw companion state from accepted solution.
@@ -1044,7 +1179,12 @@ pub fn tran_nr_with_registry_var_opts(
                             - topo.node_voltage(neg, &x).unwrap_or(0.0);
                         cap_v.insert(name.clone(), vc);
                     }
-                    Element::Inductor { name, pos, neg, inductance } => {
+                    Element::Inductor {
+                        name,
+                        pos,
+                        neg,
+                        inductance,
+                    } => {
                         let vl = topo.node_voltage(pos, &x).unwrap_or(0.0)
                             - topo.node_voltage(neg, &x).unwrap_or(0.0);
                         let il_prev = ind_i.get(name).copied().unwrap_or(0.0);
@@ -1112,7 +1252,7 @@ mod tests {
         let r_nr = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
 
         let v_lin = r_linear.voltage_at("out", 1e-3).unwrap();
-        let v_nr  = r_nr.voltage_at("out", 1e-3).unwrap();
+        let v_nr = r_nr.voltage_at("out", 1e-3).unwrap();
         assert!(
             (v_lin - v_nr).abs() < 1e-4,
             "tran_nr diverges from run_tran at t=1ms: linear={v_lin:.6}  nr={v_nr:.6}"
@@ -1123,8 +1263,7 @@ mod tests {
     fn tran_nr_diode_steady_state() {
         // R-D series, constant V=5V, no reactive elements.
         // tran_nr result at t=1µs must match dc_op_nr within 0.1%.
-        let netlist_str =
-            "* Diode DC via transient\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
+        let netlist_str = "* Diode DC via transient\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
              .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
         let netlist = parse_spice(netlist_str).unwrap();
 
@@ -1191,10 +1330,11 @@ mod tests {
         // RC: R=1kΩ C=1µF → τ=1ms; test at t=τ.
         // Exact V(t=τ) = 1 − e^−1 ≈ 0.6321.
         let netlist = parse_spice(
-            "* RC step\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n.end\n"
-        ).unwrap();
-        let h = 200e-6;          // 5 steps per τ — large enough to show BE error
-        let exact = 1.0 - (-1.0_f64).exp();  // ≈ 0.6321
+            "* RC step\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n.end\n",
+        )
+        .unwrap();
+        let h = 200e-6; // 5 steps per τ — large enough to show BE error
+        let exact = 1.0 - (-1.0_f64).exp(); // ≈ 0.6321
 
         let r_be = run_tran(&netlist, h, 5e-3).unwrap();
         let r_tr = run_tran_tr(&netlist, h, 5e-3).unwrap();
@@ -1206,7 +1346,10 @@ mod tests {
         let err_tr = (v_tr - exact).abs();
 
         assert!(err_tr < err_be, "TR should be more accurate than BE at same step: be_err={err_be:.4e} tr_err={err_tr:.4e}");
-        assert!(err_tr < 0.01, "TR error at t=τ should be < 1%: {err_tr:.4e}");
+        assert!(
+            err_tr < 0.01,
+            "TR error at t=τ should be < 1%: {err_tr:.4e}"
+        );
     }
 
     #[test]
@@ -1216,10 +1359,10 @@ mod tests {
             "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 100u 2m\n.end\n"
         ).unwrap();
         let r_lin = run_tran_tr(&netlist, 100e-6, 2e-3).unwrap();
-        let r_nr  = tran_nr_tr(&netlist, 100e-6, 2e-3).unwrap();
+        let r_nr = tran_nr_tr(&netlist, 100e-6, 2e-3).unwrap();
 
         let v_lin = r_lin.voltage_at("out", 1e-3).unwrap();
-        let v_nr  = r_nr.voltage_at("out", 1e-3).unwrap();
+        let v_nr = r_nr.voltage_at("out", 1e-3).unwrap();
         assert!(
             (v_lin - v_nr).abs() < 1e-3,
             "tran_nr_tr vs run_tran_tr at t=1ms: lin={v_lin:.6} nr={v_nr:.6}"
@@ -1258,10 +1401,10 @@ mod tests {
             "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n.end\n"
         ).unwrap();
         let r_fixed = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
-        let r_var   = tran_nr_var(&netlist, 1e-6, 2e-3).unwrap();
+        let r_var = tran_nr_var(&netlist, 1e-6, 2e-3).unwrap();
 
         let v_fixed = r_fixed.voltage_at("out", 1e-3).unwrap();
-        let v_var   = r_var.voltage_at("out", 1e-3).unwrap();
+        let v_var = r_var.voltage_at("out", 1e-3).unwrap();
         assert!(
             (v_fixed - v_var).abs() < 1e-3,
             "fixed={v_fixed:.6}  var={v_var:.6}"
@@ -1271,8 +1414,7 @@ mod tests {
     #[test]
     fn tran_nr_var_diode_steady_state() {
         // R-D series at DC: var-step should converge to the same OP as fixed-step.
-        let netlist_str =
-            "* Diode DC\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
+        let netlist_str = "* Diode DC\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
              .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
         let netlist = parse_spice(netlist_str).unwrap();
 
@@ -1304,18 +1446,18 @@ mod tests {
 
         let mut opts_g = crate::options::SimOptions::default();
         opts_g.method = IntegratorMode::Gear;
-        let r_g  = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_g).unwrap();
+        let r_g = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_g).unwrap();
 
         let tau = 1e-3;
         let exact = |t: f64| 1.0 - (-t / tau).exp();
-        let err_at = |r: &TranResult, t: f64| {
-            (r.voltage_at("out", t).unwrap() - exact(t)).abs()
-        };
+        let err_at = |r: &TranResult, t: f64| (r.voltage_at("out", t).unwrap() - exact(t)).abs();
         // Sample at 3·τ where both methods are well past the transient.
         let e_be = err_at(&r_be, 3e-3);
-        let e_g  = err_at(&r_g , 3e-3);
-        assert!(e_g <= e_be + 1e-4,
-            "GEAR-2 error {e_g:.3e} should not exceed BE error {e_be:.3e}");
+        let e_g = err_at(&r_g, 3e-3);
+        assert!(
+            e_g <= e_be + 1e-4,
+            "GEAR-2 error {e_g:.3e} should not exceed BE error {e_be:.3e}"
+        );
     }
 
     #[test]
@@ -1350,12 +1492,15 @@ mod tests {
              R1 in out 1k\nC1 out 0 1u\n\
              .ic V(out)=0.5\n\
              .options uic=1\n\
-             .tran 10u 100u\n.end\n"
-        ).unwrap();
+             .tran 10u 100u\n.end\n",
+        )
+        .unwrap();
         let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
         let v0 = r.voltage_at("out", 0.0).unwrap();
-        assert!((v0 - 0.5).abs() < 1e-6,
-            "UIC: V(out) at t=0 should equal .ic value (0.5), got {v0}");
+        assert!(
+            (v0 - 0.5).abs() < 1e-6,
+            "UIC: V(out) at t=0 should equal .ic value (0.5), got {v0}"
+        );
     }
 
     #[test]
@@ -1365,12 +1510,15 @@ mod tests {
             "* no uic\nV1 in 0 PULSE(0 1 1m 1n 1n 100m 200m)\n\
              R1 in out 1k\nC1 out 0 1u\n\
              .ic V(out)=0.5\n\
-             .tran 10u 100u\n.end\n"
-        ).unwrap();
+             .tran 10u 100u\n.end\n",
+        )
+        .unwrap();
         let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
         let v0 = r.voltage_at("out", 0.0).unwrap();
-        assert!(v0.abs() < 1e-6,
-            "no UIC: V(out) at t=0 should be DC OP (0V), got {v0}");
+        assert!(
+            v0.abs() < 1e-6,
+            "no UIC: V(out) at t=0 should be DC OP (0V), got {v0}"
+        );
     }
 
     #[test]
@@ -1378,12 +1526,13 @@ mod tests {
         // RC driven by a 1V step. With itl4=1 and reltol=1e-30, even a
         // single NR iteration on a diode/RC circuit should fail to converge.
         // We just want to confirm the function returns Err rather than Ok.
-        use crate::options::SimOptions;
         use crate::device_registry::DeviceRegistry;
+        use crate::options::SimOptions;
         let netlist = parse_spice(
             "* non-converge test\nVdd a 0 DC 5\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.tran 1u 2u\n.end\n"
-        ).unwrap();
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 2u\n.end\n",
+        )
+        .unwrap();
         let registry = {
             let mut r = DeviceRegistry::new();
             r.register_builtin_diodes(&netlist.models);
@@ -1397,13 +1546,16 @@ mod tests {
         let result = tran_nr_with_registry_opts(&netlist, 1e-6, 2e-6, &registry, &opts);
         assert!(result.is_err(), "expected Err on non-convergence, got Ok");
         let err_str = result.err().unwrap().to_string();
-        assert!(err_str.contains("did not converge"), "unexpected error: {err_str}");
+        assert!(
+            err_str.contains("did not converge"),
+            "unexpected error: {err_str}"
+        );
     }
 
     fn write_nutmeg_tran() {
-        let netlist = parse_spice(
-            "* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n",
-        ).unwrap();
+        let netlist =
+            parse_spice("* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n")
+                .unwrap();
         let result = run_tran(&netlist, 1e-6, 10e-6).unwrap();
         let mut buf = Vec::new();
         result.write_nutmeg(&mut buf, "test").unwrap();

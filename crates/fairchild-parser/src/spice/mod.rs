@@ -5,23 +5,26 @@ mod element;
 mod subckt;
 mod waveforms;
 
-pub use bundles::{BundleArity, bundle_arity_for};
+pub use bundles::{bundle_arity_for, BundleArity};
 
 // Pull internal helpers into scope so parse_spice + the test module can call
 // them unqualified (as they did before the split).
 use bundles::{expand_optical_ports, scan_bidirectional};
 use common::{canon_node, expand_bus_vectors, parse_value};
 use directives::{
-    is_silent_directive, parse_ac, parse_dc, parse_measure, parse_noise,
-    parse_node_assignments, parse_options_directive, parse_tran,
+    is_silent_directive, parse_ac, parse_dc, parse_measure, parse_node_assignments, parse_noise,
+    parse_options_directive, parse_tran,
 };
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
 
+use crate::expr::Expr;
+use crate::{
+    AcVariation, Analysis, BehavioralKind, DcSweepSpec, Element, MeasAnalysis, MeasKind, MeasOp,
+    Measurement, ModelCard, Netlist, ParseError, Waveform,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use crate::{AcVariation, Analysis, BehavioralKind, DcSweepSpec, Element, MeasAnalysis, MeasKind, MeasOp, Measurement, ModelCard, Netlist, ParseError, Waveform};
-use crate::expr::Expr;
 
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     let all_lines = logical_lines(input);
@@ -83,13 +86,18 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
             // Flush any current block, start a new one.  Label defaults to the
             // 1-based ordinal so each block gets a stable name even when the
             // user omits one.
-            if let Some(b) = current_alter.take() { netlist.alters.push(b); }
-            let label = lc.split_whitespace().nth(1).map(str::to_string)
+            if let Some(b) = current_alter.take() {
+                netlist.alters.push(b);
+            }
+            let label = lc
+                .split_whitespace()
+                .nth(1)
+                .map(str::to_string)
                 .unwrap_or_else(|| format!("alter{}", netlist.alters.len() + 1));
             current_alter = Some(crate::AlterBlock {
                 label,
                 element_overrides: Vec::new(),
-                model_overrides:   Vec::new(),
+                model_overrides: Vec::new(),
             });
         } else if lc.starts_with(".optical_port") {
             // .optical_port NAME [N]  — declare a bundle port that expands
@@ -109,7 +117,11 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 } else {
                     1
                 };
-                let port = crate::OpticalPort { name, channels, bidirectional };
+                let port = crate::OpticalPort {
+                    name,
+                    channels,
+                    bidirectional,
+                };
                 for w in port.all_wires() {
                     netlist.optical_nets.push(w);
                 }
@@ -182,7 +194,10 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
         } else if lc.starts_with('.') {
             if !is_silent_directive(&lc) {
                 let directive = lc.split_whitespace().next().unwrap_or(&lc).to_string();
-                return Err(ParseError::UnsupportedDirective { directive, line: *lineno });
+                return Err(ParseError::UnsupportedDirective {
+                    directive,
+                    line: *lineno,
+                });
             }
         } else {
             // Element or instance line; substitute top-level params first.
@@ -194,7 +209,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 // port has channels > 1, the instance replicates per channel.
                 // Returns one XOsdi per channel; for non-XOsdi elements or
                 // unreferenced ports, returns a single-element vec.
-                let expanded_elements = expand_optical_ports(base_el, &netlist.optical_ports, *lineno)?;
+                let expanded_elements =
+                    expand_optical_ports(base_el, &netlist.optical_ports, *lineno)?;
 
                 for el in expanded_elements {
                     let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
@@ -204,11 +220,24 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                     };
 
                     if is_subckt_inst {
-                        if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
-                            let def  = subckt_defs.get(model_name).unwrap();
+                        if let Element::XOsdi {
+                            ref name,
+                            ref nets,
+                            ref model_name,
+                            ref params,
+                        } = el
+                        {
+                            let def = subckt_defs.get(model_name).unwrap();
                             let flat = expand_instance(
-                                model_name, name, nets, params,
-                                def, &subckt_defs, &global_params, &mut expanding, *lineno,
+                                model_name,
+                                name,
+                                nets,
+                                params,
+                                def,
+                                &subckt_defs,
+                                &global_params,
+                                &mut expanding,
+                                *lineno,
                             )?;
                             if let Some(alter) = current_alter.as_mut() {
                                 alter.element_overrides.extend(flat);
@@ -226,7 +255,9 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
         }
     }
     // Flush trailing .alter block on EOF (no terminator required).
-    if let Some(b) = current_alter.take() { netlist.alters.push(b); }
+    if let Some(b) = current_alter.take() {
+        netlist.alters.push(b);
+    }
 
     Ok(netlist)
 }
@@ -241,9 +272,9 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
 ///
 /// `base_dir` is used to resolve relative paths.
 fn resolve_includes(
-    input:    &str,
+    input: &str,
     base_dir: Option<&Path>,
-    depth:    usize,
+    depth: usize,
 ) -> Result<String, ParseError> {
     if depth > 16 {
         return Err(ParseError::Syntax {
@@ -272,7 +303,7 @@ fn resolve_includes(
             let fname = tok[1].trim().trim_matches('"').trim_matches('\'');
             let path: PathBuf = match base_dir {
                 Some(dir) => dir.join(fname),
-                None      => PathBuf::from(fname),
+                None => PathBuf::from(fname),
             };
             let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
                 line: lineno,
@@ -295,18 +326,17 @@ fn resolve_includes(
                 let section = toks[2];
                 let path: PathBuf = match base_dir {
                     Some(dir) => dir.join(fname),
-                    None      => PathBuf::from(fname),
+                    None => PathBuf::from(fname),
                 };
                 let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
                     line: lineno,
                     msg: format!(".lib '{}': {e}", path.display()),
                 })?;
-                let section_text = extract_lib_section(&content, section).ok_or_else(|| {
-                    ParseError::Syntax {
+                let section_text =
+                    extract_lib_section(&content, section).ok_or_else(|| ParseError::Syntax {
                         line: lineno,
                         msg: format!(".lib '{}' section '{}' not found", path.display(), section),
-                    }
-                })?;
+                    })?;
                 let inlined = resolve_includes(&section_text, path.parent(), depth + 1)?;
                 out.push_str(&inlined);
                 out.push('\n');
@@ -318,7 +348,10 @@ fn resolve_includes(
                 i += 1;
                 while i < lines.len() {
                     let l = lines[i].trim().to_lowercase();
-                    if l.starts_with(".endl") { i += 1; break; }
+                    if l.starts_with(".endl") {
+                        i += 1;
+                        break;
+                    }
                     i += 1;
                 }
                 continue;
@@ -370,7 +403,11 @@ fn extract_lib_section(content: &str, section: &str) -> Option<String> {
         out.push_str(raw);
         out.push('\n');
     }
-    if inside { Some(out) } else { None }
+    if inside {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Parse a SPICE netlist file, resolving `.include` directives relative to
@@ -389,7 +426,7 @@ pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();
     for (i, raw) in input.lines().enumerate() {
-        let lineno  = i + 1;
+        let lineno = i + 1;
         let trimmed = raw.trim_start();
 
         if trimmed.starts_with('+') {
@@ -407,7 +444,12 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
 
         if prev_ends_backslash {
             if let Some(last) = result.last_mut() {
-                let without_bs = last.1.trim_end().trim_end_matches('\\').trim_end().to_string();
+                let without_bs = last
+                    .1
+                    .trim_end()
+                    .trim_end_matches('\\')
+                    .trim_end()
+                    .to_string();
                 last.1 = without_bs;
                 last.1.push(' ');
                 last.1.push_str(trimmed);
@@ -453,7 +495,11 @@ mod tests {
     fn parse_pulse_waveform() {
         let input = "* Pulse\nV1 a 0 PULSE(0 1 0 1n 1n 10m 20m)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        if let Element::VoltageSource { waveform: Waveform::Pulse { v0, v1, tr, .. }, .. } = &netlist.elements[0] {
+        if let Element::VoltageSource {
+            waveform: Waveform::Pulse { v0, v1, tr, .. },
+            ..
+        } = &netlist.elements[0]
+        {
             assert!((v0 - 0.0).abs() < 1e-12);
             assert!((v1 - 1.0).abs() < 1e-12);
             assert!((tr - 1e-9).abs() < 1e-15);
@@ -476,7 +522,7 @@ mod tests {
     fn gnd_canonical() {
         assert_eq!(canon_node("GND"), "0");
         assert_eq!(canon_node("gnd"), "0");
-        assert_eq!(canon_node("0"),   "0");
+        assert_eq!(canon_node("0"), "0");
     }
 
     #[test]
@@ -484,7 +530,13 @@ mod tests {
         let input = "* Diode\nD1 anode cathode myd\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 1);
-        if let Element::Diode { name, anode, cathode, model_name } = &netlist.elements[0] {
+        if let Element::Diode {
+            name,
+            anode,
+            cathode,
+            model_name,
+        } = &netlist.elements[0]
+        {
             assert_eq!(name, "d1");
             assert_eq!(anode, "anode");
             assert_eq!(cathode, "cathode");
@@ -499,12 +551,22 @@ mod tests {
         let input = "* test\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.models.len(), 1);
-        let m  = &netlist.models[0];
+        let m = &netlist.models[0];
         assert_eq!(m.name, "myd");
         assert_eq!(m.kind, "d");
-        let is = m.params.iter().find(|(k, _)| k == "is").map(|(_, v)| *v).unwrap();
+        let is = m
+            .params
+            .iter()
+            .find(|(k, _)| k == "is")
+            .map(|(_, v)| *v)
+            .unwrap();
         assert!((is - 1e-14).abs() < 1e-20, "is={is}");
-        let n  = m.params.iter().find(|(k, _)| k == "n").map(|(_, v)| *v).unwrap();
+        let n = m
+            .params
+            .iter()
+            .find(|(k, _)| k == "n")
+            .map(|(_, v)| *v)
+            .unwrap();
         assert!((n - 1.0).abs() < 1e-12, "n={n}");
     }
 
@@ -519,7 +581,15 @@ mod tests {
 
     #[test]
     fn pulse_waveform_at() {
-        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 1e-9, tf: 1e-9, pw: 1.0, per: 2.0 };
+        let w = Waveform::Pulse {
+            v0: 0.0,
+            v1: 1.0,
+            td: 0.0,
+            tr: 1e-9,
+            tf: 1e-9,
+            pw: 1.0,
+            per: 2.0,
+        };
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         assert!((w.at(1e-9) - 1.0).abs() < 1e-6);
         assert!((w.at(0.5e-9) - 0.5).abs() < 1e-6);
@@ -529,7 +599,11 @@ mod tests {
     fn parse_pwl_waveform() {
         let input = "* PWL\nV1 a 0 PWL(0 0 1u 5 2u 5 3u 0)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        if let Element::VoltageSource { waveform: Waveform::Pwl { points }, .. } = &netlist.elements[0] {
+        if let Element::VoltageSource {
+            waveform: Waveform::Pwl { points },
+            ..
+        } = &netlist.elements[0]
+        {
             assert_eq!(points.len(), 4);
             assert!((points[1].0 - 1e-6).abs() < 1e-18);
             assert!((points[1].1 - 5.0).abs() < 1e-12);
@@ -540,7 +614,9 @@ mod tests {
 
     #[test]
     fn pwl_waveform_at() {
-        let w = Waveform::Pwl { points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)] };
+        let w = Waveform::Pwl {
+            points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)],
+        };
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         assert!((w.at(0.5e-6) - 2.5).abs() < 1e-9);
         assert!((w.at(1.5e-6) - 5.0).abs() < 1e-9);
@@ -553,7 +629,12 @@ mod tests {
         let input = "* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 20 1 100k\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
-            Analysis::Ac { variation, points, fstart, fstop } => {
+            Analysis::Ac {
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
                 assert_eq!(*variation, crate::AcVariation::Dec);
                 assert_eq!(*points, 20);
                 assert!((fstart - 1.0).abs() < 1e-12);
@@ -568,7 +649,9 @@ mod tests {
         let input = "* test\nV1 in 0 DC 1\n.ac lin 100 1k 10k\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
-            Analysis::Ac { variation, points, .. } => {
+            Analysis::Ac {
+                variation, points, ..
+            } => {
                 assert_eq!(*variation, crate::AcVariation::Lin);
                 assert_eq!(*points, 100);
             }
@@ -578,37 +661,79 @@ mod tests {
 
     #[test]
     fn pulse_next_breakpoint_before_td() {
-        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 1e-6, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 10e-6 };
+        let w = Waveform::Pulse {
+            v0: 0.0,
+            v1: 1.0,
+            td: 1e-6,
+            tr: 100e-9,
+            tf: 100e-9,
+            pw: 5e-6,
+            per: 10e-6,
+        };
         let bp = w.next_breakpoint(0.0).unwrap();
         assert!((bp - 1e-6).abs() < 1e-18, "expected td=1µs, got {bp}");
     }
 
     #[test]
     fn pulse_next_breakpoint_at_period_boundary() {
-        let td = 0.0_f64; let tr = 100e-9_f64; let pw = 5e-6_f64; let tf = 100e-9_f64; let per = 10e-6_f64;
-        let w  = Waveform::Pulse { v0: 0.0, v1: 1.0, td, tr, tf, pw, per };
-        let t  = td + per;
+        let td = 0.0_f64;
+        let tr = 100e-9_f64;
+        let pw = 5e-6_f64;
+        let tf = 100e-9_f64;
+        let per = 10e-6_f64;
+        let w = Waveform::Pulse {
+            v0: 0.0,
+            v1: 1.0,
+            td,
+            tr,
+            tf,
+            pw,
+            per,
+        };
+        let t = td + per;
         let bp = w.next_breakpoint(t).unwrap();
-        assert!((bp - (t + tr)).abs() < 1e-18, "expected t+tr={}, got {bp}", t + tr);
+        assert!(
+            (bp - (t + tr)).abs() < 1e-18,
+            "expected t+tr={}, got {bp}",
+            t + tr
+        );
     }
 
     #[test]
     fn pulse_next_breakpoint_mid_rise() {
-        let w  = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 10e-6 };
+        let w = Waveform::Pulse {
+            v0: 0.0,
+            v1: 1.0,
+            td: 0.0,
+            tr: 100e-9,
+            tf: 100e-9,
+            pw: 5e-6,
+            per: 10e-6,
+        };
         let bp = w.next_breakpoint(50e-9).unwrap();
         assert!((bp - 100e-9).abs() < 1e-18, "expected 100ns, got {bp}");
     }
 
     #[test]
     fn pulse_next_breakpoint_no_repeat_exhausted() {
-        let w = Waveform::Pulse { v0: 0.0, v1: 1.0, td: 0.0, tr: 100e-9, tf: 100e-9, pw: 5e-6, per: 0.0 };
+        let w = Waveform::Pulse {
+            v0: 0.0,
+            v1: 1.0,
+            td: 0.0,
+            tr: 100e-9,
+            tf: 100e-9,
+            pw: 5e-6,
+            per: 0.0,
+        };
         let after_all = 100e-9 + 5e-6 + 100e-9 + 1e-9;
         assert!(w.next_breakpoint(after_all).is_none());
     }
 
     #[test]
     fn pwl_next_breakpoint() {
-        let w = Waveform::Pwl { points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)] };
+        let w = Waveform::Pwl {
+            points: vec![(0.0, 0.0), (1e-6, 5.0), (2e-6, 5.0), (3e-6, 0.0)],
+        };
         assert!((w.next_breakpoint(-1.0).unwrap() - 0.0).abs() < 1e-18);
         assert!((w.next_breakpoint(0.0).unwrap() - 1e-6).abs() < 1e-18);
         assert!((w.next_breakpoint(1e-6).unwrap() - 2e-6).abs() < 1e-18);
@@ -629,7 +754,13 @@ mod tests {
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 1);
-        if let Element::XOsdi { name, nets, model_name, params } = &netlist.elements[0] {
+        if let Element::XOsdi {
+            name,
+            nets,
+            model_name,
+            params,
+        } = &netlist.elements[0]
+        {
             assert_eq!(name, "xlaser");
             assert_eq!(nets, &["laser_re", "laser_im"]);
             assert_eq!(model_name, "cw_laser");
@@ -646,7 +777,10 @@ mod tests {
         let input = "* sin\nV1 a 0 SIN(0 1 1k 0 0 0)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
-            Element::VoltageSource { waveform: Waveform::Sin { vo, va, freq, .. }, .. } => {
+            Element::VoltageSource {
+                waveform: Waveform::Sin { vo, va, freq, .. },
+                ..
+            } => {
                 assert!((vo - 0.0).abs() < 1e-12);
                 assert!((va - 1.0).abs() < 1e-12);
                 assert!((freq - 1e3).abs() < 1e-6);
@@ -660,7 +794,18 @@ mod tests {
         let input = "* exp\nV1 a 0 EXP(0 1 1u 1u 5u 1u)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
-            Element::VoltageSource { waveform: Waveform::Exp { v1, v2, td1, tau1, td2, tau2 }, .. } => {
+            Element::VoltageSource {
+                waveform:
+                    Waveform::Exp {
+                        v1,
+                        v2,
+                        td1,
+                        tau1,
+                        td2,
+                        tau2,
+                    },
+                ..
+            } => {
                 assert_eq!(*v1, 0.0);
                 assert!((v2 - 1.0).abs() < 1e-12);
                 assert!((td1 - 1e-6).abs() < 1e-12);
@@ -677,7 +822,17 @@ mod tests {
         let input = "* sffm\nV1 a 0 SFFM(0 1 1k 5 100)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
-            Element::VoltageSource { waveform: Waveform::Sffm { vo, va, fc, mdi, fs }, .. } => {
+            Element::VoltageSource {
+                waveform:
+                    Waveform::Sffm {
+                        vo,
+                        va,
+                        fc,
+                        mdi,
+                        fs,
+                    },
+                ..
+            } => {
                 assert_eq!(*vo, 0.0);
                 assert!((va - 1.0).abs() < 1e-12);
                 assert!((fc - 1e3).abs() < 1e-6);
@@ -693,7 +848,10 @@ mod tests {
         let input = "* am\nV1 a 0 AM(1 0 100 1k 0)\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
-            Element::VoltageSource { waveform: Waveform::Am { va, vo, mf, fc, td }, .. } => {
+            Element::VoltageSource {
+                waveform: Waveform::Am { va, vo, mf, fc, td },
+                ..
+            } => {
                 assert_eq!(*va, 1.0);
                 assert_eq!(*vo, 0.0);
                 assert!((mf - 100.0).abs() < 1e-9);
@@ -706,7 +864,14 @@ mod tests {
 
     #[test]
     fn sin_at_zero_returns_vo() {
-        let w = Waveform::Sin { vo: 0.5, va: 1.0, freq: 1e3, td: 0.0, theta: 0.0, phase: 0.0 };
+        let w = Waveform::Sin {
+            vo: 0.5,
+            va: 1.0,
+            freq: 1e3,
+            td: 0.0,
+            theta: 0.0,
+            phase: 0.0,
+        };
         // sin(0) = 0 → vo
         assert!((w.at(0.0) - 0.5).abs() < 1e-12);
         // sin(π/2) at t = 0.25 ms with f=1kHz: sin(π/2)=1
@@ -715,14 +880,28 @@ mod tests {
 
     #[test]
     fn sin_pre_delay_is_vo() {
-        let w = Waveform::Sin { vo: 0.5, va: 1.0, freq: 1e3, td: 1e-6, theta: 0.0, phase: 0.0 };
+        let w = Waveform::Sin {
+            vo: 0.5,
+            va: 1.0,
+            freq: 1e3,
+            td: 1e-6,
+            theta: 0.0,
+            phase: 0.0,
+        };
         assert!((w.at(0.0) - 0.5).abs() < 1e-12);
         assert!((w.at(0.5e-6) - 0.5).abs() < 1e-12);
     }
 
     #[test]
     fn exp_pre_td1_is_v1() {
-        let w = Waveform::Exp { v1: 0.0, v2: 1.0, td1: 1e-6, tau1: 1e-6, td2: 5e-6, tau2: 1e-6 };
+        let w = Waveform::Exp {
+            v1: 0.0,
+            v2: 1.0,
+            td1: 1e-6,
+            tau1: 1e-6,
+            td2: 5e-6,
+            tau2: 1e-6,
+        };
         assert!((w.at(0.0) - 0.0).abs() < 1e-12);
         // At t=td1+tau1 the rise is (1-e^-1) = 0.6321
         assert!((w.at(2e-6) - (1.0 - (-1.0_f64).exp())).abs() < 1e-9);
@@ -736,8 +915,9 @@ mod tests {
         let net = parse_spice(
             ".optical_port portA\n\
              .optical_port portB\n\
-             Xwg portA portB some_model\n.end\n"
-        ).unwrap();
+             Xwg portA portB some_model\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.title, "", "no title comment present");
         assert_eq!(net.optical_ports.len(), 2, "both ports should parse");
         assert_eq!(net.elements.len(), 1, "Xwg should be present");
@@ -748,8 +928,9 @@ mod tests {
         let net = parse_spice(
             "* Real title\n\
              V1 in 0 DC 1\n\
-             R1 in 0 1k\n.op\n.end\n"
-        ).unwrap();
+             R1 in 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.title, "* Real title");
         // V1 and R1 both present in the body.
         assert_eq!(net.elements.len(), 2);
@@ -761,27 +942,46 @@ mod tests {
             "* port test\n\
              .optical_port portin\n\
              .optical_port portout\n\
-             Xwg portin portout some_model\n.end\n"
-        ).unwrap();
+             Xwg portin portout some_model\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.optical_ports.len(), 2);
         assert_eq!(net.optical_ports[0].name, "portin");
         assert_eq!(net.optical_ports[0].channels, 1);
         // Single XOsdi (max_n = 1); nets list is 6 wires (3 per port).
         assert_eq!(net.elements.len(), 1);
         match &net.elements[0] {
-            Element::XOsdi { name, nets, model_name, .. } => {
+            Element::XOsdi {
+                name,
+                nets,
+                model_name,
+                ..
+            } => {
                 assert_eq!(name, "xwg");
                 assert_eq!(model_name, "some_model");
-                assert_eq!(nets, &vec![
-                    "portin_re_0".to_string(), "portin_im_0".to_string(), "portin_wl_0".to_string(),
-                    "portout_re_0".to_string(), "portout_im_0".to_string(), "portout_wl_0".to_string(),
-                ]);
+                assert_eq!(
+                    nets,
+                    &vec![
+                        "portin_re_0".to_string(),
+                        "portin_im_0".to_string(),
+                        "portin_wl_0".to_string(),
+                        "portout_re_0".to_string(),
+                        "portout_im_0".to_string(),
+                        "portout_wl_0".to_string(),
+                    ]
+                );
             }
             _ => panic!("expected XOsdi"),
         }
         // All 6 underlying wires registered as optical.
-        for w in ["portin_re_0", "portin_im_0", "portin_wl_0",
-                  "portout_re_0", "portout_im_0", "portout_wl_0"] {
+        for w in [
+            "portin_re_0",
+            "portin_im_0",
+            "portin_wl_0",
+            "portout_re_0",
+            "portout_im_0",
+            "portout_wl_0",
+        ] {
             assert!(net.optical_nets.iter().any(|n| n == w), "missing {w}");
         }
     }
@@ -792,24 +992,33 @@ mod tests {
             "* WDM port test\n\
              .optical_port bus_in 4\n\
              .optical_port bus_out 4\n\
-             Xwg bus_in bus_out some_model L_um=100\n.end\n"
-        ).unwrap();
+             Xwg bus_in bus_out some_model L_um=100\n.end\n",
+        )
+        .unwrap();
         assert_eq!(net.optical_ports[0].channels, 4);
         // 4 channels → 4 device instances.
         assert_eq!(net.elements.len(), 4);
         for ch in 0..4 {
             match &net.elements[ch] {
-                Element::XOsdi { name, nets, model_name, .. } => {
+                Element::XOsdi {
+                    name,
+                    nets,
+                    model_name,
+                    ..
+                } => {
                     assert_eq!(name, &format!("xwg_ch{ch}"));
                     assert_eq!(model_name, "some_model");
-                    assert_eq!(nets, &vec![
-                        format!("bus_in_re_{ch}"),
-                        format!("bus_in_im_{ch}"),
-                        format!("bus_in_wl_{ch}"),
-                        format!("bus_out_re_{ch}"),
-                        format!("bus_out_im_{ch}"),
-                        format!("bus_out_wl_{ch}"),
-                    ]);
+                    assert_eq!(
+                        nets,
+                        &vec![
+                            format!("bus_in_re_{ch}"),
+                            format!("bus_in_im_{ch}"),
+                            format!("bus_in_wl_{ch}"),
+                            format!("bus_out_re_{ch}"),
+                            format!("bus_out_im_{ch}"),
+                            format!("bus_out_wl_{ch}"),
+                        ]
+                    );
                 }
                 _ => panic!("expected XOsdi"),
             }
@@ -822,10 +1031,13 @@ mod tests {
             "* bad\n\
              .optical_port a 2\n\
              .optical_port b 4\n\
-             Xwg a b model\n.end\n"
+             Xwg a b model\n.end\n",
         );
-        assert!(res.is_err(),
-            "should error on mismatched channel counts: {:?}", res.map(|n| n.elements.len()));
+        assert!(
+            res.is_err(),
+            "should error on mismatched channel counts: {:?}",
+            res.map(|n| n.elements.len())
+        );
     }
 
     #[test]
@@ -845,11 +1057,20 @@ mod tests {
         // Apply: base R1 = 1k, slow R1 = 2k.
         let mut applied = net.clone();
         applied.apply_alter(&net.alters[0]);
-        let r1 = applied.elements.iter().find_map(|e| match e {
-            crate::Element::Resistor { name, resistance, .. } if name == "r1" => Some(*resistance),
-            _ => None,
-        }).unwrap();
-        assert!((r1 - 2000.0).abs() < 1e-9, "expected R1=2k after alter, got {r1}");
+        let r1 = applied
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                crate::Element::Resistor {
+                    name, resistance, ..
+                } if name == "r1" => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            (r1 - 2000.0).abs() < 1e-9,
+            "expected R1=2k after alter, got {r1}"
+        );
     }
 
     #[test]
@@ -857,7 +1078,13 @@ mod tests {
         let input = "* dc\nV1 in 0 DC 0\nR1 in 0 1k\n.dc V1 0 5 0.1\n.end\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
-            Analysis::Dc { src, start, stop, step, nested } => {
+            Analysis::Dc {
+                src,
+                start,
+                stop,
+                step,
+                nested,
+            } => {
                 assert_eq!(src, "v1");
                 assert!((start - 0.0).abs() < 1e-12);
                 assert!((stop - 5.0).abs() < 1e-12);
@@ -915,7 +1142,10 @@ mod tests {
                      .optical laser_re laser_im wg_out_re wg_out_im\n\
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        assert_eq!(netlist.optical_nets, vec!["laser_re", "laser_im", "wg_out_re", "wg_out_im"]);
+        assert_eq!(
+            netlist.optical_nets,
+            vec!["laser_re", "laser_im", "wg_out_re", "wg_out_im"]
+        );
     }
 
     #[test]
@@ -925,11 +1155,13 @@ mod tests {
                      .optical opt_re[0..2] opt_im[0..2] opt_wl[0..2]\n\
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        assert_eq!(netlist.optical_nets, vec![
-            "opt_re_0", "opt_re_1", "opt_re_2",
-            "opt_im_0", "opt_im_1", "opt_im_2",
-            "opt_wl_0", "opt_wl_1", "opt_wl_2",
-        ]);
+        assert_eq!(
+            netlist.optical_nets,
+            vec![
+                "opt_re_0", "opt_re_1", "opt_re_2", "opt_im_0", "opt_im_1", "opt_im_2", "opt_wl_0",
+                "opt_wl_1", "opt_wl_2",
+            ]
+        );
     }
 
     #[test]
@@ -939,11 +1171,13 @@ mod tests {
                      .optical_bus 3 ch_re ch_im ch_wl\n\
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        assert_eq!(netlist.optical_nets, vec![
-            "ch_re_0", "ch_im_0", "ch_wl_0",
-            "ch_re_1", "ch_im_1", "ch_wl_1",
-            "ch_re_2", "ch_im_2", "ch_wl_2",
-        ]);
+        assert_eq!(
+            netlist.optical_nets,
+            vec![
+                "ch_re_0", "ch_im_0", "ch_wl_0", "ch_re_1", "ch_im_1", "ch_wl_1", "ch_re_2",
+                "ch_im_2", "ch_wl_2",
+            ]
+        );
     }
 
     #[test]
@@ -954,14 +1188,18 @@ mod tests {
                      Xmux ch_re[0..1] ch_im[0..1] ch_wl[0..1] out_re out_im out_wl wdm_mux2\n\
                      .op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        if let Element::XOsdi { nets, model_name, .. } = &netlist.elements[0] {
+        if let Element::XOsdi {
+            nets, model_name, ..
+        } = &netlist.elements[0]
+        {
             assert_eq!(model_name, "wdm_mux2");
-            assert_eq!(nets, &[
-                "ch_re_0", "ch_re_1",
-                "ch_im_0", "ch_im_1",
-                "ch_wl_0", "ch_wl_1",
-                "out_re", "out_im", "out_wl",
-            ]);
+            assert_eq!(
+                nets,
+                &[
+                    "ch_re_0", "ch_re_1", "ch_im_0", "ch_im_1", "ch_wl_0", "ch_wl_1", "out_re",
+                    "out_im", "out_wl",
+                ]
+            );
         } else {
             panic!("expected XOsdi");
         }
@@ -1024,15 +1262,29 @@ Xdiv1 vdd mid 0 rdiv
         // V1 + R1 (from Xdiv1) + R2 (from Xdiv1) = 3 elements
         assert_eq!(netlist.elements.len(), 3, "expected 3 flat elements");
         // Check that resistors have the correct namespaced names and nets.
-        let names: Vec<&str> = netlist.elements.iter().map(|el| match el {
-            Element::Resistor { name, .. } => name.as_str(),
-            Element::VoltageSource { name, .. } => name.as_str(),
-            _ => "?",
-        }).collect();
-        assert!(names.contains(&"xdiv1.r1"), "missing xdiv1.r1, got {names:?}");
-        assert!(names.contains(&"xdiv1.r2"), "missing xdiv1.r2, got {names:?}");
+        let names: Vec<&str> = netlist
+            .elements
+            .iter()
+            .map(|el| match el {
+                Element::Resistor { name, .. } => name.as_str(),
+                Element::VoltageSource { name, .. } => name.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert!(
+            names.contains(&"xdiv1.r1"),
+            "missing xdiv1.r1, got {names:?}"
+        );
+        assert!(
+            names.contains(&"xdiv1.r2"),
+            "missing xdiv1.r2, got {names:?}"
+        );
         // Check node remapping: R1 should connect vdd → mid (port substitution).
-        let r1 = netlist.elements.iter().find(|el| matches!(el, Element::Resistor { name, .. } if name == "xdiv1.r1")).unwrap();
+        let r1 = netlist
+            .elements
+            .iter()
+            .find(|el| matches!(el, Element::Resistor { name, .. } if name == "xdiv1.r1"))
+            .unwrap();
         if let Element::Resistor { pos, neg, .. } = r1 {
             assert_eq!(pos, "vdd", "R1 pos should be vdd (port 'in' → vdd)");
             assert_eq!(neg, "mid", "R1 neg should be mid (port 'out' → mid)");
@@ -1055,10 +1307,18 @@ Xinv2 vdd n2 inv
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3); // V1 + 2 × R1
-        let res: Vec<_> = netlist.elements.iter().filter(|el| matches!(el, Element::Resistor { .. })).collect();
+        let res: Vec<_> = netlist
+            .elements
+            .iter()
+            .filter(|el| matches!(el, Element::Resistor { .. }))
+            .collect();
         assert_eq!(res.len(), 2);
         let n1_r = res.iter().find(|el| {
-            if let Element::Resistor { name, .. } = el { name.starts_with("xinv1.") } else { false }
+            if let Element::Resistor { name, .. } = el {
+                name.starts_with("xinv1.")
+            } else {
+                false
+            }
         });
         assert!(n1_r.is_some(), "xinv1.r1 missing");
         if let Some(Element::Resistor { pos, neg, .. }) = n1_r {
@@ -1081,12 +1341,38 @@ Xover vdd 0 rvar R=2k
 .end
 ";
         let netlist = parse_spice(input).unwrap();
-        let resistors: Vec<_> = netlist.elements.iter().filter(|el| matches!(el, Element::Resistor { .. })).collect();
+        let resistors: Vec<_> = netlist
+            .elements
+            .iter()
+            .filter(|el| matches!(el, Element::Resistor { .. }))
+            .collect();
         assert_eq!(resistors.len(), 2);
-        let r_def  = resistors.iter().find(|el| { if let Element::Resistor { name, .. } = el { name.starts_with("xdef.")  } else { false } }).unwrap();
-        let r_over = resistors.iter().find(|el| { if let Element::Resistor { name, .. } = el { name.starts_with("xover.") } else { false } }).unwrap();
-        if let Element::Resistor { resistance, .. } = r_def  { assert!((resistance - 1e3).abs() < 1e-9, "default R={resistance}"); }
-        if let Element::Resistor { resistance, .. } = r_over { assert!((resistance - 2e3).abs() < 1e-9, "override R={resistance}"); }
+        let r_def = resistors
+            .iter()
+            .find(|el| {
+                if let Element::Resistor { name, .. } = el {
+                    name.starts_with("xdef.")
+                } else {
+                    false
+                }
+            })
+            .unwrap();
+        let r_over = resistors
+            .iter()
+            .find(|el| {
+                if let Element::Resistor { name, .. } = el {
+                    name.starts_with("xover.")
+                } else {
+                    false
+                }
+            })
+            .unwrap();
+        if let Element::Resistor { resistance, .. } = r_def {
+            assert!((resistance - 1e3).abs() < 1e-9, "default R={resistance}");
+        }
+        if let Element::Resistor { resistance, .. } = r_over {
+            assert!((resistance - 2e3).abs() < 1e-9, "override R={resistance}");
+        }
     }
 
     #[test]
@@ -1103,9 +1389,16 @@ Xbuf in out rbuf
 .end
 ";
         let netlist = parse_spice(input).unwrap();
-        let res = netlist.elements.iter().find(|el| matches!(el, Element::Resistor { .. })).unwrap();
+        let res = netlist
+            .elements
+            .iter()
+            .find(|el| matches!(el, Element::Resistor { .. }))
+            .unwrap();
         if let Element::Resistor { resistance, .. } = res {
-            assert!((resistance - 4700.0).abs() < 1e-9, "global param R={resistance}");
+            assert!(
+                (resistance - 4700.0).abs() < 1e-9,
+                "global param R={resistance}"
+            );
         }
     }
 
@@ -1128,13 +1421,35 @@ Xout vdd 0 outer
 ";
         let netlist = parse_spice(input).unwrap();
         // Flat: V1, xout.r2, xout.xin.r1
-        let resistors: Vec<_> = netlist.elements.iter().filter(|el| matches!(el, Element::Resistor { .. })).collect();
-        assert_eq!(resistors.len(), 2, "expected 2 flat resistors, got {}", resistors.len());
-        let names: Vec<&str> = resistors.iter().map(|el| {
-            if let Element::Resistor { name, .. } = el { name.as_str() } else { "" }
-        }).collect();
-        assert!(names.iter().any(|n| n.starts_with("xout.r2")),   "missing xout.r2: {names:?}");
-        assert!(names.iter().any(|n| n.starts_with("xout.xin.")), "missing xout.xin.*: {names:?}");
+        let resistors: Vec<_> = netlist
+            .elements
+            .iter()
+            .filter(|el| matches!(el, Element::Resistor { .. }))
+            .collect();
+        assert_eq!(
+            resistors.len(),
+            2,
+            "expected 2 flat resistors, got {}",
+            resistors.len()
+        );
+        let names: Vec<&str> = resistors
+            .iter()
+            .map(|el| {
+                if let Element::Resistor { name, .. } = el {
+                    name.as_str()
+                } else {
+                    ""
+                }
+            })
+            .collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("xout.r2")),
+            "missing xout.r2: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("xout.xin.")),
+            "missing xout.xin.*: {names:?}"
+        );
     }
 
     #[test]
@@ -1150,7 +1465,10 @@ Xcyc vdd 0 cyc
 .end
 ";
         let err = parse_spice(input).unwrap_err();
-        assert!(matches!(err, ParseError::SubcktCycle { .. }), "expected SubcktCycle, got {err:?}");
+        assert!(
+            matches!(err, ParseError::SubcktCycle { .. }),
+            "expected SubcktCycle, got {err:?}"
+        );
     }
 
     #[test]
@@ -1166,7 +1484,17 @@ Xbad vdd mid out extra twoport
 .end
 ";
         let err = parse_spice(input).unwrap_err();
-        assert!(matches!(err, ParseError::SubcktPortCount { expected: 2, got: 4, .. }), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                ParseError::SubcktPortCount {
+                    expected: 2,
+                    got: 4,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1184,7 +1512,10 @@ R1 a b 1k
 .end
 ";
         let netlist = parse_spice(input).unwrap();
-        let res = netlist.elements.iter().find(|el| matches!(el, Element::Resistor { .. }));
+        let res = netlist
+            .elements
+            .iter()
+            .find(|el| matches!(el, Element::Resistor { .. }));
         assert!(res.is_some(), "forward-referenced subckt not expanded");
     }
 
@@ -1277,8 +1608,19 @@ R1 a b 1k
     fn parse_b_element_current() {
         let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 I=V(in)*1m\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        let beh = netlist.elements.iter().find(|e| matches!(e, Element::Behavioral { .. })).unwrap();
-        if let Element::Behavioral { name, pos, neg, kind, .. } = beh {
+        let beh = netlist
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Behavioral { .. }))
+            .unwrap();
+        if let Element::Behavioral {
+            name,
+            pos,
+            neg,
+            kind,
+            ..
+        } = beh
+        {
             assert_eq!(name, "b1");
             assert_eq!(pos, "out");
             assert_eq!(neg, "0");
@@ -1290,7 +1632,11 @@ R1 a b 1k
     fn parse_b_element_voltage_with_spaces() {
         let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 V = V(in) * 2\n.op\n.end\n";
         let netlist = parse_spice(input).unwrap();
-        let beh = netlist.elements.iter().find(|e| matches!(e, Element::Behavioral { .. })).unwrap();
+        let beh = netlist
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Behavioral { .. }))
+            .unwrap();
         if let Element::Behavioral { kind, .. } = beh {
             assert_eq!(*kind, BehavioralKind::Voltage);
         }
@@ -1341,7 +1687,10 @@ R1 a 0 1k
         // With collect_defs, `.ends` at top level is a hard error.
         let input = "* test\nV1 a 0 DC 1\n.ends orphan\n.end\n";
         let err = parse_spice(input).unwrap_err();
-        assert!(matches!(err, ParseError::Syntax { .. }), "expected Syntax error for stray .ends, got {err:?}");
+        assert!(
+            matches!(err, ParseError::Syntax { .. }),
+            "expected Syntax error for stray .ends, got {err:?}"
+        );
     }
 
     #[test]
@@ -1360,8 +1709,16 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 ";
         let netlist = parse_spice(input).unwrap();
         // Xbuf expands to R1; Xlaser stays as XOsdi
-        let r = netlist.elements.iter().filter(|el| matches!(el, Element::Resistor { .. })).count();
-        let x = netlist.elements.iter().filter(|el| matches!(el, Element::XOsdi { .. })).count();
+        let r = netlist
+            .elements
+            .iter()
+            .filter(|el| matches!(el, Element::Resistor { .. }))
+            .count();
+        let x = netlist
+            .elements
+            .iter()
+            .filter(|el| matches!(el, Element::XOsdi { .. }))
+            .count();
         assert_eq!(r, 1, "expected 1 resistor from subckt expansion");
         assert_eq!(x, 1, "expected 1 XOsdi remaining");
     }
@@ -1373,15 +1730,29 @@ Xlaser l_re l_im cw_laser power_mW=1.0
         let input = "V1 in 0 DC 1\nL1 in out 1m rser=10\n.op\n.end\n";
         let net = parse_spice(input).unwrap();
         // L1 expands into: Inductor(in → __l1_rn) + Resistor(__l1_rn → out)
-        let inductors: Vec<_> = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).collect();
-        let resistors: Vec<_> = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).collect();
+        let inductors: Vec<_> = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Inductor { .. }))
+            .collect();
+        let resistors: Vec<_> = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Resistor { .. }))
+            .collect();
         assert_eq!(inductors.len(), 1, "expected 1 inductor");
         assert_eq!(resistors.len(), 1, "expected 1 resistor (ESR)");
         if let Element::Inductor { pos, neg, .. } = inductors[0] {
             assert_eq!(pos, "in");
             assert_eq!(neg, "__l1_rn");
         }
-        if let Element::Resistor { pos, neg, resistance, .. } = resistors[0] {
+        if let Element::Resistor {
+            pos,
+            neg,
+            resistance,
+            ..
+        } = resistors[0]
+        {
             assert_eq!(pos, "__l1_rn");
             assert_eq!(neg, "out");
             assert!((resistance - 10.0).abs() < 1e-12);
@@ -1392,15 +1763,37 @@ Xlaser l_re l_im cw_laser power_mW=1.0
     fn inductor_rser_cpar_expands_to_three_elements() {
         let input = "V1 in 0 DC 1\nL1 in out 1m rser=5 cpar=1p\n.op\n.end\n";
         let net = parse_spice(input).unwrap();
-        let n_l = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).count();
-        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
-        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        let n_l = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Inductor { .. }))
+            .count();
+        let n_r = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Resistor { .. }))
+            .count();
+        let n_c = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Capacitor { .. }))
+            .count();
         assert_eq!(n_l, 1);
         assert_eq!(n_r, 1);
         assert_eq!(n_c, 1);
         // cpar is across original pos/neg (in, out)
-        let cap = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
-        if let Element::Capacitor { pos, neg, capacitance, .. } = cap {
+        let cap = net
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Capacitor { .. }))
+            .unwrap();
+        if let Element::Capacitor {
+            pos,
+            neg,
+            capacitance,
+            ..
+        } = cap
+        {
             assert_eq!(pos, "in");
             assert_eq!(neg, "out");
             assert!((capacitance - 1e-12).abs() < 1e-24);
@@ -1411,14 +1804,30 @@ Xlaser l_re l_im cw_laser power_mW=1.0
     fn capacitor_esr_esl_expands_to_three_elements() {
         let input = "V1 in 0 DC 1\nC1 in 0 100n esr=0.1 esl=2n\n.op\n.end\n";
         let net = parse_spice(input).unwrap();
-        let n_l = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).count();
-        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
-        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        let n_l = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Inductor { .. }))
+            .count();
+        let n_r = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Resistor { .. }))
+            .count();
+        let n_c = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Capacitor { .. }))
+            .count();
         assert_eq!(n_l, 1, "expected 1 inductor (ESL)");
         assert_eq!(n_r, 1, "expected 1 resistor (ESR)");
         assert_eq!(n_c, 1, "expected 1 capacitor");
         // Chain: in --[ESL]--> __c1_esln --[ESR]--> __c1_esrn --[C]--> 0
-        let cap = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
+        let cap = net
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Capacitor { .. }))
+            .unwrap();
         if let Element::Capacitor { pos, neg, .. } = cap {
             assert_eq!(pos, "__c1_esrn");
             assert_eq!(neg, "0");
@@ -1429,10 +1838,24 @@ Xlaser l_re l_im cw_laser power_mW=1.0
     fn capacitor_rpar_adds_parallel_resistor() {
         let input = "V1 in 0 DC 1\nC1 in 0 100n rpar=1G\n.op\n.end\n";
         let net = parse_spice(input).unwrap();
-        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
+        let n_r = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Resistor { .. }))
+            .count();
         assert_eq!(n_r, 1, "expected 1 resistor (rpar)");
-        let r = net.elements.iter().find(|e| matches!(e, Element::Resistor { .. })).unwrap();
-        if let Element::Resistor { pos, neg, resistance, .. } = r {
+        let r = net
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Resistor { .. }))
+            .unwrap();
+        if let Element::Resistor {
+            pos,
+            neg,
+            resistance,
+            ..
+        } = r
+        {
             assert_eq!(pos, "in");
             assert_eq!(neg, "0");
             assert!((resistance - 1e9).abs() < 1.0);
@@ -1443,10 +1866,24 @@ Xlaser l_re l_im cw_laser power_mW=1.0
     fn resistor_cpar_adds_parallel_cap() {
         let input = "V1 in 0 DC 1\nR1 in 0 1k cpar=1p\n.op\n.end\n";
         let net = parse_spice(input).unwrap();
-        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        let n_c = net
+            .elements
+            .iter()
+            .filter(|e| matches!(e, Element::Capacitor { .. }))
+            .count();
         assert_eq!(n_c, 1);
-        let c = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
-        if let Element::Capacitor { pos, neg, capacitance, .. } = c {
+        let c = net
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Capacitor { .. }))
+            .unwrap();
+        if let Element::Capacitor {
+            pos,
+            neg,
+            capacitance,
+            ..
+        } = c
+        {
             assert_eq!(pos, "in");
             assert_eq!(neg, "0");
             assert!((capacitance - 1e-12).abs() < 1e-24);

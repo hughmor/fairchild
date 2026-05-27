@@ -11,8 +11,8 @@
 //! involved.
 
 use fairchild_core::{
-    options::SimOptions, tran::IntegratorMode, tran_nr_with_registry_var_opts,
-    DeviceRegistry, dc_op_nr_with_registry,
+    dc_op_nr_with_registry, options::SimOptions, tran::IntegratorMode,
+    tran_nr_with_registry_var_opts, DeviceRegistry,
 };
 use fairchild_parser::parse_spice;
 
@@ -55,8 +55,10 @@ fn wdm_dc_op_symmetric_at_zero_bias() {
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let v_pd1 = r.node_voltage("pd1_anode").unwrap();
     let v_pd2 = r.node_voltage("pd2_anode").unwrap();
-    assert!((v_pd1 - v_pd2).abs() < 1e-3,
-        "at V_pn=0 with symmetric detuning, PDs should match: pd1={v_pd1:.4} pd2={v_pd2:.4}");
+    assert!(
+        (v_pd1 - v_pd2).abs() < 1e-3,
+        "at V_pn=0 with symmetric detuning, PDs should match: pd1={v_pd1:.4} pd2={v_pd2:.4}"
+    );
 }
 
 /// At a V_pn that walks the ring resonance onto laser2 (red-side),
@@ -70,14 +72,20 @@ fn wdm_dc_op_breaks_symmetry_at_intermediate_bias() {
     let v_pd2 = r.node_voltage("pd2_anode").unwrap();
     // Channel 0 (blue-side): resonance walked away, far off-res → high T.
     // Channel 1 (red-side):  resonance walked onto it, deep notch → low T.
-    assert!(v_pd1 > 1.6,
-        "ch0 should be off-resonance at V=0.4: V(pd1)={v_pd1:.3}");
-    assert!(v_pd2 < 1.4,
-        "ch1 should be near-resonance at V=0.4: V(pd2)={v_pd2:.3}");
+    assert!(
+        v_pd1 > 1.6,
+        "ch0 should be off-resonance at V=0.4: V(pd1)={v_pd1:.3}"
+    );
+    assert!(
+        v_pd2 < 1.4,
+        "ch1 should be near-resonance at V=0.4: V(pd2)={v_pd2:.3}"
+    );
     // The asymmetry is the whole point.
     let asym = v_pd1 - v_pd2;
-    assert!(asym > 0.3,
-        "WDM asymmetry too small (Δ = {asym:.3} V); expected ≥ 0.3 V");
+    assert!(
+        asym > 0.3,
+        "WDM asymmetry too small (Δ = {asym:.3} V); expected ≥ 0.3 V"
+    );
 }
 
 /// Transient with V_pn = PULSE(0→4 V→0) — verify both channels run, both
@@ -117,21 +125,25 @@ Vmod vmod 0 PULSE(0 4 100n 100n 100n 800n 2u)
         .expect("WDM transient must complete");
     let pd1 = r.node_voltages.get("pd1_anode").unwrap();
     let pd2 = r.node_voltages.get("pd2_anode").unwrap();
-    let t   = &r.time;
+    let t = &r.time;
 
     // Find the timepoint where V_pn ≈ 0.4 V — the strongest asymmetry.
     // V_pn(t) ramps linearly 0 → 4 V from t=100 ns to 200 ns; so the
     // 0.4 V crossing happens around t ≈ 110 ns.
     let probe = t.iter().position(|&tt| tt >= 1.1e-7).unwrap();
     let diff = (pd1[probe] - pd2[probe]).abs();
-    assert!(diff > 0.3,
-        "expected ≥ 0.3 V asymmetry between channels around V_pn=0.4V; got {diff:.3}");
+    assert!(
+        diff > 0.3,
+        "expected ≥ 0.3 V asymmetry between channels around V_pn=0.4V; got {diff:.3}"
+    );
 
     // Both channels must converge to roughly the same off-resonance level
     // by the end of the pulse plateau (V_pn = 4 V, ring shifted ~570 pm
     // red → both lasers far blue of the new resonance → both high T).
     let late = t.iter().position(|&tt| tt >= 5e-7).unwrap();
     let conv = (pd1[late] - pd2[late]).abs();
-    assert!(conv < 0.1,
-        "both channels should be off-resonance and similar at V_pn=4V; got Δ = {conv:.3}");
+    assert!(
+        conv < 0.1,
+        "both channels should be off-resonance and similar at V_pn=4V; got Δ = {conv:.3}"
+    );
 }

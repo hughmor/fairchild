@@ -25,32 +25,32 @@ const GMIN: f64 = 1e-12;
 /// Gummel-Poon Level 1 BJT.
 pub struct GummelPoonBjt {
     // ── Model parameters ──────────────────────────────────────────────────────
-    is:      f64,   // transport saturation current (A)
-    bf:      f64,   // forward beta (current gain)
-    br:      f64,   // reverse beta
-    nf:      f64,   // forward emission coefficient
-    nr:      f64,   // reverse emission coefficient
-    vaf:     f64,   // forward Early voltage (V); f64::INFINITY = no Early effect
-    var:     f64,   // reverse Early voltage (V)
-    tf:      f64,   // forward transit time (s) — B-E diffusion charge
-    tr:      f64,   // reverse transit time (s) — B-C diffusion charge
-    polarity: f64,  // +1 NPN, -1 PNP
-    vcrit:   f64,   // pnjlim critical voltage (derived)
+    is: f64,       // transport saturation current (A)
+    bf: f64,       // forward beta (current gain)
+    br: f64,       // reverse beta
+    nf: f64,       // forward emission coefficient
+    nr: f64,       // reverse emission coefficient
+    vaf: f64,      // forward Early voltage (V); f64::INFINITY = no Early effect
+    var: f64,      // reverse Early voltage (V)
+    tf: f64,       // forward transit time (s) — B-E diffusion charge
+    tr: f64,       // reverse transit time (s) — B-C diffusion charge
+    polarity: f64, // +1 NPN, -1 PNP
+    vcrit: f64,    // pnjlim critical voltage (derived)
 
     // ── Terminal bindings ─────────────────────────────────────────────────────
     collector: NodeId,
-    base:      NodeId,
-    emitter:   NodeId,
+    base: NodeId,
+    emitter: NodeId,
 
     // ── Cached per-NR-iteration quantities (set by eval) ─────────────────────
-    vbe_eff:  f64,  // effective junction voltage B-E (after pnjlim, polarity-corrected)
-    vbc_eff:  f64,  // effective junction voltage B-C
-    gf:       f64,  // dIF/dVBE_eff (≈ transconductance in forward active)
-    gr:       f64,  // dIR/dVBC_eff
-    gpi:      f64,  // dIBF/dVBE_eff = gf/BF
-    gmu:      f64,  // dIBR/dVBC_eff = gr/BR
-    jeq_c:    f64,  // Norton offset at collector (see load_residual)
-    jeq_b:    f64,  // Norton offset at base
+    vbe_eff: f64, // effective junction voltage B-E (after pnjlim, polarity-corrected)
+    vbc_eff: f64, // effective junction voltage B-C
+    gf: f64,      // dIF/dVBE_eff (≈ transconductance in forward active)
+    gr: f64,      // dIR/dVBC_eff
+    gpi: f64,     // dIBF/dVBE_eff = gf/BF
+    gmu: f64,     // dIBR/dVBC_eff = gr/BR
+    jeq_c: f64,   // Norton offset at collector (see load_residual)
+    jeq_b: f64,   // Norton offset at base
 
     // ── pnjlim history ────────────────────────────────────────────────────────
     vbe_prev: f64,
@@ -60,57 +60,75 @@ pub struct GummelPoonBjt {
     qbe_tprev: f64, // QBE = TF*IF at last accepted timestep
     qbc_tprev: f64, // QBC = TR*IR at last accepted timestep
     // Current-iterate charges (set by eval when transient flag is set)
-    qbe_now:   f64,
-    qbc_now:   f64,
-    cbe_eff:   f64, // dQBE/dVBE_eff = TF*gf (capacitive conductance)
-    cbc_eff:   f64, // dQBC/dVBC_eff = TR*gr
+    qbe_now: f64,
+    qbc_now: f64,
+    cbe_eff: f64, // dQBE/dVBE_eff = TF*gf (capacitive conductance)
+    cbc_eff: f64, // dQBC/dVBC_eff = TR*gr
 }
 
 impl GummelPoonBjt {
     /// Build from model-card parameters.  Returns the device and any
     /// unrecognised parameter names.
     pub fn from_model_params(is_pnp: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
-        let mut is  = 1e-16;
-        let mut bf  = 100.0;
-        let mut br  = 1.0;
-        let mut nf  = 1.0;
-        let mut nr  = 1.0;
+        let mut is = 1e-16;
+        let mut bf = 100.0;
+        let mut br = 1.0;
+        let mut nf = 1.0;
+        let mut nr = 1.0;
         let mut vaf = f64::INFINITY;
         let mut var = f64::INFINITY;
-        let mut tf  = 0.0;
-        let mut tr  = 0.0;
+        let mut tf = 0.0;
+        let mut tr = 0.0;
         let mut unknown = Vec::new();
         for (k, v) in params {
             match k.to_lowercase().as_str() {
-                "is"           => is  = *v,
-                "bf" | "hfe"  => bf  = *v,
-                "br" | "hrc"  => br  = *v,
-                "nf"           => nf  = *v,
-                "nr"           => nr  = *v,
-                "vaf" | "va"  => vaf = *v,
-                "var" | "vb"  => var = *v,
-                "tf"           => tf  = *v,
-                "tr"           => tr  = *v,
+                "is" => is = *v,
+                "bf" | "hfe" => bf = *v,
+                "br" | "hrc" => br = *v,
+                "nf" => nf = *v,
+                "nr" => nr = *v,
+                "vaf" | "va" => vaf = *v,
+                "var" | "vb" => var = *v,
+                "tf" => tf = *v,
+                "tr" => tr = *v,
                 // Accepted but not yet modelled.
-                "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc"
-                | "ne" | "nc" | "cje" | "cjc" | "vje" | "vjc" | "mje" | "mjc"
-                | "fc" | "cjs" | "vjs" | "mjs" | "xtb" | "eg" | "xti"
-                | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
+                "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cje"
+                | "cjc" | "vje" | "vjc" | "mje" | "mjc" | "fc" | "cjs" | "vjs" | "mjs" | "xtb"
+                | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
                 _ => unknown.push(k.clone()),
             }
         }
         let dev = GummelPoonBjt {
-            is, bf, br, nf, nr, vaf, var, tf, tr,
+            is,
+            bf,
+            br,
+            nf,
+            nr,
+            vaf,
+            var,
+            tf,
+            tr,
             polarity: if is_pnp { -1.0 } else { 1.0 },
             vcrit: 0.0,
-            collector: None, base: None, emitter: None,
-            vbe_eff: 0.0, vbc_eff: 0.0,
-            gf: GMIN, gr: GMIN, gpi: GMIN / 100.0, gmu: GMIN / 100.0,
-            jeq_c: 0.0, jeq_b: 0.0,
-            vbe_prev: 0.0, vbc_prev: 0.0,
-            qbe_tprev: 0.0, qbc_tprev: 0.0,
-            qbe_now: 0.0, qbc_now: 0.0,
-            cbe_eff: 0.0, cbc_eff: 0.0,
+            collector: None,
+            base: None,
+            emitter: None,
+            vbe_eff: 0.0,
+            vbc_eff: 0.0,
+            gf: GMIN,
+            gr: GMIN,
+            gpi: GMIN / 100.0,
+            gmu: GMIN / 100.0,
+            jeq_c: 0.0,
+            jeq_b: 0.0,
+            vbe_prev: 0.0,
+            vbc_prev: 0.0,
+            qbe_tprev: 0.0,
+            qbc_tprev: 0.0,
+            qbe_now: 0.0,
+            qbc_now: 0.0,
+            cbe_eff: 0.0,
+            cbc_eff: 0.0,
         };
         (dev, unknown)
     }
@@ -130,7 +148,9 @@ impl GummelPoonBjt {
 }
 
 impl Device for GummelPoonBjt {
-    fn num_terminals(&self) -> usize { 4 } // C B E S (substrate tied to ground by build_devices)
+    fn num_terminals(&self) -> usize {
+        4
+    } // C B E S (substrate tied to ground by build_devices)
 
     fn setup_model(&mut self, ctx: &SimContext) {
         let vt = ctx.vt();
@@ -141,16 +161,16 @@ impl Device for GummelPoonBjt {
         // Terminals order: [C, B, E, S] — substrate (S) is ignored in this implementation.
         debug_assert!(terminals.len() >= 3, "BJT expects [C, B, E, S]");
         self.collector = terminals[0];
-        self.base      = terminals[1];
-        self.emitter   = terminals[2];
+        self.base = terminals[1];
+        self.emitter = terminals[2];
         // terminals[3] = substrate — tied to ground by caller; not stamped separately.
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let pol = self.polarity;
         let vc = self.collector.map_or(0.0, |i| x[i]);
-        let vb = self.base     .map_or(0.0, |i| x[i]);
-        let ve = self.emitter  .map_or(0.0, |i| x[i]);
+        let vb = self.base.map_or(0.0, |i| x[i]);
+        let ve = self.emitter.map_or(0.0, |i| x[i]);
 
         let vt = ctx.vt();
 
@@ -160,14 +180,18 @@ impl Device for GummelPoonBjt {
 
         let vbe_eff = if ctx.jlim_enabled {
             self.pnjlim(vbe_raw, self.vbe_prev, vt)
-        } else { vbe_raw };
+        } else {
+            vbe_raw
+        };
         let vbc_eff = if ctx.jlim_enabled {
             self.pnjlim(vbc_raw, self.vbc_prev, vt)
-        } else { vbc_raw };
+        } else {
+            vbc_raw
+        };
         self.vbe_prev = vbe_eff;
         self.vbc_prev = vbc_eff;
-        self.vbe_eff  = vbe_eff;
-        self.vbc_eff  = vbc_eff;
+        self.vbe_eff = vbe_eff;
+        self.vbc_eff = vbc_eff;
 
         // Forward and reverse junction exponentials.
         let nf_vt = self.nf * vt;
@@ -187,10 +211,20 @@ impl Device for GummelPoonBjt {
         // Early voltage modulation: q1 = 1 / (1 − VBC/VAF − VBE/VAR)
         // Applied only when VAF/VAR < ∞.  Clamped to ≥0.1 to prevent divergence.
         let q1 = if self.vaf.is_finite() || self.var.is_finite() {
-            let vbc_o_vaf = if self.vaf.is_finite() { vbc_eff / self.vaf } else { 0.0 };
-            let vbe_o_var = if self.var.is_finite() { vbe_eff / self.var } else { 0.0 };
+            let vbc_o_vaf = if self.vaf.is_finite() {
+                vbc_eff / self.vaf
+            } else {
+                0.0
+            };
+            let vbe_o_var = if self.var.is_finite() {
+                vbe_eff / self.var
+            } else {
+                0.0
+            };
             (1.0 - vbc_o_vaf - vbe_o_var).max(0.1)
-        } else { 1.0 };
+        } else {
+            1.0
+        };
 
         // Effective collector and base currents (in NPN-equivalent space).
         let ic_eff = (if_val - ir_val) / q1 - ir_val / self.br;
@@ -206,20 +240,14 @@ impl Device for GummelPoonBjt {
         //
         // jeq_C = pol*ic_eff − Jacobian_C · V_current
         // jeq_B = pol*ib_eff − (gpi+gmu)·vb + gmu·vc + gpi·ve
-        self.gf  = gf  / q1; // Early-modulated transconductance
-        self.gr  = gr;
+        self.gf = gf / q1; // Early-modulated transconductance
+        self.gr = gr;
         self.gpi = gpi / q1;
         self.gmu = gmu;
         let gce = self.gr + self.gmu;
 
-        self.jeq_c = pol * ic_eff
-            - (self.gf - gce) * vb
-            - gce * vc
-            + self.gf * ve;
-        self.jeq_b = pol * ib_eff
-            - (self.gpi + self.gmu) * vb
-            + self.gmu * vc
-            + self.gpi * ve;
+        self.jeq_c = pol * ic_eff - (self.gf - gce) * vb - gce * vc + self.gf * ve;
+        self.jeq_b = pol * ib_eff - (self.gpi + self.gmu) * vb + self.gmu * vc + self.gpi * ve;
 
         if flags.transient {
             self.cbe_eff = self.tf * self.gf;
@@ -235,17 +263,23 @@ impl Device for GummelPoonBjt {
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        if let Some(c) = self.collector { b[c] -= self.jeq_c; }
-        if let Some(bk) = self.base    { b[bk] -= self.jeq_b; }
-        if let Some(e) = self.emitter  { b[e]  += self.jeq_c + self.jeq_b; }
+        if let Some(c) = self.collector {
+            b[c] -= self.jeq_c;
+        }
+        if let Some(bk) = self.base {
+            b[bk] -= self.jeq_b;
+        }
+        if let Some(e) = self.emitter {
+            b[e] += self.jeq_c + self.jeq_b;
+        }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let (c, bk, e) = (self.collector, self.base, self.emitter);
-        let gf  = self.gf;
+        let gf = self.gf;
         let gpi = self.gpi;
         let gmu = self.gmu;
-        let gce = self.gr + gmu;  // combined collector-emitter conductance via VBC
+        let gce = self.gr + gmu; // combined collector-emitter conductance via VBC
 
         macro_rules! stamp {
             ($ri:expr, $ci:expr, $val:expr) => {
@@ -256,19 +290,19 @@ impl Device for GummelPoonBjt {
         }
 
         // Collector row: IC flows C→E; Jacobian of (device draws pol*IC from C).
-        stamp!(c,  bk,  gf - gce);
-        stamp!(c,  c,   gce);
-        stamp!(c,  e,  -gf);
+        stamp!(c, bk, gf - gce);
+        stamp!(c, c, gce);
+        stamp!(c, e, -gf);
 
         // Base row: IB flows into B.
-        stamp!(bk, bk,  gpi + gmu);
-        stamp!(bk, c,  -gmu);
-        stamp!(bk, e,  -gpi);
+        stamp!(bk, bk, gpi + gmu);
+        stamp!(bk, c, -gmu);
+        stamp!(bk, e, -gpi);
 
         // Emitter row: IE = IC + IB sources into E (negative sum of above rows).
-        stamp!(e,  bk, -(gf - gce) - (gpi + gmu));
-        stamp!(e,  c,  -gce - (-gmu));
-        stamp!(e,  e,   gf + gpi);
+        stamp!(e, bk, -(gf - gce) - (gpi + gmu));
+        stamp!(e, c, -gce - (-gmu));
+        stamp!(e, e, gf + gpi);
     }
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
@@ -278,15 +312,23 @@ impl Device for GummelPoonBjt {
             let i_be = alpha * (self.cbe_eff * self.vbe_eff + self.qbe_tprev - self.qbe_now);
             // Companion current flows from E→B (into B, out of E); same polarity as junction.
             let pol = self.polarity;
-            if let Some(bk) = self.base    { b[bk] += pol * i_be; }
-            if let Some(e)  = self.emitter { b[e]  -= pol * i_be; }
+            if let Some(bk) = self.base {
+                b[bk] += pol * i_be;
+            }
+            if let Some(e) = self.emitter {
+                b[e] -= pol * i_be;
+            }
         }
         // B-C junction charge companion: TR·IR
         if self.cbc_eff != 0.0 {
             let i_bc = alpha * (self.cbc_eff * self.vbc_eff + self.qbc_tprev - self.qbc_now);
             let pol = self.polarity;
-            if let Some(bk) = self.base      { b[bk] += pol * i_bc; }
-            if let Some(c)  = self.collector { b[c]  -= pol * i_bc; }
+            if let Some(bk) = self.base {
+                b[bk] += pol * i_bc;
+            }
+            if let Some(c) = self.collector {
+                b[c] -= pol * i_bc;
+            }
         }
     }
 
@@ -305,26 +347,26 @@ impl Device for GummelPoonBjt {
         // B-E capacitive companion: cbe_eff between base and emitter.
         if self.cbe_eff != 0.0 {
             let c_be = alpha * self.cbe_eff;
-            stamp!(bk, bk,  c_be);
-            stamp!(bk, e,  -c_be);
-            stamp!(e,  bk, -c_be);
-            stamp!(e,  e,   c_be);
+            stamp!(bk, bk, c_be);
+            stamp!(bk, e, -c_be);
+            stamp!(e, bk, -c_be);
+            stamp!(e, e, c_be);
         }
         // B-C capacitive companion: cbc_eff between base and collector.
         if self.cbc_eff != 0.0 {
             let c_bc = alpha * self.cbc_eff;
-            stamp!(bk, bk,  c_bc);
-            stamp!(bk, c,  -c_bc);
-            stamp!(c,  bk, -c_bc);
-            stamp!(c,  c,   c_bc);
+            stamp!(bk, bk, c_bc);
+            stamp!(bk, c, -c_bc);
+            stamp!(c, bk, -c_bc);
+            stamp!(c, c, c_bc);
         }
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
         let pol = self.polarity;
         let vc = self.collector.map_or(0.0, |i| x[i]);
-        let vb = self.base     .map_or(0.0, |i| x[i]);
-        let ve = self.emitter  .map_or(0.0, |i| x[i]);
+        let vb = self.base.map_or(0.0, |i| x[i]);
+        let ve = self.emitter.map_or(0.0, |i| x[i]);
         let vbe_eff = pol * (vb - ve);
         let vbc_eff = pol * (vb - vc);
         self.vbe_prev = vbe_eff;
@@ -344,10 +386,9 @@ impl Device for GummelPoonBjt {
         // i_n_ce² = 2q|IC| (collector shot noise), flows collector→emitter.
         const Q_E: f64 = 1.602176634e-19;
         let _ = ctx;
-        let ic_approx = self.polarity * (self.jeq_c
-            + (self.gf - self.gr - self.gmu) * 0.0
-            + (self.gr + self.gmu) * 0.0
-            - self.gf * 0.0);
+        let ic_approx = self.polarity
+            * (self.jeq_c + (self.gf - self.gr - self.gmu) * 0.0 + (self.gr + self.gmu) * 0.0
+                - self.gf * 0.0);
         let ib_approx = self.polarity * self.jeq_b;
         let mut sources = Vec::new();
         if ic_approx.abs() > 1e-20 {
@@ -365,14 +406,15 @@ mod tests {
     use super::*;
     use crate::device::EvalFlags;
 
-    fn ctx() -> SimContext { SimContext::default() }
+    fn ctx() -> SimContext {
+        SimContext::default()
+    }
 
     fn npn(bf: f64) -> GummelPoonBjt {
-        let (mut q, _) = GummelPoonBjt::from_model_params(false, &[
-            ("is".into(), 1e-15),
-            ("bf".into(), bf),
-            ("br".into(), 1.0),
-        ]);
+        let (mut q, _) = GummelPoonBjt::from_model_params(
+            false,
+            &[("is".into(), 1e-15), ("bf".into(), bf), ("br".into(), 1.0)],
+        );
         q.setup_model(&ctx());
         // C=0, B=1, E=2, S=None
         q.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
@@ -392,7 +434,9 @@ mod tests {
         q.eval(&x, EvalFlags::dc(), &ctx());
 
         // Recover IC from Norton stamp: IC = jeq_C + Jacobian·V
-        let vb = 0.7_f64; let vc = 5.0_f64; let ve = 0.0_f64;
+        let vb = 0.7_f64;
+        let vc = 5.0_f64;
+        let ve = 0.0_f64;
         let gce = q.gr + q.gmu;
         let ic = q.jeq_c + (q.gf - gce) * vb + gce * vc - q.gf * ve;
         // Expected: IS*exp(VBE/VT); use the same VT as the model (300.15 K default).
@@ -400,7 +444,9 @@ mod tests {
         let ic_expected = 1e-15 * (0.7_f64 / vt).exp();
         assert!(
             (ic - ic_expected).abs() / ic_expected < 0.01,
-            "IC={:.4e} expected≈{:.4e}", ic, ic_expected
+            "IC={:.4e} expected≈{:.4e}",
+            ic,
+            ic_expected
         );
     }
 
@@ -413,7 +459,9 @@ mod tests {
         let x = [5.0_f64, 0.65, 0.0];
         q.eval(&x, EvalFlags::dc(), &ctx());
 
-        let vb = 0.65_f64; let vc = 5.0_f64; let ve = 0.0_f64;
+        let vb = 0.65_f64;
+        let vc = 5.0_f64;
+        let ve = 0.0_f64;
         let gce = q.gr + q.gmu;
         let ic = q.jeq_c + (q.gf - gce) * vb + gce * vc - q.gf * ve;
         let ib = q.jeq_b + (q.gpi + q.gmu) * vb - q.gmu * vc - q.gpi * ve;
@@ -422,7 +470,9 @@ mod tests {
         let beta_measured = ic / ib;
         assert!(
             (beta_measured - bf).abs() / bf < 0.01,
-            "β = {:.1} expected {:.1}", beta_measured, bf
+            "β = {:.1} expected {:.1}",
+            beta_measured,
+            bf
         );
     }
 
@@ -430,10 +480,8 @@ mod tests {
     fn pnp_active_currents_flow_correctly() {
         // PNP in forward active: VEB=0.7V (VE=5, VB=4.3), VCB>0 (VC=0, VB=4.3)
         // IC should be negative (flows OUT of collector = INTO collector node from circuit side)
-        let (mut q, _) = GummelPoonBjt::from_model_params(true, &[
-            ("is".into(), 1e-15),
-            ("bf".into(), 100.0),
-        ]);
+        let (mut q, _) =
+            GummelPoonBjt::from_model_params(true, &[("is".into(), 1e-15), ("bf".into(), 100.0)]);
         q.setup_model(&ctx());
         q.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
         q.vbe_prev = -0.7; // raw (VB-VE) for PNP
@@ -442,14 +490,19 @@ mod tests {
         let x = [0.0_f64, 4.3, 5.0];
         q.eval(&x, EvalFlags::dc(), &ctx());
 
-        let vb = 4.3_f64; let vc = 0.0_f64; let ve = 5.0_f64;
+        let vb = 4.3_f64;
+        let vc = 0.0_f64;
+        let ve = 5.0_f64;
         let gce = q.gr + q.gmu;
         let ic_into_c = q.jeq_c + (q.gf - gce) * vb + gce * vc - q.gf * ve;
         // PNP: current flows from emitter to collector internally.
         // The collector node SOURCE (external) sees current flowing INTO it
         // when collector is the low-voltage terminal — IC_into_C is negative.
-        assert!(ic_into_c < 0.0,
-            "PNP IC_into_C should be negative, got {:.4e}", ic_into_c);
+        assert!(
+            ic_into_c < 0.0,
+            "PNP IC_into_C should be negative, got {:.4e}",
+            ic_into_c
+        );
         // |IC| / |IB| ≈ BF = 100
         let ib_into_b = q.jeq_b + (q.gpi + q.gmu) * vb - q.gmu * vc - q.gpi * ve;
         let beta = ic_into_c.abs() / ib_into_b.abs();

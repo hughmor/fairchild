@@ -12,11 +12,12 @@
 //!   - the parser's `bundle ports must have matching channel counts` check
 //!     is bypassed for the bridging devices.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 fn wdm_via_mux(p1_mw: f64, p2_mw: f64) -> String {
-    format!("\
+    format!(
+        "\
 * WDM via fc_mux / fc_demux
 .optical_port ch0
 .optical_port ch1
@@ -39,7 +40,8 @@ Rl1 v_pd1 bias 1k
 Rl2 v_pd2 bias 1k
 .op
 .end
-")
+"
+    )
 }
 
 /// Equal power on both channels → equal PD outputs.
@@ -49,8 +51,10 @@ fn wdm_mux_demux_symmetric_at_equal_power() {
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let v1 = r.node_voltage("v_pd1").unwrap();
     let v2 = r.node_voltage("v_pd2").unwrap();
-    assert!((v1 - v2).abs() < 1e-6,
-        "equal-power channels should produce equal PD voltages: v1={v1:.6} v2={v2:.6}");
+    assert!(
+        (v1 - v2).abs() < 1e-6,
+        "equal-power channels should produce equal PD voltages: v1={v1:.6} v2={v2:.6}"
+    );
     // Expected: V_bias + P · R_load · responsivity · waveguide_loss
     //   = 1 + 1e-3 · 0.8 · 1000 · exp(-α·L/2) ≈ 1 + 0.8 · 0.9988 ≈ 1.799 V.
     assert!((v1 - 1.798).abs() < 0.01,
@@ -67,17 +71,23 @@ fn wdm_mux_demux_channels_are_independent() {
     let v1 = r.node_voltage("v_pd1").unwrap();
     let v2 = r.node_voltage("v_pd2").unwrap();
     // Channel 0 carries 2 mW → V_pd1 ≈ 1 + 2 · 0.8 · 0.9988 ≈ 2.598 V.
-    assert!((v1 - 2.598).abs() < 0.01,
-        "v_pd1 = {v1:.4}, expected ≈ 2.598 V at 2 mW input");
+    assert!(
+        (v1 - 2.598).abs() < 0.01,
+        "v_pd1 = {v1:.4}, expected ≈ 2.598 V at 2 mW input"
+    );
     // Channel 1 carries 0.5 mW → V_pd2 ≈ 1 + 0.5 · 0.8 · 0.9988 ≈ 1.399 V.
-    assert!((v2 - 1.399).abs() < 0.01,
-        "v_pd2 = {v2:.4}, expected ≈ 1.399 V at 0.5 mW input");
+    assert!(
+        (v2 - 1.399).abs() < 0.01,
+        "v_pd2 = {v2:.4}, expected ≈ 1.399 V at 0.5 mW input"
+    );
     // The photocurrents should differ by exactly the laser-power ratio.
     let i1 = (v1 - 1.0) / 1000.0;
     let i2 = (v2 - 1.0) / 1000.0;
     let ratio = i1 / i2;
-    assert!((ratio - 4.0).abs() < 0.01,
-        "photocurrent ratio {ratio:.4}, expected ≈ 4.0 (2 mW / 0.5 mW)");
+    assert!(
+        (ratio - 4.0).abs() < 0.01,
+        "photocurrent ratio {ratio:.4}, expected ≈ 4.0 (2 mW / 0.5 mW)"
+    );
 }
 
 /// **WDM electrical-correctness regression.**  A single PN-PS on an
@@ -113,8 +123,8 @@ Vmod vmod 0 DC 1.0
 .op
 .end
 ";
-    let one  = parse_spice(single_channel).unwrap();
-    let two  = parse_spice(two_channel).unwrap();
+    let one = parse_spice(single_channel).unwrap();
+    let two = parse_spice(two_channel).unwrap();
     let r1 = dc_op_nr_with_registry(&one, &DeviceRegistry::new()).unwrap();
     let r2 = dc_op_nr_with_registry(&two, &DeviceRegistry::new()).unwrap();
     // I(Vmod) sign is negative (current flowing OUT of Vmod's + terminal into
@@ -122,7 +132,10 @@ Vmod vmod 0 DC 1.0
     // Magnitudes should match.
     let i1 = r1.vsrc_current("vmod").unwrap().abs();
     let i2 = r2.vsrc_current("vmod").unwrap().abs();
-    assert!((i1 - 1e-3).abs() < 1e-9, "single-channel I(Vmod) = {i1:e}; expected 1 mA");
+    assert!(
+        (i1 - 1e-3).abs() < 1e-9,
+        "single-channel I(Vmod) = {i1:e}; expected 1 mA"
+    );
     assert!((i2 - 1e-3).abs() < 1e-9,
         "2-channel I(Vmod) = {i2:e}; expected 1 mA (one shared PN junction, NOT 2 mA from N parallel conductances)");
 }
@@ -153,8 +166,10 @@ Rload pd_a bias 1k
     let v = r.node_voltage("pd_a").unwrap();
     // I_dark = 1 nA × 1k Ω = 1 µV → V(pd_a) ≈ 1 + 1e-6 V.
     // If PD were per-channel-replicated, I_dark would be 4 nA → V(pd_a) ≈ 1.000004 V.
-    assert!((v - 1.000001).abs() < 1e-8,
-        "V(pd_a) = {v}; expected ≈ 1.000001 V (one shared dark current, NOT 4× from 4 replicas)");
+    assert!(
+        (v - 1.000001).abs() < 1e-8,
+        "V(pd_a) = {v}; expected ≈ 1.000001 V (one shared dark current, NOT 4× from 4 replicas)"
+    );
 }
 
 /// **Band-centre default**: setting `.options lambda_center_nm=1310` should
@@ -179,8 +194,10 @@ Rload pd_a bias 1k
     let net = parse_spice(netlist_str).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).unwrap();
     let wl = r.node_voltage("ch0_wl_0").expect("ch0's λ wire");
-    assert!((wl - 1.31e-6).abs() < 1e-12,
-        "ch0_wl = {wl}; expected 1.31 µm from .options lambda_center_nm=1310");
+    assert!(
+        (wl - 1.31e-6).abs() < 1e-12,
+        "ch0_wl = {wl}; expected 1.31 µm from .options lambda_center_nm=1310"
+    );
 }
 
 /// 4-channel MUX/DEMUX — verify the inferred bundle width scales beyond N=2.
@@ -228,9 +245,16 @@ R3 v3 bias 1k
     let v3 = r.node_voltage("v3").unwrap();
     // Each PD voltage = 1 + P_mW · 0.8 · 1k · 1e-3 · waveguide_loss(≈0.9988).
     let expected = |p_mw: f64| 1.0 + p_mw * 0.8 * 0.9988;
-    for (probe, p_mw, v) in [("v0", 1.0, v0), ("v1", 2.0, v1), ("v2", 3.0, v2), ("v3", 4.0, v3)] {
+    for (probe, p_mw, v) in [
+        ("v0", 1.0, v0),
+        ("v1", 2.0, v1),
+        ("v2", 3.0, v2),
+        ("v3", 4.0, v3),
+    ] {
         let exp = expected(p_mw);
-        assert!((v - exp).abs() < 0.01,
-            "{probe} = {v:.4}, expected ≈ {exp:.4} at {p_mw} mW input");
+        assert!(
+            (v - exp).abs() < 0.01,
+            "{probe} = {v:.4}, expected ≈ {exp:.4} at {p_mw} mW input"
+        );
     }
 }

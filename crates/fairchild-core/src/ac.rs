@@ -15,18 +15,17 @@
 ///   [ G  -B ] [V_re]   [I_re]
 ///   [ B   G ] [V_im] = [I_im]
 /// where B = ωC − L/ω.
-
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
 use fairchild_parser::{Element, Netlist};
 
+use crate::device::{Device, EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
-use crate::device::{Device, EvalFlags, SimContext};
 use crate::solver::LinearSolver;
 
 /// Result of an AC sweep: complex node voltages at each frequency.
@@ -150,7 +149,13 @@ pub fn ac_analysis(
     ac_source: Option<&str>,
     registry: &DeviceRegistry,
 ) -> Result<AcResult, SimError> {
-    ac_analysis_opts(netlist, freqs, ac_source, registry, &SimOptions::from_netlist(netlist))
+    ac_analysis_opts(
+        netlist,
+        freqs,
+        ac_source,
+        registry,
+        &SimOptions::from_netlist(netlist),
+    )
 }
 
 /// AC analysis with explicit `SimOptions`.
@@ -183,7 +188,10 @@ pub fn ac_analysis_opts(
     for dev in devices.iter_mut() {
         dev.eval(&x0, EvalFlags::dc(), &ctx);
         // Use a temporary MnaMatrix to collect Jacobian entries.
-        let mut tmp = crate::mna::MnaMatrix { a: vec![vec![0.0; size]; size], b: vec![0.0; size] };
+        let mut tmp = crate::mna::MnaMatrix {
+            a: vec![vec![0.0; size]; size],
+            b: vec![0.0; size],
+        };
         dev.load_jacobian(&mut tmp);
         for i in 0..size {
             for j in 0..size {
@@ -203,7 +211,13 @@ pub fn ac_analysis_opts(
     // --- Capacitance matrix C (purely imaginary part of Y) ---
     let mut c_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {
-        if let Element::Capacitor { pos, neg, capacitance, .. } = el {
+        if let Element::Capacitor {
+            pos,
+            neg,
+            capacitance,
+            ..
+        } = el
+        {
             stamp_passive_2port(&mut c_mat, &topo.node_index, pos, neg, *capacitance);
         }
     }
@@ -213,7 +227,13 @@ pub fn ac_analysis_opts(
     // We track "L" values and handle 1/ω at solve time.
     let mut l_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {
-        if let Element::Inductor { pos, neg, inductance, .. } = el {
+        if let Element::Inductor {
+            pos,
+            neg,
+            inductance,
+            ..
+        } = el
+        {
             stamp_passive_2port(&mut l_mat, &topo.node_index, pos, neg, 1.0 / inductance);
         }
     }
@@ -234,7 +254,8 @@ pub fn ac_analysis_opts(
     // .collect::<Vec<_>>()` and then written into the result IndexMap by
     // index — same observable output as the sequential path.
     let solver_ref: &dyn LinearSolver = &*ac_solver;
-    let per_freq: Vec<Result<Vec<(f64, f64)>, SimError>> = freqs.par_iter()
+    let per_freq: Vec<Result<Vec<(f64, f64)>, SimError>> = freqs
+        .par_iter()
         .map(|&f| {
             let omega = 2.0 * std::f64::consts::PI * f;
 
@@ -265,7 +286,9 @@ pub fn ac_analysis_opts(
             }
 
             let x = solver_ref.solve(&a2, &rhs)?;
-            let row: Vec<(f64, f64)> = topo.node_index.values()
+            let row: Vec<(f64, f64)> = topo
+                .node_index
+                .values()
                 .map(|&idx| (x[idx], x[size + idx]))
                 .collect();
             Ok(row)
@@ -273,11 +296,12 @@ pub fn ac_analysis_opts(
         .collect();
 
     // Bail on the first error to mirror the historic short-circuit behaviour.
-    let per_freq: Vec<Vec<(f64, f64)>> = per_freq.into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let per_freq: Vec<Vec<(f64, f64)>> = per_freq.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     // Transpose: per_freq is [freq_idx][node_idx], result wants [node][freq_idx].
-    let mut voltages: IndexMap<String, Vec<(f64, f64)>> = topo.node_index.keys()
+    let mut voltages: IndexMap<String, Vec<(f64, f64)>> = topo
+        .node_index
+        .keys()
         .map(|k| (k.clone(), Vec::with_capacity(freqs.len())))
         .collect();
     for row in &per_freq {
@@ -286,7 +310,10 @@ pub fn ac_analysis_opts(
         }
     }
 
-    Ok(AcResult { freq: freqs.to_vec(), voltages })
+    Ok(AcResult {
+        freq: freqs.to_vec(),
+        voltages,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -320,16 +347,29 @@ fn dc_op(
             mat.a[i][i] += opts.gmin;
         }
         let x_new = solver.solve(&mat.a, &mat.b)?;
-        let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
-            .map(|(n, o)| (n - o).abs()).fold(0.0f64, f64::max);
+        let max_dv = x_new
+            .iter()
+            .zip(x.iter())
+            .take(n_nodes)
+            .map(|(n, o)| (n - o).abs())
+            .fold(0.0f64, f64::max);
         let x_next: Vec<f64> = if max_dv > opts.vmax {
             let scale = opts.vmax / max_dv;
-            x.iter().zip(x_new.iter()).map(|(o, n)| o + scale * (n - o)).collect()
-        } else { x_new };
-        let converged = x_next.iter().zip(x.iter())
+            x.iter()
+                .zip(x_new.iter())
+                .map(|(o, n)| o + scale * (n - o))
+                .collect()
+        } else {
+            x_new
+        };
+        let converged = x_next
+            .iter()
+            .zip(x.iter())
             .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
         x = x_next;
-        if converged { return Ok(x); }
+        if converged {
+            return Ok(x);
+        }
     }
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }
@@ -381,8 +421,12 @@ fn build_ac_rhs(
             Element::CurrentSource { name, pos, neg, .. } => {
                 let drives = ac_source.map_or(true, |s| s.eq_ignore_ascii_case(name));
                 if drives {
-                    if let Some(&p) = topo.node_index.get(pos) { b[p] -= mag; }
-                    if let Some(&n) = topo.node_index.get(neg) { b[n] += mag; }
+                    if let Some(&p) = topo.node_index.get(pos) {
+                        b[p] -= mag;
+                    }
+                    if let Some(&n) = topo.node_index.get(neg) {
+                        b[n] += mag;
+                    }
                 }
             }
             _ => {}
@@ -394,8 +438,8 @@ fn build_ac_rhs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fairchild_parser::parse_spice;
     use crate::device_registry::DeviceRegistry;
+    use fairchild_parser::parse_spice;
 
     /// RC low-pass filter: R=1kΩ, C=1nF. Cutoff at 1/(2πRC) ≈ 159 kHz.
     /// At f_c: |V(out)| = 1/√2 ≈ −3 dB.
@@ -403,14 +447,17 @@ mod tests {
     fn rc_lowpass_cutoff() {
         let net = parse_spice(
             "* RC low-pass\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.ac DEC 10 1k 10Meg\n.end\n",
-        ).unwrap();
+        )
+        .unwrap();
         let registry = DeviceRegistry::new();
         let f_c = 1.0 / (2.0 * std::f64::consts::PI * 1e3 * 1e-9); // ≈ 159 kHz
         let freqs = freq_decade(1e3, 10e6, 20);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
 
         // Find the frequency closest to f_c.
-        let fi = freqs.iter().enumerate()
+        let fi = freqs
+            .iter()
+            .enumerate()
             .min_by_key(|(_, &f)| ((f - f_c).abs() * 1e6) as u64)
             .map(|(i, _)| i)
             .unwrap();
@@ -421,15 +468,15 @@ mod tests {
         assert!(
             (mag / mag_at_dc - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.05,
             "At f={:.1}kHz: |V(out)|/|V(out)_dc|={:.4} (expected 1/√2 ≈ {:.4})",
-            freqs[fi] / 1e3, mag / mag_at_dc, std::f64::consts::FRAC_1_SQRT_2
+            freqs[fi] / 1e3,
+            mag / mag_at_dc,
+            std::f64::consts::FRAC_1_SQRT_2
         );
     }
 
     #[test]
     fn write_csv_ac() {
-        let net = parse_spice(
-            "* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n",
-        ).unwrap();
+        let net = parse_spice("* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
@@ -442,9 +489,7 @@ mod tests {
 
     #[test]
     fn write_nutmeg_ac() {
-        let net = parse_spice(
-            "* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n",
-        ).unwrap();
+        let net = parse_spice("* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
@@ -458,6 +503,9 @@ mod tests {
         assert!(s.contains("Values:"), "values: {s}");
         // Complex values should contain a comma separator.
         let values_section = s.split("Values:").nth(1).unwrap();
-        assert!(values_section.contains(','), "complex pairs should use comma: {s}");
+        assert!(
+            values_section.contains(','),
+            "complex pairs should use comma: {s}"
+        );
     }
 }

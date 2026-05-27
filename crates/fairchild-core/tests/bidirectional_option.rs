@@ -12,12 +12,15 @@ use fairchild_parser::parse_spice;
 /// Default state: bidir off, ports emit 3 wires.
 #[test]
 fn default_optical_port_emits_3_wires() {
-    let net = parse_spice("\
+    let net = parse_spice(
+        "\
 .optical_port ch0
 .optical_port bus 4
 .op
 .end
-").unwrap();
+",
+    )
+    .unwrap();
     let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
     let bus = net.optical_ports.iter().find(|p| p.name == "bus").unwrap();
     assert!(!ch0.bidirectional);
@@ -35,23 +38,31 @@ fn default_optical_port_emits_3_wires() {
 /// renames the wires with `_fw_` / `_bw_` suffixes.
 #[test]
 fn enable_bidirectional_emits_5_wires() {
-    let net = parse_spice("\
+    let net = parse_spice(
+        "\
 .options enable_bidirectional=1
 .optical_port ch0
 .optical_port bus 2
 .op
 .end
-").unwrap();
+",
+    )
+    .unwrap();
     let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
     let bus = net.optical_ports.iter().find(|p| p.name == "bus").unwrap();
     assert!(ch0.bidirectional);
     assert_eq!(ch0.wires_per_channel(), 5);
     let names = ch0.wires_for_channel(0);
-    assert_eq!(names, vec![
-        "ch0_re_fw_0", "ch0_im_fw_0",
-        "ch0_re_bw_0", "ch0_im_bw_0",
-        "ch0_wl_0",
-    ]);
+    assert_eq!(
+        names,
+        vec![
+            "ch0_re_fw_0",
+            "ch0_im_fw_0",
+            "ch0_re_bw_0",
+            "ch0_im_bw_0",
+            "ch0_wl_0",
+        ]
+    );
     // 2-channel bus → 10 wires total.
     assert_eq!(bus.all_wires().len(), 10);
 
@@ -63,7 +74,11 @@ fn enable_bidirectional_emits_5_wires() {
 /// Aliases `bidirectional=1` and `bidirectional_propagation=1` also work.
 #[test]
 fn enable_bidirectional_aliases() {
-    for keyword in ["enable_bidirectional", "bidirectional", "bidirectional_propagation"] {
+    for keyword in [
+        "enable_bidirectional",
+        "bidirectional",
+        "bidirectional_propagation",
+    ] {
         let src = format!(".options {keyword}=1\n.optical_port ch0\n.op\n.end\n");
         let net = parse_spice(&src).unwrap();
         let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
@@ -74,12 +89,15 @@ fn enable_bidirectional_aliases() {
 /// Bidir off explicitly via `enable_bidirectional=0` keeps 3-wire mode.
 #[test]
 fn enable_bidirectional_zero_stays_off() {
-    let net = parse_spice("\
+    let net = parse_spice(
+        "\
 .options enable_bidirectional=0
 .optical_port ch0
 .op
 .end
-").unwrap();
+",
+    )
+    .unwrap();
     let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
     assert!(!ch0.bidirectional);
 }

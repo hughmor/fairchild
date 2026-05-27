@@ -1,18 +1,22 @@
-use std::collections::HashMap;
-use crate::expr::Expr;
-use crate::{BehavioralKind, Element, ModelCard, ParseError, Waveform};
 use super::common::{canon_node, expand_bus_vectors, parse_value};
 use super::waveforms::parse_waveform;
+use crate::expr::Expr;
+use crate::{BehavioralKind, Element, ModelCard, ParseError, Waveform};
+use std::collections::HashMap;
 
 pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    let name   = tokens[0].to_lowercase();
+    let name = tokens[0].to_lowercase();
     let letter = name.chars().next().unwrap();
 
     match letter {
         'r' => {
             if tokens.len() < 4 {
-                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+                return Err(ParseError::FieldCount {
+                    expected: "≥4",
+                    got: tokens.len(),
+                    line: lineno,
+                });
             }
             Ok(Element::Resistor {
                 name,
@@ -23,7 +27,11 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
         }
         'c' => {
             if tokens.len() < 4 {
-                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+                return Err(ParseError::FieldCount {
+                    expected: "≥4",
+                    got: tokens.len(),
+                    line: lineno,
+                });
             }
             Ok(Element::Capacitor {
                 name,
@@ -34,7 +42,11 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
         }
         'l' => {
             if tokens.len() < 4 {
-                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+                return Err(ParseError::FieldCount {
+                    expected: "≥4",
+                    got: tokens.len(),
+                    line: lineno,
+                });
             }
             Ok(Element::Inductor {
                 name,
@@ -63,12 +75,16 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
         }
         'd' => {
             if tokens.len() < 4 {
-                return Err(ParseError::FieldCount { expected: "≥4", got: tokens.len(), line: lineno });
+                return Err(ParseError::FieldCount {
+                    expected: "≥4",
+                    got: tokens.len(),
+                    line: lineno,
+                });
             }
             Ok(Element::Diode {
                 name,
-                anode:      canon_node(tokens[1]),
-                cathode:    canon_node(tokens[2]),
+                anode: canon_node(tokens[1]),
+                cathode: canon_node(tokens[2]),
                 model_name: tokens[3].to_lowercase(),
             })
         }
@@ -76,7 +92,11 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
             // B-element behavioural source: `Bname n+ n- V=<expr>` or `I=<expr>`.
             // The expression may contain spaces, so we re-stitch tokens[3..].
             if tokens.len() < 4 {
-                return Err(ParseError::FieldCount { expected: "≥4 (Bname n+ n- V=expr|I=expr)", got: tokens.len(), line: lineno });
+                return Err(ParseError::FieldCount {
+                    expected: "≥4 (Bname n+ n- V=expr|I=expr)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
             }
             let pos = canon_node(tokens[1]);
             let neg = canon_node(tokens[2]);
@@ -84,13 +104,25 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
             let lc = rest.to_lowercase();
             // Recognise leading `v=`, `v =`, `i=`, `i =`.
             let (kind, expr_str) = if let Some(stripped) = lc.strip_prefix("v=") {
-                (BehavioralKind::Voltage, rest[rest.len() - stripped.len()..].to_string())
+                (
+                    BehavioralKind::Voltage,
+                    rest[rest.len() - stripped.len()..].to_string(),
+                )
             } else if let Some(stripped) = lc.strip_prefix("v =") {
-                (BehavioralKind::Voltage, rest[rest.len() - stripped.len()..].to_string())
+                (
+                    BehavioralKind::Voltage,
+                    rest[rest.len() - stripped.len()..].to_string(),
+                )
             } else if let Some(stripped) = lc.strip_prefix("i=") {
-                (BehavioralKind::Current, rest[rest.len() - stripped.len()..].to_string())
+                (
+                    BehavioralKind::Current,
+                    rest[rest.len() - stripped.len()..].to_string(),
+                )
             } else if let Some(stripped) = lc.strip_prefix("i =") {
-                (BehavioralKind::Current, rest[rest.len() - stripped.len()..].to_string())
+                (
+                    BehavioralKind::Current,
+                    rest[rest.len() - stripped.len()..].to_string(),
+                )
             } else {
                 return Err(ParseError::Syntax {
                     line: lineno,
@@ -99,12 +131,21 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
             };
             // Strip optional `{ … }` wrapping.
             let expr_str = expr_str.trim();
-            let expr_str = expr_str.trim_start_matches('{').trim_end_matches('}').trim();
+            let expr_str = expr_str
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
             let expr = Expr::parse(expr_str).map_err(|e| ParseError::Syntax {
                 line: lineno,
                 msg: format!("B-element expression: {e}"),
             })?;
-            Ok(Element::Behavioral { name, pos, neg, kind, expr })
+            Ok(Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr,
+            })
         }
         'm' => {
             if tokens.len() < 6 {
@@ -124,10 +165,10 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
             }
             Ok(Element::Mosfet {
                 name,
-                drain:      canon_node(tokens[1]),
-                gate:       canon_node(tokens[2]),
-                source:     canon_node(tokens[3]),
-                bulk:       canon_node(tokens[4]),
+                drain: canon_node(tokens[1]),
+                gate: canon_node(tokens[2]),
+                source: canon_node(tokens[3]),
+                bulk: canon_node(tokens[4]),
                 model_name: tokens[5].to_lowercase(),
                 params,
             })
@@ -165,8 +206,8 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
             Ok(Element::Bjt {
                 name,
                 collector: canon_node(tokens[1]),
-                base:      canon_node(tokens[2]),
-                emitter:   canon_node(tokens[3]),
+                base: canon_node(tokens[2]),
+                emitter: canon_node(tokens[3]),
                 substrate,
                 model_name,
                 params,
@@ -203,8 +244,8 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                     line: lineno,
                 });
             }
-            let mut positional: Vec<&str>      = Vec::new();
-            let mut params:     Vec<(String, f64)> = Vec::new();
+            let mut positional: Vec<&str> = Vec::new();
+            let mut params: Vec<(String, f64)> = Vec::new();
             for tok in &tokens[1..] {
                 if tok.contains('=') {
                     if let Some((k, v)) = tok.split_once('=') {
@@ -229,9 +270,17 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 .flat_map(|s| expand_bus_vectors(s))
                 .map(|s| canon_node(&s))
                 .collect();
-            Ok(Element::XOsdi { name, nets, model_name, params })
+            Ok(Element::XOsdi {
+                name,
+                nets,
+                model_name,
+                params,
+            })
         }
-        _ => Err(ParseError::UnknownElement { letter, line: lineno }),
+        _ => Err(ParseError::UnknownElement {
+            letter,
+            line: lineno,
+        }),
     }
 }
 
@@ -243,13 +292,16 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
 /// - L: `rser=<val>` — series ESR, `cpar=<val>` — parallel winding capacitance
 /// - C: `esr=<val>` — series resistance, `esl=<val>` — series inductance,
 ///      `rpar=<val>` — parallel leakage resistance
-pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<Element>, ParseError> {
+pub(super) fn parse_element_expanded(
+    line: &str,
+    lineno: usize,
+) -> Result<Vec<Element>, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.len() < 4 {
         return parse_element(line, lineno).map(|e| vec![e]);
     }
 
-    let name   = tokens[0].to_lowercase();
+    let name = tokens[0].to_lowercase();
     let letter = name.chars().next().unwrap();
 
     match letter {
@@ -259,8 +311,8 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
 
     let mut rser: Option<f64> = None;
     let mut cpar: Option<f64> = None;
-    let mut esr:  Option<f64> = None;
-    let mut esl:  Option<f64> = None;
+    let mut esr: Option<f64> = None;
+    let mut esl: Option<f64> = None;
     let mut rpar: Option<f64> = None;
     for tok in &tokens[4..] {
         if let Some((k, v)) = tok.split_once('=') {
@@ -268,8 +320,8 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
                 match k.to_lowercase().as_str() {
                     "rser" => rser = Some(val),
                     "cpar" => cpar = Some(val),
-                    "esr"  => esr  = Some(val),
-                    "esl"  => esl  = Some(val),
+                    "esr" => esr = Some(val),
+                    "esl" => esl = Some(val),
                     "rpar" => rpar = Some(val),
                     _ => {}
                 }
@@ -283,19 +335,24 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
 
     let pos: String = canon_node(tokens[1]);
     let neg: String = canon_node(tokens[2]);
-    let val: f64    = parse_value(tokens[3], lineno)?;
+    let val: f64 = parse_value(tokens[3], lineno)?;
 
     let mut elements: Vec<Element> = Vec::new();
 
     match letter {
         'r' => {
             elements.push(Element::Resistor {
-                name: name.clone(), pos: pos.clone(), neg: neg.clone(), resistance: val,
+                name: name.clone(),
+                pos: pos.clone(),
+                neg: neg.clone(),
+                resistance: val,
             });
             if let Some(cv) = cpar {
                 elements.push(Element::Capacitor {
                     name: format!("__c_{name}_cpar"),
-                    pos: pos.clone(), neg: neg.clone(), capacitance: cv,
+                    pos: pos.clone(),
+                    neg: neg.clone(),
+                    capacitance: cv,
                 });
             }
         }
@@ -307,18 +364,25 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
                 neg.clone()
             };
             elements.push(Element::Inductor {
-                name: name.clone(), pos: pos.clone(), neg: l_neg.clone(), inductance: val,
+                name: name.clone(),
+                pos: pos.clone(),
+                neg: l_neg.clone(),
+                inductance: val,
             });
             if let Some(rv) = rser {
                 elements.push(Element::Resistor {
                     name: format!("__r_{name}_rser"),
-                    pos: l_neg, neg: neg.clone(), resistance: rv,
+                    pos: l_neg,
+                    neg: neg.clone(),
+                    resistance: rv,
                 });
             }
             if let Some(cv) = cpar {
                 elements.push(Element::Capacitor {
                     name: format!("__c_{name}_cpar"),
-                    pos: pos.clone(), neg: neg.clone(), capacitance: cv,
+                    pos: pos.clone(),
+                    neg: neg.clone(),
+                    capacitance: cv,
                 });
             }
         }
@@ -329,7 +393,9 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
                 let int_node = format!("__{name}_esln");
                 elements.push(Element::Inductor {
                     name: format!("__l_{name}_esl"),
-                    pos: c_pos, neg: int_node.clone(), inductance: lv,
+                    pos: c_pos,
+                    neg: int_node.clone(),
+                    inductance: lv,
                 });
                 c_pos = int_node;
             }
@@ -337,17 +403,24 @@ pub(super) fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<El
                 let int_node = format!("__{name}_esrn");
                 elements.push(Element::Resistor {
                     name: format!("__r_{name}_esr"),
-                    pos: c_pos, neg: int_node.clone(), resistance: rv,
+                    pos: c_pos,
+                    neg: int_node.clone(),
+                    resistance: rv,
                 });
                 c_pos = int_node;
             }
             elements.push(Element::Capacitor {
-                name: name.clone(), pos: c_pos, neg: neg.clone(), capacitance: val,
+                name: name.clone(),
+                pos: c_pos,
+                neg: neg.clone(),
+                capacitance: val,
             });
             if let Some(rv) = rpar {
                 elements.push(Element::Resistor {
                     name: format!("__r_{name}_rpar"),
-                    pos: pos.clone(), neg: neg.clone(), resistance: rv,
+                    pos: pos.clone(),
+                    neg: neg.clone(),
+                    resistance: rv,
                 });
             }
         }

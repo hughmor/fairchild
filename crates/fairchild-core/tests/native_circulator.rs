@@ -8,7 +8,7 @@
 //! place their incoming signal on a port's `_re_fw_` net and read the
 //! circulator's outgoing signal from the next port's `_re_bw_` net.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// Inject light at port 0 (port_0.re_fw = 1.0).  Verify it appears at
@@ -41,11 +41,18 @@ Xcirc p0 p1 p2 fc_circulator
     let p1_im_bw = r.node_voltage("p1_im_bw_0").unwrap();
     let p2_re_bw = r.node_voltage("p2_re_bw_0").unwrap();
     let p2_im_bw = r.node_voltage("p2_im_bw_0").unwrap();
-    assert!((p1_re_bw - 1.0).abs() < 1e-9,
-        "port_1.re_bw should be 1.0 (light from port 0); got {p1_re_bw}");
-    assert!(p1_im_bw.abs() < 1e-9, "port_1.im_bw should be 0; got {p1_im_bw}");
-    assert!(p2_re_bw.abs() < 1e-9,
-        "port_2.re_bw should be 0 (no light entering port 1); got {p2_re_bw}");
+    assert!(
+        (p1_re_bw - 1.0).abs() < 1e-9,
+        "port_1.re_bw should be 1.0 (light from port 0); got {p1_re_bw}"
+    );
+    assert!(
+        p1_im_bw.abs() < 1e-9,
+        "port_1.im_bw should be 0; got {p1_im_bw}"
+    );
+    assert!(
+        p2_re_bw.abs() < 1e-9,
+        "port_2.re_bw should be 0 (no light entering port 1); got {p2_re_bw}"
+    );
     assert!(p2_im_bw.abs() < 1e-9);
 }
 
@@ -75,8 +82,10 @@ Xcirc p0 p1 p2 fc_circulator
     // Light path: port_0.fw → port_1.bw (= 1.0) → external short → port_1.fw
     // → port_2.bw (= port_1.fw = 1.0).
     let p2_re_bw = r.node_voltage("p2_re_bw_0").unwrap();
-    assert!((p2_re_bw - 1.0).abs() < 1e-6,
-        "after perfect reflection at port 1, port_2.re_bw should be 1.0; got {p2_re_bw}");
+    assert!(
+        (p2_re_bw - 1.0).abs() < 1e-6,
+        "after perfect reflection at port 1, port_2.re_bw should be 1.0; got {p2_re_bw}"
+    );
 }
 
 /// Circulator must refuse to instantiate without bidir mode.

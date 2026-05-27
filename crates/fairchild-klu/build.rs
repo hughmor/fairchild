@@ -43,7 +43,9 @@ fn main() {
                     println!("cargo:rustc-link-search=native={path}");
                 } else if let Some(lib) = tok.strip_prefix("-l") {
                     println!("cargo:rustc-link-lib={lib}");
-                    if lib == "klu" { linked_klu = true; }
+                    if lib == "klu" {
+                        linked_klu = true;
+                    }
                 }
             }
             if linked_klu {

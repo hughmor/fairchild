@@ -51,26 +51,35 @@ M5 tail vbias 0 0 nm w=10u l=1u
 fn differential_pair_dc_bias_point() {
     let net = parse_spice(DIFF_PAIR).unwrap();
     let r = dc_op_nr(&net).expect("DC OP must converge on 5-T diff pair");
-    assert!(r.iters <= 3,
-        "diff pair DC OP took {} homotopy attempts; expected direct NR (≤3)", r.iters);
+    assert!(
+        r.iters <= 3,
+        "diff pair DC OP took {} homotopy attempts; expected direct NR (≤3)",
+        r.iters
+    );
 
     let v_tail = r.node_voltage("tail").unwrap();
     let v_mid1 = r.node_voltage("mid1").unwrap();
-    let v_out  = r.node_voltage("out").unwrap();
-    let vdd    = 3.3;
+    let v_out = r.node_voltage("out").unwrap();
+    let vdd = 3.3;
 
     // Sanity checks (Level-1 accuracy, ±20 % bands):
     //   V(tail) is one Vgs below the input common mode (1.6 V); with
     //   Vth=0.6 and small overdrive on M5, expect 0.3–0.9 V.
-    assert!(v_tail > 0.2 && v_tail < 1.2,
-        "V(tail) = {v_tail:.3}; expected ≈ 0.3–0.9 V");
+    assert!(
+        v_tail > 0.2 && v_tail < 1.2,
+        "V(tail) = {v_tail:.3}; expected ≈ 0.3–0.9 V"
+    );
     //   V(mid1) is one Vsg below VDD: VDD − |Vth_p| − overdrive ≈ 1.8 V.
-    assert!(v_mid1 > 1.5 && v_mid1 < vdd - 0.5,
-        "V(mid1) = {v_mid1:.3}; expected ≈ 1.5–2.5 V");
+    assert!(
+        v_mid1 > 1.5 && v_mid1 < vdd - 0.5,
+        "V(mid1) = {v_mid1:.3}; expected ≈ 1.5–2.5 V"
+    );
     //   V(out) ≈ V(mid1) (balanced inputs → no differential → no offset).
     let imbalance = (v_out - v_mid1).abs();
-    assert!(imbalance < 0.05,
-        "balanced inputs but |V(out)−V(mid1)| = {imbalance:.4}; should be ≈ 0");
+    assert!(
+        imbalance < 0.05,
+        "balanced inputs but |V(out)−V(mid1)| = {imbalance:.4}; should be ≈ 0"
+    );
 }
 
 /// Apply a small differential input and verify the output swings — proves
@@ -78,19 +87,20 @@ fn differential_pair_dc_bias_point() {
 /// linearised Jacobian correctly couples in1/in2 to out.
 #[test]
 fn differential_pair_responds_to_differential_input() {
-    let nm = "Vin1 in1  0 DC 1.605\nVin2 in2  0 DC 1.595\n";  // 10 mV differential
-    let netlist = DIFF_PAIR
-        .replace("Vin1 in1  0 DC 1.6\nVin2 in2  0 DC 1.6", nm.trim_end());
+    let nm = "Vin1 in1  0 DC 1.605\nVin2 in2  0 DC 1.595\n"; // 10 mV differential
+    let netlist = DIFF_PAIR.replace("Vin1 in1  0 DC 1.6\nVin2 in2  0 DC 1.6", nm.trim_end());
     let net = parse_spice(&netlist).unwrap();
     let r = dc_op_nr(&net).expect("DC OP must converge under small input mismatch");
     let v_mid1 = r.node_voltage("mid1").unwrap();
-    let v_out  = r.node_voltage("out").unwrap();
+    let v_out = r.node_voltage("out").unwrap();
     let delta = v_out - v_mid1;
     // 10 mV input differential should swing the output by far more than the
     // input (a real amplifier gain).  Level-1 MOSFET gives modest gain;
     // we just require the differential-to-output coupling is monotonic
     // with the right sign — V(in1) > V(in2) drives M2 weaker than M1, so
     // V(out) rises above V(mid1).
-    assert!(delta > 0.005,
-        "expected positive output deflection from V(in1)>V(in2); got {delta:.4} V");
+    assert!(
+        delta > 0.005,
+        "expected positive output deflection from V(in1)>V(in2); got {delta:.4} V"
+    );
 }

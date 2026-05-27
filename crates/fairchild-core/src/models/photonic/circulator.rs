@@ -27,24 +27,26 @@ use crate::mna::MnaMatrix;
 /// branch count: 6 re/im routing + 2 λ ties = 8.
 pub struct NativeCirculator {
     n_channels: usize,
-    wpc:        usize,
-    nodes:      Vec<NodeId>,
-    branches:   Vec<Option<usize>>,
+    wpc: usize,
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
 }
 
 impl NativeCirculator {
     pub fn new() -> Self {
         Self {
             n_channels: 0,
-            wpc:        5,
-            nodes:      Vec::new(),
-            branches:   Vec::new(),
+            wpc: 5,
+            nodes: Vec::new(),
+            branches: Vec::new(),
         }
     }
 }
 
 impl Device for NativeCirculator {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
@@ -52,8 +54,10 @@ impl Device for NativeCirculator {
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
         if ctx.wires_per_channel() != 5 {
-            panic!("fc_circulator requires bidirectional propagation; \
-                    set `.options enable_bidirectional=1` (or via CLI / Python)");
+            panic!(
+                "fc_circulator requires bidirectional propagation; \
+                    set `.options enable_bidirectional=1` (or via CLI / Python)"
+            );
         }
         self.wpc = 5;
         let stride = 3 * 5; // 3 ports × 5 wires per channel
@@ -64,24 +68,30 @@ impl Device for NativeCirculator {
         );
         let n = terminals.len() / stride;
         self.n_channels = n;
-        self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; 8 * n];
+        self.nodes = terminals.to_vec();
+        self.branches = vec![None; 8 * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
     }
 
-    fn set_real_param(&mut self, _name: &str, _value: f64) -> bool { false }
+    fn set_real_param(&mut self, _name: &str, _value: f64) -> bool {
+        false
+    }
 
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n   = self.n_channels;
+        let n = self.n_channels;
         let wpc = 5;
         // Per channel: stride = 3 ports × 5 wires = 15.
         for k in 0..n {
@@ -103,7 +113,7 @@ impl Device for NativeCirculator {
             let b = 8 * k;
             // port_p.bw = port_((p+2) mod 3).fw
             // port_0.bw = port_2.fw
-            stamp_potential_eq(mat, &self.branches, b,     p0_re_bw, &[(p2_re_fw, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, b, p0_re_bw, &[(p2_re_fw, -1.0)]);
             stamp_potential_eq(mat, &self.branches, b + 1, p0_im_bw, &[(p2_im_fw, -1.0)]);
             // port_1.bw = port_0.fw
             stamp_potential_eq(mat, &self.branches, b + 2, p1_re_bw, &[(p0_re_fw, -1.0)]);
@@ -117,8 +127,12 @@ impl Device for NativeCirculator {
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
 
 use super::{n_eff_at_lambda, stamp_potential_eq, C0};

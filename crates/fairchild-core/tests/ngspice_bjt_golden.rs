@@ -32,7 +32,9 @@ fn find_ngspice() -> Option<std::path::PathBuf> {
         "/usr/bin/ngspice",
     ] {
         let p = std::path::Path::new(candidate);
-        if p.exists() { return Some(p.to_owned()); }
+        if p.exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }
@@ -42,12 +44,19 @@ fn strip_control_and_end(netlist: &str) -> String {
     let mut in_control = false;
     for line in netlist.lines() {
         let lc = line.trim().to_lowercase();
-        if lc.starts_with(".control") { in_control = true; continue; }
-        if in_control {
-            if lc.starts_with(".endc") { in_control = false; }
+        if lc.starts_with(".control") {
+            in_control = true;
             continue;
         }
-        if lc == ".end" { continue; }
+        if in_control {
+            if lc.starts_with(".endc") {
+                in_control = false;
+            }
+            continue;
+        }
+        if lc == ".end" {
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
@@ -67,7 +76,11 @@ fn parse_ngspice_print(output: &str) -> Option<HashMap<String, f64>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
@@ -77,7 +90,11 @@ fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
     let print_vars = queries.join(" ");
     let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n.end\n");
     write!(tmp, "{stripped}\n{control_block}").ok()?;
-    let output = Command::new(&ngspice_bin).arg("-b").arg(tmp.path()).output().ok()?;
+    let output = Command::new(&ngspice_bin)
+        .arg("-b")
+        .arg(tmp.path())
+        .output()
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_ngspice_print(&stdout)
 }
@@ -134,7 +151,10 @@ Q1  c b 0 0 npn1\n\
 
     // Sanity: VBE forward biased, BJT in forward active (VCE > ~0.2V).
     assert!(vb > 0.6 && vb < 0.8, "V(b)={vb:.4}V — expected ~0.7V (VBE)");
-    assert!(vc > 1.0 && vc < 5.0, "V(c)={vc:.4}V — expected forward active [1,5]V");
+    assert!(
+        vc > 1.0 && vc < 5.0,
+        "V(c)={vc:.4}V — expected forward active [1,5]V"
+    );
 
     let Some(ng) = ngspice_op(netlist_str, &["v(b)", "v(c)"]) else {
         eprintln!("ngspice not available — skipping comparison");
@@ -195,8 +215,11 @@ Q1  c b cc 0 pnp1\n\
 
     // VEB = VCC - VB should be ~0.7V forward biased; VC should be positive.
     let veb = 5.0 - vb;
-    assert!(veb > 0.5 && veb < 0.85, "VEB={veb:.4}V — expected ~0.7V for PNP");
-    assert!(vc > 0.5 && vc < 4.5,    "V(c)={vc:.4}V — expected [0.5, 4.5]V");
+    assert!(
+        veb > 0.5 && veb < 0.85,
+        "VEB={veb:.4}V — expected ~0.7V for PNP"
+    );
+    assert!(vc > 0.5 && vc < 4.5, "V(c)={vc:.4}V — expected [0.5, 4.5]V");
 
     let Some(ng) = ngspice_op(netlist_str, &["v(b)", "v(c)"]) else {
         eprintln!("ngspice not available — skipping comparison");

@@ -21,24 +21,38 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fairchild_core::{build_devices, dc_op_nr_with_devices, CircuitTopology, DeviceRegistry, SimContext};
+use fairchild_core::{
+    build_devices, dc_op_nr_with_devices, CircuitTopology, DeviceRegistry, SimContext,
+};
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::parse_spice;
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
-fn cmt_transmission(wavelength_m: f64, kappa_0: f64, l_ring_m: f64, n_g: f64, alpha_db_cm: f64) -> f64 {
+fn cmt_transmission(
+    wavelength_m: f64,
+    kappa_0: f64,
+    l_ring_m: f64,
+    n_g: f64,
+    alpha_db_cm: f64,
+) -> f64 {
     let r = (1.0 - kappa_0).sqrt();
     let alpha_lin = alpha_db_cm * 1e2 / 8.685_895;
     let a = (-alpha_lin * l_ring_m / 2.0).exp();
     let beta = 2.0 * std::f64::consts::PI * n_g / wavelength_m;
     let phi = beta * l_ring_m;
-    (r*r - 2.0*r*a*phi.cos() + a*a) / (1.0 - 2.0*r*a*phi.cos() + r*r*a*a)
+    (r * r - 2.0 * r * a * phi.cos() + a * a) / (1.0 - 2.0 * r * a * phi.cos() + r * r * a * a)
 }
 
 fn cmt_resonance_nearest(lambda_center_m: f64, n_g: f64, l_ring_m: f64) -> f64 {
@@ -52,22 +66,24 @@ fn model_path(dir: &str, name: &str) -> PathBuf {
 
 fn main() {
     // ── Parameters ────────────────────────────────────────────────────────────
-    let kappa_0     = env_f64("RING_KAPPA_0",      0.1);
-    let l_ring_um   = env_f64("RING_L_UM",         100.0);
-    let n_g         = env_f64("RING_N_G",           4.2);
-    let alpha_db_cm = env_f64("RING_ALPHA_DB_CM",   2.0);
-    let power_mw    = env_f64("RING_POWER_MW",      1.0);
-    let r_load      = env_f64("RING_R_LOAD",        1000.0);
-    let wl_start    = env_f64("RING_WL_START_NM",   1544.0);
-    let wl_end      = env_f64("RING_WL_END_NM",     1558.0);
-    let n_points    = env_usize("RING_N_POINTS",    101);
-    let csv_out     = std::env::var("RING_CSV_OUT")
-        .unwrap_or_else(|_| "ring_resonator_sweep.csv".to_string());
-    let model_dir   = std::env::var("RING_MODEL_DIR")
-        .unwrap_or_else(|_| {
-            // default: relative to this example's manifest dir at compile time
-            format!("{}/../../../legacy/va-models/build", env!("CARGO_MANIFEST_DIR"))
-        });
+    let kappa_0 = env_f64("RING_KAPPA_0", 0.1);
+    let l_ring_um = env_f64("RING_L_UM", 100.0);
+    let n_g = env_f64("RING_N_G", 4.2);
+    let alpha_db_cm = env_f64("RING_ALPHA_DB_CM", 2.0);
+    let power_mw = env_f64("RING_POWER_MW", 1.0);
+    let r_load = env_f64("RING_R_LOAD", 1000.0);
+    let wl_start = env_f64("RING_WL_START_NM", 1544.0);
+    let wl_end = env_f64("RING_WL_END_NM", 1558.0);
+    let n_points = env_usize("RING_N_POINTS", 101);
+    let csv_out =
+        std::env::var("RING_CSV_OUT").unwrap_or_else(|_| "ring_resonator_sweep.csv".to_string());
+    let model_dir = std::env::var("RING_MODEL_DIR").unwrap_or_else(|_| {
+        // default: relative to this example's manifest dir at compile time
+        format!(
+            "{}/../../../legacy/va-models/build",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    });
 
     let l_ring_m = l_ring_um * 1e-6;
 
@@ -79,7 +95,12 @@ fn main() {
     eprintln!("  output: {csv_out}");
 
     // ── Load OSDI libraries ───────────────────────────────────────────────────
-    let model_names = ["cw_laser", "directional_coupler", "waveguide", "photodetector"];
+    let model_names = [
+        "cw_laser",
+        "directional_coupler",
+        "waveguide",
+        "photodetector",
+    ];
     let mut libs = Vec::new();
     for name in &model_names {
         let path = model_path(&model_dir, name);
@@ -134,8 +155,8 @@ fn main() {
     let mut sweep: Vec<(f64, f64, f64)> = Vec::with_capacity(n_points); // (wl_nm, v_sim, t_cmt)
 
     for (idx, &wl_nm) in wavelengths.iter().enumerate() {
-        let mut devices = build_devices(&base_netlist, &mut topo, &ctx, &registry)
-            .unwrap_or_else(|e| {
+        let mut devices =
+            build_devices(&base_netlist, &mut topo, &ctx, &registry).unwrap_or_else(|e| {
                 eprintln!("error: build_devices at {wl_nm:.3} nm: {e}");
                 std::process::exit(1);
             });
@@ -152,7 +173,13 @@ fn main() {
         sweep.push((wl_nm, v_ph, t_cmt));
 
         if idx % 10 == 0 || idx == n_points - 1 {
-            eprint!("\r  [{}/{}] {:.3} nm  V(ph_a)={:.4} V   ", idx + 1, n_points, wl_nm, v_ph);
+            eprint!(
+                "\r  [{}/{}] {:.3} nm  V(ph_a)={:.4} V   ",
+                idx + 1,
+                n_points,
+                wl_nm,
+                v_ph
+            );
         }
     }
     eprintln!();
@@ -171,9 +198,15 @@ fn main() {
     }
 
     // ── Summary ───────────────────────────────────────────────────────────────
-    let v_max = sweep.iter().map(|&(_, v, _)| v).fold(f64::NEG_INFINITY, f64::max);
-    let (sim_res_nm, v_min, _) = sweep.iter().copied()
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+    let v_max = sweep
+        .iter()
+        .map(|&(_, v, _)| v)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (sim_res_nm, v_min, _) = sweep
+        .iter()
+        .copied()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .unwrap();
     let cmt_res_nm = cmt_resonance_nearest(sim_res_nm * 1e-9, n_g, l_ring_m) * 1e9;
     let dip_pct = (1.0 - v_min / v_max) * 100.0;
 

@@ -22,9 +22,19 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Pow,
-    Lt, Le, Gt, Ge, Eq, Ne,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone)]
@@ -70,9 +80,9 @@ impl fmt::Display for ExprError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExprError::UnexpectedToken(t, i) => write!(f, "unexpected token '{t}' at offset {i}"),
-            ExprError::UnexpectedEof         => write!(f, "unexpected end of expression"),
-            ExprError::BadNumber(s)          => write!(f, "invalid number '{s}'"),
-            ExprError::UnknownFunction(s)    => write!(f, "unknown function '{s}'"),
+            ExprError::UnexpectedEof => write!(f, "unexpected end of expression"),
+            ExprError::BadNumber(s) => write!(f, "invalid number '{s}'"),
+            ExprError::UnknownFunction(s) => write!(f, "unknown function '{s}'"),
         }
     }
 }
@@ -86,7 +96,8 @@ impl Expr {
         let e = p.parse_expr()?;
         if p.pos != p.tokens.len() {
             return Err(ExprError::UnexpectedToken(
-                format!("{:?}", &p.tokens[p.pos]), p.pos,
+                format!("{:?}", &p.tokens[p.pos]),
+                p.pos,
             ));
         }
         Ok(e)
@@ -101,7 +112,13 @@ impl Expr {
             Expr::BranchI(n) => ctx.branch_current(n),
             Expr::Time => ctx.time(),
             Expr::Neg(e) => -e.eval(ctx),
-            Expr::Not(e) => if e.eval(ctx) != 0.0 { 0.0 } else { 1.0 },
+            Expr::Not(e) => {
+                if e.eval(ctx) != 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
             Expr::Bin(op, a, b) => {
                 let av = a.eval(ctx);
                 let bv = b.eval(ctx);
@@ -111,17 +128,35 @@ impl Expr {
                     BinOp::Mul => av * bv,
                     BinOp::Div => av / bv,
                     BinOp::Pow => av.powf(bv),
-                    BinOp::Lt  => (av <  bv) as i64 as f64,
-                    BinOp::Le  => (av <= bv) as i64 as f64,
-                    BinOp::Gt  => (av >  bv) as i64 as f64,
-                    BinOp::Ge  => (av >= bv) as i64 as f64,
-                    BinOp::Eq  => (av == bv) as i64 as f64,
-                    BinOp::Ne  => (av != bv) as i64 as f64,
-                    BinOp::And => if av != 0.0 && bv != 0.0 { 1.0 } else { 0.0 },
-                    BinOp::Or  => if av != 0.0 || bv != 0.0 { 1.0 } else { 0.0 },
+                    BinOp::Lt => (av < bv) as i64 as f64,
+                    BinOp::Le => (av <= bv) as i64 as f64,
+                    BinOp::Gt => (av > bv) as i64 as f64,
+                    BinOp::Ge => (av >= bv) as i64 as f64,
+                    BinOp::Eq => (av == bv) as i64 as f64,
+                    BinOp::Ne => (av != bv) as i64 as f64,
+                    BinOp::And => {
+                        if av != 0.0 && bv != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinOp::Or => {
+                        if av != 0.0 || bv != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                 }
             }
-            Expr::If(c, a, b) => if c.eval(ctx) != 0.0 { a.eval(ctx) } else { b.eval(ctx) },
+            Expr::If(c, a, b) => {
+                if c.eval(ctx) != 0.0 {
+                    a.eval(ctx)
+                } else {
+                    b.eval(ctx)
+                }
+            }
             Expr::Call(name, args) => {
                 let vs: Vec<f64> = args.iter().map(|a| a.eval(ctx)).collect();
                 eval_fn(name, &vs).unwrap_or(0.0)
@@ -134,7 +169,10 @@ impl Expr {
     pub fn collect_refs(&self, v_nodes: &mut Vec<String>, i_srcs: &mut Vec<String>) {
         match self {
             Expr::NodeV(n) => v_nodes.push(n.clone()),
-            Expr::NodeDiffV(a, b) => { v_nodes.push(a.clone()); v_nodes.push(b.clone()); }
+            Expr::NodeDiffV(a, b) => {
+                v_nodes.push(a.clone());
+                v_nodes.push(b.clone());
+            }
             Expr::BranchI(s) => i_srcs.push(s.clone()),
             Expr::Num(_) | Expr::Time => {}
             Expr::Neg(e) | Expr::Not(e) => e.collect_refs(v_nodes, i_srcs),
@@ -147,7 +185,11 @@ impl Expr {
                 a.collect_refs(v_nodes, i_srcs);
                 b.collect_refs(v_nodes, i_srcs);
             }
-            Expr::Call(_, args) => for a in args { a.collect_refs(v_nodes, i_srcs); }
+            Expr::Call(_, args) => {
+                for a in args {
+                    a.collect_refs(v_nodes, i_srcs);
+                }
+            }
         }
     }
 }
@@ -155,32 +197,42 @@ impl Expr {
 fn eval_fn(name: &str, args: &[f64]) -> Option<f64> {
     let one = |f: fn(f64) -> f64| args.first().copied().map(f);
     match name.to_lowercase().as_str() {
-        "sin"   => one(f64::sin),
-        "cos"   => one(f64::cos),
-        "tan"   => one(f64::tan),
-        "asin"  => one(f64::asin),
-        "acos"  => one(f64::acos),
-        "atan"  => one(f64::atan),
-        "sinh"  => one(f64::sinh),
-        "cosh"  => one(f64::cosh),
-        "tanh"  => one(f64::tanh),
-        "exp"   => one(f64::exp),
+        "sin" => one(f64::sin),
+        "cos" => one(f64::cos),
+        "tan" => one(f64::tan),
+        "asin" => one(f64::asin),
+        "acos" => one(f64::acos),
+        "atan" => one(f64::atan),
+        "sinh" => one(f64::sinh),
+        "cosh" => one(f64::cosh),
+        "tanh" => one(f64::tanh),
+        "exp" => one(f64::exp),
         "log" | "ln" => one(f64::ln),
         "log10" => one(f64::log10),
-        "sqrt"  => one(f64::sqrt),
-        "abs"   => one(f64::abs),
-        "sgn"   => one(|x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }),
-        "ceil"  => one(f64::ceil),
+        "sqrt" => one(f64::sqrt),
+        "abs" => one(f64::abs),
+        "sgn" => one(|x| {
+            if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        }),
+        "ceil" => one(f64::ceil),
         "floor" => one(f64::floor),
-        "min"   => args.get(0).and_then(|a| args.get(1).map(|b| a.min(*b))),
-        "max"   => args.get(0).and_then(|a| args.get(1).map(|b| a.max(*b))),
-        "pow"   => args.get(0).and_then(|a| args.get(1).map(|b| a.powf(*b))),
+        "min" => args.get(0).and_then(|a| args.get(1).map(|b| a.min(*b))),
+        "max" => args.get(0).and_then(|a| args.get(1).map(|b| a.max(*b))),
+        "pow" => args.get(0).and_then(|a| args.get(1).map(|b| a.powf(*b))),
         "atan2" => args.get(0).and_then(|a| args.get(1).map(|b| a.atan2(*b))),
-        "if"    => {
+        "if" => {
             // if(cond, then, else)
             if args.len() >= 3 {
                 Some(if args[0] != 0.0 { args[1] } else { args[2] })
-            } else { None }
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -192,11 +244,25 @@ fn eval_fn(name: &str, args: &[f64]) -> Option<f64> {
 enum Tok {
     Num(f64),
     Ident(String),
-    LParen, RParen, Comma,
-    Plus, Minus, Star, Slash, Caret,
-    Question, Colon,
-    Lt, Le, Gt, Ge, Eq, Ne,
-    And, Or, Bang,
+    LParen,
+    RParen,
+    Comma,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Caret,
+    Question,
+    Colon,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    And,
+    Or,
+    Bang,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Tok>, ExprError> {
@@ -205,46 +271,118 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ExprError> {
     let mut out = Vec::new();
     while i < bytes.len() {
         let c = bytes[i] as char;
-        if c.is_whitespace() { i += 1; continue; }
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
         // Two-char operators first.
         if i + 1 < bytes.len() {
             let s = &input[i..i + 2];
             match s {
-                "<=" => { out.push(Tok::Le); i += 2; continue; }
-                ">=" => { out.push(Tok::Ge); i += 2; continue; }
-                "==" => { out.push(Tok::Eq); i += 2; continue; }
-                "!=" => { out.push(Tok::Ne); i += 2; continue; }
-                "&&" => { out.push(Tok::And); i += 2; continue; }
-                "||" => { out.push(Tok::Or); i += 2; continue; }
-                _    => {}
+                "<=" => {
+                    out.push(Tok::Le);
+                    i += 2;
+                    continue;
+                }
+                ">=" => {
+                    out.push(Tok::Ge);
+                    i += 2;
+                    continue;
+                }
+                "==" => {
+                    out.push(Tok::Eq);
+                    i += 2;
+                    continue;
+                }
+                "!=" => {
+                    out.push(Tok::Ne);
+                    i += 2;
+                    continue;
+                }
+                "&&" => {
+                    out.push(Tok::And);
+                    i += 2;
+                    continue;
+                }
+                "||" => {
+                    out.push(Tok::Or);
+                    i += 2;
+                    continue;
+                }
+                _ => {}
             }
         }
         match c {
-            '(' => { out.push(Tok::LParen); i += 1; }
-            ')' => { out.push(Tok::RParen); i += 1; }
-            ',' => { out.push(Tok::Comma);  i += 1; }
-            '+' => { out.push(Tok::Plus);   i += 1; }
-            '-' => { out.push(Tok::Minus);  i += 1; }
-            '*' => { out.push(Tok::Star);   i += 1; }
-            '/' => { out.push(Tok::Slash);  i += 1; }
-            '^' => { out.push(Tok::Caret);  i += 1; }
-            '?' => { out.push(Tok::Question); i += 1; }
-            ':' => { out.push(Tok::Colon);  i += 1; }
-            '<' => { out.push(Tok::Lt);     i += 1; }
-            '>' => { out.push(Tok::Gt);     i += 1; }
-            '=' => { out.push(Tok::Eq);     i += 1; }   // tolerate single `=` as ==
-            '!' => { out.push(Tok::Bang);   i += 1; }
+            '(' => {
+                out.push(Tok::LParen);
+                i += 1;
+            }
+            ')' => {
+                out.push(Tok::RParen);
+                i += 1;
+            }
+            ',' => {
+                out.push(Tok::Comma);
+                i += 1;
+            }
+            '+' => {
+                out.push(Tok::Plus);
+                i += 1;
+            }
+            '-' => {
+                out.push(Tok::Minus);
+                i += 1;
+            }
+            '*' => {
+                out.push(Tok::Star);
+                i += 1;
+            }
+            '/' => {
+                out.push(Tok::Slash);
+                i += 1;
+            }
+            '^' => {
+                out.push(Tok::Caret);
+                i += 1;
+            }
+            '?' => {
+                out.push(Tok::Question);
+                i += 1;
+            }
+            ':' => {
+                out.push(Tok::Colon);
+                i += 1;
+            }
+            '<' => {
+                out.push(Tok::Lt);
+                i += 1;
+            }
+            '>' => {
+                out.push(Tok::Gt);
+                i += 1;
+            }
+            '=' => {
+                out.push(Tok::Eq);
+                i += 1;
+            } // tolerate single `=` as ==
+            '!' => {
+                out.push(Tok::Bang);
+                i += 1;
+            }
             c if c.is_ascii_digit() || c == '.' => {
                 let start = i;
                 while i < bytes.len() {
                     let b = bytes[i] as char;
-                    if b.is_ascii_digit() || b == '.' { i += 1; }
-                    else if b == 'e' || b == 'E' {
+                    if b.is_ascii_digit() || b == '.' {
+                        i += 1;
+                    } else if b == 'e' || b == 'E' {
                         i += 1;
                         if i < bytes.len() && (bytes[i] as char == '+' || bytes[i] as char == '-') {
                             i += 1;
                         }
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 // SPICE-suffix support (k, meg, m, u, n, p, f, g, t):
                 let num_end = i;
@@ -253,11 +391,17 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ExprError> {
                     i += 1;
                 }
                 let num_str = &input[start..num_end];
-                let suffix  = &input[suffix_start..i].to_lowercase();
+                let suffix = &input[suffix_start..i].to_lowercase();
                 let mult = match suffix.as_str() {
                     "meg" => 1e6,
-                    "k" => 1e3, "m" => 1e-3, "u" => 1e-6, "n" => 1e-9,
-                    "p" => 1e-12, "f" => 1e-15, "g" => 1e9, "t" => 1e12,
+                    "k" => 1e3,
+                    "m" => 1e-3,
+                    "u" => 1e-6,
+                    "n" => 1e-9,
+                    "p" => 1e-12,
+                    "f" => 1e-15,
+                    "g" => 1e9,
+                    "t" => 1e12,
                     "" => 1.0,
                     _ => {
                         // The suffix isn't recognised; back up so it lexes as
@@ -266,14 +410,20 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, ExprError> {
                         1.0
                     }
                 };
-                let n: f64 = num_str.parse().map_err(|_| ExprError::BadNumber(num_str.into()))?;
+                let n: f64 = num_str
+                    .parse()
+                    .map_err(|_| ExprError::BadNumber(num_str.into()))?;
                 out.push(Tok::Num(n * mult));
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 while i < bytes.len() {
                     let b = bytes[i] as char;
-                    if b.is_ascii_alphanumeric() || b == '_' { i += 1; } else { break; }
+                    if b.is_ascii_alphanumeric() || b == '_' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
                 out.push(Tok::Ident(input[start..i].to_string()));
             }
@@ -291,10 +441,14 @@ struct Parser {
 }
 
 impl Parser {
-    fn peek(&self) -> Option<&Tok> { self.tokens.get(self.pos) }
+    fn peek(&self) -> Option<&Tok> {
+        self.tokens.get(self.pos)
+    }
     fn bump(&mut self) -> Option<Tok> {
         let t = self.tokens.get(self.pos).cloned();
-        if t.is_some() { self.pos += 1; }
+        if t.is_some() {
+            self.pos += 1;
+        }
         t
     }
     fn expect(&mut self, want: &Tok) -> Result<(), ExprError> {
@@ -313,7 +467,9 @@ impl Parser {
             self.expect(&Tok::Colon)?;
             let b = self.parse_expr()?;
             Ok(Expr::If(Box::new(cond), Box::new(a), Box::new(b)))
-        } else { Ok(cond) }
+        } else {
+            Ok(cond)
+        }
     }
 
     fn parse_or(&mut self) -> Result<Expr, ExprError> {
@@ -358,7 +514,7 @@ impl Parser {
         let mut e = self.parse_product()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Plus)  => BinOp::Add,
+                Some(Tok::Plus) => BinOp::Add,
                 Some(Tok::Minus) => BinOp::Sub,
                 _ => break,
             };
@@ -373,7 +529,7 @@ impl Parser {
         let mut e = self.parse_power()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Star)  => BinOp::Mul,
+                Some(Tok::Star) => BinOp::Mul,
                 Some(Tok::Slash) => BinOp::Div,
                 _ => break,
             };
@@ -391,12 +547,17 @@ impl Parser {
             // right-associative
             let exp = self.parse_power()?;
             Ok(Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exp)))
-        } else { Ok(base) }
+        } else {
+            Ok(base)
+        }
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ExprError> {
         match self.peek() {
-            Some(Tok::Plus)  => { self.bump(); self.parse_unary() }
+            Some(Tok::Plus) => {
+                self.bump();
+                self.parse_unary()
+            }
             Some(Tok::Minus) => {
                 self.bump();
                 let e = self.parse_unary()?;
@@ -448,7 +609,9 @@ impl Parser {
                             args.push(self.parse_expr()?);
                             if matches!(self.peek(), Some(Tok::Comma)) {
                                 self.bump();
-                            } else { break; }
+                            } else {
+                                break;
+                            }
                         }
                     }
                     self.expect(&Tok::RParen)?;
@@ -493,12 +656,15 @@ mod tests {
         fn branch_current(&self, vsrc: &str) -> f64 {
             *self.i.get(vsrc).unwrap_or(&0.0)
         }
-        fn time(&self) -> f64 { self.t }
+        fn time(&self) -> f64 {
+            self.t
+        }
     }
 
     fn ctx() -> StubCtx {
         let mut v = std::collections::HashMap::new();
-        v.insert("n1", 2.0);  v.insert("n2", 0.5);
+        v.insert("n1", 2.0);
+        v.insert("n2", 0.5);
         let mut i = std::collections::HashMap::new();
         i.insert("v1", 1e-3);
         StubCtx { v, i, t: 1e-6 }
@@ -510,7 +676,7 @@ mod tests {
         assert_eq!(e.eval(&ctx()), 14.0);
         let e = Expr::parse("(2 + 3) * 4").unwrap();
         assert_eq!(e.eval(&ctx()), 20.0);
-        let e = Expr::parse("2 ^ 3 ^ 2").unwrap();    // right-assoc
+        let e = Expr::parse("2 ^ 3 ^ 2").unwrap(); // right-assoc
         assert_eq!(e.eval(&ctx()), 512.0);
     }
 
@@ -556,7 +722,10 @@ mod tests {
         let mut vs = Vec::new();
         let mut is = Vec::new();
         e.collect_refs(&mut vs, &mut is);
-        assert_eq!(vs, vec!["out".to_string(), "in".to_string(), "gnd".to_string()]);
+        assert_eq!(
+            vs,
+            vec!["out".to_string(), "in".to_string(), "gnd".to_string()]
+        );
         assert_eq!(is, vec!["vsrc1".to_string()]);
     }
 }

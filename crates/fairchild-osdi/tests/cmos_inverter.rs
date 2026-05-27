@@ -13,22 +13,21 @@
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
 ///   openvaf-r legacy/va-models/nmos_l1.va --output legacy/va-models/build/nmos_l1.osdi
 ///   openvaf-r legacy/va-models/pmos_l1.va --output legacy/va-models/build/pmos_l1.osdi
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fairchild_core::{dc_op_nr_with_registry, tran_nr_with_registry, tran_nr_with_registry_var, DeviceRegistry};
+use fairchild_core::{
+    dc_op_nr_with_registry, tran_nr_with_registry, tran_nr_with_registry_var, DeviceRegistry,
+};
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::parse_spice;
 
 fn nmos_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../legacy/va-models/build/nmos_l1.osdi")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../legacy/va-models/build/nmos_l1.osdi")
 }
 
 fn pmos_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../legacy/va-models/build/pmos_l1.osdi")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../legacy/va-models/build/pmos_l1.osdi")
 }
 
 fn load_cmos_registry() -> Option<DeviceRegistry> {
@@ -72,7 +71,9 @@ fn cmos_netlist(vin_v: f64) -> String {
 /// Vin=0 → NMOS off, PMOS on → Vout ≈ VDD = 5V.
 #[test]
 fn cmos_inverter_input_low() {
-    let Some(registry) = load_cmos_registry() else { return; };
+    let Some(registry) = load_cmos_registry() else {
+        return;
+    };
 
     let netlist = parse_spice(&cmos_netlist(0.0)).unwrap();
     let result = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed (Vin=0)");
@@ -88,7 +89,9 @@ fn cmos_inverter_input_low() {
 /// Vin=VDD → PMOS off, NMOS on → Vout ≈ 0V.
 #[test]
 fn cmos_inverter_input_high() {
-    let Some(registry) = load_cmos_registry() else { return; };
+    let Some(registry) = load_cmos_registry() else {
+        return;
+    };
 
     let netlist = parse_spice(&cmos_netlist(5.0)).unwrap();
     let result = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed (Vin=5V)");
@@ -105,12 +108,13 @@ fn cmos_inverter_input_high() {
 /// Verifies Vout transitions from VDD toward 0 after the edge.
 #[test]
 fn cmos_inverter_switching_transient() {
-    let Some(registry) = load_cmos_registry() else { return; };
+    let Some(registry) = load_cmos_registry() else {
+        return;
+    };
 
     // Load capacitor at output (1 pF) to give a measurable time constant.
     // Without it, the gate-overlap caps (2 fF) give τ ≈ 0.4 ps which is too fast.
-    let netlist_str =
-        "* CMOS inverter transient\n\
+    let netlist_str = "* CMOS inverter transient\n\
          VDD vdd 0 DC 5\n\
          Vin in 0 PULSE(0 5 1n 10p 10p 10n 20n)\n\
          MN out in 0 0 nmos_l1\n\
@@ -137,19 +141,18 @@ fn cmos_inverter_switching_transient() {
         "After edge: Vout={v_after:.4} V — expected ≈ 0V"
     );
 
-    println!(
-        "Switching transient: V(out) at 0.5ns = {v_before:.4}V, at 2.9ns = {v_after:.4}V"
-    );
+    println!("Switching transient: V(out) at 0.5ns = {v_before:.4}V, at 2.9ns = {v_after:.4}V");
 }
 
 /// Same switching transient via the variable-step solver.
 /// This exercises the reactive Jacobian at realistic alpha (1/h, not 1.0).
 #[test]
 fn cmos_inverter_switching_transient_var_step() {
-    let Some(registry) = load_cmos_registry() else { return; };
+    let Some(registry) = load_cmos_registry() else {
+        return;
+    };
 
-    let netlist_str =
-        "* CMOS inverter transient (variable-step)\n\
+    let netlist_str = "* CMOS inverter transient (variable-step)\n\
          VDD vdd 0 DC 5\n\
          Vin in 0 PULSE(0 5 1n 10p 10p 10n 20n)\n\
          MN out in 0 0 nmos_l1\n\
@@ -174,9 +177,7 @@ fn cmos_inverter_switching_transient_var_step() {
         "Var-step after edge: Vout={v_after:.4} V — expected ≈ 0V"
     );
 
-    println!(
-        "Var-step switching: V(out) at 0.5ns = {v_before:.4}V, at 2.9ns = {v_after:.4}V"
-    );
+    println!("Var-step switching: V(out) at 0.5ns = {v_before:.4}V, at 2.9ns = {v_after:.4}V");
 }
 
 /// Verify that write_jacobian_array_react covers ALL reactive entries (including
@@ -189,15 +190,15 @@ fn nmos_reactive_jacobian_covers_all_entries() {
     use fairchild_osdi::OsdiDevice;
 
     let np = nmos_path();
-    if !np.exists() { return; }
+    if !np.exists() {
+        return;
+    }
     let nlib = Arc::new(unsafe { OsdiLibrary::open(&np) }.expect("dlopen nmos"));
 
     let desc = nlib.descriptors().next().expect("no descriptors");
     let n_total = desc.num_jacobian_entries as usize;
     let n_react = desc.num_reactive_jacobian_entries as usize;
-    let entries = unsafe {
-        std::slice::from_raw_parts(desc.jacobian_entries, n_total)
-    };
+    let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
 
     let ctx = SimContext::default();
     let mut dev = OsdiDevice::from_library(Arc::clone(&nlib), 0).unwrap();
@@ -209,22 +210,34 @@ fn nmos_reactive_jacobian_covers_all_entries() {
 
     let mut react_buf = vec![0.0f64; n_react];
     unsafe {
-        let f = desc.write_jacobian_array_react
+        let f = desc
+            .write_jacobian_array_react
             .expect("write_jacobian_array_react must be present");
-        f(dev.inst_ptr_raw(), dev.model_ptr_raw(), react_buf.as_mut_ptr());
+        f(
+            dev.inst_ptr_raw(),
+            dev.model_ptr_raw(),
+            react_buf.as_mut_ptr(),
+        );
     }
 
     // react_buf values are in entry-array order for entries with react_ptr_off != MAX.
-    let reactive_entries: Vec<usize> = entries.iter().enumerate()
+    let reactive_entries: Vec<usize> = entries
+        .iter()
+        .enumerate()
         .filter(|(_, e)| e.react_ptr_off != u32::MAX)
         .map(|(j, _)| j)
         .collect();
 
-    assert_eq!(reactive_entries.len(), n_react,
-        "reactive entry count from react_ptr_off must match num_reactive_jacobian_entries");
+    assert_eq!(
+        reactive_entries.len(),
+        n_react,
+        "reactive entry count from react_ptr_off must match num_reactive_jacobian_entries"
+    );
 
     // Entry[0] = (drain,drain): reactive contribution from Cgd must be non-zero.
-    let entry0_react_idx = reactive_entries.iter().position(|&j| j == 0)
+    let entry0_react_idx = reactive_entries
+        .iter()
+        .position(|&j| j == 0)
         .expect("entry[0] (drain,drain) must be in the reactive set");
     assert!(
         react_buf[entry0_react_idx].abs() > 0.0,
@@ -233,12 +246,15 @@ fn nmos_reactive_jacobian_covers_all_entries() {
     );
 
     // Gate-gate entry must have the largest (Cgs+Cgd) contribution.
-    let entry4_react_idx = reactive_entries.iter().position(|&j| j == 4)
+    let entry4_react_idx = reactive_entries
+        .iter()
+        .position(|&j| j == 4)
         .expect("entry[4] (gate,gate) must be in the reactive set");
     assert!(
         react_buf[entry4_react_idx] > react_buf[entry0_react_idx],
         "gate-gate reactive ({:.2e}) should be larger than drain-drain ({:.2e})",
-        react_buf[entry4_react_idx], react_buf[entry0_react_idx]
+        react_buf[entry4_react_idx],
+        react_buf[entry0_react_idx]
     );
 
     println!(

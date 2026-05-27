@@ -8,12 +8,12 @@ use std::io::Write;
 use std::process::Command;
 
 use fairchild_core::{dc_op_nr, SimError};
-use fairchild_parser::{Element, parse_spice};
+use fairchild_parser::{parse_spice, Element};
 
 // Slightly relaxed compared to linear tests because ngspice includes gmin
 // and temperature-model details not in our Shockley implementation.
-const REL_TOL: f64 = 1e-3;     // 0.1%
-const ABS_TOL_V: f64 = 1e-5;   // 10 μV floor
+const REL_TOL: f64 = 1e-3; // 0.1%
+const ABS_TOL_V: f64 = 1e-5; // 10 μV floor
 
 fn find_ngspice() -> Option<std::path::PathBuf> {
     if Command::new("ngspice").arg("--version").output().is_ok() {
@@ -25,7 +25,9 @@ fn find_ngspice() -> Option<std::path::PathBuf> {
         "/usr/bin/ngspice",
     ] {
         let p = std::path::Path::new(candidate);
-        if p.exists() { return Some(p.to_owned()); }
+        if p.exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }
@@ -35,12 +37,19 @@ fn strip_control_and_end(netlist: &str) -> String {
     let mut in_control = false;
     for line in netlist.lines() {
         let lc = line.trim().to_lowercase();
-        if lc.starts_with(".control") { in_control = true; continue; }
-        if in_control {
-            if lc.starts_with(".endc") { in_control = false; }
+        if lc.starts_with(".control") {
+            in_control = true;
             continue;
         }
-        if lc == ".end" { continue; }
+        if in_control {
+            if lc.starts_with(".endc") {
+                in_control = false;
+            }
+            continue;
+        }
+        if lc == ".end" {
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
@@ -60,7 +69,11 @@ fn parse_ngspice_print(output: &str) -> Option<HashMap<String, f64>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
@@ -70,7 +83,11 @@ fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
     let print_vars = queries.join(" ");
     let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n.end\n");
     write!(tmp, "{stripped}\n{control_block}").ok()?;
-    let output = Command::new(&ngspice_bin).arg("-b").arg(tmp.path()).output().ok()?;
+    let output = Command::new(&ngspice_bin)
+        .arg("-b")
+        .arg(tmp.path())
+        .output()
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_ngspice_print(&stdout)
 }
@@ -96,8 +113,7 @@ macro_rules! diode_golden_test {
     ($name:ident, $netlist_file:expr, $queries:expr, $tol_rel:expr) => {
         #[test]
         fn $name() {
-            let netlist_str =
-                include_str!(concat!("../../../tests/golden/", $netlist_file));
+            let netlist_str = include_str!(concat!("../../../tests/golden/", $netlist_file));
 
             let fc = fairchild_nr_op(netlist_str).expect("fairchild NR solve failed");
 
@@ -110,12 +126,14 @@ macro_rules! diode_golden_test {
 
             for key in queries {
                 let key_lc = key.to_lowercase();
-                let fc_val = fc.get(&key_lc).copied().unwrap_or_else(|| {
-                    panic!("fairchild missing '{key_lc}'; available: {fc:?}")
-                });
-                let ng_val = ng.get(&key_lc).copied().unwrap_or_else(|| {
-                    panic!("ngspice missing '{key_lc}'; available: {ng:?}")
-                });
+                let fc_val = fc
+                    .get(&key_lc)
+                    .copied()
+                    .unwrap_or_else(|| panic!("fairchild missing '{key_lc}'; available: {fc:?}"));
+                let ng_val = ng
+                    .get(&key_lc)
+                    .copied()
+                    .unwrap_or_else(|| panic!("ngspice missing '{key_lc}'; available: {ng:?}"));
                 let tol = f64::max(ABS_TOL_V, $tol_rel * ng_val.abs());
                 assert!(
                     (fc_val - ng_val).abs() <= tol,
@@ -128,12 +146,7 @@ macro_rules! diode_golden_test {
     };
 }
 
-diode_golden_test!(
-    diode_current_source_bias,
-    "diode_iv.sp",
-    &["v(b)"],
-    REL_TOL
-);
+diode_golden_test!(diode_current_source_bias, "diode_iv.sp", &["v(b)"], REL_TOL);
 
 diode_golden_test!(
     diode_series_rd,

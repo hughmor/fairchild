@@ -16,8 +16,9 @@ fn rc_lowpass_magnitude_and_phase() {
          V1 in 0 DC 1\n\
          R1 in out 1k\n\
          C1 out 0 1u\n\
-         .end\n"
-    ).unwrap();
+         .end\n",
+    )
+    .unwrap();
     let registry = DeviceRegistry::new();
     let freqs = vec![1.0, 159.1549430918954, 1591.549430918954, 1e5];
     let result = ac_analysis(&net, &freqs, None, &registry).expect("AC analysis");
@@ -26,18 +27,22 @@ fn rc_lowpass_magnitude_and_phase() {
     let rc = 1e-3_f64;
     for (i, &f) in freqs.iter().enumerate() {
         let omega_rc = 2.0 * std::f64::consts::PI * f * rc;
-        let mag_expected   = 1.0 / (1.0 + omega_rc * omega_rc).sqrt();
+        let mag_expected = 1.0 / (1.0 + omega_rc * omega_rc).sqrt();
         let phase_expected = -omega_rc.atan().to_degrees();
 
-        let mag   = result.magnitude("out", i).unwrap();
+        let mag = result.magnitude("out", i).unwrap();
         let phase = result.phase_deg("out", i).unwrap();
 
         let mag_rel = ((mag - mag_expected) / mag_expected).abs();
         let phase_diff = (phase - phase_expected).abs();
-        assert!(mag_rel < 1e-4,
-            "f={f:.3} Hz: |H|={mag:.6} expected={mag_expected:.6} ({mag_rel:.2e} rel)");
-        assert!(phase_diff < 1e-3,
-            "f={f:.3} Hz: ∠H={phase:.4}° expected={phase_expected:.4}° ({phase_diff:.4} diff)");
+        assert!(
+            mag_rel < 1e-4,
+            "f={f:.3} Hz: |H|={mag:.6} expected={mag_expected:.6} ({mag_rel:.2e} rel)"
+        );
+        assert!(
+            phase_diff < 1e-3,
+            "f={f:.3} Hz: ∠H={phase:.4}° expected={phase_expected:.4}° ({phase_diff:.4} diff)"
+        );
     }
 }
 
@@ -52,8 +57,9 @@ fn rlc_resonance_peak_at_f0() {
          R1 in m1 1\n\
          L1 m1 m2 1m\n\
          C1 m2 0 1u\n\
-         .end\n"
-    ).unwrap();
+         .end\n",
+    )
+    .unwrap();
     let f0 = 1.0 / (2.0 * std::f64::consts::PI * (1e-3_f64 * 1e-6).sqrt());
     // Sample near resonance and far off-resonance.
     let freqs = freq_decade(1.0, 1e5, 30);
@@ -71,10 +77,14 @@ fn rlc_resonance_peak_at_f0() {
     }
     let peak_freq = freqs[peak_idx];
     let f_rel = (peak_freq - f0).abs() / f0;
-    assert!(f_rel < 0.1,
+    assert!(
+        f_rel < 0.1,
         "RLC peak at {peak_freq:.2} Hz, expected ≈ f₀ = {f0:.2} Hz ({:.1}% off)",
-        f_rel * 100.0);
+        f_rel * 100.0
+    );
     // Q ≈ 31 → at resonance the gain should be ~Q (high).
-    assert!(peak_mag > 10.0,
-        "expected high Q gain at resonance; got |V(m2)| = {peak_mag:.2}");
+    assert!(
+        peak_mag > 10.0,
+        "expected high Q gain at resonance; got |V(m2)| = {peak_mag:.2}"
+    );
 }

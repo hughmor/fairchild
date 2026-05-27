@@ -3,7 +3,7 @@ pub mod expr;
 mod spice;
 
 pub use error::{DisciplineError, ParseError};
-pub use expr::{Expr, EvalContext, ExprError};
+pub use expr::{EvalContext, Expr, ExprError};
 pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, BundleArity};
 
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
@@ -69,7 +69,11 @@ impl OpticalPort {
     /// Number of underlying wires per channel — 3 for unidirectional,
     /// 5 for bidirectional.
     pub fn wires_per_channel(&self) -> usize {
-        if self.bidirectional { 5 } else { 3 }
+        if self.bidirectional {
+            5
+        } else {
+            3
+        }
     }
 
     /// Underlying wire names for channel `ch` of this port.
@@ -110,7 +114,7 @@ impl OpticalPort {
 pub struct AlterBlock {
     pub label: String,
     pub element_overrides: Vec<Element>,
-    pub model_overrides:  Vec<ModelCard>,
+    pub model_overrides: Vec<ModelCard>,
 }
 
 impl Netlist {
@@ -118,7 +122,11 @@ impl Netlist {
     /// ModelCard, or append a new entry if the name is unseen.
     pub fn apply_alter(&mut self, block: &AlterBlock) {
         for new_el in &block.element_overrides {
-            if let Some(slot) = self.elements.iter_mut().find(|e| element_name(e) == element_name(new_el)) {
+            if let Some(slot) = self
+                .elements
+                .iter_mut()
+                .find(|e| element_name(e) == element_name(new_el))
+            {
                 *slot = new_el.clone();
             } else {
                 self.elements.push(new_el.clone());
@@ -137,17 +145,17 @@ impl Netlist {
 /// Extract the name (case-folded) from any Element variant, for alter matching.
 fn element_name(el: &Element) -> String {
     match el {
-        Element::Resistor          { name, .. } |
-        Element::Capacitor         { name, .. } |
-        Element::Inductor          { name, .. } |
-        Element::CoupledInductors  { name, .. } |
-        Element::VoltageSource     { name, .. } |
-        Element::CurrentSource     { name, .. } |
-        Element::Diode             { name, .. } |
-        Element::Mosfet            { name, .. } |
-        Element::Bjt               { name, .. } |
-        Element::XOsdi             { name, .. } |
-        Element::Behavioral        { name, .. } => name.to_lowercase(),
+        Element::Resistor { name, .. }
+        | Element::Capacitor { name, .. }
+        | Element::Inductor { name, .. }
+        | Element::CoupledInductors { name, .. }
+        | Element::VoltageSource { name, .. }
+        | Element::CurrentSource { name, .. }
+        | Element::Diode { name, .. }
+        | Element::Mosfet { name, .. }
+        | Element::Bjt { name, .. }
+        | Element::XOsdi { name, .. }
+        | Element::Behavioral { name, .. } => name.to_lowercase(),
     }
 }
 
@@ -174,10 +182,10 @@ pub enum Waveform {
     ///   v(t) = vo                                                       for t <  td
     /// `phase` is in radians.
     Sin {
-        vo:    f64,
-        va:    f64,
-        freq:  f64,
-        td:    f64,
+        vo: f64,
+        va: f64,
+        freq: f64,
+        td: f64,
         theta: f64,
         phase: f64,
     },
@@ -186,21 +194,21 @@ pub enum Waveform {
     ///        = v1 + (v2−v1)·(1−exp(−(t−td1)/tau1))                                          for td1 ≤ t < td2
     ///        = v1 + (v2−v1)·(1−exp(−(t−td1)/tau1)) + (v1−v2)·(1−exp(−(t−td2)/tau2))         for t ≥ td2
     Exp {
-        v1:   f64,
-        v2:   f64,
-        td1:  f64,
+        v1: f64,
+        v2: f64,
+        td1: f64,
         tau1: f64,
-        td2:  f64,
+        td2: f64,
         tau2: f64,
     },
     /// SFFM(vo va fc mdi fs) — single-frequency FM.
     ///   v(t) = vo + va·sin(2π·fc·t + mdi·sin(2π·fs·t))
     Sffm {
-        vo:  f64,
-        va:  f64,
-        fc:  f64,
+        vo: f64,
+        va: f64,
+        fc: f64,
         mdi: f64,
-        fs:  f64,
+        fs: f64,
     },
     /// AM(va vo mf fc td) — amplitude-modulated sinusoid (ngspice form).
     ///   v(t) = vo                                                         for t < td
@@ -223,10 +231,10 @@ impl Waveform {
             Waveform::Pwl { points } => points.first().map(|(_, v)| *v).unwrap_or(0.0),
             // All continuous shapes use their value at t=0 as the DC point.
             // For SIN with td>0, this is just vo; for EXP, v1; etc.
-            Waveform::Sin  { vo, .. } => *vo,
-            Waveform::Exp  { v1, .. } => *v1,
-            Waveform::Sffm { vo, .. } => *vo,  // sin(0)=0 → vo dominates
-            Waveform::Am   { vo, .. } => *vo,
+            Waveform::Sin { vo, .. } => *vo,
+            Waveform::Exp { v1, .. } => *v1,
+            Waveform::Sffm { vo, .. } => *vo, // sin(0)=0 → vo dominates
+            Waveform::Am { vo, .. } => *vo,
         }
     }
 
@@ -236,37 +244,52 @@ impl Waveform {
     pub fn next_breakpoint(&self, t: f64) -> Option<f64> {
         match self {
             Waveform::Dc(_) => None,
-            Waveform::Pulse { td, tr, tf, pw, per, .. } => {
+            Waveform::Pulse {
+                td,
+                tr,
+                tf,
+                pw,
+                per,
+                ..
+            } => {
                 if t < *td {
                     return Some(*td);
                 }
                 // Offsets from the start of a period where slope changes.
                 let offsets: [f64; 4] = [0.0, *tr, tr + pw, tr + pw + tf];
                 if *per <= 0.0 {
-                    return offsets.iter()
+                    return offsets
+                        .iter()
                         .map(|b| td + b)
                         .filter(|&bp| bp > t)
                         .reduce(f64::min);
                 }
                 let phase = (t - td) % per;
                 let base = t - phase; // start of current period
-                offsets.iter()
+                offsets
+                    .iter()
                     .map(|b| base + b)
                     .chain(std::iter::once(base + per))
                     .filter(|&bp| bp > t)
                     .reduce(f64::min)
             }
-            Waveform::Pwl { points } => {
-                points.iter().map(|(pt, _)| *pt).find(|&pt| pt > t)
-            }
+            Waveform::Pwl { points } => points.iter().map(|(pt, _)| *pt).find(|&pt| pt > t),
             Waveform::Sin { td, .. } | Waveform::Am { td, .. } => {
                 // Slope discontinuity at td (constant → oscillatory).
-                if t < *td { Some(*td) } else { None }
+                if t < *td {
+                    Some(*td)
+                } else {
+                    None
+                }
             }
             Waveform::Exp { td1, td2, .. } => {
-                if t < *td1 { Some(*td1) }
-                else if t < *td2 { Some(*td2) }
-                else { None }
+                if t < *td1 {
+                    Some(*td1)
+                } else if t < *td2 {
+                    Some(*td2)
+                } else {
+                    None
+                }
             }
             // SFFM is smooth everywhere; let the LTE controller pick steps.
             Waveform::Sffm { .. } => None,
@@ -277,7 +300,15 @@ impl Waveform {
     pub fn at(&self, t: f64) -> f64 {
         match self {
             Waveform::Dc(v) => *v,
-            Waveform::Pulse { v0, v1, td, tr, tf, pw, per } => {
+            Waveform::Pulse {
+                v0,
+                v1,
+                td,
+                tr,
+                tf,
+                pw,
+                per,
+            } => {
                 if t < *td {
                     return *v0;
                 }
@@ -310,16 +341,34 @@ impl Waveform {
                 let frac = (t - t0) / (t1 - t0);
                 v0 + (v1 - v0) * frac
             }
-            Waveform::Sin { vo, va, freq, td, theta, phase } => {
+            Waveform::Sin {
+                vo,
+                va,
+                freq,
+                td,
+                theta,
+                phase,
+            } => {
                 if t < *td {
                     *vo
                 } else {
                     let dt = t - td;
-                    let damp = if *theta > 0.0 { (-theta * dt).exp() } else { 1.0 };
+                    let damp = if *theta > 0.0 {
+                        (-theta * dt).exp()
+                    } else {
+                        1.0
+                    };
                     vo + va * damp * (2.0 * std::f64::consts::PI * freq * dt + phase).sin()
                 }
             }
-            Waveform::Exp { v1, v2, td1, tau1, td2, tau2 } => {
+            Waveform::Exp {
+                v1,
+                v2,
+                td1,
+                tau1,
+                td2,
+                tau2,
+            } => {
                 if t < *td1 {
                     *v1
                 } else {
@@ -332,7 +381,13 @@ impl Waveform {
                     }
                 }
             }
-            Waveform::Sffm { vo, va, fc, mdi, fs } => {
+            Waveform::Sffm {
+                vo,
+                va,
+                fc,
+                mdi,
+                fs,
+            } => {
                 let mod_arg = 2.0 * std::f64::consts::PI * fs * t;
                 vo + va * (2.0 * std::f64::consts::PI * fc * t + mdi * mod_arg.sin()).sin()
             }
@@ -435,8 +490,8 @@ pub enum Element {
     /// a current of `expr(x)` from pos→neg.
     Behavioral {
         name: String,
-        pos:  NodeName,
-        neg:  NodeName,
+        pos: NodeName,
+        neg: NodeName,
         kind: BehavioralKind,
         expr: expr::Expr,
     },
@@ -444,7 +499,10 @@ pub enum Element {
 
 /// Whether a B-element is a voltage or current source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BehavioralKind { Voltage, Current }
+pub enum BehavioralKind {
+    Voltage,
+    Current,
+}
 
 /// A `.measure tran|dc|ac NAME …` directive.
 #[derive(Debug, Clone)]
@@ -457,28 +515,52 @@ pub struct Measurement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeasAnalysis { Tran, Dc, Ac }
+pub enum MeasAnalysis {
+    Tran,
+    Dc,
+    Ac,
+}
 
 /// What to compute.
 #[derive(Debug, Clone)]
 pub enum MeasKind {
     /// FIND expr AT=t   — evaluate `expr` at time `t`.
-    FindAt    { expr: expr::Expr, at: f64 },
+    FindAt { expr: expr::Expr, at: f64 },
     /// FIND expr WHEN cond — first time `cond` is true; report `expr` there.
-    FindWhen  { expr: expr::Expr, cond: expr::Expr, cross: usize },
+    FindWhen {
+        expr: expr::Expr,
+        cond: expr::Expr,
+        cross: usize,
+    },
     /// Aggregate operation over [from, to].
-    Aggregate { op: MeasOp, expr: expr::Expr, from: Option<f64>, to: Option<f64> },
+    Aggregate {
+        op: MeasOp,
+        expr: expr::Expr,
+        from: Option<f64>,
+        to: Option<f64>,
+    },
     /// DERIV expr AT=t — numerical derivative at t.
-    DerivAt   { expr: expr::Expr, at: f64 },
+    DerivAt { expr: expr::Expr, at: f64 },
     /// TRIG cond1 [val=v1] [cross=n] TARG cond2 [val=v2] [cross=n] — delay measurement.
-    TrigTarg  {
-        trig_expr: expr::Expr, trig_val: f64, trig_cross: usize,
-        targ_expr: expr::Expr, targ_val: f64, targ_cross: usize,
+    TrigTarg {
+        trig_expr: expr::Expr,
+        trig_val: f64,
+        trig_cross: usize,
+        targ_expr: expr::Expr,
+        targ_val: f64,
+        targ_cross: usize,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeasOp { Max, Min, Avg, Rms, Pp, Integ }
+pub enum MeasOp {
+    Max,
+    Min,
+    Avg,
+    Rms,
+    Pp,
+    Integ,
+}
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.
 #[derive(Debug, Clone)]
@@ -528,25 +610,69 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
 
     for el in &netlist.elements {
         match el {
-            Element::Resistor  { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
-            Element::Capacitor { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
-            Element::Inductor  { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
-            Element::VoltageSource { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
-            Element::CurrentSource { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
-            Element::Diode  { name, anode, cathode, .. } => { check(name, anode)?; check(name, cathode)?; }
-            Element::Mosfet { name, drain, gate, source, bulk, .. } => {
-                check(name, drain)?; check(name, gate)?;
-                check(name, source)?; check(name, bulk)?;
+            Element::Resistor { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
             }
-            Element::Bjt { name, collector, base, emitter, substrate, .. } => {
-                check(name, collector)?; check(name, base)?;
-                check(name, emitter)?; check(name, substrate)?;
+            Element::Capacitor { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
+            }
+            Element::Inductor { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
+            }
+            Element::VoltageSource { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
+            }
+            Element::CurrentSource { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
+            }
+            Element::Diode {
+                name,
+                anode,
+                cathode,
+                ..
+            } => {
+                check(name, anode)?;
+                check(name, cathode)?;
+            }
+            Element::Mosfet {
+                name,
+                drain,
+                gate,
+                source,
+                bulk,
+                ..
+            } => {
+                check(name, drain)?;
+                check(name, gate)?;
+                check(name, source)?;
+                check(name, bulk)?;
+            }
+            Element::Bjt {
+                name,
+                collector,
+                base,
+                emitter,
+                substrate,
+                ..
+            } => {
+                check(name, collector)?;
+                check(name, base)?;
+                check(name, emitter)?;
+                check(name, substrate)?;
             }
             // XOsdi is intentionally not checked: mixed-domain connections are valid.
             Element::XOsdi { .. } => {}
             // CoupledInductors only references inductor names, not nets.
             Element::CoupledInductors { .. } => {}
-            Element::Behavioral { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
+            Element::Behavioral { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
+            }
         }
     }
     Ok(())
@@ -556,9 +682,17 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
 #[derive(Debug, Clone)]
 pub enum Analysis {
     Op,
-    Tran { step: f64, stop: f64 },
+    Tran {
+        step: f64,
+        stop: f64,
+    },
     /// `.ac DEC|OCT|LIN <points> <fstart> <fstop>`
-    Ac { variation: AcVariation, points: usize, fstart: f64, fstop: f64 },
+    Ac {
+        variation: AcVariation,
+        points: usize,
+        fstart: f64,
+        fstop: f64,
+    },
     /// `.dc SRC START STOP STEP [SRC2 START2 STOP2 STEP2]`
     ///
     /// First sweep is the outer loop; optional nested sweep is the inner loop.
@@ -576,7 +710,7 @@ pub enum Analysis {
     /// node and input-referred PSD through the named excitation source.
     Noise {
         out_pos: String,
-        out_neg: String,           // "0" if user writes `V(out)`
+        out_neg: String, // "0" if user writes `V(out)`
         input_src: String,
         variation: AcVariation,
         points: usize,

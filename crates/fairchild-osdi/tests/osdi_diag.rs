@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fairchild_core::device::{Device, EvalFlags, SimContext};
-use fairchild_core::mna::{CircuitTopology, stamp_netlist};
+use fairchild_core::mna::{stamp_netlist, CircuitTopology};
 use fairchild_core::DeviceRegistry;
 use fairchild_osdi::{OsdiDevice, OsdiLibrary};
 use fairchild_parser::parse_spice;
@@ -18,7 +18,9 @@ fn osdi_path() -> PathBuf {
 #[test]
 fn osdi_jacobian_value_at_zero_voltage() {
     let path = osdi_path();
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
 
     let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.expect("dlopen"));
 
@@ -26,8 +28,10 @@ fn osdi_jacobian_value_at_zero_voltage() {
     for (i, desc) in lib.descriptors().enumerate() {
         let name = unsafe { CStr::from_ptr(desc.name) }.to_str().unwrap();
         eprintln!("desc[{i}]: {name}");
-        eprintln!("  num_nodes={} num_terminals={} num_resistive_jac={}",
-            desc.num_nodes, desc.num_terminals, desc.num_resistive_jacobian_entries);
+        eprintln!(
+            "  num_nodes={} num_terminals={} num_resistive_jac={}",
+            desc.num_nodes, desc.num_terminals, desc.num_resistive_jacobian_entries
+        );
         eprintln!("  node_mapping_offset={}", desc.node_mapping_offset);
         let entries = unsafe {
             std::slice::from_raw_parts(desc.jacobian_entries, desc.num_jacobian_entries as usize)
@@ -38,9 +42,7 @@ fn osdi_jacobian_value_at_zero_voltage() {
     }
 
     // Manually run one NR step for the 1-node circuit Ib=1mA → b → D1 → GND.
-    let netlist = parse_spice(
-        "* diag\nIb 0 b 1m\nD1 b 0 diode_shockley\n.op\n.end\n"
-    ).unwrap();
+    let netlist = parse_spice("* diag\nIb 0 b 1m\nD1 b 0 diode_shockley\n.op\n.end\n").unwrap();
 
     let ctx = SimContext::default();
     let mut registry = DeviceRegistry::new();
@@ -79,5 +81,9 @@ fn osdi_jacobian_value_at_zero_voltage() {
         "mat.a[0][0] = {} — Jacobian was not stamped!",
         mat.a[0][0]
     );
-    eprintln!("gd(Vd=0) = {:.4e}  (expected ≈ {:.4e})", mat.a[0][0], 1e-14 / (1.380649e-23 * 300.15 / 1.602176634e-19));
+    eprintln!(
+        "gd(Vd=0) = {:.4e}  (expected ≈ {:.4e})",
+        mat.a[0][0],
+        1e-14 / (1.380649e-23 * 300.15 / 1.602176634e-19)
+    );
 }

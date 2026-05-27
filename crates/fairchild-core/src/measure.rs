@@ -24,7 +24,8 @@ pub fn evaluate_measurements(
     result: &TranResult,
 ) -> Vec<MeasureResult> {
     use fairchild_parser::MeasAnalysis;
-    measurements.iter()
+    measurements
+        .iter()
         .filter(|m| {
             if !matches!(m.analysis, MeasAnalysis::Tran) {
                 eprintln!(
@@ -38,7 +39,10 @@ pub fn evaluate_measurements(
         })
         .map(|m| {
             let v = eval_one(&m.kind, result);
-            MeasureResult { name: m.name.clone(), value: v }
+            MeasureResult {
+                name: m.name.clone(),
+                value: v,
+            }
         })
         .collect()
 }
@@ -73,13 +77,21 @@ fn eval_one(kind: &MeasKind, r: &TranResult) -> f64 {
         }
         MeasKind::DerivAt { expr, at } => {
             let h = (r.time.last().copied().unwrap_or(0.0)
-                  - r.time.first().copied().unwrap_or(0.0)) * 1e-6 + 1e-12;
+                - r.time.first().copied().unwrap_or(0.0))
+                * 1e-6
+                + 1e-12;
             let a = TranSample::at(r, at - h).eval_via(expr);
             let b = TranSample::at(r, at + h).eval_via(expr);
             (b - a) / (2.0 * h)
         }
-        MeasKind::TrigTarg { trig_expr, trig_val, trig_cross,
-                             targ_expr, targ_val, targ_cross } => {
+        MeasKind::TrigTarg {
+            trig_expr,
+            trig_val,
+            trig_cross,
+            targ_expr,
+            targ_val,
+            targ_cross,
+        } => {
             let t1 = find_cross(r, trig_expr, *trig_val, *trig_cross);
             let t2 = find_cross(r, targ_expr, *targ_val, *targ_cross);
             match (t1, t2) {
@@ -90,50 +102,79 @@ fn eval_one(kind: &MeasKind, r: &TranResult) -> f64 {
         MeasKind::Aggregate { op, expr, from, to } => {
             // Filter time-slice [from, to].  Default to full range.
             let t0 = from.unwrap_or(r.time.first().copied().unwrap_or(0.0));
-            let t1 = to  .unwrap_or(r.time.last() .copied().unwrap_or(0.0));
-            let samples: Vec<(f64, f64)> = r.time.iter()
+            let t1 = to.unwrap_or(r.time.last().copied().unwrap_or(0.0));
+            let samples: Vec<(f64, f64)> = r
+                .time
+                .iter()
                 .enumerate()
                 .filter(|(_, &t)| t >= t0 && t <= t1)
                 .map(|(i, &t)| (t, expr.eval(&TranSample::index(r, i))))
                 .collect();
-            if samples.is_empty() { return f64::NAN; }
+            if samples.is_empty() {
+                return f64::NAN;
+            }
             match op {
-                MeasOp::Max => samples.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max),
-                MeasOp::Min => samples.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min),
-                MeasOp::Pp  => {
-                    let mx = samples.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
-                    let mn = samples.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+                MeasOp::Max => samples
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                MeasOp::Min => samples
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .fold(f64::INFINITY, f64::min),
+                MeasOp::Pp => {
+                    let mx = samples
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let mn = samples
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .fold(f64::INFINITY, f64::min);
                     mx - mn
                 }
                 MeasOp::Avg => {
                     // Time-weighted (trapezoidal) average.
-                    if samples.len() < 2 { return samples[0].1; }
+                    if samples.len() < 2 {
+                        return samples[0].1;
+                    }
                     let span = samples.last().unwrap().0 - samples.first().unwrap().0;
-                    if span <= 0.0 { return samples[0].1; }
+                    if span <= 0.0 {
+                        return samples[0].1;
+                    }
                     let mut sum = 0.0;
                     for w in samples.windows(2) {
-                        let (ta, va) = w[0]; let (tb, vb) = w[1];
+                        let (ta, va) = w[0];
+                        let (tb, vb) = w[1];
                         sum += 0.5 * (va + vb) * (tb - ta);
                     }
                     sum / span
                 }
                 MeasOp::Rms => {
-                    if samples.len() < 2 { return samples[0].1.abs(); }
+                    if samples.len() < 2 {
+                        return samples[0].1.abs();
+                    }
                     let span = samples.last().unwrap().0 - samples.first().unwrap().0;
-                    if span <= 0.0 { return samples[0].1.abs(); }
+                    if span <= 0.0 {
+                        return samples[0].1.abs();
+                    }
                     let mut sum = 0.0;
                     for w in samples.windows(2) {
-                        let (ta, va) = w[0]; let (tb, vb) = w[1];
+                        let (ta, va) = w[0];
+                        let (tb, vb) = w[1];
                         sum += 0.5 * (va * va + vb * vb) * (tb - ta);
                     }
                     (sum / span).sqrt()
                 }
                 MeasOp::Integ => {
                     // Trapezoidal ∫ expr dt.
-                    if samples.len() < 2 { return 0.0; }
+                    if samples.len() < 2 {
+                        return 0.0;
+                    }
                     let mut sum = 0.0;
                     for w in samples.windows(2) {
-                        let (ta, va) = w[0]; let (tb, vb) = w[1];
+                        let (ta, va) = w[0];
+                        let (tb, vb) = w[1];
                         sum += 0.5 * (va + vb) * (tb - ta);
                     }
                     sum
@@ -178,10 +219,18 @@ struct TranSample<'a> {
 
 impl<'a> TranSample<'a> {
     fn at(r: &'a TranResult, t: f64) -> Self {
-        TranSample { r, t, direct_index: None }
+        TranSample {
+            r,
+            t,
+            direct_index: None,
+        }
     }
     fn index(r: &'a TranResult, i: usize) -> Self {
-        TranSample { r, t: r.time[i], direct_index: Some(i) }
+        TranSample {
+            r,
+            t: r.time[i],
+            direct_index: Some(i),
+        }
     }
     /// Convenience: evaluate `expr` against this sample.
     fn eval_via(self, expr: &Expr) -> f64 {
@@ -191,7 +240,9 @@ impl<'a> TranSample<'a> {
 
 impl<'a> EvalContext for TranSample<'a> {
     fn node_voltage(&self, node: &str) -> f64 {
-        if node == "0" || node == "gnd" { return 0.0; }
+        if node == "0" || node == "gnd" {
+            return 0.0;
+        }
         if let Some(i) = self.direct_index {
             return self.r.node_voltages.get(node).map(|s| s[i]).unwrap_or(0.0);
         }
@@ -203,7 +254,9 @@ impl<'a> EvalContext for TranSample<'a> {
         }
         self.r.isrc_at(vsrc, self.t).unwrap_or(0.0)
     }
-    fn time(&self) -> f64 { self.t }
+    fn time(&self) -> f64 {
+        self.t
+    }
 }
 
 #[cfg(test)]
@@ -216,15 +269,20 @@ mod tests {
         let net = parse_spice(
             "* meas\nV1 in 0 PULSE(0 1 1u 1n 1n 5u 10u)\nR1 in out 1k\nC1 out 0 1u\n\
              .meas tran vmx MAX V(out)\n\
-             .tran 100n 8u\n.end\n"
-        ).unwrap();
+             .tran 100n 8u\n.end\n",
+        )
+        .unwrap();
         let r = crate::tran_nr_var(&net, 100e-9, 8e-6).unwrap();
         let ms = evaluate_measurements(&net.measurements, &r);
         assert_eq!(ms.len(), 1);
         assert_eq!(ms[0].name, "vmx");
         // Charge is small (τ=1ms ≫ 8µs), so V(out) max stays small but is the
         // peak of the rise.  Just check it's positive and ≤ 1 V.
-        assert!(ms[0].value > 0.0 && ms[0].value < 1.0, "vmx={}", ms[0].value);
+        assert!(
+            ms[0].value > 0.0 && ms[0].value < 1.0,
+            "vmx={}",
+            ms[0].value
+        );
     }
 
     #[test]
@@ -232,8 +290,9 @@ mod tests {
         let net = parse_spice(
             "* meas\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n\
              .meas tran vat FIND V(out) AT=1m\n\
-             .tran 1u 5m\n.end\n"
-        ).unwrap();
+             .tran 1u 5m\n.end\n",
+        )
+        .unwrap();
         let r = crate::tran_nr_var(&net, 1e-6, 5e-3).unwrap();
         let ms = evaluate_measurements(&net.measurements, &r);
         // V(out)(t=1ms) for RC with τ=1ms starting from DC OP V(out)=1V is constant 1V.
@@ -249,12 +308,16 @@ mod tests {
             "* delay\nV1 in 0 PULSE(0 1 1u 100n 100n 5u 10u)\n\
              R1 in out 1k\nC1 out 0 1n\n\
              .meas tran tpd TRIG V(in) VAL=0.5 TARG V(out) VAL=0.5\n\
-             .tran 10n 3u\n.end\n"
-        ).unwrap();
+             .tran 10n 3u\n.end\n",
+        )
+        .unwrap();
         let r = crate::tran_nr_var(&net, 10e-9, 3e-6).unwrap();
         let ms = evaluate_measurements(&net.measurements, &r);
         // Delay should be positive (V(out) lags V(in)).
-        assert!(ms[0].value > 0.0 && ms[0].value < 1e-6,
-            "tpd={} (should be in 0…1µs)", ms[0].value);
+        assert!(
+            ms[0].value > 0.0 && ms[0].value < 1e-6,
+            "tpd={} (should be in 0…1µs)",
+            ms[0].value
+        );
     }
 }

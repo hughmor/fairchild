@@ -9,7 +9,6 @@
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
 ///   /path/to/openvaf-r legacy/va-models/diode_shockley.va \
 ///     --output legacy/va-models/build/diode_shockley.osdi
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -78,7 +77,9 @@ fn osdi_diode_current_source_bias() {
 #[test]
 fn osdi_diode_series_resistor() {
     let path = osdi_path();
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
 
     // Vdd=5V, R=10k in series with OSDI Shockley diode.
     // V(b) should be in the forward-bias range ~0.55–0.75 V.
@@ -99,13 +100,19 @@ fn osdi_diode_series_resistor() {
     let result = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed");
     let vb = result.node_voltage("b").unwrap();
 
-    assert!(vb > 0.50 && vb < 0.80, "V(b) = {vb:.4} V — out of forward-bias range");
+    assert!(
+        vb > 0.50 && vb < 0.80,
+        "V(b) = {vb:.4} V — out of forward-bias range"
+    );
 
     // KCL check: (Vdd - V(b)) / R ≈ Is * (exp(V(b)/Vt) - 1)
     let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
     let ir = (5.0 - vb) / 10e3;
     let id = 1e-14 * ((vb / vt).exp() - 1.0);
-    assert!((ir - id).abs() / ir < 0.01, "KCL error > 1 %: ir={ir:.4e} id={id:.4e}");
+    assert!(
+        (ir - id).abs() / ir < 0.01,
+        "KCL error > 1 %: ir={ir:.4e} id={id:.4e}"
+    );
 
     println!("V(b) = {vb:.6} V  KCL residual = {:.2e}", (ir - id).abs());
 }

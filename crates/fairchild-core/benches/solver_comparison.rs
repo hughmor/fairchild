@@ -28,7 +28,6 @@
 /// ```
 ///
 /// HTML report: `target/criterion/report/index.html`
-
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fairchild_core::{dc_op_nr_with_registry_opts, DeviceRegistry, SimOptions, SolverKind};
 use fairchild_parser::parse_spice;
@@ -55,10 +54,7 @@ fn build_resistor_mesh(n: usize) -> String {
     // Horizontal resistors: v_(i,j) → v_(i,j+1)
     for i in 0..n {
         for j in 0..(n - 1) {
-            s.push_str(&format!(
-                "Rh_{i}_{j} v_{i}_{j} v_{i}_{} 1k\n",
-                j + 1
-            ));
+            s.push_str(&format!("Rh_{i}_{j} v_{i}_{j} v_{i}_{} 1k\n", j + 1));
         }
     }
 
@@ -66,9 +62,7 @@ fn build_resistor_mesh(n: usize) -> String {
     for i in 0..(n - 1) {
         for j in 0..n {
             let i1 = i + 1;
-            s.push_str(&format!(
-                "Rv_{i}_{j} v_{i}_{j} v_{i1}_{j} 1k\n"
-            ));
+            s.push_str(&format!("Rv_{i}_{j} v_{i}_{j} v_{i1}_{j} 1k\n"));
         }
     }
 

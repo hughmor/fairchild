@@ -1,6 +1,6 @@
 //! Regression tests for fc_splitter's alpha/r parameters.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// Default splitter (no params) remains the classic 3 dB lossless
@@ -42,7 +42,10 @@ X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter r=0.9
     assert!((v_b - 0.1f64.sqrt()).abs() < 1e-6, "V(b_re) = {v_b}");
     // Total power adds to 1 (lossless when α default 1.0).
     let p_sum = v_a * v_a + v_b * v_b;
-    assert!((p_sum - 1.0).abs() < 1e-6, "P_a + P_b = {p_sum}; expected 1.0 (α=1)");
+    assert!(
+        (p_sum - 1.0).abs() < 1e-6,
+        "P_a + P_b = {p_sum}; expected 1.0 (α=1)"
+    );
 }
 
 /// Insertion loss alpha_dB = 3 → total intensity transmission ≈ 0.5.
@@ -68,8 +71,10 @@ X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter alpha_dB=3.0
     let v_b = r.node_voltage("b_re").unwrap();
     let p_total = v_a * v_a + v_b * v_b;
     let alpha = 10f64.powf(-3.0 / 10.0);
-    assert!((p_total - alpha).abs() < 1e-3,
-        "P_a + P_b = {p_total}; expected {alpha} (α from 3 dB)");
+    assert!(
+        (p_total - alpha).abs() < 1e-3,
+        "P_a + P_b = {p_total}; expected {alpha} (α from 3 dB)"
+    );
 }
 
 /// Joint asymmetric + lossy: alpha = 0.8, r = 0.6 → P_a = 0.6, P_b = 0.2.
@@ -87,6 +92,14 @@ X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter alpha=0.8 r=0.6
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let v_a = r.node_voltage("a_re").unwrap();
     let v_b = r.node_voltage("b_re").unwrap();
-    assert!((v_a * v_a - 0.6).abs() < 1e-6, "P_a = {}; expected 0.6", v_a * v_a);
-    assert!((v_b * v_b - 0.2).abs() < 1e-6, "P_b = {}; expected 0.2", v_b * v_b);
+    assert!(
+        (v_a * v_a - 0.6).abs() < 1e-6,
+        "P_a = {}; expected 0.6",
+        v_a * v_a
+    );
+    assert!(
+        (v_b * v_b - 0.2).abs() < 1e-6,
+        "P_b = {}; expected 0.2",
+        v_b * v_b
+    );
 }

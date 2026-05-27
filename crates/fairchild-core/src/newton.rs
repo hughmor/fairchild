@@ -30,7 +30,10 @@ impl NrResult {
     }
 
     pub fn all_voltages(&self) -> impl Iterator<Item = (&str, f64)> {
-        self.topo.node_index.iter().map(|(name, &i)| (name.as_str(), self.x[i]))
+        self.topo
+            .node_index
+            .iter()
+            .map(|(name, &i)| (name.as_str(), self.x[i]))
     }
 
     /// Write the DC operating point as an ngspice-compatible Nutmeg ASCII rawfile.
@@ -94,19 +97,27 @@ pub fn build_device_names(netlist: &Netlist) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for el in &netlist.elements {
         match el {
-            Element::Diode { name, model_name, .. } => {
+            Element::Diode {
+                name, model_name, ..
+            } => {
                 names.push(format!("{name} ({model_name})"));
             }
-            Element::Mosfet { name, model_name, .. } => {
+            Element::Mosfet {
+                name, model_name, ..
+            } => {
                 names.push(format!("{name} ({model_name})"));
             }
-            Element::Bjt { name, model_name, .. } => {
+            Element::Bjt {
+                name, model_name, ..
+            } => {
                 names.push(format!("{name} ({model_name})"));
             }
             Element::Behavioral { name, kind, .. } => {
                 names.push(format!("{name} ({kind:?})"));
             }
-            Element::XOsdi { name, model_name, .. } => {
+            Element::XOsdi {
+                name, model_name, ..
+            } => {
                 names.push(format!("{name} ({model_name})"));
             }
             _ => {}
@@ -126,14 +137,28 @@ pub fn build_devices(
     let topo_arc = Arc::new(topo.clone());
     for el in &netlist.elements {
         match el {
-            Element::Diode { anode, cathode, model_name, .. } => {
-                let factory = registry.get(model_name)
+            Element::Diode {
+                anode,
+                cathode,
+                model_name,
+                ..
+            } => {
+                let factory = registry
+                    .get(model_name)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
                 devices.push(factory(&[pos, neg], ctx));
             }
-            Element::Mosfet { drain, gate, source, bulk, model_name, params, .. } => {
+            Element::Mosfet {
+                drain,
+                gate,
+                source,
+                bulk,
+                model_name,
+                params,
+                ..
+            } => {
                 let d: NodeId = topo.node_index.get(drain).copied();
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
@@ -141,31 +166,57 @@ pub fn build_devices(
                 if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
                     devices.push(dev);
                 } else {
-                    let factory = registry.get(model_name)
+                    let factory = registry
+                        .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     devices.push(factory(&[d, g, s, b], ctx));
                 }
             }
-            Element::Bjt { collector, base, emitter, substrate, model_name, .. } => {
+            Element::Bjt {
+                collector,
+                base,
+                emitter,
+                substrate,
+                model_name,
+                ..
+            } => {
                 let c: NodeId = topo.node_index.get(collector).copied();
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
-                let dev = registry.build_bjt(model_name, &[c, b, e, s], ctx)
+                let dev = registry
+                    .build_bjt(model_name, &[c, b, e, s], ctx)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 devices.push(dev);
             }
-            Element::Behavioral { name, pos, neg, kind, expr } => {
+            Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr,
+            } => {
                 let dev = BehavioralDevice::build(
                     Arc::clone(&topo_arc),
-                    name, pos, neg, *kind, expr.clone(),
+                    name,
+                    pos,
+                    neg,
+                    *kind,
+                    expr.clone(),
                 );
                 devices.push(Box::new(dev));
             }
-            Element::XOsdi { nets, model_name, params, .. } => {
-                let factory = registry.get(model_name)
+            Element::XOsdi {
+                nets,
+                model_name,
+                params,
+                ..
+            } => {
+                let factory = registry
+                    .get(model_name)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-                let terminals: Vec<NodeId> = nets.iter()
+                let terminals: Vec<NodeId> = nets
+                    .iter()
                     .map(|net| topo.node_index.get(net).copied())
                     .collect();
                 let mut dev = factory(&terminals, ctx);
@@ -213,7 +264,9 @@ fn report_matrix_stats(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
 ) -> bool {
-    if !opts.verbose { return false; }
+    if !opts.verbose {
+        return false;
+    }
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let x0 = vec![0.0f64; topo.size];
     let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
@@ -230,31 +283,50 @@ fn report_matrix_stats(
     for i in 0..n {
         for j in 0..n {
             let v = mat.a[i][j];
-            if v != 0.0 { nnz += 1; }
-            if !v.is_finite() { nonfinite = true; }
+            if v != 0.0 {
+                nnz += 1;
+            }
+            if !v.is_finite() {
+                nonfinite = true;
+            }
         }
-        if !mat.b[i].is_finite() { nonfinite = true; }
+        if !mat.b[i].is_finite() {
+            nonfinite = true;
+        }
         let d = mat.a[i][i].abs();
         if d.is_finite() && d > 0.0 {
-            if d > diag_max { diag_max = d; }
-            if d < diag_min { diag_min = d; }
+            if d > diag_max {
+                diag_max = d;
+            }
+            if d < diag_min {
+                diag_min = d;
+            }
         }
     }
     let total = (n as f64) * (n as f64);
     let sparsity_pct = 100.0 * (1.0 - (nnz as f64) / total.max(1.0));
-    eprintln!("info: MNA size: {n} rows ({} nodes + {} vsrc + {} extras); \
+    eprintln!(
+        "info: MNA size: {n} rows ({} nodes + {} vsrc + {} extras); \
                nnz={nnz} ({sparsity_pct:.1}% sparse)",
-        topo.n_nodes(), topo.vsrc_index.len(),
-        n - topo.n_nodes() - topo.vsrc_index.len());
+        topo.n_nodes(),
+        topo.vsrc_index.len(),
+        n - topo.n_nodes() - topo.vsrc_index.len()
+    );
     if diag_min < f64::INFINITY {
-        eprintln!("info: MNA diagonal magnitude spread (mixed units; large spread \
+        eprintln!(
+            "info: MNA diagonal magnitude spread (mixed units; large spread \
                    often indicates poor scaling): min={:.2e} max={:.2e} ratio={:.2e}",
-            diag_min, diag_max, diag_max / diag_min.max(1e-300));
+            diag_min,
+            diag_max,
+            diag_max / diag_min.max(1e-300)
+        );
     }
     if nonfinite {
-        eprintln!("info: MNA contains non-finite values at x=0 — running \
+        eprintln!(
+            "info: MNA contains non-finite values at x=0 — running \
                    per-device finiteness validator to identify the offending \
-                   device(s).");
+                   device(s)."
+        );
     }
     nonfinite
 }
@@ -298,11 +370,15 @@ fn validate_devices_finite(
                 }
             }
         }
-        if row_bad { bad_rows.push(r); }
+        if row_bad {
+            bad_rows.push(r);
+        }
     }
     if bad_rows.is_empty() {
-        eprintln!("info: validator found NO non-finite rows in the cumulative \
-                   device stamp (inf must come from the linear stamp or LU).");
+        eprintln!(
+            "info: validator found NO non-finite rows in the cumulative \
+                   device stamp (inf must come from the linear stamp or LU)."
+        );
         return;
     }
 
@@ -310,15 +386,21 @@ fn validate_devices_finite(
     let n_nodes = topo.n_nodes();
     let mut node_name_by_idx: Vec<&str> = vec![""; n_nodes];
     for (name, &i) in &topo.node_index {
-        if i < n_nodes { node_name_by_idx[i] = name.as_str(); }
+        if i < n_nodes {
+            node_name_by_idx[i] = name.as_str();
+        }
     }
     let mut vsrc_name_by_idx: Vec<&str> = vec![""; topo.vsrc_index.len()];
     for (name, &i) in &topo.vsrc_index {
-        if i < vsrc_name_by_idx.len() { vsrc_name_by_idx[i] = name.as_str(); }
+        if i < vsrc_name_by_idx.len() {
+            vsrc_name_by_idx[i] = name.as_str();
+        }
     }
 
-    eprintln!("info: {} MNA row(s) contain non-finite stamps at x=0:",
-        bad_rows.len());
+    eprintln!(
+        "info: {} MNA row(s) contain non-finite stamps at x=0:",
+        bad_rows.len()
+    );
     const MAX_BAD: usize = 10;
     for &r in bad_rows.iter().take(MAX_BAD) {
         let label = if r < n_nodes {
@@ -337,7 +419,9 @@ fn validate_devices_finite(
             let mut suspects: Vec<String> = Vec::new();
             for el in &netlist.elements {
                 let (refdes, touches, bad) = element_touches(el, &net_name_lc);
-                if !touches { continue; }
+                if !touches {
+                    continue;
+                }
                 match bad {
                     Some(hint) => culprits.push(format!("{refdes} [{hint}]")),
                     None => suspects.push(refdes),
@@ -348,16 +432,23 @@ fn validate_devices_finite(
             }
             if !suspects.is_empty() {
                 let trunc = if suspects.len() > 8 {
-                    format!("{} (and {} more)",
-                        suspects[..8].join(", "), suspects.len() - 8)
-                } else { suspects.join(", ") };
+                    format!(
+                        "{} (and {} more)",
+                        suspects[..8].join(", "),
+                        suspects.len() - 8
+                    )
+                } else {
+                    suspects.join(", ")
+                };
                 eprintln!("info:     other elements on this net: {trunc}");
             }
         }
     }
     if bad_rows.len() > MAX_BAD {
-        eprintln!("info:   ... and {} more non-finite row(s) (truncated)",
-            bad_rows.len() - MAX_BAD);
+        eprintln!(
+            "info:   ... and {} more non-finite row(s) (truncated)",
+            bad_rows.len() - MAX_BAD
+        );
     }
 }
 
@@ -378,39 +469,87 @@ fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>)
         }
     };
     match el {
-        Element::Resistor { name, pos, neg, resistance } => {
-            (name.clone(), net_match(pos) || net_match(neg),
-             bad_value(*resistance, "R"))
-        }
-        Element::Capacitor { name, pos, neg, capacitance } => {
-            (name.clone(), net_match(pos) || net_match(neg),
-             if !capacitance.is_finite() { Some(format!("C={capacitance} (non-finite)")) } else { None })
-        }
-        Element::Inductor { name, pos, neg, inductance } => {
-            (name.clone(), net_match(pos) || net_match(neg),
-             if !inductance.is_finite() { Some(format!("L={inductance} (non-finite)")) } else { None })
-        }
+        Element::Resistor {
+            name,
+            pos,
+            neg,
+            resistance,
+        } => (
+            name.clone(),
+            net_match(pos) || net_match(neg),
+            bad_value(*resistance, "R"),
+        ),
+        Element::Capacitor {
+            name,
+            pos,
+            neg,
+            capacitance,
+        } => (
+            name.clone(),
+            net_match(pos) || net_match(neg),
+            if !capacitance.is_finite() {
+                Some(format!("C={capacitance} (non-finite)"))
+            } else {
+                None
+            },
+        ),
+        Element::Inductor {
+            name,
+            pos,
+            neg,
+            inductance,
+        } => (
+            name.clone(),
+            net_match(pos) || net_match(neg),
+            if !inductance.is_finite() {
+                Some(format!("L={inductance} (non-finite)"))
+            } else {
+                None
+            },
+        ),
         Element::VoltageSource { name, pos, neg, .. }
         | Element::CurrentSource { name, pos, neg, .. } => {
             (name.clone(), net_match(pos) || net_match(neg), None)
         }
-        Element::Diode { name, anode, cathode, .. } => {
-            (name.clone(), net_match(anode) || net_match(cathode), None)
-        }
-        Element::Mosfet { name, drain, gate, source, bulk, .. } => {
-            (name.clone(),
-             net_match(drain) || net_match(gate) || net_match(source) || net_match(bulk),
-             None)
-        }
-        Element::Bjt { name, collector, base, emitter, substrate, .. } => {
-            (name.clone(),
-             net_match(collector) || net_match(base) || net_match(emitter) || net_match(substrate),
-             None)
-        }
+        Element::Diode {
+            name,
+            anode,
+            cathode,
+            ..
+        } => (name.clone(), net_match(anode) || net_match(cathode), None),
+        Element::Mosfet {
+            name,
+            drain,
+            gate,
+            source,
+            bulk,
+            ..
+        } => (
+            name.clone(),
+            net_match(drain) || net_match(gate) || net_match(source) || net_match(bulk),
+            None,
+        ),
+        Element::Bjt {
+            name,
+            collector,
+            base,
+            emitter,
+            substrate,
+            ..
+        } => (
+            name.clone(),
+            net_match(collector) || net_match(base) || net_match(emitter) || net_match(substrate),
+            None,
+        ),
         Element::Behavioral { name, pos, neg, .. } => {
             (name.clone(), net_match(pos) || net_match(neg), None)
         }
-        Element::XOsdi { name, nets, model_name, .. } => {
+        Element::XOsdi {
+            name,
+            nets,
+            model_name,
+            ..
+        } => {
             let hits = nets.iter().any(|n| net_match(n));
             (format!("{name} ({model_name})"), hits, None)
         }
@@ -426,11 +565,15 @@ fn row_name(topo: &CircuitTopology, r: usize) -> String {
     let n_nodes = topo.n_nodes();
     if r < n_nodes {
         for (name, &i) in &topo.node_index {
-            if i == r { return format!("v({name})"); }
+            if i == r {
+                return format!("v({name})");
+            }
         }
     } else if r < n_nodes + topo.vsrc_index.len() {
         for (name, &i) in &topo.vsrc_index {
-            if i + n_nodes == r { return format!("i({name})"); }
+            if i + n_nodes == r {
+                return format!("i({name})");
+            }
         }
     } else {
         return format!("x[{r}] (device-internal)");
@@ -453,7 +596,9 @@ fn report_failure(
     source_scale: f64,
     gmin_extra: f64,
 ) {
-    if !opts.verbose { return; }
+    if !opts.verbose {
+        return;
+    }
     // Recompute the residual at the failed iterate `x` so we can attribute
     // rows to devices.
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
@@ -485,16 +630,24 @@ fn report_failure(
     idx.sort_by(|&a, &c| b[c].abs().partial_cmp(&b[a].abs()).unwrap());
 
     let l2: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-    eprintln!("info: NR did NOT converge in {phase} (residual L2 = {l2:.3e}, \
-               source_scale={source_scale:.3}, gmin_extra={gmin_extra:.2e})");
+    eprintln!(
+        "info: NR did NOT converge in {phase} (residual L2 = {l2:.3e}, \
+               source_scale={source_scale:.3}, gmin_extra={gmin_extra:.2e})"
+    );
     eprintln!("info: top 5 residual rows:");
     for &r in idx.iter().take(5) {
         let owner = match row_owner[r] {
             Some(d) if d < dev_names.len() => dev_names[d].as_str(),
             _ => "(linear stamp)",
         };
-        eprintln!("info:   {:>4}  {:<35}  b={:>11.3e}  x={:>11.3e}  dom: {}",
-            r, row_name(topo, r), b[r], x[r], owner);
+        eprintln!(
+            "info:   {:>4}  {:<35}  b={:>11.3e}  x={:>11.3e}  dom: {}",
+            r,
+            row_name(topo, r),
+            b[r],
+            x[r],
+            owner
+        );
     }
 }
 
@@ -578,7 +731,12 @@ fn nr_inner(
 
     for _ in 0..opts.itl1 {
         crate::mna::stamp_netlist_scaled_in_place(
-            &mut mat, topo, netlist, source_scale, &empty, &empty,
+            &mut mat,
+            topo,
+            netlist,
+            source_scale,
+            &empty,
+            &empty,
         );
 
         for dev in devices.iter_mut() {
@@ -619,14 +777,27 @@ fn nr_inner(
             Err(e) => {
                 if opts.verbose && !phase.is_empty() {
                     eprintln!("info: linear solve failed in {phase}: {e}");
-                    report_failure(phase, opts, topo, netlist, devices, dev_names,
-                                   ctx, &x, source_scale, gmin_extra);
+                    report_failure(
+                        phase,
+                        opts,
+                        topo,
+                        netlist,
+                        devices,
+                        dev_names,
+                        ctx,
+                        &x,
+                        source_scale,
+                        gmin_extra,
+                    );
                 }
                 return Err(e);
             }
         };
 
-        let max_dv = x_new.iter().zip(x.iter()).take(n_nodes)
+        let max_dv = x_new
+            .iter()
+            .zip(x.iter())
+            .take(n_nodes)
             .map(|(n, o)| (n - o).abs())
             .fold(0.0f64, f64::max);
 
@@ -648,20 +819,42 @@ fn nr_inner(
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
-            let delta: Vec<f64> = x.iter().zip(x_new.iter())
-                .map(|(o, n)| scale * (n - o)).collect();
+            let delta: Vec<f64> = x
+                .iter()
+                .zip(x_new.iter())
+                .map(|(o, n)| scale * (n - o))
+                .collect();
 
-            let f_prev = residual_l2(topo, netlist, devices, ctx, opts,
-                                     source_scale, gmin_extra, &x);
+            let f_prev = residual_l2(
+                topo,
+                netlist,
+                devices,
+                ctx,
+                opts,
+                source_scale,
+                gmin_extra,
+                &x,
+            );
             const C_ARMIJO: f64 = 1e-4;
             const ALPHA_MIN: f64 = 1.0 / 16.0;
             let mut alpha = 1.0_f64;
             let mut x_trial: Vec<f64>;
             loop {
-                x_trial = x.iter().zip(delta.iter())
-                    .map(|(o, d)| o + alpha * d).collect();
-                let f_trial = residual_l2(topo, netlist, devices, ctx, opts,
-                                          source_scale, gmin_extra, &x_trial);
+                x_trial = x
+                    .iter()
+                    .zip(delta.iter())
+                    .map(|(o, d)| o + alpha * d)
+                    .collect();
+                let f_trial = residual_l2(
+                    topo,
+                    netlist,
+                    devices,
+                    ctx,
+                    opts,
+                    source_scale,
+                    gmin_extra,
+                    &x_trial,
+                );
                 if f_trial <= (1.0 - C_ARMIJO * alpha) * f_prev || alpha <= ALPHA_MIN {
                     break;
                 }
@@ -672,7 +865,9 @@ fn nr_inner(
             x_new
         };
 
-        let converged = x_next.iter().zip(x.iter())
+        let converged = x_next
+            .iter()
+            .zip(x.iter())
             .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
         x = x_next;
@@ -681,8 +876,18 @@ fn nr_inner(
         }
     }
     if opts.verbose && !phase.is_empty() {
-        report_failure(phase, opts, topo, netlist, devices, dev_names, ctx,
-                       &x, source_scale, gmin_extra);
+        report_failure(
+            phase,
+            opts,
+            topo,
+            netlist,
+            devices,
+            dev_names,
+            ctx,
+            &x,
+            source_scale,
+            gmin_extra,
+        );
     }
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }
@@ -708,8 +913,19 @@ fn source_stepping(
         // Suppress per-step failure reports during the inner stepping
         // loop — most failures are recoverable by halving ds.  Only the
         // outer give-up below is worth reporting.
-        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(),
-                       next, 0.0, &[], "") {
+        match nr_inner(
+            topo,
+            netlist,
+            devices,
+            ctx,
+            opts,
+            solver,
+            x.clone(),
+            next,
+            0.0,
+            &[],
+            "",
+        ) {
             Ok(x_new) => {
                 x = x_new;
                 scale = next;
@@ -719,15 +935,25 @@ fn source_stepping(
                 ds *= 0.5;
                 if ds < min_ds {
                     if opts.verbose {
-                        eprintln!("info: source-stepping gave up at scale={scale:.3} \
+                        eprintln!(
+                            "info: source-stepping gave up at scale={scale:.3} \
                                    (ds shrank to {ds:.2e} < {min_ds:.0e}); \
-                                   replaying last failing step for diagnosis");
+                                   replaying last failing step for diagnosis"
+                        );
                         // Replay the last failing step with reporting on.
-                        let _ = nr_inner(topo, netlist, devices, ctx, opts, solver,
-                                         x.clone(), (scale + ds*2.0).min(1.0), 0.0,
-                                         dev_names,
-                                         &format!("source-stepping @ scale={:.3}",
-                                                  (scale + ds*2.0).min(1.0)));
+                        let _ = nr_inner(
+                            topo,
+                            netlist,
+                            devices,
+                            ctx,
+                            opts,
+                            solver,
+                            x.clone(),
+                            (scale + ds * 2.0).min(1.0),
+                            0.0,
+                            dev_names,
+                            &format!("source-stepping @ scale={:.3}", (scale + ds * 2.0).min(1.0)),
+                        );
                     }
                     return Err(SimError::NoConvergence { iters: opts.itl1 });
                 }
@@ -753,20 +979,45 @@ fn gmin_stepping(
 
     loop {
         // Quiet during the inner ramp; only the outer failure is reported.
-        match nr_inner(topo, netlist, devices, ctx, opts, solver, x.clone(),
-                       1.0, gmin_extra, &[], "") {
+        match nr_inner(
+            topo,
+            netlist,
+            devices,
+            ctx,
+            opts,
+            solver,
+            x.clone(),
+            1.0,
+            gmin_extra,
+            &[],
+            "",
+        ) {
             Ok(x_new) => {
                 x = x_new;
-                if gmin_extra <= target { break; }
+                if gmin_extra <= target {
+                    break;
+                }
                 gmin_extra = (gmin_extra * 0.1).max(target);
             }
             Err(_) => {
                 if opts.verbose {
-                    eprintln!("info: gmin-stepping FAILED at gmin_extra={gmin_extra:.2e} \
-                               (target gmin={target:.2e}); replaying for diagnosis");
-                    let _ = nr_inner(topo, netlist, devices, ctx, opts, solver,
-                                     x.clone(), 1.0, gmin_extra, dev_names,
-                                     &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"));
+                    eprintln!(
+                        "info: gmin-stepping FAILED at gmin_extra={gmin_extra:.2e} \
+                               (target gmin={target:.2e}); replaying for diagnosis"
+                    );
+                    let _ = nr_inner(
+                        topo,
+                        netlist,
+                        devices,
+                        ctx,
+                        opts,
+                        solver,
+                        x.clone(),
+                        1.0,
+                        gmin_extra,
+                        dev_names,
+                        &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"),
+                    );
                 }
                 return Err(SimError::NoConvergence { iters: opts.itl1 });
             }
@@ -816,27 +1067,70 @@ pub fn dc_op_nr_with_registry_opts(
             let x_probe = vec![0.0f64; topo.size];
             validate_devices_finite(&topo, netlist, &mut devices, &ctx, &x_probe);
         }
-        eprintln!("info: DC OP: trying direct Newton-Raphson from \
+        eprintln!(
+            "info: DC OP: trying direct Newton-Raphson from \
                    {} seed...",
-            if !netlist.nodeset.is_empty() {"nodeset"} else {"x=0"});
+            if !netlist.nodeset.is_empty() {
+                "nodeset"
+            } else {
+                "x=0"
+            }
+        );
     }
-    if let Ok(x) = nr_inner(&topo, netlist, &mut devices, &ctx, opts, &*solver,
-                            x0.clone(), 1.0, 0.0, &dev_names, "direct NR (DC OP)") {
-        if opts.verbose { eprintln!("info: DC OP: direct NR succeeded"); }
+    if let Ok(x) = nr_inner(
+        &topo,
+        netlist,
+        &mut devices,
+        &ctx,
+        opts,
+        &*solver,
+        x0.clone(),
+        1.0,
+        0.0,
+        &dev_names,
+        "direct NR (DC OP)",
+    ) {
+        if opts.verbose {
+            eprintln!("info: DC OP: direct NR succeeded");
+        }
         return Ok(NrResult { topo, x, iters: 1 });
     }
 
-    if opts.verbose { eprintln!("info: DC OP: direct NR failed; trying source-stepping..."); }
-    if let Ok(x) = source_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver,
-                                   x0, &dev_names) {
-        if opts.verbose { eprintln!("info: DC OP: source-stepping succeeded"); }
+    if opts.verbose {
+        eprintln!("info: DC OP: direct NR failed; trying source-stepping...");
+    }
+    if let Ok(x) = source_stepping(
+        &topo,
+        netlist,
+        &mut devices,
+        &ctx,
+        opts,
+        &*solver,
+        x0,
+        &dev_names,
+    ) {
+        if opts.verbose {
+            eprintln!("info: DC OP: source-stepping succeeded");
+        }
         return Ok(NrResult { topo, x, iters: 2 });
     }
 
-    if opts.verbose { eprintln!("info: DC OP: source-stepping failed; trying gmin-stepping..."); }
-    match gmin_stepping(&topo, netlist, &mut devices, &ctx, opts, &*solver, &dev_names) {
+    if opts.verbose {
+        eprintln!("info: DC OP: source-stepping failed; trying gmin-stepping...");
+    }
+    match gmin_stepping(
+        &topo,
+        netlist,
+        &mut devices,
+        &ctx,
+        opts,
+        &*solver,
+        &dev_names,
+    ) {
         Ok(x) => {
-            if opts.verbose { eprintln!("info: DC OP: gmin-stepping succeeded"); }
+            if opts.verbose {
+                eprintln!("info: DC OP: gmin-stepping succeeded");
+            }
             Ok(NrResult { topo, x, iters: 3 })
         }
         Err(e) => Err(e),
@@ -867,18 +1161,40 @@ pub fn dc_op_nr_with_devices_opts(
     let solver = opts.linear_solver(topo.size);
     let dev_names = build_device_names(netlist);
 
-    if let Ok(x) = nr_inner(topo, netlist, devices, ctx, opts, &*solver,
-                            x0.clone(), 1.0, 0.0, &dev_names, "direct NR (DC OP)") {
-        return Ok(NrResult { topo: topo.clone(), x, iters: 1 });
+    if let Ok(x) = nr_inner(
+        topo,
+        netlist,
+        devices,
+        ctx,
+        opts,
+        &*solver,
+        x0.clone(),
+        1.0,
+        0.0,
+        &dev_names,
+        "direct NR (DC OP)",
+    ) {
+        return Ok(NrResult {
+            topo: topo.clone(),
+            x,
+            iters: 1,
+        });
     }
 
-    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver,
-                                   x0, &dev_names) {
-        return Ok(NrResult { topo: topo.clone(), x, iters: 2 });
+    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver, x0, &dev_names) {
+        return Ok(NrResult {
+            topo: topo.clone(),
+            x,
+            iters: 2,
+        });
     }
 
     match gmin_stepping(topo, netlist, devices, ctx, opts, &*solver, &dev_names) {
-        Ok(x) => Ok(NrResult { topo: topo.clone(), x, iters: 3 }),
+        Ok(x) => Ok(NrResult {
+            topo: topo.clone(),
+            x,
+            iters: 3,
+        }),
         Err(e) => Err(e),
     }
 }
@@ -914,11 +1230,14 @@ mod tests {
 
     #[test]
     fn linear_circuit_converges() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n",
-        ).unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+            .unwrap();
         let r = dc_op_nr(&net).unwrap();
-        assert!(r.iters <= 5, "linear circuit should converge fast, took {}", r.iters);
+        assert!(
+            r.iters <= 5,
+            "linear circuit should converge fast, took {}",
+            r.iters
+        );
         let v = r.node_voltage("out").unwrap();
         assert!((v - 0.5).abs() < 1e-6, "v(out)={v}");
     }
@@ -930,21 +1249,27 @@ mod tests {
         // ON (default) this must converge in well under ITL1=150 iters.
         let net = parse_spice(
             "* stiff diode\nVdd a 0 DC 20\nR1 a b 100\nD1 b 0 myd\n\
-             .model myd D (Is=1e-15 N=1)\n.op\n.end\n"
-        ).unwrap();
+             .model myd D (Is=1e-15 N=1)\n.op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr(&net).unwrap();
         // The pn-junction equation gives V(b) ≈ 18·V_T·ln(I/Is) ≈ 0.7 V,
         // and most of the supply drops across R1.
         let vb = r.node_voltage("b").unwrap();
         assert!(vb > 0.5 && vb < 1.0, "V(b)={vb:.4} should be ~0.7V");
-        assert!(r.iters < 50, "convergence took {} iters with pnjlim on", r.iters);
+        assert!(
+            r.iters < 50,
+            "convergence took {} iters with pnjlim on",
+            r.iters
+        );
     }
 
     #[test]
     fn current_source_biased_diode() {
         let net = parse_spice(
             "* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n",
-        ).unwrap();
+        )
+        .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let vb = r.node_voltage("b").unwrap();
         let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
@@ -962,7 +1287,8 @@ mod tests {
         let net = parse_spice(
             "* R-D series\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
              .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
-        ).unwrap();
+        )
+        .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let vb = r.node_voltage("b").unwrap();
         assert!(vb > 0.5 && vb < 0.8, "V(b) out of expected range: {vb}");
@@ -974,9 +1300,8 @@ mod tests {
 
     #[test]
     fn write_csv_dc_op() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n",
-        ).unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+            .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_csv(&mut buf).unwrap();
@@ -984,14 +1309,16 @@ mod tests {
         assert!(s.starts_with("analysis,"), "header: {s}");
         assert!(s.contains("V(out)"), "should contain V(out): {s}");
         assert!(s.contains("dc_op"), "should have dc_op row: {s}");
-        assert!(s.contains("1.000000e0") || s.contains("1.000000e+0"), "V(out)≈1V missing: {s}");
+        assert!(
+            s.contains("1.000000e0") || s.contains("1.000000e+0"),
+            "V(out)≈1V missing: {s}"
+        );
     }
 
     #[test]
     fn write_nutmeg_dc_op() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n",
-        ).unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
+            .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_nutmeg(&mut buf, "divider test").unwrap();
@@ -1009,10 +1336,11 @@ mod tests {
         let net = parse_spice(
             "* R-D\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
              .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
-        ).unwrap();
+        )
+        .unwrap();
         let mut opts = SimOptions::default();
         opts.reltol = 1e-10;
-        opts.vntol  = 1e-12;
+        opts.vntol = 1e-12;
         let r = dc_op_nr_opts(&net, &opts).unwrap();
         let vb = r.node_voltage("b").unwrap();
         assert!(vb > 0.5 && vb < 0.8);

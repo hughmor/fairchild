@@ -5,7 +5,6 @@
 ///   /path/to/openvaf-r legacy/va-models/diode_shockley.va \
 ///     --output legacy/va-models/build/diode_shockley.osdi
 /// or the test will skip with a helpful message.
-
 use std::ffi::CStr;
 use std::path::PathBuf;
 
@@ -47,14 +46,21 @@ fn load_shockley_osdi_descriptor() {
     assert_eq!(d.num_nodes, 2);
 
     // 3 declared parameters (Is, N, Tnom) + OpenVAF may add implicit temperature params.
-    assert!(d.num_params >= 3, "expected at least 3 params, got {}", d.num_params);
+    assert!(
+        d.num_params >= 3,
+        "expected at least 3 params, got {}",
+        d.num_params
+    );
 
     // All required function pointers must be populated by OpenVAF.
     assert!(d.setup_model.is_some(), "setup_model missing");
     assert!(d.setup_instance.is_some(), "setup_instance missing");
     assert!(d.eval.is_some(), "eval missing");
     assert!(d.load_spice_rhs_dc.is_some(), "load_spice_rhs_dc missing");
-    assert!(d.write_jacobian_array_resist.is_some(), "write_jacobian_array_resist missing");
+    assert!(
+        d.write_jacobian_array_resist.is_some(),
+        "write_jacobian_array_resist missing"
+    );
 
     // The Shockley diode has a 2x2 Jacobian (I_d flows between anode and cathode):
     // entries: (A,A), (A,C), (C,A), (C,C)  → 4 resistive entries.

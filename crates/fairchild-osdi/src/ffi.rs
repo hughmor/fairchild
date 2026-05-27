@@ -250,7 +250,6 @@ pub struct OsdiDescriptor {
     pub instance_size: u32,
     pub model_size: u32,
     // 4 bytes C padding before first function pointer (align 8)
-
     pub access: Option<FnAccess>,
     pub setup_model: Option<FnSetupModel>,
     pub setup_instance: Option<FnSetupInstance>,

@@ -1,6 +1,8 @@
-use crate::expr::Expr;
-use crate::{AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, ParseError};
 use super::common::{canon_node, parse_value};
+use crate::expr::Expr;
+use crate::{
+    AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, ParseError,
+};
 
 pub(super) fn is_silent_directive(lc: &str) -> bool {
     lc.starts_with(".print")
@@ -33,12 +35,14 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
     }
     let analysis = match toks[1].to_lowercase().as_str() {
         "tran" => MeasAnalysis::Tran,
-        "dc"   => MeasAnalysis::Dc,
-        "ac"   => MeasAnalysis::Ac,
-        other  => return Err(ParseError::Syntax {
-            line: lineno,
-            msg: format!(".measure analysis '{other}' unsupported (use tran|dc|ac)"),
-        }),
+        "dc" => MeasAnalysis::Dc,
+        "ac" => MeasAnalysis::Ac,
+        other => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!(".measure analysis '{other}' unsupported (use tran|dc|ac)"),
+            })
+        }
     };
     let name = toks[2].to_string();
     let op_word = toks[3].to_lowercase();
@@ -49,14 +53,17 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
     // `=`, etc.).
     let parse_expr = |s: &str| -> Result<Expr, ParseError> {
         Expr::parse(s).map_err(|e| ParseError::Syntax {
-            line: lineno, msg: format!(".meas expr '{s}': {e}"),
+            line: lineno,
+            msg: format!(".meas expr '{s}': {e}"),
         })
     };
 
     // Helper: split tokens[start..] into (expr_tokens, keyword_pairs).
     // Keyword pairs are recognised by `KEY=VALUE` or `KEY VALUE` for AT/FROM/TO/VAL/CROSS.
     let kw_keys = ["at", "from", "to", "val", "cross"];
-    let split_kw = |start: usize, end: usize| -> (Vec<&str>, std::collections::HashMap<String, String>) {
+    let split_kw = |start: usize,
+                    end: usize|
+     -> (Vec<&str>, std::collections::HashMap<String, String>) {
         let mut expr_toks: Vec<&str> = Vec::new();
         let mut kws: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut i = start;
@@ -99,7 +106,15 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
                 if rest_lc == "when" {
                     let cond_str = toks[split + 1..].join(" ");
                     let cond = parse_expr(&cond_str)?;
-                    Ok(Measurement { name, analysis, kind: MeasKind::FindWhen { expr, cond, cross: 1 } })
+                    Ok(Measurement {
+                        name,
+                        analysis,
+                        kind: MeasKind::FindWhen {
+                            expr,
+                            cond,
+                            cross: 1,
+                        },
+                    })
                 } else {
                     let (_e, kws) = split_kw(split, toks.len());
                     let at = kws.get("at").ok_or_else(|| ParseError::Syntax {
@@ -107,7 +122,11 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
                         msg: ".meas FIND requires AT=<time> or WHEN <cond>".into(),
                     })?;
                     let at_v = parse_value(at, lineno)?;
-                    Ok(Measurement { name, analysis, kind: MeasKind::FindAt { expr, at: at_v } })
+                    Ok(Measurement {
+                        name,
+                        analysis,
+                        kind: MeasKind::FindAt { expr, at: at_v },
+                    })
                 }
             } else {
                 Err(ParseError::Syntax {
@@ -123,27 +142,39 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
             let mut split = toks.len();
             for i in 4..toks.len() {
                 let lc = toks[i].to_lowercase();
-                if lc == "at" || lc.starts_with("at=") { split = i; break; }
+                if lc == "at" || lc.starts_with("at=") {
+                    split = i;
+                    break;
+                }
             }
             let expr_str = toks[4..split].join(" ");
             let expr = parse_expr(&expr_str)?;
             let (_e, kws) = split_kw(split, toks.len());
             let at = kws.get("at").ok_or_else(|| ParseError::Syntax {
-                line: lineno, msg: ".meas DERIV requires AT=<time>".into(),
+                line: lineno,
+                msg: ".meas DERIV requires AT=<time>".into(),
             })?;
             let at_v = parse_value(at, lineno)?;
-            Ok(Measurement { name, analysis, kind: MeasKind::DerivAt { expr, at: at_v } })
+            Ok(Measurement {
+                name,
+                analysis,
+                kind: MeasKind::DerivAt { expr, at: at_v },
+            })
         }
 
         "trig" => {
             // .meas tran NAME TRIG <expr1> [VAL=<v1>] [CROSS=<n>] TARG <expr2> [VAL=<v2>] [CROSS=<n>]
             let mut targ_idx = toks.len();
             for i in 4..toks.len() {
-                if toks[i].to_lowercase() == "targ" { targ_idx = i; break; }
+                if toks[i].to_lowercase() == "targ" {
+                    targ_idx = i;
+                    break;
+                }
             }
             if targ_idx == toks.len() {
                 return Err(ParseError::Syntax {
-                    line: lineno, msg: ".meas TRIG requires a TARG clause".into(),
+                    line: lineno,
+                    msg: ".meas TRIG requires a TARG clause".into(),
                 });
             }
             let trig_part = &toks[4..targ_idx];
@@ -154,8 +185,13 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
                 let mut split = part.len();
                 for (i, t) in part.iter().enumerate() {
                     let lc = t.to_lowercase();
-                    if lc == "val" || lc.starts_with("val=") || lc == "cross" || lc.starts_with("cross=") {
-                        split = i; break;
+                    if lc == "val"
+                        || lc.starts_with("val=")
+                        || lc == "cross"
+                        || lc.starts_with("cross=")
+                    {
+                        split = i;
+                        break;
                     }
                 }
                 let expr = parse_expr(&part[..split].join(" "))?;
@@ -171,9 +207,12 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
                         let pair = (t.to_lowercase(), part[i + 1].to_string());
                         i += 2;
                         pair
-                    } else { i += 1; continue; };
+                    } else {
+                        i += 1;
+                        continue;
+                    };
                     match k.as_str() {
-                        "val"   => val = parse_value(&v, lineno)?,
+                        "val" => val = parse_value(&v, lineno)?,
                         "cross" => cross = v.parse().unwrap_or(1),
                         _ => {}
                     }
@@ -184,10 +223,15 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
             let (trig_expr, trig_val, trig_cross) = parse_part(trig_part)?;
             let (targ_expr, targ_val, targ_cross) = parse_part(targ_part)?;
             Ok(Measurement {
-                name, analysis,
+                name,
+                analysis,
                 kind: MeasKind::TrigTarg {
-                    trig_expr, trig_val, trig_cross,
-                    targ_expr, targ_val, targ_cross,
+                    trig_expr,
+                    trig_val,
+                    trig_cross,
+                    targ_expr,
+                    targ_val,
+                    targ_cross,
                 },
             })
         }
@@ -198,7 +242,7 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
                 "min" => MeasOp::Min,
                 "avg" => MeasOp::Avg,
                 "rms" => MeasOp::Rms,
-                "pp"  => MeasOp::Pp,
+                "pp" => MeasOp::Pp,
                 "integ" => MeasOp::Integ,
                 _ => unreachable!(),
             };
@@ -207,19 +251,29 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
             for i in 4..toks.len() {
                 let lc = toks[i].to_lowercase();
                 if lc == "from" || lc == "to" || lc.starts_with("from=") || lc.starts_with("to=") {
-                    split = i; break;
+                    split = i;
+                    break;
                 }
             }
             let expr = parse_expr(&toks[4..split].join(" "))?;
             let (_e, kws) = split_kw(split, toks.len());
-            let from = kws.get("from").map(|s| parse_value(s, lineno)).transpose()?;
-            let to   = kws.get("to").map(|s| parse_value(s, lineno)).transpose()?;
-            Ok(Measurement { name, analysis, kind: MeasKind::Aggregate { op, expr, from, to } })
+            let from = kws
+                .get("from")
+                .map(|s| parse_value(s, lineno))
+                .transpose()?;
+            let to = kws.get("to").map(|s| parse_value(s, lineno)).transpose()?;
+            Ok(Measurement {
+                name,
+                analysis,
+                kind: MeasKind::Aggregate { op, expr, from, to },
+            })
         }
 
         other => Err(ParseError::Syntax {
             line: lineno,
-            msg: format!(".meas op '{other}' unsupported (use FIND/MAX/MIN/AVG/RMS/PP/INTEG/DERIV/TRIG)"),
+            msg: format!(
+                ".meas op '{other}' unsupported (use FIND/MAX/MIN/AVG/RMS/PP/INTEG/DERIV/TRIG)"
+            ),
         }),
     }
 }
@@ -230,7 +284,11 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
 /// Tokens that don't match the `V(<name>)=<value>` shape are silently ignored
 /// (they're typically the leading `.ic`/`.nodeset` keyword itself).
 pub(super) fn parse_node_assignments(line: &str) -> Result<Vec<(String, f64)>, ParseError> {
-    let raw: String = line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+    let raw: String = line
+        .split_whitespace()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut out = Vec::new();
 
     // Pre-process: collapse spaces around `=` and inside `V(…)` so we can
@@ -244,14 +302,13 @@ pub(super) fn parse_node_assignments(line: &str) -> Result<Vec<(String, f64)>, P
             None => continue,
         };
         let lhs_lc = lhs.to_lowercase();
-        let name = if let Some(inner) = lhs_lc.strip_prefix("v(").and_then(|s| s.strip_suffix(')')) {
+        let name = if let Some(inner) = lhs_lc.strip_prefix("v(").and_then(|s| s.strip_suffix(')'))
+        {
             inner.to_string()
         } else {
             lhs_lc.clone()
         };
-        let value: f64 = parse_value(rhs, 0).unwrap_or_else(|_| {
-            rhs.parse::<f64>().unwrap_or(0.0)
-        });
+        let value: f64 = parse_value(rhs, 0).unwrap_or_else(|_| rhs.parse::<f64>().unwrap_or(0.0));
         out.push((canon_node(&name), value));
     }
     Ok(out)
@@ -285,7 +342,11 @@ pub(super) fn parse_options_directive(line: &str) -> Vec<(String, String)> {
 pub(super) fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.len() < 3 {
-        return Err(ParseError::FieldCount { expected: "≥3 (.tran step stop)", got: tokens.len(), line: lineno });
+        return Err(ParseError::FieldCount {
+            expected: "≥3 (.tran step stop)",
+            got: tokens.len(),
+            line: lineno,
+        });
     }
     Ok(Analysis::Tran {
         step: parse_value(tokens[1], lineno)?,
@@ -303,21 +364,27 @@ pub(super) fn parse_dc(line: &str, lineno: usize) -> Result<Analysis, ParseError
             line: lineno,
         });
     }
-    let src   = tokens[1].to_lowercase();
+    let src = tokens[1].to_lowercase();
     let start = parse_value(tokens[2], lineno)?;
-    let stop  = parse_value(tokens[3], lineno)?;
-    let step  = parse_value(tokens[4], lineno)?;
+    let stop = parse_value(tokens[3], lineno)?;
+    let step = parse_value(tokens[4], lineno)?;
     let nested = if tokens.len() >= 9 {
         Some(DcSweepSpec {
-            src:   tokens[5].to_lowercase(),
+            src: tokens[5].to_lowercase(),
             start: parse_value(tokens[6], lineno)?,
-            stop:  parse_value(tokens[7], lineno)?,
-            step:  parse_value(tokens[8], lineno)?,
+            stop: parse_value(tokens[7], lineno)?,
+            step: parse_value(tokens[8], lineno)?,
         })
     } else {
         None
     };
-    Ok(Analysis::Dc { src, start, stop, step, nested })
+    Ok(Analysis::Dc {
+        src,
+        start,
+        stop,
+        step,
+        nested,
+    })
 }
 
 pub(super) fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
@@ -333,10 +400,12 @@ pub(super) fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError
         "dec" => AcVariation::Dec,
         "oct" => AcVariation::Oct,
         "lin" => AcVariation::Lin,
-        other => return Err(ParseError::Syntax {
-            line: lineno,
-            msg: format!("unknown AC variation '{other}'; expected dec, oct, or lin"),
-        }),
+        other => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!("unknown AC variation '{other}'; expected dec, oct, or lin"),
+            })
+        }
     };
     let points = tokens[2].parse::<usize>().map_err(|_| ParseError::Syntax {
         line: lineno,
@@ -346,7 +415,7 @@ pub(super) fn parse_ac(line: &str, lineno: usize) -> Result<Analysis, ParseError
         variation,
         points,
         fstart: parse_value(tokens[3], lineno)?,
-        fstop:  parse_value(tokens[4], lineno)?,
+        fstop: parse_value(tokens[4], lineno)?,
     })
 }
 
@@ -382,10 +451,12 @@ pub(super) fn parse_noise(line: &str, lineno: usize) -> Result<Analysis, ParseEr
         "dec" => AcVariation::Dec,
         "oct" => AcVariation::Oct,
         "lin" => AcVariation::Lin,
-        other => return Err(ParseError::Syntax {
-            line: lineno,
-            msg: format!("unknown variation '{other}'; expected dec, oct, or lin"),
-        }),
+        other => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!("unknown variation '{other}'; expected dec, oct, or lin"),
+            })
+        }
     };
     let points = tokens[4].parse::<usize>().map_err(|_| ParseError::Syntax {
         line: lineno,
@@ -398,7 +469,6 @@ pub(super) fn parse_noise(line: &str, lineno: usize) -> Result<Analysis, ParseEr
         variation,
         points,
         fstart: parse_value(tokens[5], lineno)?,
-        fstop:  parse_value(tokens[6], lineno)?,
+        fstop: parse_value(tokens[6], lineno)?,
     })
 }
-

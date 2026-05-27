@@ -34,7 +34,7 @@ use std::os::raw::c_int;
 /// Default size for the `klu_common` backing buffer.  4096 bytes, which
 /// is comfortably larger than the actual struct on every SuiteSparse
 /// version we care about.
-const COMMON_BUF_F64S: usize = 512;  // 4096 bytes / 8 bytes per f64
+const COMMON_BUF_F64S: usize = 512; // 4096 bytes / 8 bytes per f64
 
 // ---------------------------------------------------------------------------
 // Raw extern "C" declarations.
@@ -48,12 +48,7 @@ const COMMON_BUF_F64S: usize = 512;  // 4096 bytes / 8 bytes per f64
 extern "C" {
     fn klu_defaults(common: *mut c_void) -> c_int;
 
-    fn klu_analyze(
-        n: i32,
-        ap: *mut i32,
-        ai: *mut i32,
-        common: *mut c_void,
-    ) -> *mut c_void;
+    fn klu_analyze(n: i32, ap: *mut i32, ai: *mut i32, common: *mut c_void) -> *mut c_void;
 
     fn klu_factor(
         ap: *mut i32,
@@ -90,15 +85,9 @@ extern "C" {
         common: *mut c_void,
     ) -> c_int;
 
-    fn klu_free_symbolic(
-        symbolic: *mut *mut c_void,
-        common: *mut c_void,
-    ) -> c_int;
+    fn klu_free_symbolic(symbolic: *mut *mut c_void, common: *mut c_void) -> c_int;
 
-    fn klu_free_numeric(
-        numeric: *mut *mut c_void,
-        common: *mut c_void,
-    ) -> c_int;
+    fn klu_free_numeric(numeric: *mut *mut c_void, common: *mut c_void) -> c_int;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,11 +114,11 @@ pub enum KluError {
 impl std::fmt::Display for KluError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KluError::AnalyzeFailed   => write!(f, "klu_analyze returned NULL"),
-            KluError::FactorFailed    => write!(f, "klu_factor returned NULL (singular matrix?)"),
-            KluError::RefactorFailed  => write!(f, "klu_refactor failed"),
-            KluError::SolveFailed     => write!(f, "klu_solve / klu_tsolve failed"),
-            KluError::BadShape        => write!(f, "CSC dimensions inconsistent with system size"),
+            KluError::AnalyzeFailed => write!(f, "klu_analyze returned NULL"),
+            KluError::FactorFailed => write!(f, "klu_factor returned NULL (singular matrix?)"),
+            KluError::RefactorFailed => write!(f, "klu_refactor failed"),
+            KluError::SolveFailed => write!(f, "klu_solve / klu_tsolve failed"),
+            KluError::BadShape => write!(f, "CSC dimensions inconsistent with system size"),
         }
     }
 }
@@ -169,7 +158,9 @@ impl KluCommon {
 }
 
 impl Default for KluCommon {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Owned handle to a KLU symbolic factorisation (column permutation +
@@ -193,14 +184,8 @@ impl KluSymbolic {
         if ap.len() != n + 1 {
             return Err(KluError::BadShape);
         }
-        let ptr = unsafe {
-            klu_analyze(
-                n as i32,
-                ap.as_mut_ptr(),
-                ai.as_mut_ptr(),
-                common.as_ptr(),
-            )
-        };
+        let ptr =
+            unsafe { klu_analyze(n as i32, ap.as_mut_ptr(), ai.as_mut_ptr(), common.as_ptr()) };
         if ptr.is_null() {
             return Err(KluError::AnalyzeFailed);
         }
@@ -435,10 +420,10 @@ mod tests {
         // 0 -1  4 -1
         // 0  0 -1  3
         let a = vec![
-            vec![ 4.0, -1.0,  0.0,  0.0],
-            vec![-1.0,  4.0, -1.0,  0.0],
-            vec![ 0.0, -1.0,  4.0, -1.0],
-            vec![ 0.0,  0.0, -1.0,  3.0],
+            vec![4.0, -1.0, 0.0, 0.0],
+            vec![-1.0, 4.0, -1.0, 0.0],
+            vec![0.0, -1.0, 4.0, -1.0],
+            vec![0.0, 0.0, -1.0, 3.0],
         ];
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let x = klu_solve_dense(&a, &b).unwrap();
@@ -450,8 +435,11 @@ mod tests {
             }
         }
         for i in 0..4 {
-            assert!((r[i] - b[i]).abs() < 1e-10,
-                "row {i}: Ax-b = {:.3e}", r[i] - b[i]);
+            assert!(
+                (r[i] - b[i]).abs() < 1e-10,
+                "row {i}: Ax-b = {:.3e}",
+                r[i] - b[i]
+            );
         }
     }
 
@@ -460,8 +448,10 @@ mod tests {
         let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         let b = vec![1.0, 2.0];
         let r = klu_solve_dense(&a, &b);
-        assert!(matches!(r, Err(KluError::FactorFailed) | Err(KluError::SolveFailed)),
-            "expected factor/solve failure, got {r:?}");
+        assert!(
+            matches!(r, Err(KluError::FactorFailed) | Err(KluError::SolveFailed)),
+            "expected factor/solve failure, got {r:?}"
+        );
     }
 
     #[test]
@@ -469,14 +459,12 @@ mod tests {
         // Verifies the cache path: analyze + factor + solve, then change
         // values (preserving pattern) and refactor + solve.  This is the
         // motivation for the entire KLU integration.
-        let mut a = vec![
-            vec![2.0, 1.0],
-            vec![0.0, 3.0],
-        ];
+        let mut a = vec![vec![2.0, 1.0], vec![0.0, 3.0]];
         let mut common = KluCommon::new();
         let (mut ap, mut ai, mut ax) = dense_to_csc(&a, 1e-30);
         let symbolic = KluSymbolic::analyze(2, &mut ap, &mut ai, &mut common).unwrap();
-        let mut numeric = KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut common).unwrap();
+        let mut numeric =
+            KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut common).unwrap();
         let mut x = vec![3.0, 6.0];
         numeric.solve(&symbolic, &mut x, &mut common).unwrap();
         // 2x+y=3, 3y=6 → y=2, 2x=1 → x=0.5
@@ -484,10 +472,15 @@ mod tests {
         assert!((x[1] - 2.0).abs() < 1e-12);
 
         // Change values, same sparsity pattern → refactor.
-        a[0][0] = 5.0; a[0][1] = 1.0; a[1][1] = 4.0;
+        a[0][0] = 5.0;
+        a[0][1] = 1.0;
+        a[1][1] = 4.0;
         let (mut ap2, mut ai2, mut ax2) = dense_to_csc(&a, 1e-30);
-        assert_eq!(ap, ap2); assert_eq!(ai, ai2);  // pattern preserved
-        numeric.refactor(&mut ap2, &mut ai2, &mut ax2, &symbolic, &mut common).unwrap();
+        assert_eq!(ap, ap2);
+        assert_eq!(ai, ai2); // pattern preserved
+        numeric
+            .refactor(&mut ap2, &mut ai2, &mut ax2, &symbolic, &mut common)
+            .unwrap();
         let mut x = vec![6.0, 8.0];
         numeric.solve(&symbolic, &mut x, &mut common).unwrap();
         // 5x+y=6, 4y=8 → y=2, 5x=4 → x=0.8

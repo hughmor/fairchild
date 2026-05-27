@@ -1,6 +1,6 @@
+use super::stamp_potential_eq;
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
-use super::stamp_potential_eq;
 
 // ────────────────────────────────────────────────────────────────────────
 // Native directional coupler (2×2)
@@ -28,11 +28,11 @@ use super::stamp_potential_eq;
 /// closed-loop topologies that prevents a missing-driver bind-loop on d_λ.
 pub struct NativeDirectionalCoupler {
     kappa_per_m: f64,
-    length_m:    f64,
-    n_channels:  usize,
-    wpc:         usize,            // 3 or 5
-    nodes:       Vec<NodeId>,
-    branches:    Vec<Option<usize>>,
+    length_m: f64,
+    n_channels: usize,
+    wpc: usize, // 3 or 5
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
 }
 
 impl NativeDirectionalCoupler {
@@ -51,16 +51,18 @@ impl NativeDirectionalCoupler {
         Self {
             kappa_per_m: kappa_l / length_m,
             length_m,
-            n_channels:  0,
-            wpc:         3,
-            nodes:       Vec::new(),
-            branches:    Vec::new(),
+            n_channels: 0,
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
         }
     }
 }
 
 impl Device for NativeDirectionalCoupler {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
@@ -77,26 +79,43 @@ impl Device for NativeDirectionalCoupler {
         );
         let n = terminals.len() / stride;
         self.n_channels = n;
-        self.nodes      = terminals.to_vec();
+        self.nodes = terminals.to_vec();
         // Per channel: 4 fw branches (re, im for c and d) + (if bidir) 4 bw
         // branches (re, im for a and b) + 2 λ branches (c_λ, d_λ).
         let bpc = if wpc == 5 { 10 } else { 6 };
-        self.branches   = vec![None; bpc * n];
+        self.branches = vec![None; bpc * n];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         match name.to_lowercase().as_str() {
-            "kappa_per_m" | "kappa" => { self.kappa_per_m = value; true }
-            "l_um"   => { self.length_m = value * 1e-6; true }
-            "l_m" | "length" => { self.length_m = value; true }
+            "kappa_per_m" | "kappa" => {
+                self.kappa_per_m = value;
+                true
+            }
+            "l_um" => {
+                self.length_m = value * 1e-6;
+                true
+            }
+            "l_m" | "length" => {
+                self.length_m = value;
+                true
+            }
             "kappa_l" | "kappal" => {
-                self.kappa_per_m = if self.length_m > 0.0 { value / self.length_m } else { 0.0 };
+                self.kappa_per_m = if self.length_m > 0.0 {
+                    value / self.length_m
+                } else {
+                    0.0
+                };
                 true
             }
             _ => false,
@@ -108,11 +127,11 @@ impl Device for NativeDirectionalCoupler {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n   = self.n_channels;
+        let n = self.n_channels;
         let wpc = self.wpc;
-        let kl  = self.kappa_per_m * self.length_m;
-        let t   = kl.cos();
-        let s   = kl.sin();
+        let kl = self.kappa_per_m * self.length_m;
+        let t = kl.cos();
+        let s = kl.sin();
         let bpc = if wpc == 5 { 10 } else { 6 };
         let lam = wpc - 1;
         let port_b = wpc * n;
@@ -121,29 +140,47 @@ impl Device for NativeDirectionalCoupler {
         for k in 0..n {
             let a_re_fw = self.nodes[wpc * k];
             let a_im_fw = self.nodes[wpc * k + 1];
-            let a_l     = self.nodes[wpc * k + lam];
+            let a_l = self.nodes[wpc * k + lam];
             let b_re_fw = self.nodes[port_b + wpc * k];
             let b_im_fw = self.nodes[port_b + wpc * k + 1];
             let c_re_fw = self.nodes[port_c + wpc * k];
             let c_im_fw = self.nodes[port_c + wpc * k + 1];
-            let c_l     = self.nodes[port_c + wpc * k + lam];
+            let c_l = self.nodes[port_c + wpc * k + lam];
             let d_re_fw = self.nodes[port_d + wpc * k];
             let d_im_fw = self.nodes[port_d + wpc * k + 1];
-            let d_l     = self.nodes[port_d + wpc * k + lam];
+            let d_l = self.nodes[port_d + wpc * k + lam];
             // Forward: c, d are outputs computed from a, b inputs.
-            stamp_potential_eq(mat, &self.branches, bpc * k,     c_re_fw,
-                &[(a_re_fw, -t), (b_im_fw, -s)]);
-            stamp_potential_eq(mat, &self.branches, bpc * k + 1, c_im_fw,
-                &[(a_im_fw, -t), (b_re_fw,  s)]);
-            stamp_potential_eq(mat, &self.branches, bpc * k + 2, d_re_fw,
-                &[(b_re_fw, -t), (a_im_fw, -s)]);
-            stamp_potential_eq(mat, &self.branches, bpc * k + 3, d_im_fw,
-                &[(b_im_fw, -t), (a_re_fw,  s)]);
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                bpc * k,
+                c_re_fw,
+                &[(a_re_fw, -t), (b_im_fw, -s)],
+            );
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                bpc * k + 1,
+                c_im_fw,
+                &[(a_im_fw, -t), (b_re_fw, s)],
+            );
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                bpc * k + 2,
+                d_re_fw,
+                &[(b_re_fw, -t), (a_im_fw, -s)],
+            );
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                bpc * k + 3,
+                d_im_fw,
+                &[(b_im_fw, -t), (a_re_fw, s)],
+            );
             // λ wires: c_λ = a_λ, d_λ = a_λ (closed-loop bind safety).
-            stamp_potential_eq(mat, &self.branches, bpc * k + 4, c_l,
-                &[(a_l, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l,
-                &[(a_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 4, c_l, &[(a_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l, &[(a_l, -1.0)]);
             if wpc == 5 {
                 // Bw: a, b are outputs computed from c, d inputs (same matrix,
                 // reciprocal coupler).
@@ -155,19 +192,42 @@ impl Device for NativeDirectionalCoupler {
                 let c_im_bw = self.nodes[port_c + wpc * k + 3];
                 let d_re_bw = self.nodes[port_d + wpc * k + 2];
                 let d_im_bw = self.nodes[port_d + wpc * k + 3];
-                stamp_potential_eq(mat, &self.branches, bpc * k + 6, a_re_bw,
-                    &[(c_re_bw, -t), (d_im_bw, -s)]);
-                stamp_potential_eq(mat, &self.branches, bpc * k + 7, a_im_bw,
-                    &[(c_im_bw, -t), (d_re_bw,  s)]);
-                stamp_potential_eq(mat, &self.branches, bpc * k + 8, b_re_bw,
-                    &[(d_re_bw, -t), (c_im_bw, -s)]);
-                stamp_potential_eq(mat, &self.branches, bpc * k + 9, b_im_bw,
-                    &[(d_im_bw, -t), (c_re_bw,  s)]);
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    bpc * k + 6,
+                    a_re_bw,
+                    &[(c_re_bw, -t), (d_im_bw, -s)],
+                );
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    bpc * k + 7,
+                    a_im_bw,
+                    &[(c_im_bw, -t), (d_re_bw, s)],
+                );
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    bpc * k + 8,
+                    b_re_bw,
+                    &[(d_re_bw, -t), (c_im_bw, -s)],
+                );
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    bpc * k + 9,
+                    b_im_bw,
+                    &[(d_im_bw, -t), (c_re_bw, s)],
+                );
             }
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
-

@@ -1,12 +1,11 @@
+use fairchild_core::device_registry::DeviceRegistry;
 /// Tests for coupled inductors (K elements).
 ///
 /// Validates the Backward-Euler companion model for mutual inductance:
 ///   M = coupling * sqrt(L1 * L2)
 ///   det = L1*L2 - M²  (= L1*L2*(1-k²))
 ///   G11 = h*L2/det,  G22 = h*L1/det,  G12 = G21 = -h*M/det
-
 use fairchild_core::tran::{tran_nr_with_registry, TranResult};
-use fairchild_core::device_registry::DeviceRegistry;
 use fairchild_parser::parse_spice;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -50,14 +49,14 @@ L2 b2 0 1m
 .end
 ";
 
-    let res_k0  = run_be(netlist_k0,  1e-6, 100e-6);
+    let res_k0 = run_be(netlist_k0, 1e-6, 100e-6);
     let res_ref = run_be(netlist_ref, 1e-6, 100e-6);
 
     // Both circuits should produce the same voltage at b1 and b2.
     let t_check = 50e-6;
-    let vb1_k0  = res_k0 .voltage_at("b1", t_check).unwrap();
+    let vb1_k0 = res_k0.voltage_at("b1", t_check).unwrap();
     let vb1_ref = res_ref.voltage_at("b1", t_check).unwrap();
-    let vb2_k0  = res_k0 .voltage_at("b2", t_check).unwrap();
+    let vb2_k0 = res_k0.voltage_at("b2", t_check).unwrap();
     let vb2_ref = res_ref.voltage_at("b2", t_check).unwrap();
 
     assert!(
@@ -229,18 +228,22 @@ K1 l1 l2 0.5
 ";
 
     let res_unc = run_be(netlist_uncoupled, step, stop);
-    let res_cpl = run_be(netlist_coupled,   step, stop);
+    let res_cpl = run_be(netlist_coupled, step, stop);
 
     // Find the first zero-crossing of V(n1) after t=3µs (after the pulse ends at 2.1µs).
     // The tank rings: V starts positive (pulse charged C), falls, crosses zero,
     // then swings negative.  The first downward zero-crossing gives the quarter-period.
     let find_first_zero_crossing = |res: &TranResult| -> Option<f64> {
         let times = &res.time;
-        let v_n1  = res.node_voltages.get("n1")?;
+        let v_n1 = res.node_voltages.get("n1")?;
         let mut prev_v = 0.0f64;
         let mut prev_t = 0.0f64;
         for (&t, &v) in times.iter().zip(v_n1.iter()) {
-            if t < 3e-6 { prev_v = v; prev_t = t; continue; }
+            if t < 3e-6 {
+                prev_v = v;
+                prev_t = t;
+                continue;
+            }
             // Downward zero crossing: prev was positive, current is negative
             if prev_v > 0.0 && v <= 0.0 {
                 let frac = prev_v / (prev_v - v);
@@ -255,8 +258,14 @@ K1 l1 l2 0.5
     let t_zero_unc = find_first_zero_crossing(&res_unc);
     let t_zero_cpl = find_first_zero_crossing(&res_cpl);
 
-    assert!(t_zero_unc.is_some(), "uncoupled tank did not ring down through zero — check circuit");
-    assert!(t_zero_cpl.is_some(), "coupled tank did not ring down through zero");
+    assert!(
+        t_zero_unc.is_some(),
+        "uncoupled tank did not ring down through zero — check circuit"
+    );
+    assert!(
+        t_zero_cpl.is_some(),
+        "coupled tank did not ring down through zero"
+    );
 
     let t_unc = t_zero_unc.unwrap();
     let t_cpl = t_zero_cpl.unwrap();
@@ -279,4 +288,3 @@ K1 l1 l2 0.5
         "zero-crossing time ratio {ratio:.3} should be ≈ sqrt(1.5)={expected:.3} (±0.25)"
     );
 }
-

@@ -31,34 +31,42 @@ enum RefKind {
 
 /// Evaluation context that reads V/I from a snapshot of `x`.
 struct XContext<'a> {
-    x:        &'a [f64],
-    topo:     &'a CircuitTopology,
-    time:     f64,
+    x: &'a [f64],
+    topo: &'a CircuitTopology,
+    time: f64,
 }
 
 impl<'a> EvalContext for XContext<'a> {
     fn node_voltage(&self, node: &str) -> f64 {
-        if node == "0" || node == "gnd" { return 0.0; }
-        self.topo.node_index.get(node)
+        if node == "0" || node == "gnd" {
+            return 0.0;
+        }
+        self.topo
+            .node_index
+            .get(node)
             .map(|&i| self.x[i])
             .unwrap_or(0.0)
     }
     fn branch_current(&self, vsrc: &str) -> f64 {
         let n = self.topo.n_nodes();
-        self.topo.vsrc_index.get(vsrc)
+        self.topo
+            .vsrc_index
+            .get(vsrc)
             .map(|&i| self.x[n + i])
             .unwrap_or(0.0)
     }
-    fn time(&self) -> f64 { self.time }
+    fn time(&self) -> f64 {
+        self.time
+    }
 }
 
 /// A B-element device.
 pub struct BehavioralDevice {
     kind: BehavioralKind,
-    pos:  NodeId,
-    neg:  NodeId,
+    pos: NodeId,
+    neg: NodeId,
     /// Aux MNA row for V= form (None for I=).
-    vi:   Option<usize>,
+    vi: Option<usize>,
     /// Parsed expression.
     expr: Arc<Expr>,
     /// Topology snapshot (cheap: just an Arc-shared reference for name → index lookups).
@@ -72,9 +80,9 @@ pub struct BehavioralDevice {
     /// Norton-equivalent: `i_eq = f(x_old) − Σ_k g_k · x_old[col_k]`.
     /// Stamped into b at residual time; combined with `grads` in the Jacobian
     /// this gives the correct linearisation for `f(x_new)` at `x_old`.
-    i_eq:  f64,
+    i_eq: f64,
     /// Cached time (set at eval time).
-    t:     f64,
+    t: f64,
 }
 
 impl BehavioralDevice {
@@ -82,25 +90,38 @@ impl BehavioralDevice {
     pub fn build(
         topo: Arc<CircuitTopology>,
         name: &str,
-        pos:  &str,
-        neg:  &str,
+        pos: &str,
+        neg: &str,
         kind: BehavioralKind,
         expr: Expr,
     ) -> Self {
-        let pos_id = if pos == "0" || pos == "gnd" { None } else { topo.node_index.get(pos).copied() };
-        let neg_id = if neg == "0" || neg == "gnd" { None } else { topo.node_index.get(neg).copied() };
+        let pos_id = if pos == "0" || pos == "gnd" {
+            None
+        } else {
+            topo.node_index.get(pos).copied()
+        };
+        let neg_id = if neg == "0" || neg == "gnd" {
+            None
+        } else {
+            topo.node_index.get(neg).copied()
+        };
         let vi = if kind == BehavioralKind::Voltage {
             topo.vsrc_index.get(name).copied()
-        } else { None };
+        } else {
+            None
+        };
 
         // Collect refs from the expression and resolve them.
         let mut v_nodes = Vec::new();
-        let mut i_srcs  = Vec::new();
+        let mut i_srcs = Vec::new();
         expr.collect_refs(&mut v_nodes, &mut i_srcs);
         let mut refs: Vec<RefKind> = Vec::new();
         for n in &v_nodes {
-            let id = if n == "0" || n == "gnd" { None }
-                     else { topo.node_index.get(n).copied() };
+            let id = if n == "0" || n == "gnd" {
+                None
+            } else {
+                topo.node_index.get(n).copied()
+            };
             refs.push(RefKind::NodeV(id));
         }
         for s in &i_srcs {
@@ -110,17 +131,20 @@ impl BehavioralDevice {
         }
         // De-dup refs by their (kind, coord) key.
         let key = |r: &RefKind| match r {
-            RefKind::NodeV(Some(i))   => (0u8, *i),
-            RefKind::NodeV(None)      => (0, usize::MAX),
-            RefKind::BranchI(i)       => (1, *i),
-            RefKind::Time             => (2, 0),
+            RefKind::NodeV(Some(i)) => (0u8, *i),
+            RefKind::NodeV(None) => (0, usize::MAX),
+            RefKind::BranchI(i) => (1, *i),
+            RefKind::Time => (2, 0),
         };
         refs.sort_by_key(|r| key(r));
         refs.dedup_by(|a, b| key(a) == key(b));
 
         let grads = vec![0.0; refs.len()];
         BehavioralDevice {
-            kind, pos: pos_id, neg: neg_id, vi,
+            kind,
+            pos: pos_id,
+            neg: neg_id,
+            vi,
             expr: Arc::new(expr),
             topo,
             refs,
@@ -132,7 +156,11 @@ impl BehavioralDevice {
     }
 
     fn eval_value(&self, x: &[f64], t: f64) -> f64 {
-        let ctx = XContext { x, topo: &self.topo, time: t };
+        let ctx = XContext {
+            x,
+            topo: &self.topo,
+            time: t,
+        };
         self.expr.eval(&ctx)
     }
 }
@@ -149,8 +177,9 @@ mod tests {
         // for R2=1k that pins V(out) = −I·R = −1V.
         let net = parse_spice(
             "* b\nV1 in 0 DC 1\nR1 in nin 1\n\
-             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n.end\n"
-        ).unwrap();
+             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
         let v_out = r.node_voltage("out").unwrap();
         assert!((v_out + 1.0).abs() < 1e-4, "V(out)={v_out}");
@@ -161,8 +190,9 @@ mod tests {
         // B1 V = V(in) * 2.  V(in) = 1, so V(out) = 2.
         let net = parse_spice(
             "* bv\nV1 in 0 DC 1\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n.end\n"
-        ).unwrap();
+             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
         let v_out = r.node_voltage("out").unwrap();
         assert!((v_out - 2.0).abs() < 1e-4, "V(out)={v_out}");
@@ -173,8 +203,9 @@ mod tests {
         // B1 V = V(in) ^ 2.  V(in) = 0.7, so V(out) should converge to 0.49.
         let net = parse_spice(
             "* bv\nV1 in 0 DC 0.7\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n.end\n"
-        ).unwrap();
+             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
         let v_out = r.node_voltage("out").unwrap();
         assert!((v_out - 0.49).abs() < 1e-3, "V(out)={v_out}");
@@ -182,7 +213,9 @@ mod tests {
 }
 
 impl Device for BehavioralDevice {
-    fn num_terminals(&self) -> usize { 2 }
+    fn num_terminals(&self) -> usize {
+        2
+    }
     fn setup_model(&mut self, _ctx: &SimContext) {}
     fn setup_instance(&mut self, _terminals: &[NodeId], _ctx: &SimContext) {}
 
@@ -195,12 +228,15 @@ impl Device for BehavioralDevice {
         let mut sum_g_x = 0.0;
         for (k, r) in self.refs.iter().enumerate() {
             let idx_opt: Option<usize> = match r {
-                RefKind::NodeV(Some(i))   => Some(*i),
-                RefKind::NodeV(None)      => None,
-                RefKind::BranchI(i)       => Some(n_nodes + *i),
-                RefKind::Time             => None,
+                RefKind::NodeV(Some(i)) => Some(*i),
+                RefKind::NodeV(None) => None,
+                RefKind::BranchI(i) => Some(n_nodes + *i),
+                RefKind::Time => None,
             };
-            let Some(i) = idx_opt else { self.grads[k] = 0.0; continue; };
+            let Some(i) = idx_opt else {
+                self.grads[k] = 0.0;
+                continue;
+            };
 
             let xi = x_pert[i];
             let h = 1e-6 * (xi.abs().max(1.0));
@@ -231,8 +267,12 @@ impl Device for BehavioralDevice {
                 // KCL: current OUT of pos is f(x_new) ≈ i_eq + Σ_k g_k·x_new[k].
                 // Move Σ g x to A; i_eq goes to b with the "OUT" sign:
                 //   b[pos] -= i_eq,  b[neg] += i_eq.
-                if let Some(p) = self.pos { b[p] -= self.i_eq; }
-                if let Some(n) = self.neg { b[n] += self.i_eq; }
+                if let Some(p) = self.pos {
+                    b[p] -= self.i_eq;
+                }
+                if let Some(n) = self.neg {
+                    b[n] += self.i_eq;
+                }
             }
         }
     }
@@ -245,21 +285,21 @@ impl Device for BehavioralDevice {
                     let row = n_nodes + vi;
                     // Incidence (just like a real voltage source):
                     if let Some(p) = self.pos {
-                        mat.a[p][row]  += 1.0;
-                        mat.a[row][p]  += 1.0;
+                        mat.a[p][row] += 1.0;
+                        mat.a[row][p] += 1.0;
                     }
                     if let Some(n) = self.neg {
-                        mat.a[n][row]  -= 1.0;
-                        mat.a[row][n]  -= 1.0;
+                        mat.a[n][row] -= 1.0;
+                        mat.a[row][n] -= 1.0;
                     }
                     // The aux row equation V(pos) - V(neg) - Σ g_k·x_new[k] = i_eq
                     // gives -g_k entries at row=row, col=col_k.
                     for (k, r) in self.refs.iter().enumerate() {
                         let col_opt = match r {
-                            RefKind::NodeV(Some(i))   => Some(*i),
-                            RefKind::NodeV(None)      => None,
-                            RefKind::BranchI(i)       => Some(n_nodes + *i),
-                            RefKind::Time             => None,
+                            RefKind::NodeV(Some(i)) => Some(*i),
+                            RefKind::NodeV(None) => None,
+                            RefKind::BranchI(i) => Some(n_nodes + *i),
+                            RefKind::Time => None,
                         };
                         if let Some(col) = col_opt {
                             mat.a[row][col] -= self.grads[k];
@@ -272,18 +312,21 @@ impl Device for BehavioralDevice {
                 // KCL_neg coefficient is -g_k (current IN to neg).
                 for (k, r) in self.refs.iter().enumerate() {
                     let col_opt = match r {
-                        RefKind::NodeV(Some(i))   => Some(*i),
-                        RefKind::NodeV(None)      => None,
-                        RefKind::BranchI(i)       => Some(n_nodes + *i),
-                        RefKind::Time             => None,
+                        RefKind::NodeV(Some(i)) => Some(*i),
+                        RefKind::NodeV(None) => None,
+                        RefKind::BranchI(i) => Some(n_nodes + *i),
+                        RefKind::Time => None,
                     };
                     if let Some(col) = col_opt {
-                        if let Some(p) = self.pos { mat.a[p][col] += self.grads[k]; }
-                        if let Some(n) = self.neg { mat.a[n][col] -= self.grads[k]; }
+                        if let Some(p) = self.pos {
+                            mat.a[p][col] += self.grads[k];
+                        }
+                        if let Some(n) = self.neg {
+                            mat.a[n][col] -= self.grads[k];
+                        }
                     }
                 }
             }
         }
     }
 }
-

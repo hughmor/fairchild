@@ -18,7 +18,7 @@ use crate::options::SimOptions;
 /// One axis of a sweep: name of the swept source plus the linear point grid.
 #[derive(Debug, Clone)]
 pub struct SweepAxis {
-    pub src:    String,
+    pub src: String,
     pub values: Vec<f64>,
 }
 
@@ -78,8 +78,8 @@ impl DcSweepResult {
 
     /// Write the sweep as an ngspice-compatible Nutmeg ASCII rawfile.
     pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_vars = 1 + self.inner.is_some() as usize
-                       + self.node_voltages.len() + self.vsrc_currents.len();
+        let n_vars =
+            1 + self.inner.is_some() as usize + self.node_voltages.len() + self.vsrc_currents.len();
         let n_pts = self.n_points();
         writeln!(w, "Title: {title}")?;
         writeln!(w, "Plotname: DC Sweep")?;
@@ -183,7 +183,7 @@ pub fn dc_sweep_with_registry_opts(
 ) -> Result<DcSweepResult, SimError> {
     let outer_vals = linspace(start, stop, step);
     let inner = nested.map(|(name, a, b, s)| SweepAxis {
-        src:    name.to_lowercase(),
+        src: name.to_lowercase(),
         values: linspace(a, b, s),
     });
     let inner_vals: Vec<f64> = inner.as_ref().map_or(vec![0.0], |i| i.values.clone());
@@ -193,7 +193,7 @@ pub fn dc_sweep_with_registry_opts(
     // We need the topology to allocate result vectors; just build it once from
     // the unmodified netlist (topology only depends on connectivity, not values).
     let probe = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-    let topo  = probe.topo;
+    let topo = probe.topo;
 
     // Each sweep point is independent: clone the netlist, override the
     // swept source(s), run a fresh DC OP.  Solve all points in parallel
@@ -220,21 +220,28 @@ pub fn dc_sweep_with_registry_opts(
     };
 
     let solved: Vec<Result<(usize, Vec<f64>), SimError>> = if opts.verbose {
-        points.iter()
+        points
+            .iter()
             .map(|&(idx, ov, iv)| solve_one(ov, iv).map(|x| (idx, x)))
             .collect()
     } else {
-        points.par_iter()
+        points
+            .par_iter()
             .map(|&(idx, ov, iv)| solve_one(ov, iv).map(|x| (idx, x)))
             .collect()
     };
-    let solved: Vec<(usize, Vec<f64>)> = solved.into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let solved: Vec<(usize, Vec<f64>)> = solved.into_iter().collect::<Result<Vec<_>, _>>()?;
 
-    let mut node_voltages: IndexMap<String, Vec<f64>> = topo.node_index.keys()
-        .map(|k| (k.clone(), vec![0.0; total])).collect();
-    let mut vsrc_currents: IndexMap<String, Vec<f64>> = topo.vsrc_index.keys()
-        .map(|k| (k.clone(), vec![0.0; total])).collect();
+    let mut node_voltages: IndexMap<String, Vec<f64>> = topo
+        .node_index
+        .keys()
+        .map(|k| (k.clone(), vec![0.0; total]))
+        .collect();
+    let mut vsrc_currents: IndexMap<String, Vec<f64>> = topo
+        .vsrc_index
+        .keys()
+        .map(|k| (k.clone(), vec![0.0; total]))
+        .collect();
     let n_nodes = topo.n_nodes();
     for (idx, x) in solved {
         for (name, &node_idx) in &topo.node_index {
@@ -246,7 +253,10 @@ pub fn dc_sweep_with_registry_opts(
     }
 
     Ok(DcSweepResult {
-        outer: SweepAxis { src: src.to_lowercase(), values: outer_vals },
+        outer: SweepAxis {
+            src: src.to_lowercase(),
+            values: outer_vals,
+        },
         inner,
         node_voltages,
         vsrc_currents,
@@ -263,8 +273,16 @@ pub fn dc_sweep_with_registry(
     nested: Option<(&str, f64, f64, f64)>,
     registry: &DeviceRegistry,
 ) -> Result<DcSweepResult, SimError> {
-    dc_sweep_with_registry_opts(netlist, src, start, stop, step, nested, registry,
-        &SimOptions::from_netlist(netlist))
+    dc_sweep_with_registry_opts(
+        netlist,
+        src,
+        start,
+        stop,
+        step,
+        nested,
+        registry,
+        &SimOptions::from_netlist(netlist),
+    )
 }
 
 #[cfg(test)]
@@ -290,12 +308,12 @@ mod tests {
     #[test]
     fn dc_sweep_resistor_divider_linear() {
         // V1 → 1k → out → 1k → 0.  V(out) should be V1/2 at each sweep point.
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.dc V1 0 5 1\n.end\n"
-        ).unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.dc V1 0 5 1\n.end\n")
+                .unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 5.0, 1.0, None, &reg).unwrap();
-        assert_eq!(r.outer.values.len(), 6);  // 0,1,2,3,4,5
+        assert_eq!(r.outer.values.len(), 6); // 0,1,2,3,4,5
         let v_out = r.node_voltages.get("out").unwrap();
         for (v_in, &v) in r.outer.values.iter().zip(v_out.iter()) {
             assert!((v - 0.5 * v_in).abs() < 1e-6, "V(in)={v_in} V(out)={v}");
@@ -307,8 +325,9 @@ mod tests {
         // Diode I-V curve: V(b) > 0 and monotonic in V1.
         let net = parse_spice(
             "* diode IV\nV1 a 0 DC 0\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.dc V1 0 1 0.1\n.end\n"
-        ).unwrap();
+             .model myd D (Is=1e-14 N=1)\n.dc V1 0 1 0.1\n.end\n",
+        )
+        .unwrap();
         let reg = {
             let mut r = DeviceRegistry::new();
             r.register_builtin_diodes(&net.models);
@@ -317,16 +336,19 @@ mod tests {
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 1.0, 0.1, None, &reg).unwrap();
         let v_b = r.node_voltages.get("b").unwrap();
         for i in 1..v_b.len() {
-            assert!(v_b[i] >= v_b[i - 1] - 1e-9,
-                "V(b) not monotonic at step {i}: {} → {}", v_b[i - 1], v_b[i]);
+            assert!(
+                v_b[i] >= v_b[i - 1] - 1e-9,
+                "V(b) not monotonic at step {i}: {} → {}",
+                v_b[i - 1],
+                v_b[i]
+            );
         }
     }
 
     #[test]
     fn dc_sweep_csv_header_and_rows() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.end\n"
-        ).unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.end\n").unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 1.0, 0.5, None, &reg).unwrap();
         let mut buf = Vec::new();

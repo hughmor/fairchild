@@ -15,12 +15,12 @@ use crate::mna::MnaMatrix;
 /// re_bw, im_bw, λ) under bidirectional — the bw wires are forced to 0
 /// because a laser emits in one direction only.
 pub struct NativeCwLaser {
-    re_amp:     f64,
-    im_amp:     f64,
-    wavelen_m:  f64,
-    wpc:        usize,             // 3 (unidir) or 5 (bidir)
-    nodes:      Vec<NodeId>,
-    branches:   Vec<Option<usize>>,
+    re_amp: f64,
+    im_amp: f64,
+    wavelen_m: f64,
+    wpc: usize, // 3 (unidir) or 5 (bidir)
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
 }
 
 impl NativeCwLaser {
@@ -28,18 +28,20 @@ impl NativeCwLaser {
         // Defaults: 1 mW, 0° phase, 1550 nm.
         let p = 1e-3_f64;
         Self {
-            re_amp:    p.sqrt(),
-            im_amp:    0.0,
+            re_amp: p.sqrt(),
+            im_amp: 0.0,
             wavelen_m: 1550e-9,
-            wpc:       3,
-            nodes:     Vec::new(),
-            branches:  Vec::new(),
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
         }
     }
 }
 
 impl Device for NativeCwLaser {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wavelen_m = ctx.lambda_center_m;
@@ -49,17 +51,24 @@ impl Device for NativeCwLaser {
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
-        debug_assert_eq!(terminals.len(), wpc,
+        debug_assert_eq!(
+            terminals.len(),
+            wpc,
             "fc_cw_laser: expected {wpc} terminals (one channel × wpc); got {}",
-            terminals.len());
-        self.nodes    = terminals.to_vec();
+            terminals.len()
+        );
+        self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -87,10 +96,22 @@ impl Device for NativeCwLaser {
                 self.im_amp = mag * phi.sin();
                 true
             }
-            "wavelength_nm" => { self.wavelen_m = value * 1e-9; true }
-            "wavelength_m"  => { self.wavelen_m = value; true }
-            "re_amp" => { self.re_amp = value; true }
-            "im_amp" => { self.im_amp = value; true }
+            "wavelength_nm" => {
+                self.wavelen_m = value * 1e-9;
+                true
+            }
+            "wavelength_m" => {
+                self.wavelen_m = value;
+                true
+            }
+            "re_amp" => {
+                self.re_amp = value;
+                true
+            }
+            "im_amp" => {
+                self.im_amp = value;
+                true
+            }
             _ => false,
         }
     }
@@ -102,15 +123,27 @@ impl Device for NativeCwLaser {
         // Wire order: [re_fw, im_fw, re_bw, im_bw, λ] (5-wire bidir) or
         //             [re,    im,    λ]               (3-wire unidir).
         if self.wpc == 5 {
-            if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
-            if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
+            if let Some(j) = self.branches[0] {
+                b[j] += self.re_amp;
+            }
+            if let Some(j) = self.branches[1] {
+                b[j] += self.im_amp;
+            }
             // bw wires forced to 0 — no contribution from RHS (branch row
             // already enforces V = 0 because rhs is 0).
-            if let Some(j) = self.branches[4] { b[j] += self.wavelen_m; }
+            if let Some(j) = self.branches[4] {
+                b[j] += self.wavelen_m;
+            }
         } else {
-            if let Some(j) = self.branches[0] { b[j] += self.re_amp; }
-            if let Some(j) = self.branches[1] { b[j] += self.im_amp; }
-            if let Some(j) = self.branches[2] { b[j] += self.wavelen_m; }
+            if let Some(j) = self.branches[0] {
+                b[j] += self.re_amp;
+            }
+            if let Some(j) = self.branches[1] {
+                b[j] += self.im_amp;
+            }
+            if let Some(j) = self.branches[2] {
+                b[j] += self.wavelen_m;
+            }
         }
     }
 
@@ -126,7 +159,10 @@ impl Device for NativeCwLaser {
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
-

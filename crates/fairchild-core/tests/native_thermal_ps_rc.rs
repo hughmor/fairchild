@@ -3,7 +3,9 @@
 //! design: the device declares 1 extra MNA state row for T(t) and stamps
 //! its BE-discretised state equation directly in load_jacobian_tran.
 
-use fairchild_core::{DeviceRegistry, SimOptions, dc_op_nr_with_registry, tran_nr_with_registry_opts};
+use fairchild_core::{
+    dc_op_nr_with_registry, tran_nr_with_registry_opts, DeviceRegistry, SimOptions,
+};
 use fairchild_parser::parse_spice;
 
 /// DC: with no time derivative the state equation reduces to T = P, so the
@@ -35,8 +37,10 @@ Vh vh 0 DC 1.0
     let v1_im = r1.node_voltage("out0_im_0").unwrap();
     let v2_re = r2.node_voltage("out0_re_0").unwrap();
     let v2_im = r2.node_voltage("out0_im_0").unwrap();
-    assert!((v1_re - v2_re).abs() < 1e-6,
-        "L1 vs L2 (DC) out.re mismatch: {v1_re} vs {v2_re}");
+    assert!(
+        (v1_re - v2_re).abs() < 1e-6,
+        "L1 vs L2 (DC) out.re mismatch: {v1_re} vs {v2_re}"
+    );
     assert!((v1_im - v2_im).abs() < 1e-6);
 }
 
@@ -66,10 +70,22 @@ Vh vh 0 PULSE(0 1.0 1u 100n 100n 100u 200u)
 .end
 ";
     let opts = SimOptions::from_netlist(&parse_spice(l1).unwrap());
-    let r1 = tran_nr_with_registry_opts(&parse_spice(l1).unwrap(),
-                                        1e-6, 30e-6, &DeviceRegistry::new(), &opts).unwrap();
-    let r2 = tran_nr_with_registry_opts(&parse_spice(l2).unwrap(),
-                                        1e-6, 30e-6, &DeviceRegistry::new(), &opts).unwrap();
+    let r1 = tran_nr_with_registry_opts(
+        &parse_spice(l1).unwrap(),
+        1e-6,
+        30e-6,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .unwrap();
+    let r2 = tran_nr_with_registry_opts(
+        &parse_spice(l2).unwrap(),
+        1e-6,
+        30e-6,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .unwrap();
     // At t ≈ 2 µs (1 µs after the edge, well below tau_th = 10 µs):
     //   L1 has fully responded (its phase = π·P/P_pi instantaneous).
     //   L2 has only partially responded (≈ 1 − exp(−1/10) ≈ 9.5% of final).
@@ -82,9 +98,11 @@ Vh vh 0 PULSE(0 1.0 1u 100n 100n 100u 200u)
     let in_amp = 1e-3_f64.sqrt();
     let dl1 = (phi_l1 - in_amp).abs();
     let dl2 = (phi_l2 - in_amp).abs();
-    assert!(dl2 < dl1,
+    assert!(
+        dl2 < dl1,
         "L2 should be less perturbed than L1 at t = 1 µs after edge \
-         (tau_th = 10 µs > t).  l1 dev={dl1:.4} l2 dev={dl2:.4}");
+         (tau_th = 10 µs > t).  l1 dev={dl1:.4} l2 dev={dl2:.4}"
+    );
 }
 
 /// Sanity: after t » tau_th, the L2 device should converge to the same
@@ -101,14 +119,31 @@ Vh vh 0 DC 1.0
 .options method=be
 .end
 ";
-    let l2 = l1.replace("fc_thermal_ps r_heater", "fc_thermal_ps_rc tau_th=10u r_heater");
+    let l2 = l1.replace(
+        "fc_thermal_ps r_heater",
+        "fc_thermal_ps_rc tau_th=10u r_heater",
+    );
     let opts = SimOptions::from_netlist(&parse_spice(l1).unwrap());
-    let r1 = tran_nr_with_registry_opts(&parse_spice(l1).unwrap(),
-                                        5e-6, 100e-6, &DeviceRegistry::new(), &opts).unwrap();
-    let r2 = tran_nr_with_registry_opts(&parse_spice(&l2).unwrap(),
-                                        5e-6, 100e-6, &DeviceRegistry::new(), &opts).unwrap();
+    let r1 = tran_nr_with_registry_opts(
+        &parse_spice(l1).unwrap(),
+        5e-6,
+        100e-6,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .unwrap();
+    let r2 = tran_nr_with_registry_opts(
+        &parse_spice(&l2).unwrap(),
+        5e-6,
+        100e-6,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .unwrap();
     let v1 = *r1.node_voltages.get("out0_re_0").unwrap().last().unwrap();
     let v2 = *r2.node_voltages.get("out0_re_0").unwrap().last().unwrap();
-    assert!((v1 - v2).abs() < 1e-3,
-        "at t = 100 µs (10·tau_th), L2 should match L1 steady state; v1={v1} v2={v2}");
+    assert!(
+        (v1 - v2).abs() < 1e-3,
+        "at t = 100 µs (10·tau_th), L2 should match L1 steady state; v1={v1} v2={v2}"
+    );
 }

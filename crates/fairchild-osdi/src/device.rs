@@ -21,11 +21,9 @@ use fairchild_core::device::{Device, EvalFlags, NodeId, SimContext};
 use fairchild_core::mna::MnaMatrix;
 
 use crate::ffi::{
-    OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas,
-    ANALYSIS_DC, ANALYSIS_TRAN,
-    CALC_RESIST_JACOBIAN, CALC_RESIST_RESIDUAL,
-    CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL,
-    PARA_KIND_MODEL, PARA_KIND_INST,
+    OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas, ANALYSIS_DC,
+    ANALYSIS_TRAN, CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL, CALC_RESIST_JACOBIAN,
+    CALC_RESIST_RESIDUAL, PARA_KIND_INST, PARA_KIND_MODEL,
 };
 use crate::loader::OsdiLibrary;
 
@@ -116,8 +114,12 @@ impl OsdiDevice {
     }
 
     /// Expose raw instance/model pointers for integration-test diagnostics.
-    pub fn inst_ptr_raw(&self) -> *mut c_void { self.inst_ptr() }
-    pub fn model_ptr_raw(&self) -> *mut c_void { self.model_ptr() }
+    pub fn inst_ptr_raw(&self) -> *mut c_void {
+        self.inst_ptr()
+    }
+    pub fn model_ptr_raw(&self) -> *mut c_void {
+        self.model_ptr()
+    }
 
     /// Read a model param's current value via access(READ), and report the pointer
     /// offset from model_ptr.  Returns (value, byte_offset_from_model_base) or None.
@@ -126,8 +128,10 @@ impl OsdiDevice {
         let desc = self.desc();
         let access_fn = desc.access?;
         let n_total = desc.num_params as usize;
-        let n_inst  = desc.num_instance_params as usize;
-        if n_total == 0 || desc.param_opvar.is_null() { return None; }
+        let n_inst = desc.num_instance_params as usize;
+        if n_total == 0 || desc.param_opvar.is_null() {
+            return None;
+        }
         let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
         // Use absolute index i (not relative j) — access() expects the absolute param_opvar index.
         for i in n_inst..n_total {
@@ -136,9 +140,12 @@ impl OsdiDevice {
                 let ptr = unsafe {
                     access_fn(std::ptr::null_mut(), self.model_ptr(), id, ACCESS_FLAG_READ)
                 };
-                if ptr.is_null() { return None; }
+                if ptr.is_null() {
+                    return None;
+                }
                 let value = unsafe { *(ptr as *const f64) };
-                let offset = unsafe { (ptr as *const u8).offset_from(self.model.as_ptr() as *const u8) };
+                let offset =
+                    unsafe { (ptr as *const u8).offset_from(self.model.as_ptr() as *const u8) };
                 return Some((value, offset));
             }
         }
@@ -156,8 +163,11 @@ impl Device for OsdiDevice {
         let setup_fn = self.desc().setup_model;
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
-            let mut res =
-                OsdiInitInfo { flags: 0, num_errors: 0, errors: std::ptr::null_mut() };
+            let mut res = OsdiInitInfo {
+                flags: 0,
+                num_errors: 0,
+                errors: std::ptr::null_mut(),
+            };
             unsafe {
                 f(
                     std::ptr::null_mut(), // handle (unused by most models)
@@ -176,7 +186,9 @@ impl Device for OsdiDevice {
         // with real allocated row indices.
         let num_nodes = self.desc().num_nodes as usize;
         let num_terminals = self.desc().num_terminals as usize;
-        self.mna_nodes = terminals.iter().copied()
+        self.mna_nodes = terminals
+            .iter()
+            .copied()
             .chain(std::iter::repeat(None).take(num_nodes.saturating_sub(terminals.len())))
             .take(num_nodes)
             .collect();
@@ -191,9 +203,8 @@ impl Device for OsdiDevice {
         // find which solution-vector index corresponds to its i-th node.
         // UINT32_MAX is the sentinel for ground (NodeId = None).
         // We write ALL num_nodes slots (terminals + internals).
-        let map_ptr = unsafe {
-            (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32
-        };
+        let map_ptr =
+            unsafe { (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32 };
         for i in 0..num_nodes {
             let node = self.mna_nodes.get(i).copied().flatten();
             unsafe {
@@ -203,8 +214,11 @@ impl Device for OsdiDevice {
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
-            let mut res =
-                OsdiInitInfo { flags: 0, num_errors: 0, errors: std::ptr::null_mut() };
+            let mut res = OsdiInitInfo {
+                flags: 0,
+                num_errors: 0,
+                errors: std::ptr::null_mut(),
+            };
             unsafe {
                 f(
                     std::ptr::null_mut(),
@@ -246,7 +260,11 @@ impl Device for OsdiDevice {
 
         let eval_fn = self.desc().eval;
         if let Some(f) = eval_fn {
-            let mut osdi_flags = if flags.transient { ANALYSIS_TRAN } else { ANALYSIS_DC };
+            let mut osdi_flags = if flags.transient {
+                ANALYSIS_TRAN
+            } else {
+                ANALYSIS_DC
+            };
             if flags.resistive {
                 osdi_flags |= CALC_RESIST_RESIDUAL | CALC_RESIST_JACOBIAN;
             }
@@ -281,7 +299,12 @@ impl Device for OsdiDevice {
             let mut temp = vec![0.0f64; b.len() + 1];
             let prev = unsafe { self.x_cache.as_ptr().add(1) as *mut f64 };
             unsafe {
-                f(self.inst_ptr(), self.model_ptr(), temp.as_mut_ptr().add(1), prev);
+                f(
+                    self.inst_ptr(),
+                    self.model_ptr(),
+                    temp.as_mut_ptr().add(1),
+                    prev,
+                );
             }
             for i in 0..b.len() {
                 b[i] += temp[i + 1];
@@ -310,10 +333,7 @@ impl Device for OsdiDevice {
         // jacobian_entries[0..num_resistive_jacobian_entries] are the resistive entries,
         // in the same order that write_jacobian_array_resist writes to jac_buf.
         let entries = unsafe {
-            std::slice::from_raw_parts(
-                desc.jacobian_entries,
-                desc.num_jacobian_entries as usize,
-            )
+            std::slice::from_raw_parts(desc.jacobian_entries, desc.num_jacobian_entries as usize)
         };
 
         for (i, entry) in entries.iter().take(n_resist).enumerate() {
@@ -335,10 +355,20 @@ impl Device for OsdiDevice {
             // Use x_tprev (previous accepted timestep) as the reactive history term.
             // Fall back to x_cache (current iterate) when x_tprev is not yet populated
             // (i.e., before the first commit_timestep call in the fixed-step path).
-            let prev_src = if self.x_tprev.is_empty() { &self.x_cache } else { &self.x_tprev };
+            let prev_src = if self.x_tprev.is_empty() {
+                &self.x_cache
+            } else {
+                &self.x_tprev
+            };
             let prev = unsafe { prev_src.as_ptr().add(1) as *mut f64 };
             unsafe {
-                f(self.inst_ptr(), self.model_ptr(), temp.as_mut_ptr().add(1), prev, alpha);
+                f(
+                    self.inst_ptr(),
+                    self.model_ptr(),
+                    temp.as_mut_ptr().add(1),
+                    prev,
+                    alpha,
+                );
             }
             for i in 0..b.len() {
                 b[i] += temp[i + 1];
@@ -366,12 +396,12 @@ impl Device for OsdiDevice {
         };
 
         let mut jac_buf = vec![0.0f64; n_react];
-        unsafe { f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr()); }
+        unsafe {
+            f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
+        }
 
         let n_total = desc.num_jacobian_entries as usize;
-        let entries = unsafe {
-            std::slice::from_raw_parts(desc.jacobian_entries, n_total)
-        };
+        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
 
         // Walk all entries; for each one with a reactive pointer (react_ptr_off != MAX),
         // consume the next value from jac_buf in order.
@@ -412,7 +442,7 @@ impl Device for OsdiDevice {
         // param_opvar layout: [inst_params(0..n_inst) | model_params(n_inst..n_total) | opvars]
         // The access() id is the ABSOLUTE param_opvar index (not relative within kind).
         let n_total = desc.num_params as usize;
-        let n_inst  = desc.num_instance_params as usize;
+        let n_inst = desc.num_instance_params as usize;
         if n_total == 0 || desc.param_opvar.is_null() {
             return false;
         }
@@ -423,10 +453,17 @@ impl Device for OsdiDevice {
             if osdi_param_name_matches(&params[i], name) {
                 let id = PARA_KIND_INST | i as u32;
                 let ptr = unsafe {
-                    access_fn(self.inst_ptr(), self.model_ptr(), id, crate::ffi::ACCESS_FLAG_SET)
+                    access_fn(
+                        self.inst_ptr(),
+                        self.model_ptr(),
+                        id,
+                        crate::ffi::ACCESS_FLAG_SET,
+                    )
                 };
                 if !ptr.is_null() {
-                    unsafe { *(ptr as *mut f64) = value; }
+                    unsafe {
+                        *(ptr as *mut f64) = value;
+                    }
                     return true;
                 }
             }
@@ -437,10 +474,17 @@ impl Device for OsdiDevice {
             if osdi_param_name_matches(&params[i], name) {
                 let id = PARA_KIND_MODEL | i as u32;
                 let ptr = unsafe {
-                    access_fn(std::ptr::null_mut(), self.model_ptr(), id, crate::ffi::ACCESS_FLAG_SET)
+                    access_fn(
+                        std::ptr::null_mut(),
+                        self.model_ptr(),
+                        id,
+                        crate::ffi::ACCESS_FLAG_SET,
+                    )
                 };
                 if !ptr.is_null() {
-                    unsafe { *(ptr as *mut f64) = value; }
+                    unsafe {
+                        *(ptr as *mut f64) = value;
+                    }
                     // Re-run setup_instance so the instance struct picks up the new model value.
                     // OpenVAF caches model-param-derived quantities in the instance during
                     // setup_instance; eval() reads from instance, not directly from model.
@@ -467,9 +511,8 @@ impl OsdiDevice {
         let num_nodes = self.desc().num_nodes as usize;
         let temperature = SimContext::default().temperature;
 
-        let map_ptr = unsafe {
-            (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32
-        };
+        let map_ptr =
+            unsafe { (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32 };
         for i in 0..num_nodes {
             let node = self.mna_nodes.get(i).copied().flatten();
             unsafe {
@@ -479,7 +522,11 @@ impl OsdiDevice {
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
-            let mut res = OsdiInitInfo { flags: 0, num_errors: 0, errors: std::ptr::null_mut() };
+            let mut res = OsdiInitInfo {
+                flags: 0,
+                num_errors: 0,
+                errors: std::ptr::null_mut(),
+            };
             unsafe {
                 f(
                     std::ptr::null_mut(),
@@ -507,7 +554,7 @@ fn osdi_param_name_matches(param: &OsdiParamOpvar, target: &str) -> bool {
     if param.name.is_null() {
         return false;
     }
-    let n = param.num_alias as usize + 1;  // primary + aliases
+    let n = param.num_alias as usize + 1; // primary + aliases
     let names = unsafe { std::slice::from_raw_parts(param.name, n) };
     for &name_ptr in names {
         if name_ptr.is_null() {

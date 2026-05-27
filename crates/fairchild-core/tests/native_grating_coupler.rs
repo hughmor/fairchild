@@ -1,6 +1,6 @@
 //! Native grating coupler regression tests.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// Drive a 1 V amplitude into a 3 dB grating coupler.  Expected
@@ -22,10 +22,15 @@ X1 in_re in_im in_wl out_re out_im out_wl fc_grating_coupler alpha_dB=3.0
     let v_im = r.node_voltage("out_im").unwrap();
     let v_wl = r.node_voltage("out_wl").unwrap();
     let t_expected = 10f64.powf(-3.0 / 20.0);
-    assert!((v_re - t_expected).abs() < 1e-6,
-        "V(out_re) = {v_re}; expected {t_expected}");
+    assert!(
+        (v_re - t_expected).abs() < 1e-6,
+        "V(out_re) = {v_re}; expected {t_expected}"
+    );
     assert!(v_im.abs() < 1e-6, "V(out_im) = {v_im}; expected 0");
-    assert!((v_wl - 1.55e-6).abs() < 1e-12, "V(out_wl) should pass through");
+    assert!(
+        (v_wl - 1.55e-6).abs() < 1e-12,
+        "V(out_wl) should pass through"
+    );
 }
 
 /// The `alpha` keyword takes an amplitude transmission (linear scale).
@@ -43,7 +48,10 @@ X1 in_re in_im in_wl out_re out_im out_wl fc_grating_coupler alpha=0.5
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let v_re = r.node_voltage("out_re").unwrap();
-    assert!((v_re - 0.5).abs() < 1e-6, "V(out_re) = {v_re}; expected 0.5");
+    assert!(
+        (v_re - 0.5).abs() < 1e-6,
+        "V(out_re) = {v_re}; expected 0.5"
+    );
 }
 
 /// Grating coupler on a 2-channel WDM bundle: parser replicates per channel,
@@ -75,6 +83,12 @@ Xdmx  bus_out o0 o1 fc_demux
     let o0 = r.node_voltage("o0_re_0").unwrap();
     let o1 = r.node_voltage("o1_re_0").unwrap();
     let t = 10f64.powf(-6.02 / 20.0);
-    assert!((o0 - 1.0 * t).abs() < 1e-3, "V(o0.re) = {o0}; expected ≈ 0.5");
-    assert!((o1 - 0.5 * t).abs() < 1e-3, "V(o1.re) = {o1}; expected ≈ 0.25");
+    assert!(
+        (o0 - 1.0 * t).abs() < 1e-3,
+        "V(o0.re) = {o0}; expected ≈ 0.5"
+    );
+    assert!(
+        (o1 - 0.5 * t).abs() < 1e-3,
+        "V(o1.re) = {o1}; expected ≈ 0.25"
+    );
 }

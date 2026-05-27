@@ -9,8 +9,8 @@ use std::process::Command;
 use fairchild_core::{tran_nr, SimError};
 use fairchild_parser::parse_spice;
 
-const REL_TOL: f64 = 2e-2;   // 2% — ngspice uses finer timestep internally
-const ABS_TOL_V: f64 = 1e-3;  // 1 mV floor
+const REL_TOL: f64 = 2e-2; // 2% — ngspice uses finer timestep internally
+const ABS_TOL_V: f64 = 1e-3; // 1 mV floor
 
 fn find_ngspice() -> Option<std::path::PathBuf> {
     if Command::new("ngspice").arg("--version").output().is_ok() {
@@ -22,7 +22,9 @@ fn find_ngspice() -> Option<std::path::PathBuf> {
         "/usr/bin/ngspice",
     ] {
         let p = std::path::Path::new(candidate);
-        if p.exists() { return Some(p.to_owned()); }
+        if p.exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }
@@ -33,7 +35,8 @@ fn ngspice_tran_at(netlist: &str, node: &str, at_time: f64) -> Option<f64> {
     let mut tmp = tempfile::NamedTempFile::new().ok()?;
 
     // Strip any existing .control/.endc and .end, inject our own.
-    let body: String = netlist.lines()
+    let body: String = netlist
+        .lines()
         .filter(|l| {
             let lc = l.trim().to_lowercase();
             !lc.starts_with(".control") && !lc.starts_with(".endc") && lc != ".end"
@@ -44,13 +47,16 @@ fn ngspice_tran_at(netlist: &str, node: &str, at_time: f64) -> Option<f64> {
 
     // Use .meas tran to extract the value at a specific time.
     let meas_name = format!("v_{node}_at");
-    let control = format!(
-        ".control\ntran\n.endc\n.meas tran {meas_name} FIND v({node}) AT={at_time:.3e}\n"
-    );
+    let control =
+        format!(".control\ntran\n.endc\n.meas tran {meas_name} FIND v({node}) AT={at_time:.3e}\n");
 
     write!(tmp, "{body}\n{control}").ok()?;
 
-    let output = Command::new(&ngspice_bin).arg("-b").arg(tmp.path()).output().ok()?;
+    let output = Command::new(&ngspice_bin)
+        .arg("-b")
+        .arg(tmp.path())
+        .output()
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Parse: "v_cap_at = 5.234567e-01 at ..."
@@ -70,12 +76,17 @@ fn ngspice_tran_at(netlist: &str, node: &str, at_time: f64) -> Option<f64> {
     None
 }
 
-fn fairchild_tran_at(netlist_str: &str, node: &str, at_time: f64, step: f64, stop: f64)
-    -> Result<f64, SimError>
-{
+fn fairchild_tran_at(
+    netlist_str: &str,
+    node: &str,
+    at_time: f64,
+    step: f64,
+    stop: f64,
+) -> Result<f64, SimError> {
     let netlist = parse_spice(netlist_str).map_err(SimError::Parse)?;
     let result = tran_nr(&netlist, step, stop)?;
-    result.voltage_at(node, at_time)
+    result
+        .voltage_at(node, at_time)
         .ok_or_else(|| SimError::UnknownNode(node.to_owned()))
 }
 
@@ -90,14 +101,19 @@ fn diode_tran_rc_halfwave() {
     let stop = 600e-6_f64;
     let at = 550e-6_f64; // near end of first positive half-cycle
 
-    let fc = fairchild_tran_at(netlist_str, "cap", at, step, stop)
-        .expect("fairchild tran_nr failed");
+    let fc =
+        fairchild_tran_at(netlist_str, "cap", at, step, stop).expect("fairchild tran_nr failed");
 
     // Without ngspice, just sanity-check: cap should be charged (>0.4 V) but below 5V.
-    assert!(fc > 0.4 && fc < 5.0, "V(cap) at t=550µs = {fc:.4e}; expected 0.4..5 V");
+    assert!(
+        fc > 0.4 && fc < 5.0,
+        "V(cap) at t=550µs = {fc:.4e}; expected 0.4..5 V"
+    );
 
     let Some(ng) = ngspice_tran_at(netlist_str, "cap", at) else {
-        eprintln!("ngspice not available — skipping golden comparison (fairchild V(cap) = {fc:.4e})");
+        eprintln!(
+            "ngspice not available — skipping golden comparison (fairchild V(cap) = {fc:.4e})"
+        );
         return;
     };
 

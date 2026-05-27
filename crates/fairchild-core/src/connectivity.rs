@@ -46,33 +46,61 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
             Element::Resistor { pos, neg, .. }
             | Element::Inductor { pos, neg, .. }
             | Element::VoltageSource { pos, neg, .. } => {
-                record(pos, &mut nodes); record(neg, &mut nodes);
+                record(pos, &mut nodes);
+                record(neg, &mut nodes);
                 add_edge(pos, neg, &mut adj);
             }
             // Capacitor and current source are open at DC; their nodes still
             // need to be reachable through some *other* path.  Just record the
             // nodes so they participate in the orphan check.
-            Element::Capacitor { pos, neg, .. }
-            | Element::CurrentSource { pos, neg, .. } => {
-                record(pos, &mut nodes); record(neg, &mut nodes);
+            Element::Capacitor { pos, neg, .. } | Element::CurrentSource { pos, neg, .. } => {
+                record(pos, &mut nodes);
+                record(neg, &mut nodes);
             }
             Element::Diode { anode, cathode, .. } => {
-                record(anode, &mut nodes); record(cathode, &mut nodes);
+                record(anode, &mut nodes);
+                record(cathode, &mut nodes);
                 add_edge(anode, cathode, &mut adj);
             }
-            Element::Mosfet { drain, gate, source, bulk, .. } => {
-                for n in &[drain, gate, source, bulk] { record(n, &mut nodes); }
+            Element::Mosfet {
+                drain,
+                gate,
+                source,
+                bulk,
+                ..
+            } => {
+                for n in &[drain, gate, source, bulk] {
+                    record(n, &mut nodes);
+                }
                 // Treat every pair as connected (conservative).
-                let terms = [drain.as_str(), gate.as_str(), source.as_str(), bulk.as_str()];
+                let terms = [
+                    drain.as_str(),
+                    gate.as_str(),
+                    source.as_str(),
+                    bulk.as_str(),
+                ];
                 for i in 0..terms.len() {
                     for j in (i + 1)..terms.len() {
                         add_edge(terms[i], terms[j], &mut adj);
                     }
                 }
             }
-            Element::Bjt { collector, base, emitter, substrate, .. } => {
-                for n in &[collector, base, emitter, substrate] { record(n, &mut nodes); }
-                let terms = [collector.as_str(), base.as_str(), emitter.as_str(), substrate.as_str()];
+            Element::Bjt {
+                collector,
+                base,
+                emitter,
+                substrate,
+                ..
+            } => {
+                for n in &[collector, base, emitter, substrate] {
+                    record(n, &mut nodes);
+                }
+                let terms = [
+                    collector.as_str(),
+                    base.as_str(),
+                    emitter.as_str(),
+                    substrate.as_str(),
+                ];
                 for i in 0..terms.len() {
                     for j in (i + 1)..terms.len() {
                         add_edge(terms[i], terms[j], &mut adj);
@@ -96,7 +124,8 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                 // current source (open at DC), but in either case the
                 // expression Jacobian connects every referenced node to
                 // (pos, neg).  Treat as a short for connectivity purposes.
-                record(pos, &mut nodes); record(neg, &mut nodes);
+                record(pos, &mut nodes);
+                record(neg, &mut nodes);
                 add_edge(pos, neg, &mut adj);
             }
             Element::CoupledInductors { .. } => {
@@ -127,7 +156,8 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
     }
 
     // Any node mentioned in the circuit but not visited from ground is floating.
-    let mut floating: Vec<String> = nodes.into_iter()
+    let mut floating: Vec<String> = nodes
+        .into_iter()
         .filter(|n| n != "0" && !visited.contains(n))
         .collect();
     if floating.is_empty() {
@@ -145,9 +175,8 @@ mod tests {
 
     #[test]
     fn connected_divider_passes() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n"
-        ).unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n").unwrap();
         check_connectivity(&net).unwrap();
     }
 
@@ -156,8 +185,9 @@ mod tests {
         // 'floater' is only on a capacitor (open at DC) → unreachable from ground.
         let net = parse_spice(
             "* float\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n\
-             C1 floater 0 1u\n.op\n.end\n"
-        ).unwrap();
+             C1 floater 0 1u\n.op\n.end\n",
+        )
+        .unwrap();
         let err = check_connectivity(&net).unwrap_err();
         match err {
             SimError::FloatingNodes { nodes } => {
@@ -173,13 +203,16 @@ mod tests {
         // no DC path to ground at all.
         let net = parse_spice(
             "* split\nV1 in 0 DC 1\nR1 in 0 1k\n\
-             C1 a b 1u\nC2 b 0 1u\n.op\n.end\n"
-        ).unwrap();
+             C1 a b 1u\nC2 b 0 1u\n.op\n.end\n",
+        )
+        .unwrap();
         let err = check_connectivity(&net).unwrap_err();
         match err {
             SimError::FloatingNodes { nodes } => {
-                assert!(nodes.contains(&"a".to_string()) || nodes.contains(&"b".to_string()),
-                    "expected 'a' or 'b' as floating, got {nodes:?}");
+                assert!(
+                    nodes.contains(&"a".to_string()) || nodes.contains(&"b".to_string()),
+                    "expected 'a' or 'b' as floating, got {nodes:?}"
+                );
             }
             other => panic!("expected FloatingNodes, got {other:?}"),
         }
@@ -190,8 +223,9 @@ mod tests {
         // D1 connects b to ground (R1 connects a to b, V1 connects a to ground).
         let net = parse_spice(
             "* rd\nV1 a 0 DC 1\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n"
-        ).unwrap();
+             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+        )
+        .unwrap();
         check_connectivity(&net).unwrap();
     }
 }

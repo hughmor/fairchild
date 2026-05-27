@@ -27,7 +27,7 @@
 //!                            `KluNumeric`; `refactor_and_solve` calls
 //!                            `klu_refactor` — the major perf win.
 
-use faer::{Col, Mat, linalg::solvers::Solve};
+use faer::{linalg::solvers::Solve, Col, Mat};
 
 use crate::error::SimError;
 
@@ -102,7 +102,7 @@ pub trait LinearSolver: Send + Sync {
         // behaviour; for sparse backends, this default is overridden to
         // cache the sparsity pattern.
         let n = a.len();
-        let _ = n;  // matrix is used only via the trait's `solve` later
+        let _ = n; // matrix is used only via the trait's `solve` later
         Ok(Box::new(NoCacheFactorisation::new()))
     }
 }
@@ -150,7 +150,9 @@ struct NoCacheFactorisation {
 
 impl NoCacheFactorisation {
     fn new() -> Self {
-        Self { backend: Box::new(DenseSolver) }
+        Self {
+            backend: Box::new(DenseSolver),
+        }
     }
     fn with_backend(backend: Box<dyn LinearSolver>) -> Self {
         Self { backend }
@@ -161,7 +163,11 @@ impl Factorisation for NoCacheFactorisation {
     fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
         self.backend.solve(a, b)
     }
-    fn refactor_and_solve_transpose(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve_transpose(
+        &mut self,
+        a: &[Vec<f64>],
+        b: &[f64],
+    ) -> Result<Vec<f64>, SimError> {
         self.backend.solve_transpose(a, b)
     }
 }
@@ -176,7 +182,9 @@ pub struct DenseSolver;
 impl LinearSolver for DenseSolver {
     fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let n = b.len();
-        if n == 0 { return Ok(Vec::new()); }
+        if n == 0 {
+            return Ok(Vec::new());
+        }
         let a_mat = Mat::<f64>::from_fn(n, n, |i, j| a[i][j]);
         let b_col = Col::<f64>::from_fn(n, |i| b[i]);
         let lu = a_mat.partial_piv_lu();
@@ -191,7 +199,9 @@ impl LinearSolver for DenseSolver {
     fn factorise(&self, _a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
         // No-op cache for dense: re-running partial_piv_lu is cheap
         // enough that caching the column permutation does not pay.
-        Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(DenseSolver))))
+        Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
+            DenseSolver,
+        ))))
     }
 }
 
@@ -217,7 +227,9 @@ pub struct FaerSparseSolver {
 
 impl Default for FaerSparseSolver {
     fn default() -> Self {
-        FaerSparseSolver { zero_threshold: 1e-30 }
+        FaerSparseSolver {
+            zero_threshold: 1e-30,
+        }
     }
 }
 
@@ -226,7 +238,9 @@ impl LinearSolver for FaerSparseSolver {
         use faer::sparse::{SparseColMat, Triplet};
 
         let n = b.len();
-        if n == 0 { return Ok(Vec::new()); }
+        if n == 0 {
+            return Ok(Vec::new());
+        }
 
         let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         for i in 0..n {
@@ -261,9 +275,11 @@ impl LinearSolver for FaerSparseSolver {
         // Until faer exposes a refactor primitive, the safe behaviour is
         // to fall back to one-shot solves; the per-iteration overhead is
         // dominated by `sp_lu` itself, not the dense-scan.
-        Ok(Box::new(NoCacheFactorisation::with_backend(
-            Box::new(FaerSparseSolver { zero_threshold: self.zero_threshold }),
-        )))
+        Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
+            FaerSparseSolver {
+                zero_threshold: self.zero_threshold,
+            },
+        ))))
     }
 }
 
@@ -289,7 +305,9 @@ impl LinearSolver for KluSolver {
         use fairchild_klu::{dense_to_csc, KluCommon, KluNumeric, KluSymbolic};
         let n = a.len();
         if n == 0 {
-            return Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(KluSolver))));
+            return Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
+                KluSolver,
+            ))));
         }
         let (mut ap, mut ai, mut ax) = dense_to_csc(a, 1e-30);
         let mut common = KluCommon::new();
@@ -332,14 +350,14 @@ fn column_row_pattern(ap: &[i32], ai: &[i32]) -> Vec<(i32, i32)> {
 
 #[cfg(feature = "klu")]
 struct KluFactorisation {
-    common:   fairchild_klu::KluCommon,
+    common: fairchild_klu::KluCommon,
     symbolic: fairchild_klu::KluSymbolic,
-    numeric:  fairchild_klu::KluNumeric,
-    ap:       Vec<i32>,
-    ai:       Vec<i32>,
-    ax:       Vec<f64>,
-    pattern:  Vec<(i32, i32)>,  // (col, row) per CSC entry
-    n:        usize,
+    numeric: fairchild_klu::KluNumeric,
+    ap: Vec<i32>,
+    ai: Vec<i32>,
+    ax: Vec<f64>,
+    pattern: Vec<(i32, i32)>, // (col, row) per CSC entry
+    n: usize,
 }
 
 #[cfg(feature = "klu")]
@@ -377,8 +395,13 @@ impl KluFactorisation {
         let new_symbolic = KluSymbolic::analyze(n, &mut self.ap, &mut self.ai, &mut self.common)
             .map_err(|_| SimError::SingularMatrix)?;
         let new_numeric = KluNumeric::factor(
-            &mut self.ap, &mut self.ai, &mut self.ax, &new_symbolic, &mut self.common
-        ).map_err(|_| SimError::SingularMatrix)?;
+            &mut self.ap,
+            &mut self.ai,
+            &mut self.ax,
+            &new_symbolic,
+            &mut self.common,
+        )
+        .map_err(|_| SimError::SingularMatrix)?;
         self.symbolic = new_symbolic;
         self.numeric = new_numeric;
         Ok(())
@@ -395,7 +418,13 @@ impl Factorisation for KluFactorisation {
             self.reanalyze()?;
         } else {
             self.numeric
-                .refactor(&mut self.ap, &mut self.ai, &mut self.ax, &self.symbolic, &mut self.common)
+                .refactor(
+                    &mut self.ap,
+                    &mut self.ai,
+                    &mut self.ax,
+                    &self.symbolic,
+                    &mut self.common,
+                )
                 .map_err(|_| SimError::SingularMatrix)?;
         }
         let mut x = b.to_vec();
@@ -408,12 +437,22 @@ impl Factorisation for KluFactorisation {
         Ok(x)
     }
 
-    fn refactor_and_solve_transpose(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve_transpose(
+        &mut self,
+        a: &[Vec<f64>],
+        b: &[f64],
+    ) -> Result<Vec<f64>, SimError> {
         if self.refresh_csc(a) {
             self.reanalyze()?;
         } else {
             self.numeric
-                .refactor(&mut self.ap, &mut self.ai, &mut self.ax, &self.symbolic, &mut self.common)
+                .refactor(
+                    &mut self.ap,
+                    &mut self.ai,
+                    &mut self.ax,
+                    &self.symbolic,
+                    &mut self.common,
+                )
                 .map_err(|_| SimError::SingularMatrix)?;
         }
         let mut x = b.to_vec();
@@ -435,18 +474,25 @@ impl Factorisation for KluFactorisation {
 /// `SolverKind::Auto`'s dense / sparse crossover.
 pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
     match kind {
-        SolverKind::Dense  => Box::new(DenseSolver),
+        SolverKind::Dense => Box::new(DenseSolver),
         SolverKind::Sparse => Box::new(FaerSparseSolver::default()),
-        SolverKind::Klu    => {
+        SolverKind::Klu => {
             #[cfg(feature = "klu")]
-            { Box::new(KluSolver) }
+            {
+                Box::new(KluSolver)
+            }
             #[cfg(not(feature = "klu"))]
-            unreachable!("SolverKind::Klu reached make_solver without the `klu` feature — \
-                          SimOptions::set should have rejected it earlier")
+            unreachable!(
+                "SolverKind::Klu reached make_solver without the `klu` feature — \
+                          SimOptions::set should have rejected it earlier"
+            )
         }
-        SolverKind::Auto   => {
-            if n < 50 { Box::new(DenseSolver) }
-            else      { Box::new(FaerSparseSolver::default()) }
+        SolverKind::Auto => {
+            if n < 50 {
+                Box::new(DenseSolver)
+            } else {
+                Box::new(FaerSparseSolver::default())
+            }
         }
     }
 }
@@ -466,17 +512,21 @@ mod tests {
     #[test]
     fn dense_matches_sparse_on_small_matrix() {
         let a = vec![
-            vec![ 4.0, -1.0,  0.0,  0.0],
-            vec![-1.0,  4.0, -1.0,  0.0],
-            vec![ 0.0, -1.0,  4.0, -1.0],
-            vec![ 0.0,  0.0, -1.0,  3.0],
+            vec![4.0, -1.0, 0.0, 0.0],
+            vec![-1.0, 4.0, -1.0, 0.0],
+            vec![0.0, -1.0, 4.0, -1.0],
+            vec![0.0, 0.0, -1.0, 3.0],
         ];
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let x_d = DenseSolver.solve(&a, &b).unwrap();
         let x_s = FaerSparseSolver::default().solve(&a, &b).unwrap();
         for i in 0..4 {
-            assert!((x_d[i] - x_s[i]).abs() < 1e-10,
-                "i={i}: dense={} sparse={}", x_d[i], x_s[i]);
+            assert!(
+                (x_d[i] - x_s[i]).abs() < 1e-10,
+                "i={i}: dense={} sparse={}",
+                x_d[i],
+                x_s[i]
+            );
         }
     }
 
@@ -484,10 +534,14 @@ mod tests {
     fn singular_matrix_returns_err() {
         let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         let b = vec![1.0, 2.0];
-        assert!(matches!(DenseSolver.solve(&a, &b),
-            Err(SimError::SingularMatrix)));
-        assert!(matches!(FaerSparseSolver::default().solve(&a, &b),
-            Err(SimError::SingularMatrix)));
+        assert!(matches!(
+            DenseSolver.solve(&a, &b),
+            Err(SimError::SingularMatrix)
+        ));
+        assert!(matches!(
+            FaerSparseSolver::default().solve(&a, &b),
+            Err(SimError::SingularMatrix)
+        ));
     }
 
     #[test]
@@ -501,7 +555,7 @@ mod tests {
         let at: Vec<Vec<f64>> = (0..3).map(|i| (0..3).map(|j| a[j][i]).collect()).collect();
 
         let x_via_explicit_t = DenseSolver.solve(&at, &b).unwrap();
-        let x_via_method     = DenseSolver.solve_transpose(&a, &b).unwrap();
+        let x_via_method = DenseSolver.solve_transpose(&a, &b).unwrap();
         for i in 0..3 {
             assert!((x_via_explicit_t[i] - x_via_method[i]).abs() < 1e-12);
         }
@@ -512,10 +566,7 @@ mod tests {
         // First solve through factorise(); second solve through the
         // refactor path with updated values — answer must match a fresh
         // dense solve of the second matrix.
-        let a1 = vec![
-            vec![3.0, 1.0],
-            vec![0.0, 4.0],
-        ];
+        let a1 = vec![vec![3.0, 1.0], vec![0.0, 4.0]];
         let solver = FaerSparseSolver::default();
         let mut fact = solver.factorise(&a1).unwrap();
         let x1 = fact.refactor_and_solve(&a1, &[5.0, 8.0]).unwrap();
@@ -524,10 +575,7 @@ mod tests {
         assert!((x1[1] - 2.0).abs() < 1e-12);
 
         // Change values, same pattern.
-        let a2 = vec![
-            vec![6.0, 2.0],
-            vec![0.0, 4.0],
-        ];
+        let a2 = vec![vec![6.0, 2.0], vec![0.0, 4.0]];
         let x2 = fact.refactor_and_solve(&a2, &[10.0, 8.0]).unwrap();
         // 6x+2y=10, 4y=8 → y=2, 6x=6 → x=1
         assert!((x2[0] - 1.0).abs() < 1e-12);

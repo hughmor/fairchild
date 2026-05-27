@@ -21,9 +21,15 @@ fn find_ngspice() -> Option<std::path::PathBuf> {
     if Command::new("ngspice").arg("--version").output().is_ok() {
         return Some("ngspice".into());
     }
-    for candidate in &["/opt/homebrew/bin/ngspice", "/usr/local/bin/ngspice", "/usr/bin/ngspice"] {
+    for candidate in &[
+        "/opt/homebrew/bin/ngspice",
+        "/usr/local/bin/ngspice",
+        "/usr/bin/ngspice",
+    ] {
         let p = std::path::Path::new(candidate);
-        if p.exists() { return Some(p.to_owned()); }
+        if p.exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }
@@ -56,17 +62,30 @@ fn ngspice_meas(netlist: &str) -> Option<HashMap<String, f64>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Fairchild transient runner
 // ---------------------------------------------------------------------------
 
-fn fairchild_tran_at(netlist_str: &str, step: f64, stop: f64, node: &str, at_times: &[f64]) -> Vec<f64> {
+fn fairchild_tran_at(
+    netlist_str: &str,
+    step: f64,
+    stop: f64,
+    node: &str,
+    at_times: &[f64],
+) -> Vec<f64> {
     let netlist = parse_spice(netlist_str).expect("parse failed");
     let result = run_tran(&netlist, step, stop).expect("transient failed");
-    at_times.iter().map(|&t| result.voltage_at(node, t).expect("node not found")).collect()
+    at_times
+        .iter()
+        .map(|&t| result.voltage_at(node, t).expect("node not found"))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -84,17 +103,17 @@ fn rc_step_vs_ngspice() {
     let Some(ng) = ngspice_meas(netlist_str) else {
         eprintln!("ngspice not available — validating fairchild shape only");
         // Shape check: monotone increasing, 0.5 < V(τ) < 0.75
-        assert!(fc_vals[0] > 0.5 && fc_vals[0] < 0.75,  "V(out) at 1τ = {:.4}", fc_vals[0]);
+        assert!(
+            fc_vals[0] > 0.5 && fc_vals[0] < 0.75,
+            "V(out) at 1τ = {:.4}",
+            fc_vals[0]
+        );
         assert!(fc_vals[1] > fc_vals[0], "not monotone");
         assert!(fc_vals[2] > 0.99, "V(out) at 5τ = {:.4}", fc_vals[2]);
         return;
     };
 
-    let ng_vals = [
-        ng["v_1tau"],
-        ng["v_2tau"],
-        ng["v_5tau"],
-    ];
+    let ng_vals = [ng["v_1tau"], ng["v_2tau"], ng["v_5tau"]];
 
     for (i, (&fc, &ng_v)) in fc_vals.iter().zip(ng_vals.iter()).enumerate() {
         let tol = REL_TOL * ng_v.abs();
@@ -116,17 +135,17 @@ fn rl_step_vs_ngspice() {
     let Some(ng) = ngspice_meas(netlist_str) else {
         eprintln!("ngspice not available — validating fairchild shape only");
         // Shape check: monotone decreasing, V(τ) ≈ 0.37
-        assert!(fc_vals[0] > 0.3 && fc_vals[0] < 0.45, "V(out) at 1τ = {:.4}", fc_vals[0]);
+        assert!(
+            fc_vals[0] > 0.3 && fc_vals[0] < 0.45,
+            "V(out) at 1τ = {:.4}",
+            fc_vals[0]
+        );
         assert!(fc_vals[1] < fc_vals[0], "not monotone decreasing");
         assert!(fc_vals[2] < 0.02, "V(out) at 5τ = {:.4}", fc_vals[2]);
         return;
     };
 
-    let ng_vals = [
-        ng["v_1tau"],
-        ng["v_2tau"],
-        ng["v_5tau"],
-    ];
+    let ng_vals = [ng["v_1tau"], ng["v_2tau"], ng["v_5tau"]];
 
     for (i, (&fc, &ng_v)) in fc_vals.iter().zip(ng_vals.iter()).enumerate() {
         let tol = REL_TOL * ng_v.abs();

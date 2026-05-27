@@ -6,21 +6,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use numpy::{PyArray1, PyReadonlyArray1};
 
-use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
-    evaluate_measurements,
-    freq_decade, freq_linear, freq_oct,
-    tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
-    AcResult, DcSweepResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
+    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
+    tran_nr_with_registry_var_opts, AcResult, DcSweepResult, DeviceRegistry, NrResult, SimError,
+    SimOptions, TranResult,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
+use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
 
 // ---------------------------------------------------------------------------
 // Error conversion
@@ -49,21 +48,27 @@ fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
 
         for el in &mut netlist.elements {
             match el {
-                Element::Resistor { name, resistance, .. } => {
+                Element::Resistor {
+                    name, resistance, ..
+                } => {
                     if name.to_lowercase() == el_name
                         && (param_name == "resistance" || param_name == "value")
                     {
                         *resistance = value;
                     }
                 }
-                Element::Capacitor { name, capacitance, .. } => {
+                Element::Capacitor {
+                    name, capacitance, ..
+                } => {
                     if name.to_lowercase() == el_name
                         && (param_name == "capacitance" || param_name == "value")
                     {
                         *capacitance = value;
                     }
                 }
-                Element::Inductor { name, inductance, .. } => {
+                Element::Inductor {
+                    name, inductance, ..
+                } => {
                     if name.to_lowercase() == el_name
                         && (param_name == "inductance" || param_name == "value")
                     {
@@ -86,7 +91,10 @@ fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
                 }
                 Element::XOsdi { name, params, .. } => {
                     if name.to_lowercase() == el_name {
-                        if let Some(entry) = params.iter_mut().find(|(k, _)| k.to_lowercase() == param_name) {
+                        if let Some(entry) = params
+                            .iter_mut()
+                            .find(|(k, _)| k.to_lowercase() == param_name)
+                        {
                             entry.1 = value;
                         } else {
                             params.push((key[dot + 1..].to_string(), value));
@@ -95,7 +103,10 @@ fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
                 }
                 Element::Mosfet { name, params, .. } => {
                     if name.to_lowercase() == el_name {
-                        if let Some(entry) = params.iter_mut().find(|(k, _)| k.to_lowercase() == param_name) {
+                        if let Some(entry) = params
+                            .iter_mut()
+                            .find(|(k, _)| k.to_lowercase() == param_name)
+                        {
                             entry.1 = value;
                         } else {
                             params.push((key[dot + 1..].to_string(), value));
@@ -135,12 +146,13 @@ impl WaveformSource {
     /// Both arrays must be 1-D and the same length. Time values must be
     /// non-decreasing.
     #[new]
-    pub fn new(
-        t: PyReadonlyArray1<f64>,
-        v: PyReadonlyArray1<f64>,
-    ) -> PyResult<Self> {
-        let t = t.as_slice().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let v = v.as_slice().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    pub fn new(t: PyReadonlyArray1<f64>, v: PyReadonlyArray1<f64>) -> PyResult<Self> {
+        let t = t
+            .as_slice()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let v = v
+            .as_slice()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         if t.len() != v.len() {
             return Err(PyRuntimeError::new_err(
                 "WaveformSource: t and v must have the same length",
@@ -151,7 +163,8 @@ impl WaveformSource {
     }
 
     fn __repr__(&self) -> String {
-        format!("WaveformSource({} points, t=[{:.3e}..{:.3e}])",
+        format!(
+            "WaveformSource({} points, t=[{:.3e}..{:.3e}])",
             self.points.len(),
             self.points.first().map(|(t, _)| *t).unwrap_or(0.0),
             self.points.last().map(|(t, _)| *t).unwrap_or(0.0),
@@ -238,31 +251,23 @@ impl SimResult {
         let key_lc = key.to_lowercase();
 
         match &self.inner {
-            SimResultInner::Dc(r) => {
-                self.get_dc_or_tran_signal(py, &key_lc, r, None)
-            }
-            SimResultInner::Tran(r_tran) => {
-                self.get_tran_signal(py, &key_lc, r_tran)
-            }
-            SimResultInner::Ac(r) => {
-                self.get_ac_signal(py, &key_lc, r)
-            }
-            SimResultInner::DcSweep(r) => {
-                self.get_dc_sweep_signal(py, &key_lc, r)
-            }
+            SimResultInner::Dc(r) => self.get_dc_or_tran_signal(py, &key_lc, r, None),
+            SimResultInner::Tran(r_tran) => self.get_tran_signal(py, &key_lc, r_tran),
+            SimResultInner::Ac(r) => self.get_ac_signal(py, &key_lc, r),
+            SimResultInner::DcSweep(r) => self.get_dc_sweep_signal(py, &key_lc, r),
             SimResultInner::Noise(r) => {
                 // Recognise the same keys as the CSV output.
                 let arr = match key_lc.as_str() {
-                    "onoise" | "v(onoise)" | "onoise_psd" =>
-                        r.onoise_psd.clone(),
-                    "inoise" | "v(inoise)" | "inoise_psd" =>
-                        r.inoise_psd.clone(),
+                    "onoise" | "v(onoise)" | "onoise_psd" => r.onoise_psd.clone(),
+                    "inoise" | "v(inoise)" | "inoise_psd" => r.inoise_psd.clone(),
                     "onoise_vrthz" => r.onoise_psd.iter().map(|x| x.max(0.0).sqrt()).collect(),
                     "inoise_vrthz" => r.inoise_psd.iter().map(|x| x.max(0.0).sqrt()).collect(),
-                    other => return Err(PyRuntimeError::new_err(format!(
-                        "noise result: unknown key '{other}'; use 'onoise', 'inoise', \
+                    other => {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "noise result: unknown key '{other}'; use 'onoise', 'inoise', \
                          'onoise_vrthz', or 'inoise_vrthz'"
-                    ))),
+                        )))
+                    }
                 };
                 Ok(PyArray1::from_vec_bound(py, arr))
             }
@@ -273,51 +278,62 @@ impl SimResult {
     fn signals(&self) -> Vec<String> {
         match &self.inner {
             SimResultInner::Dc(r) => {
-                let mut sigs: Vec<String> = r.topo.node_index.keys()
+                let mut sigs: Vec<String> = r
+                    .topo
+                    .node_index
+                    .keys()
                     .map(|n| format!("V({n})"))
                     .collect();
                 sigs.extend(r.topo.vsrc_index.keys().map(|n| format!("I({n})")));
                 sigs
             }
             SimResultInner::Tran(r) => {
-                let mut sigs: Vec<String> = r.node_voltages.keys()
-                    .map(|n| format!("V({n})"))
-                    .collect();
+                let mut sigs: Vec<String> =
+                    r.node_voltages.keys().map(|n| format!("V({n})")).collect();
                 sigs.extend(r.vsrc_currents.keys().map(|n| format!("I({n})")));
                 sigs
             }
-            SimResultInner::Ac(r) => {
-                r.voltages.keys().map(|n| format!("V({n})")).collect()
-            }
+            SimResultInner::Ac(r) => r.voltages.keys().map(|n| format!("V({n})")).collect(),
             SimResultInner::DcSweep(r) => {
-                let mut sigs: Vec<String> = r.node_voltages.keys()
-                    .map(|n| format!("V({n})"))
-                    .collect();
+                let mut sigs: Vec<String> =
+                    r.node_voltages.keys().map(|n| format!("V({n})")).collect();
                 sigs.extend(r.vsrc_currents.keys().map(|n| format!("I({n})")));
                 sigs
             }
             SimResultInner::Noise(_) => {
-                vec!["onoise".into(), "inoise".into(),
-                     "onoise_vrthz".into(), "inoise_vrthz".into()]
+                vec![
+                    "onoise".into(),
+                    "inoise".into(),
+                    "onoise_vrthz".into(),
+                    "inoise_vrthz".into(),
+                ]
             }
         }
     }
 
     /// True if this is a DC operating-point result.
     #[getter]
-    fn is_dc(&self) -> bool { matches!(&self.inner, SimResultInner::Dc(_)) }
+    fn is_dc(&self) -> bool {
+        matches!(&self.inner, SimResultInner::Dc(_))
+    }
 
     /// True if this is a transient result.
     #[getter]
-    fn is_tran(&self) -> bool { matches!(&self.inner, SimResultInner::Tran(_)) }
+    fn is_tran(&self) -> bool {
+        matches!(&self.inner, SimResultInner::Tran(_))
+    }
 
     /// True if this is an AC sweep result.
     #[getter]
-    fn is_ac(&self) -> bool { matches!(&self.inner, SimResultInner::Ac(_)) }
+    fn is_ac(&self) -> bool {
+        matches!(&self.inner, SimResultInner::Ac(_))
+    }
 
     /// True if this is a DC sweep result.
     #[getter]
-    fn is_dc_sweep(&self) -> bool { matches!(&self.inner, SimResultInner::DcSweep(_)) }
+    fn is_dc_sweep(&self) -> bool {
+        matches!(&self.inner, SimResultInner::DcSweep(_))
+    }
 
     /// Return all `.measure` scalar values produced from this run.
     ///
@@ -363,11 +379,15 @@ impl SimResult {
             if node == "0" || node == "gnd" {
                 return Ok(PyArray1::from_vec_bound(py, vec![0.0f64; r.time.len()]));
             }
-            let series = r.node_voltages.get(node)
+            let series = r
+                .node_voltages
+                .get(node)
                 .ok_or_else(|| PyRuntimeError::new_err(format!("unknown node '{node}'")))?;
             Ok(PyArray1::from_vec_bound(py, series.clone()))
         } else if let Some(vsrc) = key.strip_prefix("i(").and_then(|s| s.strip_suffix(')')) {
-            let series = r.vsrc_currents.get(vsrc)
+            let series = r
+                .vsrc_currents
+                .get(vsrc)
                 .ok_or_else(|| PyRuntimeError::new_err(format!("unknown vsrc '{vsrc}'")))?;
             Ok(PyArray1::from_vec_bound(py, series.clone()))
         } else {
@@ -388,11 +408,15 @@ impl SimResult {
                 let n = r.n_points();
                 return Ok(PyArray1::from_vec_bound(py, vec![0.0f64; n]));
             }
-            let series = r.node_voltages.get(node)
+            let series = r
+                .node_voltages
+                .get(node)
                 .ok_or_else(|| PyRuntimeError::new_err(format!("unknown node '{node}'")))?;
             Ok(PyArray1::from_vec_bound(py, series.clone()))
         } else if let Some(vsrc) = key.strip_prefix("i(").and_then(|s| s.strip_suffix(')')) {
-            let series = r.vsrc_currents.get(vsrc)
+            let series = r
+                .vsrc_currents
+                .get(vsrc)
                 .ok_or_else(|| PyRuntimeError::new_err(format!("unknown vsrc '{vsrc}'")))?;
             Ok(PyArray1::from_vec_bound(py, series.clone()))
         } else {
@@ -415,7 +439,9 @@ impl SimResult {
             } else if let Some(bare) = rest.strip_suffix(')') {
                 (bare, None)
             } else {
-                return Err(PyRuntimeError::new_err(format!("malformed signal key '{key}'")));
+                return Err(PyRuntimeError::new_err(format!(
+                    "malformed signal key '{key}'"
+                )));
             }
         } else {
             return Err(PyRuntimeError::new_err(format!(
@@ -423,27 +449,26 @@ impl SimResult {
             )));
         };
 
-        let voltages = r.voltages.get(node)
+        let voltages = r
+            .voltages
+            .get(node)
             .ok_or_else(|| PyRuntimeError::new_err(format!("unknown AC node '{node}'")))?;
 
         let data: Vec<f64> = match suffix.unwrap_or("mag") {
-            "mag" | "magnitude" => {
-                voltages.iter().map(|(re, im)| (re * re + im * im).sqrt()).collect()
-            }
-            "phase" => {
-                voltages.iter().map(|(re, im)| im.atan2(*re).to_degrees()).collect()
-            }
-            "re" | "real" => {
-                voltages.iter().map(|(re, _)| *re).collect()
-            }
-            "im" | "imag" | "imaginary" => {
-                voltages.iter().map(|(_, im)| *im).collect()
-            }
-            "db" => {
-                voltages.iter().map(|(re, im)| {
-                    20.0 * (re * re + im * im).sqrt().max(1e-300).log10()
-                }).collect()
-            }
+            "mag" | "magnitude" => voltages
+                .iter()
+                .map(|(re, im)| (re * re + im * im).sqrt())
+                .collect(),
+            "phase" => voltages
+                .iter()
+                .map(|(re, im)| im.atan2(*re).to_degrees())
+                .collect(),
+            "re" | "real" => voltages.iter().map(|(re, _)| *re).collect(),
+            "im" | "imag" | "imaginary" => voltages.iter().map(|(_, im)| *im).collect(),
+            "db" => voltages
+                .iter()
+                .map(|(re, im)| 20.0 * (re * re + im * im).sqrt().max(1e-300).log10())
+                .collect(),
             other => {
                 return Err(PyRuntimeError::new_err(format!(
                     "AC suffix '{other}' not recognised; use mag, phase, re, im, db"
@@ -519,7 +544,8 @@ impl Circuit {
     /// Pass one of these as the `alter` kwarg to `run()` to apply that
     /// block on top of the base netlist for that call.
     pub fn alter_labels(&self) -> Vec<String> {
-        self.netlist.as_ref()
+        self.netlist
+            .as_ref()
             .map(|n| n.alters.iter().map(|b| b.label.clone()).collect())
             .unwrap_or_default()
     }
@@ -530,7 +556,8 @@ impl Circuit {
     /// replaced with a PWL interpolation of the provided `WaveformSource`.
     /// Call this before `run()`.
     pub fn set_source(&mut self, name: &str, source: &WaveformSource) {
-        self.source_overrides.insert(name.to_lowercase(), source.points.clone());
+        self.source_overrides
+            .insert(name.to_lowercase(), source.points.clone());
     }
 
     /// Run a simulation analysis.
@@ -554,7 +581,9 @@ impl Circuit {
     ///   Unrecognised kwargs raise `RuntimeError` immediately.
     #[pyo3(signature = (analysis, **kwargs))]
     pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
-        let netlist = self.netlist.as_ref()
+        let netlist = self
+            .netlist
+            .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
         let mut nl = netlist.clone();
@@ -565,11 +594,17 @@ impl Circuit {
         if let Some(kw) = kwargs {
             if let Some(v) = kw.get_item("alter")? {
                 let label: String = v.extract()?;
-                let block = nl.alters.iter().find(|b| b.label == label).cloned()
-                    .ok_or_else(|| PyRuntimeError::new_err(format!(
-                        "no .alter block named '{label}'; available: {:?}",
-                        nl.alters.iter().map(|b| &b.label).collect::<Vec<_>>()
-                    )))?;
+                let block = nl
+                    .alters
+                    .iter()
+                    .find(|b| b.label == label)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "no .alter block named '{label}'; available: {:?}",
+                            nl.alters.iter().map(|b| &b.label).collect::<Vec<_>>()
+                        ))
+                    })?;
                 nl.apply_alter(&block);
             }
         }
@@ -581,15 +616,20 @@ impl Circuit {
         // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
         let is_dc_sweep = analysis_lc == "dc_sweep"
             || (analysis_lc == "dc"
-                && kwargs.and_then(|kw| kw.get_item("src").ok().flatten()).is_some());
+                && kwargs
+                    .and_then(|kw| kw.get_item("src").ok().flatten())
+                    .is_some());
 
         if is_dc_sweep {
             let p = parse_dc_kwargs(kwargs)?;
-            let nested_arg = p.nested.as_ref()
+            let nested_arg = p
+                .nested
+                .as_ref()
                 .map(|(s, a, b, st)| (s.as_str(), *a, *b, *st));
             let result = dc_sweep_with_registry_opts(
-                &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts
-            ).map_err(sim_err)?;
+                &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts,
+            )
+            .map_err(sim_err)?;
             return Ok(SimResult {
                 inner: SimResultInner::DcSweep(result),
                 measurements: Vec::new(),
@@ -610,22 +650,36 @@ impl Circuit {
                     tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
                 } else {
                     tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                }.map_err(sim_err)?;
+                }
+                .map_err(sim_err)?;
                 let measurements = evaluate_measurements(&nl.measurements, &result)
-                    .into_iter().map(|m| (m.name, m.value)).collect();
-                Ok(SimResult { inner: SimResultInner::Tran(result), measurements })
+                    .into_iter()
+                    .map(|m| (m.name, m.value))
+                    .collect();
+                Ok(SimResult {
+                    inner: SimResultInner::Tran(result),
+                    measurements,
+                })
             }
             "ac" => {
                 let (freqs, src) = parse_ac_kwargs(kwargs)?;
-                let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
-                Ok(SimResult { inner: SimResultInner::Ac(result), measurements: Vec::new() })
+                let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
+                    .map_err(sim_err)?;
+                Ok(SimResult {
+                    inner: SimResultInner::Ac(result),
+                    measurements: Vec::new(),
+                })
             }
             "noise" => {
                 let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(kwargs)?;
                 let result = fairchild_core::noise_analysis(
                     &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
-                ).map_err(sim_err)?;
-                Ok(SimResult { inner: SimResultInner::Noise(result), measurements: Vec::new() })
+                )
+                .map_err(sim_err)?;
+                Ok(SimResult {
+                    inner: SimResultInner::Noise(result),
+                    measurements: Vec::new(),
+                })
             }
             other => Err(PyRuntimeError::new_err(format!(
                 "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', or 'dc_sweep'",
@@ -648,7 +702,9 @@ impl Circuit {
         analysis: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<SimResult>> {
-        let netlist = self.netlist.as_ref()
+        let netlist = self
+            .netlist
+            .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
         let mut results = Vec::with_capacity(values.len());
@@ -667,7 +723,10 @@ impl Circuit {
             let result = match analysis.to_lowercase().as_str() {
                 "op" | "dc" => {
                     let r = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
-                    SimResult { inner: SimResultInner::Dc(r), measurements: Vec::new() }
+                    SimResult {
+                        inner: SimResultInner::Dc(r),
+                        measurements: Vec::new(),
+                    }
                 }
                 "tran" | "transient" => {
                     let (stop, step) = parse_tran_kwargs(kwargs)?;
@@ -675,19 +734,30 @@ impl Circuit {
                         tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
                     } else {
                         tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                    }.map_err(sim_err)?;
+                    }
+                    .map_err(sim_err)?;
                     let measurements = evaluate_measurements(&nl.measurements, &r)
-                        .into_iter().map(|m| (m.name, m.value)).collect();
-                    SimResult { inner: SimResultInner::Tran(r), measurements }
+                        .into_iter()
+                        .map(|m| (m.name, m.value))
+                        .collect();
+                    SimResult {
+                        inner: SimResultInner::Tran(r),
+                        measurements,
+                    }
                 }
                 "ac" => {
                     let (freqs, src) = parse_ac_kwargs(kwargs)?;
-                    let r = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts).map_err(sim_err)?;
-                    SimResult { inner: SimResultInner::Ac(r), measurements: Vec::new() }
+                    let r = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
+                        .map_err(sim_err)?;
+                    SimResult {
+                        inner: SimResultInner::Ac(r),
+                        measurements: Vec::new(),
+                    }
                 }
                 other => {
                     return Err(PyRuntimeError::new_err(format!(
-                        "unknown analysis '{}'; use 'op', 'tran', or 'ac'", other
+                        "unknown analysis '{}'; use 'op', 'tran', or 'ac'",
+                        other
                     )));
                 }
             };
@@ -706,11 +776,19 @@ fn apply_source_overrides(netlist: &mut Netlist, overrides: &HashMap<String, Vec
     for (name_lc, points) in overrides {
         for el in &mut netlist.elements {
             match el {
-                Element::VoltageSource { name, waveform, .. } if name.to_lowercase() == *name_lc => {
-                    *waveform = Waveform::Pwl { points: points.clone() };
+                Element::VoltageSource { name, waveform, .. }
+                    if name.to_lowercase() == *name_lc =>
+                {
+                    *waveform = Waveform::Pwl {
+                        points: points.clone(),
+                    };
                 }
-                Element::CurrentSource { name, waveform, .. } if name.to_lowercase() == *name_lc => {
-                    *waveform = Waveform::Pwl { points: points.clone() };
+                Element::CurrentSource { name, waveform, .. }
+                    if name.to_lowercase() == *name_lc =>
+                {
+                    *waveform = Waveform::Pwl {
+                        points: points.clone(),
+                    };
                 }
                 _ => {}
             }
@@ -738,10 +816,12 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
             PathBuf::from(osdi_path)
         };
 
-        let lib = unsafe { OsdiLibrary::open(&path) }
-            .map_err(|e| PyRuntimeError::new_err(format!(
-                "failed to load OSDI library '{}': {e}", path.display()
-            )))?;
+        let lib = unsafe { OsdiLibrary::open(&path) }.map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "failed to load OSDI library '{}': {e}",
+                path.display()
+            ))
+        })?;
         let lib = Arc::new(lib);
         lib.register_into(&mut registry);
     }
@@ -766,12 +846,18 @@ fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)>
     let mut step: Option<f64> = None;
 
     if let Some(kw) = kwargs {
-        if let Some(v) = kw.get_item("stop")? { stop = Some(v.extract::<f64>()?); }
-        if let Some(v) = kw.get_item("step")? { step = Some(v.extract::<f64>()?); }
+        if let Some(v) = kw.get_item("stop")? {
+            stop = Some(v.extract::<f64>()?);
+        }
+        if let Some(v) = kw.get_item("step")? {
+            step = Some(v.extract::<f64>()?);
+        }
     }
 
-    let stop = stop.ok_or_else(|| PyRuntimeError::new_err("tran requires 'stop' kwarg (seconds)"))?;
-    let step = step.ok_or_else(|| PyRuntimeError::new_err("tran requires 'step' kwarg (seconds)"))?;
+    let stop =
+        stop.ok_or_else(|| PyRuntimeError::new_err("tran requires 'stop' kwarg (seconds)"))?;
+    let step =
+        step.ok_or_else(|| PyRuntimeError::new_err("tran requires 'step' kwarg (seconds)"))?;
     Ok((stop, step))
 }
 
@@ -786,25 +872,44 @@ fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)>
 /// silently skipped — they are consumed by the `parse_*_kwargs` helpers.
 /// Every other kwarg is forwarded to `SimOptions::set`; an unrecognised or
 /// unavailable key raises `PyRuntimeError` so misspellings surface immediately.
-fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimOptions> {
+fn build_sim_options(
+    netlist: &Netlist,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<SimOptions> {
     let mut opts = SimOptions::from_netlist(netlist);
     if let Some(kw) = kwargs {
         // Keywords consumed by parse_tran/ac/dc/noise_kwargs or run() itself.
         // Any kwarg NOT in this list is forwarded to SimOptions::set().
         const SKIP: &[&str] = &[
-            "alter",                                   // .alter block selector
-            "stop", "step",                            // tran / dc sweep
-            "src", "start", "src2",                    // dc sweep
-            "start2", "stop2", "step2",                // dc sweep nested
-            "fstart", "fstop", "points", "variation",  // ac / noise
-            "out_pos", "out_neg", "out",               // noise
+            "alter", // .alter block selector
+            "stop",
+            "step", // tran / dc sweep
+            "src",
+            "start",
+            "src2", // dc sweep
+            "start2",
+            "stop2",
+            "step2", // dc sweep nested
+            "fstart",
+            "fstop",
+            "points",
+            "variation", // ac / noise
+            "out_pos",
+            "out_neg",
+            "out", // noise
         ];
         for (k, v) in kw.iter() {
             let key: String = k.extract()?;
-            if SKIP.contains(&key.as_str()) { continue; }
+            if SKIP.contains(&key.as_str()) {
+                continue;
+            }
             // Accept bool before numeric to avoid True → 1.0 path.
             let value_str: String = if let Ok(b) = v.extract::<bool>() {
-                if b { "1".into() } else { "0".into() }
+                if b {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
             } else if let Ok(s) = v.extract::<String>() {
                 s
             } else if let Ok(i) = v.extract::<i64>() {
@@ -839,40 +944,46 @@ fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> P
 
 #[derive(Default)]
 struct DcKwargs {
-    src:    String,
-    start:  f64,
-    stop:   f64,
-    step:   f64,
+    src: String,
+    start: f64,
+    stop: f64,
+    step: f64,
     nested: Option<(String, f64, f64, f64)>,
 }
 
 fn parse_dc_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<DcKwargs> {
-    let kw = kwargs.ok_or_else(|| PyRuntimeError::new_err(
-        "dc requires src, start, stop, step kwargs"))?;
+    let kw = kwargs
+        .ok_or_else(|| PyRuntimeError::new_err("dc requires src, start, stop, step kwargs"))?;
 
     let get = |k: &str| -> PyResult<_> {
-        kw.get_item(k)?.ok_or_else(|| PyRuntimeError::new_err(
-            format!("dc requires '{k}' kwarg")))
+        kw.get_item(k)?
+            .ok_or_else(|| PyRuntimeError::new_err(format!("dc requires '{k}' kwarg")))
     };
 
-    let src   = get("src")?.extract::<String>()?;
+    let src = get("src")?.extract::<String>()?;
     let start = get("start")?.extract::<f64>()?;
-    let stop  = get("stop")?.extract::<f64>()?;
-    let step  = get("step")?.extract::<f64>()?;
+    let stop = get("stop")?.extract::<f64>()?;
+    let step = get("step")?.extract::<f64>()?;
 
     // Optional nested second sweep: src2, start2, stop2, step2 (all four required if any).
     let nested = match kw.get_item("src2")? {
         Some(v) => {
-            let src2   = v.extract::<String>()?;
+            let src2 = v.extract::<String>()?;
             let start2 = get("start2")?.extract::<f64>()?;
-            let stop2  = get("stop2")?.extract::<f64>()?;
-            let step2  = get("step2")?.extract::<f64>()?;
+            let stop2 = get("stop2")?.extract::<f64>()?;
+            let step2 = get("step2")?.extract::<f64>()?;
             Some((src2, start2, stop2, step2))
         }
         None => None,
     };
 
-    Ok(DcKwargs { src, start, stop, step, nested })
+    Ok(DcKwargs {
+        src,
+        start,
+        stop,
+        step,
+        nested,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -887,10 +998,16 @@ fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Op
     let mut src: Option<String> = None;
 
     if let Some(kw) = kwargs {
-        if let Some(v) = kw.get_item("fstart")? { fstart = Some(v.extract::<f64>()?); }
-        if let Some(v) = kw.get_item("fstop")?  { fstop  = Some(v.extract::<f64>()?); }
-        if let Some(v) = kw.get_item("points")? { points = v.extract::<usize>()?; }
-        if let Some(v) = kw.get_item("src")?    {
+        if let Some(v) = kw.get_item("fstart")? {
+            fstart = Some(v.extract::<f64>()?);
+        }
+        if let Some(v) = kw.get_item("fstop")? {
+            fstop = Some(v.extract::<f64>()?);
+        }
+        if let Some(v) = kw.get_item("points")? {
+            points = v.extract::<usize>()?;
+        }
+        if let Some(v) = kw.get_item("src")? {
             let s: Option<String> = v.extract()?;
             src = s;
         }
@@ -900,15 +1017,18 @@ fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Op
                 "dec" => AcVariation::Dec,
                 "oct" => AcVariation::Oct,
                 "lin" => AcVariation::Lin,
-                other => return Err(PyRuntimeError::new_err(format!(
-                    "unknown AC variation '{other}'; use 'dec', 'oct', or 'lin'"
-                ))),
+                other => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "unknown AC variation '{other}'; use 'dec', 'oct', or 'lin'"
+                    )))
+                }
             };
         }
     }
 
-    let fstart = fstart.ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstart' kwarg (Hz)"))?;
-    let fstop  = fstop .ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstop' kwarg (Hz)"))?;
+    let fstart =
+        fstart.ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstart' kwarg (Hz)"))?;
+    let fstop = fstop.ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstop' kwarg (Hz)"))?;
 
     let freqs = match variation {
         AcVariation::Dec => freq_decade(fstart, fstop, points),
@@ -919,48 +1039,65 @@ fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Op
     Ok((freqs, src))
 }
 
-fn parse_noise_kwargs(kwargs: Option<&Bound<'_, PyDict>>)
-    -> PyResult<(Vec<f64>, String, String, String)>
-{
-    let kw = kwargs.ok_or_else(|| PyRuntimeError::new_err(
-        "noise requires kwargs: out (or out_pos+out_neg), src, fstart, fstop"
-    ))?;
+fn parse_noise_kwargs(
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(Vec<f64>, String, String, String)> {
+    let kw = kwargs.ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "noise requires kwargs: out (or out_pos+out_neg), src, fstart, fstop",
+        )
+    })?;
 
     let mut out_pos: Option<String> = None;
     let mut out_neg: String = "0".to_string();
-    if let Some(v) = kw.get_item("out_pos")? { out_pos = Some(v.extract()?); }
-    if let Some(v) = kw.get_item("out_neg")? { out_neg = v.extract()?; }
-    if out_pos.is_none() {
-        if let Some(v) = kw.get_item("out")? { out_pos = Some(v.extract()?); }
+    if let Some(v) = kw.get_item("out_pos")? {
+        out_pos = Some(v.extract()?);
     }
-    let out_pos = out_pos.ok_or_else(|| PyRuntimeError::new_err(
-        "noise: missing 'out' (or 'out_pos') kwarg — the observation node"
-    ))?;
+    if let Some(v) = kw.get_item("out_neg")? {
+        out_neg = v.extract()?;
+    }
+    if out_pos.is_none() {
+        if let Some(v) = kw.get_item("out")? {
+            out_pos = Some(v.extract()?);
+        }
+    }
+    let out_pos = out_pos.ok_or_else(|| {
+        PyRuntimeError::new_err("noise: missing 'out' (or 'out_pos') kwarg — the observation node")
+    })?;
 
-    let input_src: String = kw.get_item("src")?
+    let input_src: String = kw
+        .get_item("src")?
         .ok_or_else(|| PyRuntimeError::new_err("noise: missing 'src' kwarg"))?
         .extract()?;
 
     let mut fstart: Option<f64> = None;
-    let mut fstop:  Option<f64> = None;
+    let mut fstop: Option<f64> = None;
     let mut points: usize = 20;
     let mut variation = AcVariation::Dec;
-    if let Some(v) = kw.get_item("fstart")? { fstart = Some(v.extract()?); }
-    if let Some(v) = kw.get_item("fstop")?  { fstop  = Some(v.extract()?); }
-    if let Some(v) = kw.get_item("points")? { points = v.extract()?; }
+    if let Some(v) = kw.get_item("fstart")? {
+        fstart = Some(v.extract()?);
+    }
+    if let Some(v) = kw.get_item("fstop")? {
+        fstop = Some(v.extract()?);
+    }
+    if let Some(v) = kw.get_item("points")? {
+        points = v.extract()?;
+    }
     if let Some(v) = kw.get_item("variation")? {
         let var: String = v.extract()?;
         variation = match var.to_lowercase().as_str() {
             "dec" => AcVariation::Dec,
             "oct" => AcVariation::Oct,
             "lin" => AcVariation::Lin,
-            other => return Err(PyRuntimeError::new_err(format!(
-                "unknown variation '{other}'; use 'dec', 'oct', or 'lin'"
-            ))),
+            other => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "unknown variation '{other}'; use 'dec', 'oct', or 'lin'"
+                )))
+            }
         };
     }
     let fstart = fstart.ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstart' kwarg"))?;
-    let fstop  = fstop .ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstop' kwarg"))?;
+    let fstop = fstop.ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstop' kwarg"))?;
 
     let freqs = match variation {
         AcVariation::Dec => freq_decade(fstart, fstop, points),
@@ -968,7 +1105,12 @@ fn parse_noise_kwargs(kwargs: Option<&Bound<'_, PyDict>>)
         AcVariation::Lin => freq_linear(fstart, fstop, points),
     };
 
-    Ok((freqs, out_pos.to_lowercase(), out_neg.to_lowercase(), input_src.to_lowercase()))
+    Ok((
+        freqs,
+        out_pos.to_lowercase(),
+        out_neg.to_lowercase(),
+        input_src.to_lowercase(),
+    ))
 }
 
 // ---------------------------------------------------------------------------

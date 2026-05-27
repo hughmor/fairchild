@@ -12,9 +12,9 @@ use fairchild_parser::parse_spice;
 
 // Tolerance: max(absolute floor, relative fraction of the expected value).
 // This handles large currents where floating-point noise exceeds the absolute floor.
-const ABS_TOL_V: f64 = 1e-9;  // 1 nV floor
+const ABS_TOL_V: f64 = 1e-9; // 1 nV floor
 const ABS_TOL_A: f64 = 1e-12; // 1 pA floor
-const REL_TOL: f64 = 1e-5;    // 10 ppm relative
+const REL_TOL: f64 = 1e-5; // 10 ppm relative
 
 // ---------------------------------------------------------------------------
 // ngspice harness
@@ -54,9 +54,7 @@ fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
     // then add our own at the bottom.
     let stripped = strip_control_and_end(netlist);
     let print_vars = queries.join(" ");
-    let control_block = format!(
-        ".control\nop\nprint {print_vars}\n.endc\n.end\n"
-    );
+    let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n.end\n");
     write!(tmp, "{stripped}\n{control_block}").ok()?;
 
     let output = Command::new(&ngspice_bin)
@@ -110,7 +108,11 @@ fn parse_ngspice_print(output: &str) -> Option<HashMap<String, f64>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,11 +189,7 @@ golden_test!(
     &["v(in)", "v(mid)", "i(v1)"]
 );
 
-golden_test!(
-    current_divider,
-    "current_divider.sp",
-    &["v(a)"]
-);
+golden_test!(current_divider, "current_divider.sp", &["v(a)"]);
 
 golden_test!(
     wheatstone_bridge,

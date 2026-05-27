@@ -8,8 +8,8 @@ pub type NodeId = Option<usize>;
 
 /// Simulator context passed to device model callbacks at every eval.
 pub struct SimContext {
-    pub temperature: f64,   // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
-    pub omega_0: f64,        // rad/s carrier frequency for optical ports; 0 for electrical
+    pub temperature: f64, // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
+    pub omega_0: f64,     // rad/s carrier frequency for optical ports; 0 for electrical
     /// When true, device models apply junction-step limiters (pnjlim, fetlim).
     /// Mapped from `SimOptions::pnjlim` / `.options nopnjlim`.
     pub jlim_enabled: bool,
@@ -50,7 +50,11 @@ impl SimContext {
     /// re_bw, im_bw, λ).  Photonic devices that derive `n_channels` from
     /// `terminals.len()` should query this to know the per-channel stride.
     pub fn wires_per_channel(&self) -> usize {
-        if self.bidirectional_propagation { 5 } else { 3 }
+        if self.bidirectional_propagation {
+            5
+        } else {
+            3
+        }
     }
 }
 
@@ -83,8 +87,8 @@ pub enum ReactiveKind {
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveBranchSpec {
     pub kind: ReactiveKind,
-    pub pos:  NodeId,
-    pub neg:  NodeId,
+    pub pos: NodeId,
+    pub neg: NodeId,
     /// Current capacitance (F) or inductance (H) at the device's cached
     /// operating point.  Re-queried per NR iteration.
     pub value: f64,
@@ -100,11 +104,17 @@ pub struct EvalFlags {
 
 impl EvalFlags {
     pub fn dc() -> Self {
-        EvalFlags { resistive: true, transient: false }
+        EvalFlags {
+            resistive: true,
+            transient: false,
+        }
     }
 
     pub fn tran() -> Self {
-        EvalFlags { resistive: true, transient: true }
+        EvalFlags {
+            resistive: true,
+            transient: true,
+        }
     }
 }
 
@@ -138,11 +148,15 @@ pub trait Device: Send + Sync {
     /// Transient residual: stamp reactive + resistive contributions for BE companion.
     /// `alpha` = h_new/h_old (1.0 for fixed-step BE).
     /// Default falls back to DC residual (correct for purely resistive devices).
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
 
     /// Transient Jacobian: stamp resistive + α·reactive conductances.
     /// Default falls back to DC Jacobian.
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 
     /// Record the current solution as the previous-timestep reference for reactive terms.
     ///
@@ -160,14 +174,18 @@ pub trait Device: Send + Sync {
     ///
     /// Default empty.  Override for devices with linear C(V) or L(I)
     /// contributions (depletion C_j on a PN, parasitic c_par on a PD).
-    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> { Vec::new() }
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        Vec::new()
+    }
 
     /// Set a named real-valued parameter on this device instance.
     ///
     /// Returns `true` if the parameter was found and set; `false` if not supported
     /// or if `name` is not a parameter of this device (built-in devices return false
     /// by default — their parameters are set at construction time).
-    fn set_real_param(&mut self, _name: &str, _value: f64) -> bool { false }
+    fn set_real_param(&mut self, _name: &str, _value: f64) -> bool {
+        false
+    }
 
     /// Internal noise current sources for `.noise` analysis.
     ///
@@ -191,7 +209,9 @@ pub trait Device: Send + Sync {
     /// per device and then calls `bind_extra_nodes` with the starting index.
     /// Returns 0 by default — native Rust devices that stamp directly into
     /// terminal nodes have no extras.
-    fn num_extra_nodes(&self) -> usize { 0 }
+    fn num_extra_nodes(&self) -> usize {
+        0
+    }
 
     /// Tell the device which contiguous MNA rows (starting at `first_idx`)
     /// have been allocated for its internal nodes.  Called once after

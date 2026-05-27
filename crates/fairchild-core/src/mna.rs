@@ -5,7 +5,6 @@
 ///   rows/cols [n_nodes .. n_nodes+m)  → voltage-source branch currents
 ///
 /// Ground node "0" is eliminated from the matrix.
-
 use fairchild_parser::{Element, Netlist};
 use indexmap::IndexMap;
 
@@ -33,10 +32,16 @@ impl CircuitTopology {
     pub fn build(netlist: &Netlist) -> CircuitTopology {
         let (node_index, vsrc_index) = index_circuit(netlist);
         let size = node_index.len() + vsrc_index.len();
-        CircuitTopology { node_index, vsrc_index, size }
+        CircuitTopology {
+            node_index,
+            vsrc_index,
+            size,
+        }
     }
 
-    pub fn n_nodes(&self) -> usize { self.node_index.len() }
+    pub fn n_nodes(&self) -> usize {
+        self.node_index.len()
+    }
 
     /// Allocate `n` contiguous MNA rows for device-internal nodes (e.g. OSDI
     /// flow-branch nodes from potential contributions).  Returns the first
@@ -50,15 +55,19 @@ impl CircuitTopology {
 
     /// Retrieve a node voltage from a solution vector.
     pub fn node_voltage(&self, node: &str, x: &[f64]) -> Result<f64, SimError> {
-        if node == "0" || node == "gnd" { return Ok(0.0); }
-        self.node_index.get(node)
+        if node == "0" || node == "gnd" {
+            return Ok(0.0);
+        }
+        self.node_index
+            .get(node)
             .map(|&i| x[i])
             .ok_or_else(|| SimError::UnknownNode(node.to_string()))
     }
 
     /// Retrieve a voltage-source branch current from a solution vector.
     pub fn vsrc_current(&self, vsrc_name: &str, x: &[f64]) -> Result<f64, SimError> {
-        self.vsrc_index.get(vsrc_name)
+        self.vsrc_index
+            .get(vsrc_name)
             .map(|&i| x[self.n_nodes() + i])
             .ok_or_else(|| SimError::UnknownNode(vsrc_name.to_string()))
     }
@@ -81,7 +90,9 @@ impl MnaMatrix {
     /// Build a zero-filled MnaMatrix at the given dimension.  Useful for
     /// diagnostic passes that need a clean scratch matrix without going
     /// through the netlist stamper.
-    pub fn zeros(size: usize) -> Self { Self::new(size) }
+    pub fn zeros(size: usize) -> Self {
+        Self::new(size)
+    }
 
     /// Zero every cell of `a` and every entry of `b` in place.  Used by
     /// the hot NR / transient loops to reuse a single `MnaMatrix`
@@ -117,9 +128,11 @@ pub fn stamp_netlist_scaled_in_place(
     let n_nodes = topo.n_nodes();
     for (name, &vi_idx) in &topo.vsrc_index {
         let vi = n_nodes + vi_idx;
-        if let Some(el) = netlist.elements.iter().find(|e| {
-            matches!(e, Element::VoltageSource { name: n, .. } if n == name)
-        }) {
+        if let Some(el) = netlist
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::VoltageSource { name: n, .. } if n == name))
+        {
             if let Element::VoltageSource { waveform, .. } = el {
                 let v_full = waveform.at(0.0);
                 mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
@@ -127,12 +140,21 @@ pub fn stamp_netlist_scaled_in_place(
         }
     }
     for el in &netlist.elements {
-        if let Element::CurrentSource { pos, neg, waveform, .. } = el {
+        if let Element::CurrentSource {
+            pos, neg, waveform, ..
+        } = el
+        {
             let i_full = waveform.at(0.0);
-            if i_full == 0.0 { continue; }
+            if i_full == 0.0 {
+                continue;
+            }
             let delta = i_full * (source_scale - 1.0);
-            if let Some(&p) = topo.node_index.get(pos) { mat.b[p] -= delta; }
-            if let Some(&n) = topo.node_index.get(neg) { mat.b[n] += delta; }
+            if let Some(&p) = topo.node_index.get(pos) {
+                mat.b[p] -= delta;
+            }
+            if let Some(&n) = topo.node_index.get(neg) {
+                mat.b[n] += delta;
+            }
         }
     }
 }
@@ -159,9 +181,11 @@ pub fn stamp_netlist_scaled(
     for (name, &vi_idx) in &topo.vsrc_index {
         let vi = n_nodes + vi_idx;
         // Find the source's waveform value and rescale.
-        if let Some(el) = netlist.elements.iter().find(|e| {
-            matches!(e, Element::VoltageSource { name: n, .. } if n == name)
-        }) {
+        if let Some(el) = netlist
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::VoltageSource { name: n, .. } if n == name))
+        {
             if let Element::VoltageSource { waveform, .. } = el {
                 let v_full = waveform.at(0.0);
                 // The stamp put v_full into b[vi]; replace with v_full * source_scale.
@@ -170,13 +194,22 @@ pub fn stamp_netlist_scaled(
         }
     }
     for el in &netlist.elements {
-        if let Element::CurrentSource { pos, neg, waveform, .. } = el {
+        if let Element::CurrentSource {
+            pos, neg, waveform, ..
+        } = el
+        {
             let i_full = waveform.at(0.0);
-            if i_full == 0.0 { continue; }
+            if i_full == 0.0 {
+                continue;
+            }
             let delta = i_full * (source_scale - 1.0);
             // stamp_current_source: b[pos] -= i, b[neg] += i. Scale correction = delta.
-            if let Some(&p) = topo.node_index.get(pos) { mat.b[p] -= delta; }
-            if let Some(&n) = topo.node_index.get(neg) { mat.b[n] += delta; }
+            if let Some(&p) = topo.node_index.get(pos) {
+                mat.b[p] -= delta;
+            }
+            if let Some(&n) = topo.node_index.get(neg) {
+                mat.b[n] += delta;
+            }
         }
     }
     mat
@@ -234,10 +267,16 @@ fn stamp_netlist_into(
     let mut coupled_map: HashMap<String, (String, f64)> = HashMap::new();
     let mut ind_values: HashMap<String, f64> = HashMap::new();
     for el in &netlist.elements {
-        if let Element::Inductor { name, inductance, .. } = el {
+        if let Element::Inductor {
+            name, inductance, ..
+        } = el
+        {
             ind_values.insert(name.clone(), *inductance);
         }
-        if let Element::CoupledInductors { l1, l2, coupling, .. } = el {
+        if let Element::CoupledInductors {
+            l1, l2, coupling, ..
+        } = el
+        {
             coupled_map.insert(l1.clone(), (l2.clone(), *coupling));
             coupled_map.insert(l2.clone(), (l1.clone(), *coupling));
         }
@@ -245,7 +284,12 @@ fn stamp_netlist_into(
 
     for el in &netlist.elements {
         match el {
-            Element::Resistor { pos, neg, resistance, .. } => {
+            Element::Resistor {
+                pos,
+                neg,
+                resistance,
+                ..
+            } => {
                 stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, 1.0 / resistance);
             }
             Element::Capacitor { name, pos, neg, .. } => {
@@ -269,17 +313,29 @@ fn stamp_netlist_into(
                 }
                 // If not in ind_state (no transient yet), inductor = open circuit at DC.
             }
-            Element::CoupledInductors { l1, l2, coupling, .. } => {
+            Element::CoupledInductors {
+                l1, l2, coupling, ..
+            } => {
                 // Both inductors must be in ind_state (transient); skip at DC.
-                let Some(&(g_eq1, _)) = ind_state.get(l1) else { continue; };
-                let Some(&(g_eq2, _)) = ind_state.get(l2) else { continue; };
-                let Some(&val1) = ind_values.get(l1) else { continue; };
-                let Some(&val2) = ind_values.get(l2) else { continue; };
+                let Some(&(g_eq1, _)) = ind_state.get(l1) else {
+                    continue;
+                };
+                let Some(&(g_eq2, _)) = ind_state.get(l2) else {
+                    continue;
+                };
+                let Some(&val1) = ind_values.get(l1) else {
+                    continue;
+                };
+                let Some(&val2) = ind_values.get(l2) else {
+                    continue;
+                };
                 let k = *coupling;
                 let m = k * (val1 * val2).sqrt();
                 let det = val1 * val2 - m * m; // = val1*val2*(1-k²)
-                if det.abs() < 1e-40 { continue; } // k≈1: degenerate, skip
-                // Extract h from g_eq = h/L  =>  h = g_eq * L
+                if det.abs() < 1e-40 {
+                    continue;
+                } // k≈1: degenerate, skip
+                  // Extract h from g_eq = h/L  =>  h = g_eq * L
                 let h = g_eq1 * val1;
                 let g11 = h * val2 / det;
                 let g22 = h * val1 / det;
@@ -295,16 +351,34 @@ fn stamp_netlist_into(
                 // Verify g_eq2-derived h is consistent (both inductors share same step).
                 let _ = g_eq2; // used above implicitly; avoid unused variable warning
             }
-            Element::VoltageSource { name, pos, neg, waveform } => {
+            Element::VoltageSource {
+                name,
+                pos,
+                neg,
+                waveform,
+            } => {
                 let vi = n_nodes + topo.vsrc_index[name];
-                stamp_vsource(&mut mat.a, &mut mat.b, &topo.node_index, pos, neg, vi, waveform.at(t));
+                stamp_vsource(
+                    &mut mat.a,
+                    &mut mat.b,
+                    &topo.node_index,
+                    pos,
+                    neg,
+                    vi,
+                    waveform.at(t),
+                );
             }
-            Element::CurrentSource { pos, neg, waveform, .. } => {
+            Element::CurrentSource {
+                pos, neg, waveform, ..
+            } => {
                 // SPICE: current flows from n+ through source to n- → subtract from n+, add to n-.
                 stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, waveform.at(t));
             }
-            Element::Diode { .. } | Element::Mosfet { .. } | Element::Bjt { .. }
-            | Element::XOsdi { .. } | Element::Behavioral { .. } => {
+            Element::Diode { .. }
+            | Element::Mosfet { .. }
+            | Element::Bjt { .. }
+            | Element::XOsdi { .. }
+            | Element::Behavioral { .. } => {
                 // Nonlinear; stamped by the Device trait inside the Newton-Raphson loop.
             }
         }
@@ -366,8 +440,12 @@ fn stamp_current_source(
     neg: &str,
     value: f64,
 ) {
-    if let Some(&p) = idx.get(pos) { b[p] -= value; }
-    if let Some(&n) = idx.get(neg) { b[n] += value; }
+    if let Some(&p) = idx.get(pos) {
+        b[p] -= value;
+    }
+    if let Some(&n) = idx.get(neg) {
+        b[n] += value;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,13 +469,25 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 add_node(&mut node_index, anode);
                 add_node(&mut node_index, cathode);
             }
-            Element::Mosfet { drain, gate, source, bulk, .. } => {
+            Element::Mosfet {
+                drain,
+                gate,
+                source,
+                bulk,
+                ..
+            } => {
                 add_node(&mut node_index, drain);
                 add_node(&mut node_index, gate);
                 add_node(&mut node_index, source);
                 add_node(&mut node_index, bulk);
             }
-            Element::Bjt { collector, base, emitter, substrate, .. } => {
+            Element::Bjt {
+                collector,
+                base,
+                emitter,
+                substrate,
+                ..
+            } => {
                 add_node(&mut node_index, collector);
                 add_node(&mut node_index, base);
                 add_node(&mut node_index, emitter);
@@ -414,7 +504,13 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                     add_node(&mut node_index, net);
                 }
             }
-            Element::Behavioral { name, pos, neg, kind, .. } => {
+            Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                ..
+            } => {
                 add_node(&mut node_index, pos);
                 add_node(&mut node_index, neg);
                 if *kind == fairchild_parser::BehavioralKind::Voltage {
@@ -550,9 +646,15 @@ pub fn ind_companion_gear2(
 ///
 /// Panics if the inductor is not found — only called when the K-element references
 /// it, so the inductor is guaranteed to exist (the sanity check would have caught it).
-fn find_inductor_terminals<'a>(netlist: &'a fairchild_parser::Netlist, name: &str) -> (&'a str, &'a str) {
+fn find_inductor_terminals<'a>(
+    netlist: &'a fairchild_parser::Netlist,
+    name: &str,
+) -> (&'a str, &'a str) {
     for el in &netlist.elements {
-        if let Element::Inductor { name: n, pos, neg, .. } = el {
+        if let Element::Inductor {
+            name: n, pos, neg, ..
+        } = el
+        {
             if n == name {
                 return (pos, neg);
             }
@@ -571,8 +673,10 @@ fn find_inductor_terminals<'a>(netlist: &'a fairchild_parser::Netlist, name: &st
 fn stamp_mutual_conductance(
     a: &mut Vec<Vec<f64>>,
     idx: &IndexMap<String, usize>,
-    pos1: &str, neg1: &str,
-    pos2: &str, neg2: &str,
+    pos1: &str,
+    neg1: &str,
+    pos2: &str,
+    neg2: &str,
     g: f64,
 ) {
     let p1 = idx.get(pos1).copied();
@@ -582,21 +686,37 @@ fn stamp_mutual_conductance(
 
     // L2 rows from L1 voltage: G12 * (V_pos1 - V_neg1) → current at pos2/neg2
     if let Some(r2) = p2 {
-        if let Some(c1) = p1 { a[r2][c1] += g; }
-        if let Some(c1) = n1 { a[r2][c1] -= g; }
+        if let Some(c1) = p1 {
+            a[r2][c1] += g;
+        }
+        if let Some(c1) = n1 {
+            a[r2][c1] -= g;
+        }
     }
     if let Some(r2) = n2 {
-        if let Some(c1) = p1 { a[r2][c1] -= g; }
-        if let Some(c1) = n1 { a[r2][c1] += g; }
+        if let Some(c1) = p1 {
+            a[r2][c1] -= g;
+        }
+        if let Some(c1) = n1 {
+            a[r2][c1] += g;
+        }
     }
     // L1 rows from L2 voltage: G12 * (V_pos2 - V_neg2) → current at pos1/neg1
     if let Some(r1) = p1 {
-        if let Some(c2) = p2 { a[r1][c2] += g; }
-        if let Some(c2) = n2 { a[r1][c2] -= g; }
+        if let Some(c2) = p2 {
+            a[r1][c2] += g;
+        }
+        if let Some(c2) = n2 {
+            a[r1][c2] -= g;
+        }
     }
     if let Some(r1) = n1 {
-        if let Some(c2) = p2 { a[r1][c2] -= g; }
-        if let Some(c2) = n2 { a[r1][c2] += g; }
+        if let Some(c2) = p2 {
+            a[r1][c2] -= g;
+        }
+        if let Some(c2) = n2 {
+            a[r1][c2] += g;
+        }
     }
 }
 
@@ -607,10 +727,8 @@ mod tests {
 
     #[test]
     fn voltage_divider_topology_size() {
-        let net = parse_spice(
-            "* divider\nV1 in 0 1.0\nR1 in mid 1000\nR2 mid 0 1000\n.op\n.end\n",
-        )
-        .unwrap();
+        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1000\nR2 mid 0 1000\n.op\n.end\n")
+            .unwrap();
         let topo = CircuitTopology::build(&net);
         // 2 nodes (in, mid) + 1 vsource = 3×3
         assert_eq!(topo.size, 3);
@@ -618,10 +736,7 @@ mod tests {
 
     #[test]
     fn rc_circuit_topology() {
-        let net = parse_spice(
-            "* RC\nV1 in 0 1.0\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n",
-        )
-        .unwrap();
+        let net = parse_spice("* RC\nV1 in 0 1.0\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n").unwrap();
         let topo = CircuitTopology::build(&net);
         // nodes: in, out (2) + 1 vsource = 3
         assert_eq!(topo.size, 3);

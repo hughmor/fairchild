@@ -4,7 +4,7 @@
 //! signal chain — and they must also produce the same answer as the
 //! unidirectional baseline because no backward light enters the chain.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// Laser → waveguide → PD chain.  Compare the PD voltage with bidir off
@@ -35,17 +35,17 @@ Rload pd_a bias 1k
 .op
 .end
 ";
-    let r_uni = dc_op_nr_with_registry(&parse_spice(unidir).unwrap(),
-                                       &DeviceRegistry::new())
-                .expect("DC OP (unidir)");
-    let r_bi  = dc_op_nr_with_registry(&parse_spice(bidir).unwrap(),
-                                       &DeviceRegistry::new())
-                .expect("DC OP (bidir)");
+    let r_uni = dc_op_nr_with_registry(&parse_spice(unidir).unwrap(), &DeviceRegistry::new())
+        .expect("DC OP (unidir)");
+    let r_bi = dc_op_nr_with_registry(&parse_spice(bidir).unwrap(), &DeviceRegistry::new())
+        .expect("DC OP (bidir)");
     let v_uni = r_uni.node_voltage("pd_a").unwrap();
-    let v_bi  = r_bi.node_voltage("pd_a").unwrap();
-    assert!((v_uni - v_bi).abs() < 1e-6,
+    let v_bi = r_bi.node_voltage("pd_a").unwrap();
+    assert!(
+        (v_uni - v_bi).abs() < 1e-6,
         "PD anode should match between unidir and bidir for fw-only drive: \
-         uni={v_uni:.6} bi={v_bi:.6}");
+         uni={v_uni:.6} bi={v_bi:.6}"
+    );
 }
 
 /// In bidir mode the laser explicitly zeroes the bw wires.  Verify by
@@ -65,8 +65,10 @@ Xl src fc_cw_laser power_mW=1.0 wavelength_nm=1550
     let re_bw = r.node_voltage("src_re_bw_0").unwrap();
     let im_bw = r.node_voltage("src_im_bw_0").unwrap();
     let p_in = 1e-3_f64;
-    assert!((re_fw - p_in.sqrt()).abs() < 1e-9,
-        "fw amplitude should be √(1 mW); got {re_fw}");
+    assert!(
+        (re_fw - p_in.sqrt()).abs() < 1e-9,
+        "fw amplitude should be √(1 mW); got {re_fw}"
+    );
     assert!(re_bw.abs() < 1e-12, "bw real should be 0; got {re_bw}");
     assert!(im_bw.abs() < 1e-12, "bw imag should be 0; got {im_bw}");
 }
@@ -102,6 +104,8 @@ Xwg src wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
     // Expected amplitude: t_amp · 1.0 = exp(-α·L/2) ≈ exp(-2·100·ln10/20·100e-6/2)
     //                            = exp(-1.151e-3) ≈ 0.998850.
     let t_expected = (-2.0_f64 * 100.0 * std::f64::consts::LN_10 / 20.0 * 100e-6 / 2.0).exp();
-    assert!((amp - t_expected).abs() < 1e-5,
-        "bw amplitude through waveguide = {amp:.6}; expected {t_expected:.6}");
+    assert!(
+        (amp - t_expected).abs() < 1e-5,
+        "bw amplitude through waveguide = {amp:.6}; expected {t_expected:.6}"
+    );
 }

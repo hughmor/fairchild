@@ -6,7 +6,6 @@
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
 ///   openvaf-r legacy/va-models/test_optical_discipline.va \
 ///     --output legacy/va-models/build/test_optical_discipline.osdi
-
 use std::ffi::CStr;
 use std::path::PathBuf;
 
@@ -48,5 +47,8 @@ fn load_optical_discipline_osdi() {
     assert!(d.setup_instance.is_some(), "setup_instance missing");
     assert!(d.eval.is_some(), "eval missing");
 
-    println!("optical_wire OSDI loaded OK: {} terminals, {} params", d.num_terminals, d.num_params);
+    println!(
+        "optical_wire OSDI loaded OK: {} terminals, {} params",
+        d.num_terminals, d.num_params
+    );
 }

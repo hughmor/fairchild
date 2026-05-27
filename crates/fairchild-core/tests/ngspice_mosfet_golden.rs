@@ -7,8 +7,8 @@ use std::process::Command;
 use fairchild_core::dc_op_nr;
 use fairchild_parser::parse_spice;
 
-const REL_TOL: f64 = 2e-3;    // 0.2% — Level 1 has some param differences from ngspice
-const ABS_TOL_V: f64 = 1e-4;  // 100 µV floor
+const REL_TOL: f64 = 2e-3; // 0.2% — Level 1 has some param differences from ngspice
+const ABS_TOL_V: f64 = 1e-4; // 100 µV floor
 
 fn find_ngspice() -> Option<std::path::PathBuf> {
     if Command::new("ngspice").arg("--version").output().is_ok() {
@@ -20,7 +20,9 @@ fn find_ngspice() -> Option<std::path::PathBuf> {
         "/usr/bin/ngspice",
     ] {
         let p = std::path::Path::new(candidate);
-        if p.exists() { return Some(p.to_owned()); }
+        if p.exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }
@@ -47,9 +49,13 @@ fn ngspice_op_node(spice_with_print: &str, node: &str) -> Option<f64> {
         let prefix = format!("v({node})");
         if line.to_lowercase().starts_with(&prefix) {
             if let Some(eq) = line.find('=') {
-                let val: f64 = line[eq + 1..].trim()
-                    .split_whitespace().next().unwrap_or("")
-                    .parse().ok()?;
+                let val: f64 = line[eq + 1..]
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .parse()
+                    .ok()?;
                 return Some(val);
             }
         }
@@ -85,13 +91,14 @@ fn nmos_resistor_dc_op() {
     let ids_r = (3.3 - vd) / 10e3;
     // IDS from NMOS: at the OP, must match.
     // We can verify V(d) is positive and less than VDD.
-    assert!(vd > 0.0 && vd < 3.3, "V(d) = {vd:.4}V should be between 0 and VDD");
+    assert!(
+        vd > 0.0 && vd < 3.3,
+        "V(d) = {vd:.4}V should be between 0 and VDD"
+    );
     assert!(ids_r > 0.0, "IDS should be positive: {ids_r:.4e}");
 
     // Compare with ngspice if available.
-    let ngspice_str = format!(
-        "{netlist_str}.control\nop\nprint v(d)\n.endc\n"
-    );
+    let ngspice_str = format!("{netlist_str}.control\nop\nprint v(d)\n.endc\n");
     if let Some(vd_ng) = ngspice_op_node(&ngspice_str, "d") {
         let err = (vd - vd_ng).abs();
         let tol = ABS_TOL_V + REL_TOL * vd_ng.abs();
@@ -125,9 +132,7 @@ fn cmos_inverter_high_output() {
         "CMOS inverter VIN=0: VOUT={vout:.4}V (expected > 3.0V)"
     );
 
-    let ngspice_str = format!(
-        "{netlist_str}.control\nop\nprint v(out)\n.endc\n"
-    );
+    let ngspice_str = format!("{netlist_str}.control\nop\nprint v(out)\n.endc\n");
     if let Some(vout_ng) = ngspice_op_node(&ngspice_str, "out") {
         let err = (vout - vout_ng).abs();
         let tol = ABS_TOL_V + REL_TOL * vout_ng.abs() + 0.05;
@@ -161,9 +166,7 @@ fn cmos_inverter_low_output() {
         "CMOS inverter VIN=VDD: VOUT={vout:.4}V (expected < 10mV)"
     );
 
-    let ngspice_str = format!(
-        "{netlist_str}.control\nop\nprint v(out)\n.endc\n"
-    );
+    let ngspice_str = format!("{netlist_str}.control\nop\nprint v(out)\n.endc\n");
     if let Some(vout_ng) = ngspice_op_node(&ngspice_str, "out") {
         let err = (vout - vout_ng).abs();
         let tol = ABS_TOL_V + REL_TOL * vout_ng.abs() + 1e-6;

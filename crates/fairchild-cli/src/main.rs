@@ -9,13 +9,14 @@ use rayon::prelude::*;
 
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
-    evaluate_measurements,
-    freq_decade, freq_linear, freq_oct,
-    tran_nr_with_registry_opts, tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
+    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
+    tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
-use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist};
+use fairchild_parser::{
+    check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist,
+};
 
 #[derive(Parser)]
 #[command(
@@ -155,32 +156,41 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
         let (lhs, rhs) = match raw.split_once('=') {
             Some(pair) => pair,
             None => {
-                if !quiet { eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM=VALUE, skipping"); }
+                if !quiet {
+                    eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM=VALUE, skipping");
+                }
                 continue;
             }
         };
         let value: f64 = match rhs.parse() {
             Ok(v) => v,
             Err(_) => {
-                if !quiet { eprintln!("warning: --param '{raw}': cannot parse value '{rhs}', skipping"); }
+                if !quiet {
+                    eprintln!("warning: --param '{raw}': cannot parse value '{rhs}', skipping");
+                }
                 continue;
             }
         };
         let (elem_name, param_name) = match lhs.split_once('.') {
             Some(pair) => pair,
             None => {
-                if !quiet { eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM, skipping"); }
+                if !quiet {
+                    eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM, skipping");
+                }
                 continue;
             }
         };
-        let elem_name_lc  = elem_name.to_lowercase();
+        let elem_name_lc = elem_name.to_lowercase();
         let param_name_lc = param_name.to_lowercase();
 
         let mut applied = false;
         for el in &mut netlist.elements {
             match el {
                 Element::XOsdi { name, params, .. } if name.to_lowercase() == elem_name_lc => {
-                    if let Some(slot) = params.iter_mut().find(|(k, _)| k.to_lowercase() == param_name_lc) {
+                    if let Some(slot) = params
+                        .iter_mut()
+                        .find(|(k, _)| k.to_lowercase() == param_name_lc)
+                    {
                         slot.1 = value;
                     } else {
                         params.push((param_name_lc.clone(), value));
@@ -188,25 +198,34 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
                     applied = true;
                     break;
                 }
-                Element::Resistor { name, resistance, .. }
-                    if name.to_lowercase() == elem_name_lc
-                       && (param_name_lc == "resistance" || param_name_lc == "value" || param_name_lc == "r") =>
+                Element::Resistor {
+                    name, resistance, ..
+                } if name.to_lowercase() == elem_name_lc
+                    && (param_name_lc == "resistance"
+                        || param_name_lc == "value"
+                        || param_name_lc == "r") =>
                 {
                     *resistance = value;
                     applied = true;
                     break;
                 }
-                Element::Capacitor { name, capacitance, .. }
-                    if name.to_lowercase() == elem_name_lc
-                       && (param_name_lc == "capacitance" || param_name_lc == "value" || param_name_lc == "c") =>
+                Element::Capacitor {
+                    name, capacitance, ..
+                } if name.to_lowercase() == elem_name_lc
+                    && (param_name_lc == "capacitance"
+                        || param_name_lc == "value"
+                        || param_name_lc == "c") =>
                 {
                     *capacitance = value;
                     applied = true;
                     break;
                 }
-                Element::Inductor { name, inductance, .. }
-                    if name.to_lowercase() == elem_name_lc
-                       && (param_name_lc == "inductance" || param_name_lc == "value" || param_name_lc == "l") =>
+                Element::Inductor {
+                    name, inductance, ..
+                } if name.to_lowercase() == elem_name_lc
+                    && (param_name_lc == "inductance"
+                        || param_name_lc == "value"
+                        || param_name_lc == "l") =>
                 {
                     *inductance = value;
                     applied = true;
@@ -214,7 +233,9 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
                 }
                 Element::VoltageSource { name, waveform, .. }
                     if name.to_lowercase() == elem_name_lc
-                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "v") =>
+                        && (param_name_lc == "dc"
+                            || param_name_lc == "value"
+                            || param_name_lc == "v") =>
                 {
                     *waveform = fairchild_parser::Waveform::Dc(value);
                     applied = true;
@@ -222,7 +243,9 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
                 }
                 Element::CurrentSource { name, waveform, .. }
                     if name.to_lowercase() == elem_name_lc
-                       && (param_name_lc == "dc" || param_name_lc == "value" || param_name_lc == "i") =>
+                        && (param_name_lc == "dc"
+                            || param_name_lc == "value"
+                            || param_name_lc == "i") =>
                 {
                     *waveform = fairchild_parser::Waveform::Dc(value);
                     applied = true;
@@ -232,7 +255,9 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
             }
         }
         if !applied && !quiet {
-            eprintln!("warning: --param '{raw}': element '{elem_name}' not found or param not applicable");
+            eprintln!(
+                "warning: --param '{raw}': element '{elem_name}' not found or param not applicable"
+            );
         }
     }
 }
@@ -241,7 +266,10 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
 
 /// Parse a comma-separated probe string into normalised signal names.
 fn parse_probe(s: &str) -> Vec<String> {
-    s.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
+    s.split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// Filter a CSV string to keep only the header columns that match `probes`.
@@ -273,7 +301,10 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
         } else {
             let cols = keep_cols.as_ref().unwrap();
             let fields: Vec<&str> = line.split(',').collect();
-            let row: Vec<&str> = cols.iter().filter_map(|&i| fields.get(i).copied()).collect();
+            let row: Vec<&str> = cols
+                .iter()
+                .filter_map(|&i| fields.get(i).copied())
+                .collect();
             out.push_str(&row.join(","));
             out.push('\n');
         }
@@ -294,13 +325,27 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
         }
     };
 
-    if let Some(v) = &cli.reltol      { apply("reltol",        v); }
-    if let Some(v) = &cli.gmin       { apply("gmin",          v); }
-    if let Some(v) = &cli.method     { apply("method",        v); }
-    if let Some(v) = &cli.max_step   { apply("maxstep",       v); }
-    if cli.no_pnjlim                 { apply("pnjlim",        "0"); }
-    if let Some(v) = &cli.solver     { apply("solver",        v); }
-    if cli.variable_step             { apply("variable_step", "1"); }
+    if let Some(v) = &cli.reltol {
+        apply("reltol", v);
+    }
+    if let Some(v) = &cli.gmin {
+        apply("gmin", v);
+    }
+    if let Some(v) = &cli.method {
+        apply("method", v);
+    }
+    if let Some(v) = &cli.max_step {
+        apply("maxstep", v);
+    }
+    if cli.no_pnjlim {
+        apply("pnjlim", "0");
+    }
+    if let Some(v) = &cli.solver {
+        apply("solver", v);
+    }
+    if cli.variable_step {
+        apply("variable_step", "1");
+    }
 
     for raw in &cli.options {
         if let Some((k, v)) = raw.split_once('=') {
@@ -310,7 +355,9 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
         }
     }
 
-    if cli.verbose { opts.verbose = true; }
+    if cli.verbose {
+        opts.verbose = true;
+    }
     opts
 }
 
@@ -332,12 +379,16 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
         // path.  Surface a one-shot info note so users with `.osdi` photonic
         // models know there's a faster, cleaner alternative.
         if !quiet && !netlist.osdi_paths.is_empty() {
-            let photonic_count = netlist.osdi_paths.iter()
-                .filter(|p| p.contains("photonic")
-                    || p.contains("waveguide")
-                    || p.contains("mrr")
-                    || p.contains("mzi")
-                    || p.contains("laser"))
+            let photonic_count = netlist
+                .osdi_paths
+                .iter()
+                .filter(|p| {
+                    p.contains("photonic")
+                        || p.contains("waveguide")
+                        || p.contains("mrr")
+                        || p.contains("mzi")
+                        || p.contains("laser")
+                })
                 .count();
             if photonic_count > 0 {
                 eprintln!(
@@ -405,7 +456,10 @@ fn main() {
         if !cli.quiet {
             let n_el = netlist.elements.len();
             let n_an = netlist.analyses.len();
-            eprintln!("ok: {} element(s), {} analysis/analyses, disciplines clean", n_el, n_an);
+            eprintln!(
+                "ok: {} element(s), {} analysis/analyses, disciplines clean",
+                n_el, n_an
+            );
         }
         std::process::exit(0);
     }
@@ -416,14 +470,19 @@ fn main() {
         let netlist_dir_tmp = cli.file.parent().map(|p| p.to_path_buf());
         let reg_tmp = build_registry(&netlist, netlist_dir_tmp.as_ref(), cli.quiet);
         let opts_tmp = build_options(&netlist, &cli);
-        let result = dc_op_nr_with_registry_opts(&netlist, &reg_tmp, &opts_tmp).unwrap_or_else(|e| {
-            eprintln!("error: cannot build topology: {e}");
-            std::process::exit(1);
-        });
+        let result =
+            dc_op_nr_with_registry_opts(&netlist, &reg_tmp, &opts_tmp).unwrap_or_else(|e| {
+                eprintln!("error: cannot build topology: {e}");
+                std::process::exit(1);
+            });
         let mut nodes: Vec<&str> = result.topo.node_index.keys().map(|s| s.as_str()).collect();
         nodes.sort_unstable();
-        for n in nodes { println!("V({n})"); }
-        for n in result.topo.vsrc_index.keys() { println!("I({n})"); }
+        for n in nodes {
+            println!("V({n})");
+        }
+        for n in result.topo.vsrc_index.keys() {
+            println!("I({n})");
+        }
         std::process::exit(0);
     }
 
@@ -452,8 +511,10 @@ fn main() {
     // Merge netlist `.options` + CLI flag overrides into a single SimOptions.
     let opts = build_options(&netlist, &cli);
     if cli.verbose {
-        eprintln!("info: solver options: reltol={:e} gmin={:e} method={:?} itl1={} itl4={}",
-            opts.reltol, opts.gmin, opts.method, opts.itl1, opts.itl4);
+        eprintln!(
+            "info: solver options: reltol={:e} gmin={:e} method={:?} itl1={} itl4={}",
+            opts.reltol, opts.gmin, opts.method, opts.itl1, opts.itl4
+        );
     }
 
     // .temp <T1> [<T2> ...] sweep: re-run every analysis once per temperature.
@@ -499,20 +560,28 @@ fn main() {
     // (b) we have more than one corner, (c) the user hasn't asked for
     // the single-output bundle, and (d) verbose is off (otherwise the
     // interleaved per-corner NR diagnostics would be unreadable).
-    let parallel_eligible = cli.output.is_some()
-        && n_corners > 1
-        && !cli.single_output
-        && !cli.verbose;
+    let parallel_eligible =
+        cli.output.is_some() && n_corners > 1 && !cli.single_output && !cli.verbose;
 
     let ran_something = if parallel_eligible {
         run_corners_parallel(
-            &corners, n_alters, n_temps,
-            netlist_dir.as_ref(), &probe_list, &title, &cli,
+            &corners,
+            n_alters,
+            n_temps,
+            netlist_dir.as_ref(),
+            &probe_list,
+            &title,
+            &cli,
         )
     } else {
         run_corners_serial(
-            &corners, n_alters, n_temps,
-            netlist_dir.as_ref(), &probe_list, &title, &cli,
+            &corners,
+            n_alters,
+            n_temps,
+            netlist_dir.as_ref(),
+            &probe_list,
+            &title,
+            &cli,
         )
     };
 
@@ -528,23 +597,35 @@ fn main() {
 /// One leaf of the `.alter` × `.temp` grid: a fully-resolved netlist
 /// plus a `SimOptions` carrying the per-corner temperature.
 struct Corner {
-    alter_idx:  usize,
-    temp_idx:   usize,
+    alter_idx: usize,
+    temp_idx: usize,
     alter_label: String,
-    temp_k:     f64,
-    netlist:    Netlist,
-    opts:       SimOptions,
+    temp_k: f64,
+    netlist: Netlist,
+    opts: SimOptions,
 }
 
 /// Derive a per-corner output path by suffixing the base `--output`
 /// path with `.alter_<label>` and `.temp_<C>c` where the corresponding
 /// sweep is non-trivial.  Single-corner runs pass through unchanged.
-fn corner_path(base: &Path, alter_label: &str, n_alters: usize, temp_k: f64, n_temps: usize) -> PathBuf {
+fn corner_path(
+    base: &Path,
+    alter_label: &str,
+    n_alters: usize,
+    temp_k: f64,
+    n_temps: usize,
+) -> PathBuf {
     if n_alters <= 1 && n_temps <= 1 {
         return base.to_path_buf();
     }
-    let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext  = base.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = base
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let parent = base.parent().unwrap_or_else(|| Path::new("."));
     let mut name = stem;
     if n_alters > 1 {
@@ -567,10 +648,12 @@ fn corner_path(base: &Path, alter_label: &str, n_alters: usize, temp_k: f64, n_t
 /// Replace whitespace and path separators in `.alter` labels so they
 /// produce valid filename suffixes.
 fn sanitize_label(s: &str) -> String {
-    s.chars().map(|c| match c {
-        ' ' | '\t' | '/' | '\\' | ':' => '_',
-        _ => c,
-    }).collect()
+    s.chars()
+        .map(|c| match c {
+            ' ' | '\t' | '/' | '\\' | ':' => '_',
+            _ => c,
+        })
+        .collect()
 }
 
 fn open_writer(path: &Path) -> Box<dyn Write + Send> {
@@ -586,12 +669,17 @@ fn open_writer(path: &Path) -> Box<dyn Write + Send> {
 /// when no `--output` was specified (writes go to stdout), or under
 /// `--verbose` (per-corner diagnostics would otherwise interleave).
 fn run_corners_serial(
-    corners: &[Corner], n_alters: usize, n_temps: usize,
-    netlist_dir: Option<&PathBuf>, probe_list: &[String], title: &str, cli: &Cli,
+    corners: &[Corner],
+    n_alters: usize,
+    n_temps: usize,
+    netlist_dir: Option<&PathBuf>,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
 ) -> bool {
     let mut w: Box<dyn Write> = match &cli.output {
         Some(path) => open_writer(path),
-        None       => Box::new(BufWriter::new(io::stdout())),
+        None => Box::new(BufWriter::new(io::stdout())),
     };
     let mut ran_something = false;
     let mut last_alter: Option<usize> = None;
@@ -604,26 +692,48 @@ fn run_corners_serial(
             last_alter = Some(corner.alter_idx);
         }
         if n_alters > 1 {
-            writeln!(w, "# alter={} (block {}/{})",
-                corner.alter_label, corner.alter_idx + 1, n_alters)
-                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            writeln!(
+                w,
+                "# alter={} (block {}/{})",
+                corner.alter_label,
+                corner.alter_idx + 1,
+                n_alters
+            )
+            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
             if cli.verbose {
-                eprintln!("info: .alter block {}/{}: '{}'",
-                    corner.alter_idx + 1, n_alters, corner.alter_label);
+                eprintln!(
+                    "info: .alter block {}/{}: '{}'",
+                    corner.alter_idx + 1,
+                    n_alters,
+                    corner.alter_label
+                );
             }
         }
         if n_temps > 1 {
-            writeln!(w, "# temp_c={:.3} (point {}/{})",
-                corner.temp_k - 273.15, corner.temp_idx + 1, n_temps)
-                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            writeln!(
+                w,
+                "# temp_c={:.3} (point {}/{})",
+                corner.temp_k - 273.15,
+                corner.temp_idx + 1,
+                n_temps
+            )
+            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
             if cli.verbose {
-                eprintln!("info: temperature sweep point {}/{}: {:.2} °C",
-                    corner.temp_idx + 1, n_temps, corner.temp_k - 273.15);
+                eprintln!(
+                    "info: temperature sweep point {}/{}: {:.2} °C",
+                    corner.temp_idx + 1,
+                    n_temps,
+                    corner.temp_k - 273.15
+                );
             }
         }
         if run_corner_analyses(
-            corner, registry.as_ref().unwrap(),
-            probe_list, title, cli, &mut w,
+            corner,
+            registry.as_ref().unwrap(),
+            probe_list,
+            title,
+            cli,
+            &mut w,
         ) {
             ran_something = true;
         }
@@ -637,10 +747,18 @@ fn run_corners_serial(
 /// loader uses `dlopen` which is process-global, but each registry
 /// owns its own `OsdiLibrary` handles).
 fn run_corners_parallel(
-    corners: &[Corner], n_alters: usize, n_temps: usize,
-    netlist_dir: Option<&PathBuf>, probe_list: &[String], title: &str, cli: &Cli,
+    corners: &[Corner],
+    n_alters: usize,
+    n_temps: usize,
+    netlist_dir: Option<&PathBuf>,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
 ) -> bool {
-    let base = cli.output.as_ref().expect("--output required for parallel mode");
+    let base = cli
+        .output
+        .as_ref()
+        .expect("--output required for parallel mode");
     let netlist_dir = netlist_dir.cloned();
     let probe_list = probe_list.to_vec();
     let title = title.to_string();
@@ -648,7 +766,8 @@ fn run_corners_parallel(
     let cli_verbose = cli.verbose;
     let cli_format = cli.format.clone();
 
-    let ran: Vec<bool> = corners.par_iter()
+    let ran: Vec<bool> = corners
+        .par_iter()
         .map(|corner| {
             let out_path = corner_path(base, &corner.alter_label, n_alters, corner.temp_k, n_temps);
             let mut w: Box<dyn Write> = open_writer(&out_path);
@@ -672,24 +791,33 @@ fn run_corners_parallel(
 /// `String` / `Vec<String>` that would force cloning per corner).
 struct CornerCtx<'a> {
     verbose: bool,
-    format:  &'a Format,
+    format: &'a Format,
 }
 
 /// Convenience wrapper for the serial path that has a `&Cli` available.
 fn run_corner_analyses(
-    corner: &Corner, registry: &DeviceRegistry,
-    probe_list: &[String], title: &str, cli: &Cli,
+    corner: &Corner,
+    registry: &DeviceRegistry,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
     w: &mut dyn Write,
 ) -> bool {
-    let ctx = CornerCtx { verbose: cli.verbose, format: &cli.format };
+    let ctx = CornerCtx {
+        verbose: cli.verbose,
+        format: &cli.format,
+    };
     run_corner_analyses_ctx(corner, registry, probe_list, title, &ctx, w)
 }
 
 /// Run every `Analysis` declared on this corner's netlist, writing
 /// results to `w`.  Returns `true` if anything was emitted.
 fn run_corner_analyses_ctx(
-    corner: &Corner, registry: &DeviceRegistry,
-    probe_list: &[String], title: &str, ctx: &CornerCtx,
+    corner: &Corner,
+    registry: &DeviceRegistry,
+    probe_list: &[String],
+    title: &str,
+    ctx: &CornerCtx,
     w: &mut dyn Write,
 ) -> bool {
     let netlist = &corner.netlist;
@@ -698,26 +826,37 @@ fn run_corner_analyses_ctx(
     for analysis in &netlist.analyses {
         match analysis {
             Analysis::Op => {
-                if ctx.verbose { eprintln!("info: running DC operating-point analysis..."); }
-                let t0 = Instant::now();
-                let result = dc_op_nr_with_registry_opts(netlist, registry, opts).unwrap_or_else(|e| {
-                    eprintln!("error: DC op failed: {e}");
-                    std::process::exit(1);
-                });
                 if ctx.verbose {
-                    eprintln!("info: DC op converged in {} iteration(s) [{:.1} ms]",
-                        result.iters, t0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!("info: running DC operating-point analysis...");
+                }
+                let t0 = Instant::now();
+                let result =
+                    dc_op_nr_with_registry_opts(netlist, registry, opts).unwrap_or_else(|e| {
+                        eprintln!("error: DC op failed: {e}");
+                        std::process::exit(1);
+                    });
+                if ctx.verbose {
+                    eprintln!(
+                        "info: DC op converged in {} iteration(s) [{:.1} ms]",
+                        result.iters,
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
-                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
                         let filtered = filter_csv(&csv, probe_list);
-                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_nutmeg(&mut *w, title)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
@@ -725,7 +864,11 @@ fn run_corner_analyses_ctx(
 
             Analysis::Tran { step, stop } => {
                 if ctx.verbose {
-                    let mode = if opts.variable_step { "variable-step" } else { "fixed-step" };
+                    let mode = if opts.variable_step {
+                        "variable-step"
+                    } else {
+                        "fixed-step"
+                    };
                     eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?} {mode})...", opts.method);
                 }
                 let t0 = Instant::now();
@@ -733,24 +876,33 @@ fn run_corner_analyses_ctx(
                     tran_nr_with_registry_var_opts(netlist, *step, *stop, registry, opts)
                 } else {
                     tran_nr_with_registry_opts(netlist, *step, *stop, registry, opts)
-                }.unwrap_or_else(|e| {
+                }
+                .unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });
                 if ctx.verbose {
-                    eprintln!("info: transient complete: {} time-points [{:.1} ms]",
-                        result.time.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "info: transient complete: {} time-points [{:.1} ms]",
+                        result.time.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
-                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
                         let filtered = filter_csv(&csv, probe_list);
-                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_nutmeg(&mut *w, title)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 if !netlist.measurements.is_empty() {
@@ -762,76 +914,123 @@ fn run_corner_analyses_ctx(
                 ran_something = true;
             }
 
-            Analysis::Dc { src, start, stop, step, nested } => {
+            Analysis::Dc {
+                src,
+                start,
+                stop,
+                step,
+                nested,
+            } => {
                 if ctx.verbose {
                     let extra = match nested {
                         Some(n) => format!(" × {} {}..{}", n.src, n.start, n.stop),
-                        None    => String::new(),
+                        None => String::new(),
                     };
-                    eprintln!("info: running DC sweep on {src} ({start}..{stop} step={step}){extra}...");
+                    eprintln!(
+                        "info: running DC sweep on {src} ({start}..{stop} step={step}){extra}..."
+                    );
                 }
                 let t0 = Instant::now();
-                let nested_arg = nested.as_ref().map(|n| (n.src.as_str(), n.start, n.stop, n.step));
+                let nested_arg = nested
+                    .as_ref()
+                    .map(|n| (n.src.as_str(), n.start, n.stop, n.step));
                 let result = dc_sweep_with_registry_opts(
-                    netlist, src, *start, *stop, *step, nested_arg, registry, opts
-                ).unwrap_or_else(|e| {
+                    netlist, src, *start, *stop, *step, nested_arg, registry, opts,
+                )
+                .unwrap_or_else(|e| {
                     eprintln!("error: DC sweep failed: {e}");
                     std::process::exit(1);
                 });
                 if ctx.verbose {
-                    eprintln!("info: DC sweep complete: {} point(s) [{:.1} ms]",
-                        result.n_points(), t0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "info: DC sweep complete: {} point(s) [{:.1} ms]",
+                        result.n_points(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
-                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
                         let filtered = filter_csv(&csv, probe_list);
-                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_nutmeg(&mut *w, title)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
             }
 
-            Analysis::Ac { variation, points, fstart, fstop } => {
-                if ctx.verbose { eprintln!("info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."); }
+            Analysis::Ac {
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
+                if ctx.verbose {
+                    eprintln!(
+                        "info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."
+                    );
+                }
                 let t0 = Instant::now();
                 let freqs = match variation {
                     AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
                     AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
                     AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
                 };
-                let result = ac_analysis_opts(netlist, &freqs, None, registry, opts).unwrap_or_else(|e| {
-                    eprintln!("error: AC analysis failed: {e}");
-                    std::process::exit(1);
-                });
+                let result = ac_analysis_opts(netlist, &freqs, None, registry, opts)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: AC analysis failed: {e}");
+                        std::process::exit(1);
+                    });
                 if ctx.verbose {
-                    eprintln!("info: AC analysis complete: {} frequency points [{:.1} ms]",
-                        freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "info: AC analysis complete: {} frequency points [{:.1} ms]",
+                        freqs.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 match ctx.format {
                     Format::Csv => {
                         let mut buf = Vec::new();
-                        result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
                         let filtered = filter_csv(&csv, probe_list);
-                        w.write_all(filtered.as_bytes()).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                     Format::Nutmeg => {
-                        result.write_nutmeg(&mut *w, title).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        result
+                            .write_nutmeg(&mut *w, title)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
                 ran_something = true;
             }
 
-            Analysis::Noise { out_pos, out_neg, input_src, variation, points, fstart, fstop } => {
+            Analysis::Noise {
+                out_pos,
+                out_neg,
+                input_src,
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
                 if ctx.verbose {
-                    eprintln!("info: running noise analysis V({out_pos},{out_neg}) on {input_src} \
-                              ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)...");
+                    eprintln!(
+                        "info: running noise analysis V({out_pos},{out_neg}) on {input_src} \
+                              ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."
+                    );
                 }
                 let t0 = Instant::now();
                 let freqs = match variation {
@@ -841,17 +1040,24 @@ fn run_corner_analyses_ctx(
                 };
                 let result = fairchild_core::noise_analysis(
                     netlist, &freqs, out_pos, out_neg, input_src, registry, opts,
-                ).unwrap_or_else(|e| {
+                )
+                .unwrap_or_else(|e| {
                     eprintln!("error: noise analysis failed: {e}");
                     std::process::exit(1);
                 });
                 if ctx.verbose {
-                    eprintln!("info: noise analysis complete: {} pts [{:.1} ms]",
-                        freqs.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "info: noise analysis complete: {} pts [{:.1} ms]",
+                        freqs.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 let mut buf = Vec::new();
-                result.write_csv(&mut buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-                w.write_all(&buf).unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                result
+                    .write_csv(&mut buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                 ran_something = true;
             }
         }

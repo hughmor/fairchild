@@ -1,10 +1,9 @@
+use fairchild_core::device_registry::DeviceRegistry;
 /// Integration tests for passive parasitic expansion (Item E).
 ///
 /// Tests that `rser=`, `cpar=`, `esr=`, `esl=`, `rpar=` on R/L/C elements
 /// expand to the same circuit as the equivalent explicit sub-network.
-
 use fairchild_core::tran::{tran_nr_with_registry, TranResult};
-use fairchild_core::device_registry::DeviceRegistry;
 use fairchild_parser::parse_spice;
 
 fn run_be(netlist_str: &str, step: f64, stop: f64) -> TranResult {
@@ -43,7 +42,7 @@ C1  out 0   1u
 .end
 ";
     let res_p = run_be(with_param, 1e-6, 200e-6);
-    let res_e = run_be(explicit,   1e-6, 200e-6);
+    let res_e = run_be(explicit, 1e-6, 200e-6);
 
     for t in [50e-6, 100e-6, 150e-6, 200e-6] {
         let vp = voltage_at(&res_p, "out", t);
@@ -78,7 +77,7 @@ C1  __c1_esrn 0  1u
 .end
 ";
     let res_p = run_be(with_param, 1e-6, 200e-6);
-    let res_e = run_be(explicit,   1e-6, 200e-6);
+    let res_e = run_be(explicit, 1e-6, 200e-6);
 
     for t in [50e-6, 100e-6, 150e-6, 200e-6] {
         let vp = voltage_at(&res_p, "mid", t);
@@ -114,7 +113,7 @@ Rleak out 0 1k
 .end
 ";
     let res_p = run_be(with_param, 10e-6, 5e-3);
-    let res_e = run_be(explicit,   10e-6, 5e-3);
+    let res_e = run_be(explicit, 10e-6, 5e-3);
 
     for t in [1e-3, 2e-3, 3e-3] {
         let vp = voltage_at(&res_p, "out", t);

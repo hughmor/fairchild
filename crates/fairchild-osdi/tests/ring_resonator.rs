@@ -17,12 +17,11 @@
 ///
 /// Validation: resonance dip in simulated V(ph_a) must be within 0.1 nm of the
 /// CMT analytical resonance wavelength.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use fairchild_core::{
-    build_devices, dc_op_nr_with_devices, CircuitTopology, DeviceRegistry, SimContext, Device,
+    build_devices, dc_op_nr_with_devices, CircuitTopology, Device, DeviceRegistry, SimContext,
 };
 use fairchild_osdi::{OsdiDevice, OsdiLibrary};
 use fairchild_parser::parse_spice;
@@ -30,10 +29,10 @@ use fairchild_parser::parse_spice;
 // Ring resonator physical parameters
 const L_RING_UM: f64 = 100.0;
 const N_G: f64 = 4.2;
-const KAPPA_0: f64 = 0.1;        // coupler cross-coupling power fraction
-const ALPHA_DB_CM: f64 = 2.0;    // waveguide propagation loss
-const POWER_MW: f64 = 1.0;       // laser power
-const R_LOAD: f64 = 1e3;         // load resistance
+const KAPPA_0: f64 = 0.1; // coupler cross-coupling power fraction
+const ALPHA_DB_CM: f64 = 2.0; // waveguide propagation loss
+const POWER_MW: f64 = 1.0; // laser power
+const R_LOAD: f64 = 1e3; // load resistance
 
 fn model_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,13 +82,12 @@ fn cmt_transmission(wavelength_m: f64) -> f64 {
     let r = (1.0 - KAPPA_0).sqrt();
     let alpha_lin = ALPHA_DB_CM * 1e2 / 8.685_895; // dB/cm → Np/m
     let l_ring_m = L_RING_UM * 1e-6;
-    let a = (-alpha_lin * l_ring_m / 2.0).exp();   // round-trip amplitude (one full loop = 2*half)
+    let a = (-alpha_lin * l_ring_m / 2.0).exp(); // round-trip amplitude (one full loop = 2*half)
 
     let beta = 2.0 * std::f64::consts::PI * N_G / wavelength_m;
     let phi = beta * l_ring_m;
 
-    (r * r - 2.0 * r * a * phi.cos() + a * a)
-        / (1.0 - 2.0 * r * a * phi.cos() + r * r * a * a)
+    (r * r - 2.0 * r * a * phi.cos() + a * a) / (1.0 - 2.0 * r * a * phi.cos() + r * r * a * a)
 }
 
 /// Find the resonance wavelength nearest to `lambda_center_m` using CMT.
@@ -106,29 +104,40 @@ fn cmt_resonance_nearest(lambda_center_m: f64) -> f64 {
 #[test]
 fn access_ptr_diagnostic() {
     let path = model_path("cw_laser");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.expect("dlopen"));
 
     // Inspect the descriptor fields directly.
     let desc = lib.descriptors().next().expect("no descriptors");
     let n_total = desc.num_params as usize;
-    let n_inst  = desc.num_instance_params as usize;
+    let n_inst = desc.num_instance_params as usize;
     let n_opvar = desc.num_opvars as usize;
     let model_size = desc.model_size as usize;
     eprintln!("Descriptor: num_params={n_total}, num_instance_params={n_inst}, num_opvars={n_opvar}, model_size={model_size}");
 
     // Print all param/opvar names and their flags.
     if !desc.param_opvar.is_null() {
-        let entries = unsafe {
-            std::slice::from_raw_parts(desc.param_opvar, n_total + n_opvar)
-        };
+        let entries = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total + n_opvar) };
         for (idx, p) in entries.iter().enumerate() {
-            let kind = if idx < n_inst { "INST" } else if idx < n_total { "MODEL" } else { "OPVAR" };
-            let name = if p.name.is_null() { "<null>" } else {
+            let kind = if idx < n_inst {
+                "INST"
+            } else if idx < n_total {
+                "MODEL"
+            } else {
+                "OPVAR"
+            };
+            let name = if p.name.is_null() {
+                "<null>"
+            } else {
                 unsafe { std::ffi::CStr::from_ptr(*p.name).to_str().unwrap_or("?") }
             };
-            eprintln!("  param_opvar[{idx}] {kind}: name={name:20} flags={:#010x}", p.flags);
+            eprintln!(
+                "  param_opvar[{idx}] {kind}: name={name:20} flags={:#010x}",
+                p.flags
+            );
         }
     }
 
@@ -146,7 +155,10 @@ fn access_ptr_diagnostic() {
         eprintln!("  [{}] offset {:3}: {}", i, i * 8, v);
     }
 
-    eprintln!("\naccess(null, model_ptr, PARA_KIND_MODEL|j, READ) for j=0..{}:", n_total + 2);
+    eprintln!(
+        "\naccess(null, model_ptr, PARA_KIND_MODEL|j, READ) for j=0..{}:",
+        n_total + 2
+    );
     use fairchild_osdi::ffi::{ACCESS_FLAG_READ, PARA_KIND_MODEL};
     if let Some(access_fn) = desc.access {
         for j in 0u32..(n_total as u32 + 2) {
@@ -174,26 +186,40 @@ fn access_ptr_diagnostic() {
     eprintln!("Model buffer after set_real_param: {:?}", model_f64s);
 
     // --- Node/Jacobian topology (cw_laser) ---
-    eprintln!("\nNode topology: num_nodes={}, num_terminals={}", desc.num_nodes, desc.num_terminals);
+    eprintln!(
+        "\nNode topology: num_nodes={}, num_terminals={}",
+        desc.num_nodes, desc.num_terminals
+    );
     let n_nodes_total = desc.num_nodes as usize;
     if !desc.nodes.is_null() {
         let nodes = unsafe { std::slice::from_raw_parts(desc.nodes, n_nodes_total) };
         for (i, node) in nodes.iter().enumerate() {
-            let name = if node.name.is_null() { "<null>" } else {
+            let name = if node.name.is_null() {
+                "<null>"
+            } else {
                 unsafe { std::ffi::CStr::from_ptr(node.name).to_str().unwrap_or("?") }
             };
-            eprintln!("  node[{i}] name={name:20} is_flow={} resist_res_off={}", node.is_flow, node.resist_residual_off);
+            eprintln!(
+                "  node[{i}] name={name:20} is_flow={} resist_res_off={}",
+                node.is_flow, node.resist_residual_off
+            );
         }
     }
 
-    eprintln!("\nJacobian: num_jacobian_entries={}, num_resistive={}", desc.num_jacobian_entries, desc.num_resistive_jacobian_entries);
+    eprintln!(
+        "\nJacobian: num_jacobian_entries={}, num_resistive={}",
+        desc.num_jacobian_entries, desc.num_resistive_jacobian_entries
+    );
     let n_jac = desc.num_jacobian_entries as usize;
     let n_resist = desc.num_resistive_jacobian_entries as usize;
     if !desc.jacobian_entries.is_null() && n_jac > 0 {
         let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_jac) };
         for (i, e) in entries.iter().enumerate() {
             let kind = if i < n_resist { "RESIST" } else { "REACT" };
-            eprintln!("  entry[{i}] {kind}: node_1={} node_2={} react_ptr_off={}", e.nodes.node_1, e.nodes.node_2, e.react_ptr_off);
+            eprintln!(
+                "  entry[{i}] {kind}: node_1={} node_2={} react_ptr_off={}",
+                e.nodes.node_1, e.nodes.node_2, e.react_ptr_off
+            );
         }
     }
 }
@@ -204,7 +230,9 @@ fn access_ptr_diagnostic() {
 #[test]
 fn set_real_param_verification() {
     let path = model_path("cw_laser");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.expect("dlopen"));
     let mut registry = DeviceRegistry::new();
@@ -265,12 +293,15 @@ fn ring_single_point_diagnostic() {
         model_path("photodetector"),
     ];
     for p in &paths {
-        if skip_if_missing(p) { return; }
+        if skip_if_missing(p) {
+            return;
+        }
     }
 
-    let libs: Vec<Arc<OsdiLibrary>> = paths.iter().map(|p| {
-        Arc::new(unsafe { OsdiLibrary::open(p) }.expect("dlopen"))
-    }).collect();
+    let libs: Vec<Arc<OsdiLibrary>> = paths
+        .iter()
+        .map(|p| Arc::new(unsafe { OsdiLibrary::open(p) }.expect("dlopen")))
+        .collect();
 
     let mut registry = DeviceRegistry::new();
     for lib in &libs {
@@ -285,14 +316,14 @@ fn ring_single_point_diagnostic() {
     // build_devices element order: [laser=0, coupler=1, waveguide=2, PD=3]
     let mut devices = build_devices(&netlist, &mut topo, &ctx, &registry).expect("build_devices");
 
-    let r_laser_pwr  = devices[0].set_real_param("power_mW",      POWER_MW);
-    let r_laser_wl   = devices[0].set_real_param("wavelength_nm", 1550.0);
-    let r_kappa      = devices[1].set_real_param("kappa_0",        KAPPA_0);
+    let r_laser_pwr = devices[0].set_real_param("power_mW", POWER_MW);
+    let r_laser_wl = devices[0].set_real_param("wavelength_nm", 1550.0);
+    let r_kappa = devices[1].set_real_param("kappa_0", KAPPA_0);
     let r_coupler_wl = devices[1].set_real_param("wavelength_nm", 1550.0);
-    let r_l_um       = devices[2].set_real_param("L_um",           L_RING_UM);
-    let r_n_g        = devices[2].set_real_param("n_g",            N_G);
-    let r_alpha      = devices[2].set_real_param("alpha_dB_cm",    ALPHA_DB_CM);
-    let r_wg_wl      = devices[2].set_real_param("wavelength_nm", 1550.0);
+    let r_l_um = devices[2].set_real_param("L_um", L_RING_UM);
+    let r_n_g = devices[2].set_real_param("n_g", N_G);
+    let r_alpha = devices[2].set_real_param("alpha_dB_cm", ALPHA_DB_CM);
+    let r_wg_wl = devices[2].set_real_param("wavelength_nm", 1550.0);
 
     eprintln!("set_real_param results:");
     eprintln!("  [laser]  power_mW={POWER_MW}       → {r_laser_pwr}");
@@ -312,15 +343,15 @@ fn ring_single_point_diagnostic() {
         eprintln!("  V({name:20}) = {v:+.6e}");
     }
 
-    let v_laser_re   = result.node_voltage("laser_re").unwrap_or(0.0);
-    let v_laser_im   = result.node_voltage("laser_im").unwrap_or(0.0);
+    let v_laser_re = result.node_voltage("laser_re").unwrap_or(0.0);
+    let v_laser_im = result.node_voltage("laser_im").unwrap_or(0.0);
     let v_through_re = result.node_voltage("through_re").unwrap_or(0.0);
     let v_through_im = result.node_voltage("through_im").unwrap_or(0.0);
     let v_ring_fb_re = result.node_voltage("ring_fb_re").unwrap_or(0.0);
     let v_ring_fb_im = result.node_voltage("ring_fb_im").unwrap_or(0.0);
-    let v_ph_a       = result.node_voltage("ph_a").unwrap_or(0.0);
+    let v_ph_a = result.node_voltage("ph_a").unwrap_or(0.0);
 
-    let p_laser   = v_laser_re.powi(2) + v_laser_im.powi(2);
+    let p_laser = v_laser_re.powi(2) + v_laser_im.powi(2);
     let p_through = v_through_re.powi(2) + v_through_im.powi(2);
     let p_ring_fb = v_ring_fb_re.powi(2) + v_ring_fb_im.powi(2);
     let expected_p_in = POWER_MW * 1e-3;
@@ -350,13 +381,16 @@ fn ring_resonator_wavelength_sweep() {
         model_path("photodetector"),
     ];
     for p in &paths {
-        if skip_if_missing(p) { return; }
+        if skip_if_missing(p) {
+            return;
+        }
     }
 
     // Load all model libraries once.
-    let libs: Vec<Arc<OsdiLibrary>> = paths.iter().map(|p| {
-        Arc::new(unsafe { OsdiLibrary::open(p) }.expect("dlopen failed"))
-    }).collect();
+    let libs: Vec<Arc<OsdiLibrary>> = paths
+        .iter()
+        .map(|p| Arc::new(unsafe { OsdiLibrary::open(p) }.expect("dlopen failed")))
+        .collect();
 
     let mut registry = DeviceRegistry::new();
     for lib in &libs {
@@ -366,7 +400,7 @@ fn ring_resonator_wavelength_sweep() {
     // Wavelength sweep: 1544..=1558 nm in steps of 0.14 nm → 101 points.
     let n_points = 101usize;
     let wl_start = 1544.0_f64;
-    let wl_end   = 1558.0_f64;
+    let wl_end = 1558.0_f64;
     let wavelengths: Vec<f64> = (0..n_points)
         .map(|i| wl_start + (wl_end - wl_start) * i as f64 / (n_points - 1) as f64)
         .collect();
@@ -382,8 +416,8 @@ fn ring_resonator_wavelength_sweep() {
     let ctx = SimContext::default();
 
     for &wl_nm in &wavelengths {
-        let mut devices = build_devices(&base_netlist, &mut topo, &ctx, &registry)
-            .expect("build_devices");
+        let mut devices =
+            build_devices(&base_netlist, &mut topo, &ctx, &registry).expect("build_devices");
 
         // Inject wavelength into every optical OSDI device.
         for dev in &mut devices {
@@ -411,10 +445,12 @@ fn ring_resonator_wavelength_sweep() {
     println!("Sweep CSV written to {}", csv_path.display());
 
     // Find the simulated transmission minimum and maximum.
-    let v_off_resonance = sweep_results.iter()
+    let v_off_resonance = sweep_results
+        .iter()
         .map(|&(_, v)| v)
         .fold(f64::NEG_INFINITY, f64::max);
-    let (sim_res_nm, v_min) = sweep_results.iter()
+    let (sim_res_nm, v_min) = sweep_results
+        .iter()
         .copied()
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .unwrap();

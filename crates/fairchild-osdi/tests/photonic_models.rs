@@ -8,7 +8,6 @@
 /// Physics baseline (coupled-mode theory / analytical):
 ///   CW laser (1 mW, 0°): V(out_re) = sqrt(1e-3) ≈ 0.031623, V(out_im) = 0.0
 ///   Photodetector (1 mW in, R=1.0 A/W, R_load=1kΩ): V(ph_a) ≈ 1.0 V
-
 use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +38,9 @@ fn skip_if_missing(path: &PathBuf) -> bool {
 #[test]
 fn cw_laser_descriptor_sanity() {
     let path = model_path("cw_laser");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
     assert_eq!(lib.version, (0, 4));
@@ -52,7 +53,11 @@ fn cw_laser_descriptor_sanity() {
     // 3 external terminals (out_re, out_im, out_lambda).
     assert_eq!(d.num_terminals, 3, "expected 3 terminals");
     // At least 3 declared parameters (power_mW, phi_0_deg, wavelength_nm).
-    assert!(d.num_params >= 3, "expected ≥3 params, got {}", d.num_params);
+    assert!(
+        d.num_params >= 3,
+        "expected ≥3 params, got {}",
+        d.num_params
+    );
 
     println!(
         "cw_laser: terminals={}, nodes={}, params={}, resist_jac_entries={}",
@@ -63,7 +68,9 @@ fn cw_laser_descriptor_sanity() {
 #[test]
 fn waveguide_descriptor_sanity() {
     let path = model_path("waveguide");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
     let d = lib.descriptors().next().unwrap();
@@ -72,7 +79,11 @@ fn waveguide_descriptor_sanity() {
 
     // 6 external terminals: in_re, in_im, in_lambda, out_re, out_im, out_lambda.
     assert_eq!(d.num_terminals, 6, "expected 6 terminals");
-    assert!(d.num_params >= 4, "expected ≥4 params, got {}", d.num_params);
+    assert!(
+        d.num_params >= 4,
+        "expected ≥4 params, got {}",
+        d.num_params
+    );
 
     println!(
         "waveguide: terminals={}, nodes={}, params={}, resist_jac_entries={}",
@@ -83,7 +94,9 @@ fn waveguide_descriptor_sanity() {
 #[test]
 fn directional_coupler_descriptor_sanity() {
     let path = model_path("directional_coupler");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
     let d = lib.descriptors().next().unwrap();
@@ -92,7 +105,11 @@ fn directional_coupler_descriptor_sanity() {
 
     // 12 external terminals: 4 ports × 3 wires (re, im, lambda).
     assert_eq!(d.num_terminals, 12, "expected 12 terminals");
-    assert!(d.num_params >= 4, "expected ≥4 params, got {}", d.num_params);
+    assert!(
+        d.num_params >= 4,
+        "expected ≥4 params, got {}",
+        d.num_params
+    );
 
     println!(
         "directional_coupler: terminals={}, nodes={}, params={}, resist_jac_entries={}",
@@ -103,7 +120,9 @@ fn directional_coupler_descriptor_sanity() {
 #[test]
 fn photodetector_descriptor_sanity() {
     let path = model_path("photodetector");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
     let d = lib.descriptors().next().unwrap();
@@ -112,7 +131,11 @@ fn photodetector_descriptor_sanity() {
 
     // 5 external terminals: in_re, in_im, in_lambda (optical) + anode, cathode (electrical).
     assert_eq!(d.num_terminals, 5, "expected 5 terminals");
-    assert!(d.num_params >= 3, "expected ≥3 params, got {}", d.num_params);
+    assert!(
+        d.num_params >= 3,
+        "expected ≥3 params, got {}",
+        d.num_params
+    );
 
     println!(
         "photodetector: terminals={}, nodes={}, params={}, resist_jac_entries={}",
@@ -131,21 +154,23 @@ fn photodetector_descriptor_sanity() {
 #[test]
 fn cw_laser_dc_op_default_params() {
     let path = model_path("cw_laser");
-    if skip_if_missing(&path) { return; }
+    if skip_if_missing(&path) {
+        return;
+    }
 
     let netlist = parse_spice(
         "* CW laser stand-alone DC OP\n\
          Xlaser out_re out_im wl cw_laser\n\
          .optical out_re out_im wl\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed"));
     let mut registry = DeviceRegistry::new();
     lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for cw_laser");
+    let result = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for cw_laser");
 
     let v_re = result.node_voltage("out_re").unwrap();
     let v_im = result.node_voltage("out_im").unwrap();
@@ -162,10 +187,7 @@ fn cw_laser_dc_op_default_params() {
         "V(out_re)={v_re:.6e}  expected≈{a_expected:.6e}  diff={:.2e}",
         (v_re - a_expected).abs()
     );
-    assert!(
-        v_im.abs() < tol,
-        "V(out_im)={v_im:.6e}  expected≈0.0",
-    );
+    assert!(v_im.abs() < tol, "V(out_im)={v_im:.6e}  expected≈0.0",);
 }
 
 // ─── Photodetector physics validation ────────────────────────────────────────
@@ -183,8 +205,10 @@ fn cw_laser_dc_op_default_params() {
 #[test]
 fn laser_photodetector_chain_dc_op() {
     let laser_path = model_path("cw_laser");
-    let pd_path    = model_path("photodetector");
-    if skip_if_missing(&laser_path) || skip_if_missing(&pd_path) { return; }
+    let pd_path = model_path("photodetector");
+    if skip_if_missing(&laser_path) || skip_if_missing(&pd_path) {
+        return;
+    }
 
     let netlist = parse_spice(
         "* CW laser → photodetector → load\n\
@@ -193,24 +217,25 @@ fn laser_photodetector_chain_dc_op() {
          Rload   ph_a 0  1k\n\
          .optical laser_re laser_im wl\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
     pd_lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for laser→PD chain");
+    let result =
+        dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for laser→PD chain");
 
     let v_ph = result.node_voltage("ph_a").unwrap();
 
     // Expected: V(ph_a) ≈ 1.0 V (1 mW * 1 A/W * 1 kΩ)
     // Small correction from shunt (R_shunt=1MΩ in parallel with 1kΩ):
     // V ≈ I_ph * (R_load || R_shunt) = 1e-3 * (1k || 1M) ≈ 0.999 V
-    let expected = 1e-3 * (1e3 * 1e6) / (1e3 + 1e6);  // ≈ 0.999 V
+    let expected = 1e-3 * (1e3 * 1e6) / (1e3 + 1e6); // ≈ 0.999 V
     let tol = 5e-3; // 5 mV
 
     println!("laser→PD: V(ph_a)={v_ph:.6e}  expected≈{expected:.6e}");
@@ -232,8 +257,8 @@ fn laser_photodetector_chain_dc_op() {
 #[test]
 fn laser_waveguide_photodetector_chain_dc_op() {
     let laser_path = model_path("cw_laser");
-    let wg_path    = model_path("waveguide");
-    let pd_path    = model_path("photodetector");
+    let wg_path = model_path("waveguide");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&wg_path) || skip_if_missing(&pd_path) {
         return;
     }
@@ -246,26 +271,27 @@ fn laser_waveguide_photodetector_chain_dc_op() {
          Rload   ph_a 0  1k\n\
          .optical laser_re laser_im wg_out_re wg_out_im wl\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let wg_lib    = Arc::new(unsafe { OsdiLibrary::open(&wg_path) }.expect("dlopen wg"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let wg_lib = Arc::new(unsafe { OsdiLibrary::open(&wg_path) }.expect("dlopen wg"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
     wg_lib.register_into(&mut registry);
     pd_lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for laser→wg→PD chain");
+    let result =
+        dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for laser→wg→PD chain");
 
     let v_ph = result.node_voltage("ph_a").unwrap();
 
     // Waveguide default: alpha_dB_cm=2.0, L_um=100 → α·L = 2 dB/cm * 100µm * 1e-4 cm/µm = 2e-4 dB
     // Amplitude transmission: exp(-α_lin * L / 2) where α_lin = 2e-4 * 1e2 / 8.686 ≈ 2.3e-3 Np/m * 1e-4 m
     // T ≈ 1 - tiny loss → output power ≈ input power for such a short waveguide
-    let expected = 1e-3 * (1e3 * 1e6) / (1e3 + 1e6);  // ≈ 0.999 V (power-conserving)
+    let expected = 1e-3 * (1e3 * 1e6) / (1e3 + 1e6); // ≈ 0.999 V (power-conserving)
     let tol = 5e-2; // 50 mV tolerance (accounts for waveguide insertion loss)
 
     println!("laser→wg→PD: V(ph_a)={v_ph:.6e}  expected≈{expected:.6e}");
@@ -286,8 +312,8 @@ fn laser_waveguide_photodetector_chain_dc_op() {
 #[test]
 fn pn_phase_shifter_l1_dc_op_zero_bias() {
     let laser_path = model_path("cw_laser");
-    let pnps_path  = model_path("pn_phase_shifter_l1");
-    let pd_path    = model_path("photodetector");
+    let pnps_path = model_path("pn_phase_shifter_l1");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&pnps_path) || skip_if_missing(&pd_path) {
         return;
     }
@@ -301,19 +327,20 @@ fn pn_phase_shifter_l1_dc_op_zero_bias() {
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl ore oim\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let pnps_lib  = Arc::new(unsafe { OsdiLibrary::open(&pnps_path) }.expect("dlopen pn_ps"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let pnps_lib = Arc::new(unsafe { OsdiLibrary::open(&pnps_path) }.expect("dlopen pn_ps"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
     pnps_lib.register_into(&mut registry);
     pd_lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for laser→pn_ps→PD");
+    let result =
+        dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for laser→pn_ps→PD");
 
     let v_ph = result.node_voltage("ph_a").unwrap();
     // Default: L_um=100 µm, alpha_dB_cm=3.0
@@ -325,7 +352,8 @@ fn pn_phase_shifter_l1_dc_op_zero_bias() {
     println!("pn_ps(0V)→PD: V(ph_a)={v_ph:.6e}  expected≈{expected:.6e}");
     assert!(
         (v_ph - expected).abs() < tol,
-        "V(ph_a)={v_ph:.6e} expected≈{expected:.6e} diff={:.3e}", (v_ph - expected).abs()
+        "V(ph_a)={v_ph:.6e} expected≈{expected:.6e} diff={:.3e}",
+        (v_ph - expected).abs()
     );
 }
 
@@ -338,8 +366,8 @@ fn pn_phase_shifter_l1_dc_op_zero_bias() {
 #[test]
 fn mrr_modulator_l1_resonance_dip() {
     let laser_path = model_path("cw_laser");
-    let mrr_path   = model_path("mrr_modulator_l1");
-    let pd_path    = model_path("photodetector");
+    let mrr_path = model_path("mrr_modulator_l1");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&mrr_path) || skip_if_missing(&pd_path) {
         return;
     }
@@ -355,27 +383,37 @@ fn mrr_modulator_l1_resonance_dip() {
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl ore oim\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let mrr_lib   = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let mrr_lib = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
     mrr_lib.register_into(&mut registry);
     pd_lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for laser→MRR→PD");
+    let result =
+        dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for laser→MRR→PD");
 
     let v_ph = result.node_voltage("ph_a").unwrap();
     println!("MRR(resonance, 0V): V(ph_a)={v_ph:.6e}");
     // At resonance: through-port is reduced from max transmission
-    assert!(v_ph < 0.99, "Expected resonance dip: V(ph_a)={v_ph:.4} should be < 0.99 V");
-    assert!(v_ph > 0.01, "Unexpectedly deep resonance: V(ph_a)={v_ph:.4}");
+    assert!(
+        v_ph < 0.99,
+        "Expected resonance dip: V(ph_a)={v_ph:.4} should be < 0.99 V"
+    );
+    assert!(
+        v_ph > 0.01,
+        "Unexpectedly deep resonance: V(ph_a)={v_ph:.4}"
+    );
     // Energy conservation: input is 1 mW → V(ph_a) ≤ 1mW × 999Ω = 0.999 V always
-    assert!(v_ph < 1.0, "Energy conservation violated: V(ph_a)={v_ph:.6} > 1 V");
+    assert!(
+        v_ph < 1.0,
+        "Energy conservation violated: V(ph_a)={v_ph:.6} > 1 V"
+    );
 }
 
 // ─── Phase 2.5: MRR modulator L1 — energy conservation off resonance ─────────
@@ -389,14 +427,15 @@ fn mrr_modulator_l1_resonance_dip() {
 #[test]
 fn mrr_modulator_l1_off_resonance_energy_conservation() {
     let laser_path = model_path("cw_laser");
-    let mrr_path   = model_path("mrr_modulator_l1");
-    let pd_path    = model_path("photodetector");
+    let mrr_path = model_path("mrr_modulator_l1");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&mrr_path) || skip_if_missing(&pd_path) {
         return;
     }
 
-    let base_netlist = |vbias_v: f64| format!(
-        "* MRR L1 energy conservation at V={vbias_v} V\n\
+    let base_netlist = |vbias_v: f64| {
+        format!(
+            "* MRR L1 energy conservation at V={vbias_v} V\n\
          Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.12\n\
          Xmod    lre lim wl  ore oim wl  vbias 0  mrr_modulator_l1\n\
          + kappa_0=0.1 L_ring_um=100.0 n_g=4.2 alpha_dB_cm=2.0\n\
@@ -406,11 +445,12 @@ fn mrr_modulator_l1_off_resonance_energy_conservation() {
          Vbias   vbias 0  DC {vbias_v}\n\
          .optical  lre lim wl ore oim\n\
          .op\n.end\n"
-    );
+        )
+    };
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let mrr_lib   = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let mrr_lib = Arc::new(unsafe { OsdiLibrary::open(&mrr_path) }.expect("dlopen mrr"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
@@ -419,8 +459,7 @@ fn mrr_modulator_l1_off_resonance_energy_conservation() {
 
     for vbias in [-0.25_f64, -1.0, -2.5, -5.0] {
         let netlist = parse_spice(&base_netlist(vbias)).unwrap();
-        let result = dc_op_nr_with_registry(&netlist, &registry)
-            .expect("DC OP failed");
+        let result = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed");
         let v_ph = result.node_voltage("ph_a").unwrap();
         println!("MRR(V={vbias:.2}): V(ph_a)={v_ph:.6e}");
         assert!(
@@ -440,8 +479,8 @@ fn mrr_modulator_l1_off_resonance_energy_conservation() {
 #[test]
 fn mzi_pn_l1_v0_cross_full() {
     let laser_path = model_path("cw_laser");
-    let mzi_path   = model_path("mzi_modulator_pn_l1");
-    let pd_path    = model_path("photodetector");
+    let mzi_path = model_path("mzi_modulator_pn_l1");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&mzi_path) || skip_if_missing(&pd_path) {
         return;
     }
@@ -458,30 +497,40 @@ fn mzi_pn_l1_v0_cross_full() {
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl bre bim cre cim\n\
          .op\n.end\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let mzi_lib   = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let mzi_lib = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
     mzi_lib.register_into(&mut registry);
     pd_lib.register_into(&mut registry);
 
-    let result = dc_op_nr_with_registry(&netlist, &registry)
-        .expect("DC OP failed for MZI L1 at V=0");
+    let result =
+        dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed for MZI L1 at V=0");
 
-    let v_bar   = result.node_voltage("ph_bar").unwrap();
+    let v_bar = result.node_voltage("ph_bar").unwrap();
     let v_cross = result.node_voltage("ph_cross").unwrap();
     println!("MZI(V=0): bar={v_bar:.6e}  cross={v_cross:.6e}");
 
     // At V=0, Δφ=0: bar must be dark (< 1 mV)
-    assert!(v_bar < 1e-3, "MZI bar should be dark at V=0: V(ph_bar)={v_bar:.4}");
+    assert!(
+        v_bar < 1e-3,
+        "MZI bar should be dark at V=0: V(ph_bar)={v_bar:.4}"
+    );
     // Cross carries all power (> 0.98 V = 0.98 mW with 1 kΩ)
-    assert!(v_cross > 0.98, "MZI cross should be bright at V=0: V(ph_cross)={v_cross:.4}");
+    assert!(
+        v_cross > 0.98,
+        "MZI cross should be bright at V=0: V(ph_cross)={v_cross:.4}"
+    );
     // Energy conservation
-    assert!(v_cross < 1.0, "MZI energy conservation violated: V(ph_cross)={v_cross:.4}");
+    assert!(
+        v_cross < 1.0,
+        "MZI energy conservation violated: V(ph_cross)={v_cross:.4}"
+    );
 }
 
 /// MZI L1 full switching cycle: V=0, −Vpi/2, −Vpi, −2Vpi.
@@ -494,14 +543,15 @@ fn mzi_pn_l1_v0_cross_full() {
 #[test]
 fn mzi_pn_l1_switching_cycle() {
     let laser_path = model_path("cw_laser");
-    let mzi_path   = model_path("mzi_modulator_pn_l1");
-    let pd_path    = model_path("photodetector");
+    let mzi_path = model_path("mzi_modulator_pn_l1");
+    let pd_path = model_path("photodetector");
     if skip_if_missing(&laser_path) || skip_if_missing(&mzi_path) || skip_if_missing(&pd_path) {
         return;
     }
 
-    let make_netlist = |vbias_v: f64| format!(
-        "* MZI L1 switching at V={vbias_v}\n\
+    let make_netlist = |vbias_v: f64| {
+        format!(
+            "* MZI L1 switching at V={vbias_v}\n\
          Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0\n\
          Xmzi    lre lim wl  bre bim blam  cre cim clam  vbias 0  mzi_modulator_pn_l1\n\
          + L_arm_um=10.0 Vpi_L=0.05 V_ref=0.0 n_g=4.2 alpha_dB_cm=3.0 wavelength_nm=1550.0\n\
@@ -512,11 +562,12 @@ fn mzi_pn_l1_switching_cycle() {
          Vbias   vbias 0  DC {vbias_v}\n\
          .optical  lre lim wl bre bim cre cim\n\
          .op\n.end\n"
-    );
+        )
+    };
 
     let laser_lib = Arc::new(unsafe { OsdiLibrary::open(&laser_path) }.expect("dlopen laser"));
-    let mzi_lib   = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
-    let pd_lib    = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
+    let mzi_lib = Arc::new(unsafe { OsdiLibrary::open(&mzi_path) }.expect("dlopen mzi"));
+    let pd_lib = Arc::new(unsafe { OsdiLibrary::open(&pd_path) }.expect("dlopen pd"));
 
     let mut registry = DeviceRegistry::new();
     laser_lib.register_into(&mut registry);
@@ -525,36 +576,70 @@ fn mzi_pn_l1_switching_cycle() {
 
     // V=0: bar=0, cross=full
     let r0 = dc_op_nr_with_registry(&parse_spice(&make_netlist(0.0)).unwrap(), &registry).unwrap();
-    let (b0, c0) = (r0.node_voltage("ph_bar").unwrap(), r0.node_voltage("ph_cross").unwrap());
+    let (b0, c0) = (
+        r0.node_voltage("ph_bar").unwrap(),
+        r0.node_voltage("ph_cross").unwrap(),
+    );
     println!("V=0:   bar={b0:.4e}  cross={c0:.4e}");
     assert!(b0 < 1e-3, "bar should be dark at V=0: {b0:.4}");
-    assert!(c0 > 0.98,  "cross should be bright at V=0: {c0:.4}");
+    assert!(c0 > 0.98, "cross should be bright at V=0: {c0:.4}");
 
     // V=-25: 50:50 split (Δφ=−π/2)
-    let r25 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-25.0)).unwrap(), &registry).unwrap();
-    let (b25, c25) = (r25.node_voltage("ph_bar").unwrap(), r25.node_voltage("ph_cross").unwrap());
+    let r25 =
+        dc_op_nr_with_registry(&parse_spice(&make_netlist(-25.0)).unwrap(), &registry).unwrap();
+    let (b25, c25) = (
+        r25.node_voltage("ph_bar").unwrap(),
+        r25.node_voltage("ph_cross").unwrap(),
+    );
     println!("V=-25: bar={b25:.4e}  cross={c25:.4e}");
-    assert!((b25 - c25).abs() < 0.01 * (b25 + c25),
-            "50:50 expected at V=-25V: bar={b25:.4} cross={c25:.4}");
+    assert!(
+        (b25 - c25).abs() < 0.01 * (b25 + c25),
+        "50:50 expected at V=-25V: bar={b25:.4} cross={c25:.4}"
+    );
 
     // V=-50: bar=full, cross=0 (Δφ=−π)
-    let r50 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-50.0)).unwrap(), &registry).unwrap();
-    let (b50, c50) = (r50.node_voltage("ph_bar").unwrap(), r50.node_voltage("ph_cross").unwrap());
+    let r50 =
+        dc_op_nr_with_registry(&parse_spice(&make_netlist(-50.0)).unwrap(), &registry).unwrap();
+    let (b50, c50) = (
+        r50.node_voltage("ph_bar").unwrap(),
+        r50.node_voltage("ph_cross").unwrap(),
+    );
     println!("V=-50: bar={b50:.4e}  cross={c50:.4e}");
-    assert!(b50 > 0.98,  "bar should be bright at V=-50V: {b50:.4}");
+    assert!(b50 > 0.98, "bar should be bright at V=-50V: {b50:.4}");
     assert!(c50 < 1e-3, "cross should be dark at V=-50V: {c50:.4}");
 
     // V=-100: back to bar=0, cross=full (Δφ=−2π)
-    let r100 = dc_op_nr_with_registry(&parse_spice(&make_netlist(-100.0)).unwrap(), &registry).unwrap();
-    let (b100, c100) = (r100.node_voltage("ph_bar").unwrap(), r100.node_voltage("ph_cross").unwrap());
+    let r100 =
+        dc_op_nr_with_registry(&parse_spice(&make_netlist(-100.0)).unwrap(), &registry).unwrap();
+    let (b100, c100) = (
+        r100.node_voltage("ph_bar").unwrap(),
+        r100.node_voltage("ph_cross").unwrap(),
+    );
     println!("V=-100: bar={b100:.4e}  cross={c100:.4e}");
-    assert!(b100 < 1e-3, "bar should be dark at V=-100V (Δφ=-2π): {b100:.4}");
-    assert!(c100 > 0.98,  "cross should be bright at V=-100V (Δφ=-2π): {c100:.4}");
+    assert!(
+        b100 < 1e-3,
+        "bar should be dark at V=-100V (Δφ=-2π): {b100:.4}"
+    );
+    assert!(
+        c100 > 0.98,
+        "cross should be bright at V=-100V (Δφ=-2π): {c100:.4}"
+    );
 
     // Energy conservation at all points
-    for (v, bar, cross) in [(-0.0, b0, c0), (-25.0, b25, c25), (-50.0, b50, c50), (-100.0, b100, c100)] {
+    for (v, bar, cross) in [
+        (-0.0, b0, c0),
+        (-25.0, b25, c25),
+        (-50.0, b50, c50),
+        (-100.0, b100, c100),
+    ] {
         let total = bar + cross;
-        assert!(total < 1.0, "Energy conservation violated at V={v}: bar+cross={total:.4}");
-        assert!(total > 0.98, "Unexpected loss at V={v}: bar+cross={total:.4}");
+        assert!(
+            total < 1.0,
+            "Energy conservation violated at V={v}: bar+cross={total:.4}"
+        );
+        assert!(
+            total > 0.98,
+            "Unexpected loss at V={v}: bar+cross={total:.4}"
+        );
     }
 }

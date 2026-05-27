@@ -1,6 +1,6 @@
-use crate::{Element, ParseError, Waveform};
 use super::common::{canon_node, expand_bus_vectors, parse_value};
 use super::element::parse_element;
+use crate::{Element, ParseError, Waveform};
 
 pub(super) fn scan_bidirectional(main_lines: &[(usize, String)]) -> bool {
     let mut bidir = false;
@@ -16,11 +16,11 @@ pub(super) fn scan_bidirectional(main_lines: &[(usize, String)]) -> bool {
             } else {
                 (tok.to_lowercase(), String::new())
             };
-            if k == "enable_bidirectional" || k == "bidirectional"
+            if k == "enable_bidirectional"
+                || k == "bidirectional"
                 || k == "bidirectional_propagation"
             {
-                bidir = matches!(v.to_lowercase().as_str(),
-                    "" | "1" | "true" | "yes" | "on");
+                bidir = matches!(v.to_lowercase().as_str(), "" | "1" | "true" | "yes" | "on");
             }
         }
     }
@@ -69,18 +69,9 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
         // state (pn_ps, thermal_ps, photodetector) share one physical
         // electrical interface across all N channels.  WDM is the rule,
         // not the exception.
-        "fc_waveguide"
-            | "fc_splitter"
-            | "fc_dcoupler"
-            | "fc_grating_coupler"
-            | "fc_pn_ps"
-            | "fc_pn_ps_cap"
-            | "fc_pn_th_ps"
-            | "fc_thermal_ps"
-            | "fc_thermal_ps_rc"
-            | "fc_mzm"
-            | "fc_photodetector"
-            | "fc_circulator" => BundleArity::Aware,
+        "fc_waveguide" | "fc_splitter" | "fc_dcoupler" | "fc_grating_coupler" | "fc_pn_ps"
+        | "fc_pn_ps_cap" | "fc_pn_th_ps" | "fc_thermal_ps" | "fc_thermal_ps_rc" | "fc_mzm"
+        | "fc_photodetector" | "fc_circulator" => BundleArity::Aware,
         // `fc_cw_laser` deliberately stays Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for
         // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
@@ -98,7 +89,13 @@ pub(super) fn expand_optical_ports(
     ports: &[crate::OpticalPort],
     lineno: usize,
 ) -> Result<Vec<Element>, ParseError> {
-    let Element::XOsdi { name, nets, model_name, params } = el else {
+    let Element::XOsdi {
+        name,
+        nets,
+        model_name,
+        params,
+    } = el
+    else {
         return Ok(vec![el]);
     };
     // Build a per-token (matching_port_index | None) map; collect each
@@ -116,7 +113,12 @@ pub(super) fn expand_optical_ports(
     }
     if port_refs.iter().all(|r| r.is_none()) {
         // No port references — return the element unchanged.
-        return Ok(vec![Element::XOsdi { name, nets, model_name, params }]);
+        return Ok(vec![Element::XOsdi {
+            name,
+            nets,
+            model_name,
+            params,
+        }]);
     }
     // Dispatch by WDM policy.  See `BundleArity` for semantics.
     let arity = bundle_arity_for(&model_name);
@@ -140,7 +142,10 @@ pub(super) fn expand_optical_ports(
 
     if arity == BundleArity::Bridge {
         return Ok(vec![Element::XOsdi {
-            name, nets: flatten(), model_name, params,
+            name,
+            nets: flatten(),
+            model_name,
+            params,
         }]);
     }
     // Validate consistent channel count when more than one port is involved.
@@ -156,7 +161,10 @@ pub(super) fn expand_optical_ports(
     }
     if arity == BundleArity::Aware {
         return Ok(vec![Element::XOsdi {
-            name, nets: flatten(), model_name, params,
+            name,
+            nets: flatten(),
+            model_name,
+            params,
         }]);
     }
     // BundleArity::Scalar — replicate per channel.
@@ -170,7 +178,11 @@ pub(super) fn expand_optical_ports(
                 expanded_nets.push(net.clone());
             }
         }
-        let new_name = if max_n > 1 { format!("{name}_ch{ch}") } else { name.clone() };
+        let new_name = if max_n > 1 {
+            format!("{name}_ch{ch}")
+        } else {
+            name.clone()
+        };
         out.push(Element::XOsdi {
             name: new_name,
             nets: expanded_nets,

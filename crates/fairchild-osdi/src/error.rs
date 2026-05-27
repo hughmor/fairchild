@@ -12,5 +12,8 @@ pub enum OsdiError {
     DlOpen(String),
 
     #[error("symbol '{symbol}' not found: {detail}")]
-    Symbol { symbol: &'static str, detail: String },
+    Symbol {
+        symbol: &'static str,
+        detail: String,
+    },
 }

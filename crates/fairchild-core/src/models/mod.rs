@@ -9,6 +9,7 @@ pub use photonic::{
     NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
     NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter, NativePnPhaseShifterCap,
     NativePnPhaseShifterFull, NativePnPhaseShifterInj, NativePnThermalPhaseShifter,
-    NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj,
-    NativeSplitter, NativeThermalPhaseShifter, NativeThermalPhaseShifterRc, NativeWaveguide,
+    NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
+    NativePnThermalPhaseShifterInj, NativeSplitter, NativeThermalPhaseShifter,
+    NativeThermalPhaseShifterRc, NativeWaveguide,
 };

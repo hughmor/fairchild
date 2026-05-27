@@ -19,7 +19,11 @@ fn mock_path() -> PathBuf {
     if p.ends_with("deps") {
         p.pop();
     }
-    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
     p.push(format!("libosdi_mock.{ext}"));
     p
 }
@@ -59,7 +63,11 @@ fn osdi_device_conductance_stamp() {
     // --- load_residual: Jeq = 0 for linear element, b unchanged ---
     let mut mat = make_mat(2);
     dev.load_residual(&mut mat.b);
-    assert_eq!(mat.b, vec![0.0, 0.0], "load_residual should be no-op for linear conductance");
+    assert_eq!(
+        mat.b,
+        vec![0.0, 0.0],
+        "load_residual should be no-op for linear conductance"
+    );
 
     // --- load_jacobian: stamps gd = 1e-3 S as standard conductance ---
     dev.load_jacobian(&mut mat);
@@ -76,7 +84,9 @@ fn osdi_device_conductance_stamp() {
 fn osdi_device_ground_terminal() {
     // Cathode connected to ground (NodeId = None): only the anode row/col is stamped.
     let path = mock_path();
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
 
     let lib = unsafe { OsdiLibrary::open(&path) }.expect("open mock");
     let desc_ptr = lib.descriptors().next().unwrap() as *const _;
@@ -93,6 +103,10 @@ fn osdi_device_ground_terminal() {
 
     // Only a[0][0] should be stamped; off-diagonal entries don't exist.
     let gd = 1e-3_f64;
-    assert!((mat.a[0][0] - gd).abs() < 1e-12, "a[0][0] = {}", mat.a[0][0]);
+    assert!(
+        (mat.a[0][0] - gd).abs() < 1e-12,
+        "a[0][0] = {}",
+        mat.a[0][0]
+    );
     assert_eq!(mat.b, vec![0.0]);
 }

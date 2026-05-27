@@ -1,6 +1,6 @@
+use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
-use super::{C0, dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq};
 
 // ────────────────────────────────────────────────────────────────────────
 // Native straight waveguide
@@ -18,26 +18,26 @@ use super::{C0, dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq};
 /// device — but having one instance for the whole bundle keeps WDM the rule
 /// rather than the exception and simplifies stamping when channel count grows.
 pub struct NativeWaveguide {
-    length_m:        f64,
-    n_eff:           f64,    // n_eff at wl_ref_m (default 2.445 for silicon)
-    n_g:             f64,    // n_g    at wl_ref_m (default 4.2)
+    length_m: f64,
+    n_eff: f64, // n_eff at wl_ref_m (default 2.445 for silicon)
+    n_g: f64,   // n_g    at wl_ref_m (default 4.2)
     /// Reference wavelength at which `n_eff` and `n_g` are evaluated.  The
     /// dispersion-corrected index `n_eff(λ)` is linearised around this point.
-    wl_ref_m:        f64,
-    alpha_neper_m:   f64,
+    wl_ref_m: f64,
+    alpha_neper_m: f64,
     /// Group delay `τ_g = L·n_g/c` (s).  Computed and exposed for transient
     /// post-processing; this device does not yet implement a true delay line,
     /// so the parameter is informational only at this tier (DC OP and steady-
     /// state spectra are unaffected — τ matters only at modulation
     /// bandwidths comparable to 1/τ).
-    tau_g_s:         f64,
+    tau_g_s: f64,
     // Bootstrap λ for the first NR iterate (x = 0).  Sourced from
     // `SimContext::lambda_center_m` in `setup_model`.
     lambda_bootstrap_m: f64,
-    n_channels:      usize,
-    wpc:             usize,        // wires_per_channel: 3 (unidir) or 5 (bidir)
-    nodes:    Vec<NodeId>,
-    branches: Vec<Option<usize>>,  // wpc per channel
+    n_channels: usize,
+    wpc: usize, // wires_per_channel: 3 (unidir) or 5 (bidir)
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>, // wpc per channel
     c_cached: Vec<f64>,
     s_cached: Vec<f64>,
 }
@@ -50,29 +50,33 @@ impl NativeWaveguide {
         //  Phase-shifter device classes (fc_pn_ps, fc_pn_th_ps, fc_pn_ps_cap)
         //  use bent-rib values appropriate to a ring section instead.
         let length_m = 100e-6;
-        let n_g      = 4.19;
+        let n_g = 4.19;
         NativeWaveguide {
             length_m,
-            n_eff:              2.445,
+            n_eff: 2.445,
             n_g,
-            wl_ref_m:           1.55e-6,
-            alpha_neper_m:      dB_per_cm_to_neper_per_m(2.0),
-            tau_g_s:            length_m * n_g / C0,
+            wl_ref_m: 1.55e-6,
+            alpha_neper_m: dB_per_cm_to_neper_per_m(2.0),
+            tau_g_s: length_m * n_g / C0,
             lambda_bootstrap_m: 1.55e-6,
-            n_channels:         0,
-            wpc:                3,
-            nodes:              Vec::new(),
-            branches:           Vec::new(),
-            c_cached:           Vec::new(),
-            s_cached:           Vec::new(),
+            n_channels: 0,
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
+            c_cached: Vec::new(),
+            s_cached: Vec::new(),
         }
     }
 
-    fn refresh_tau(&mut self) { self.tau_g_s = self.length_m * self.n_g / C0; }
+    fn refresh_tau(&mut self) {
+        self.tau_g_s = self.length_m * self.n_g / C0;
+    }
 }
 
 impl Device for NativeWaveguide {
-    fn num_terminals(&self) -> usize { self.nodes.len() }
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.lambda_bootstrap_m = ctx.lambda_center_m;
@@ -96,27 +100,55 @@ impl Device for NativeWaveguide {
         );
         let n = terminals.len() / stride;
         self.n_channels = n;
-        self.nodes      = terminals.to_vec();
-        self.branches   = vec![None; wpc * n];
-        self.c_cached   = vec![1.0; n];
-        self.s_cached   = vec![0.0; n];
+        self.nodes = terminals.to_vec();
+        self.branches = vec![None; wpc * n];
+        self.c_cached = vec![1.0; n];
+        self.s_cached = vec![0.0; n];
     }
 
-    fn num_extra_nodes(&self) -> usize { self.branches.len() }
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..self.branches.len() { self.branches[i] = Some(first_idx + i); }
+        for i in 0..self.branches.len() {
+            self.branches[i] = Some(first_idx + i);
+        }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         match name.to_lowercase().as_str() {
-            "l_um"          => { self.length_m       = value * 1e-6; self.refresh_tau();  true }
-            "l_m" | "length"=> { self.length_m       = value;        self.refresh_tau();  true }
-            "n_g"           => { self.n_g            = value;        self.refresh_tau();  true }
-            "n_eff"         => { self.n_eff          = value;                              true }
-            "wl_ref_m" | "lambda_ref_m" => { self.wl_ref_m = value;                        true }
-            "wl_ref_nm" | "lambda_ref_nm" => { self.wl_ref_m = value * 1e-9;               true }
-            "alpha_db_cm"   => { self.alpha_neper_m  = dB_per_cm_to_neper_per_m(value);    true }
+            "l_um" => {
+                self.length_m = value * 1e-6;
+                self.refresh_tau();
+                true
+            }
+            "l_m" | "length" => {
+                self.length_m = value;
+                self.refresh_tau();
+                true
+            }
+            "n_g" => {
+                self.n_g = value;
+                self.refresh_tau();
+                true
+            }
+            "n_eff" => {
+                self.n_eff = value;
+                true
+            }
+            "wl_ref_m" | "lambda_ref_m" => {
+                self.wl_ref_m = value;
+                true
+            }
+            "wl_ref_nm" | "lambda_ref_nm" => {
+                self.wl_ref_m = value * 1e-9;
+                true
+            }
+            "alpha_db_cm" => {
+                self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
+                true
+            }
             _ => false,
         }
     }
@@ -133,7 +165,11 @@ impl Device for NativeWaveguide {
             let lambda = match self.nodes[wpc * k + lambda_off] {
                 Some(i) => {
                     let v = x[i];
-                    if v.abs() > boot * 0.5 { v } else { boot }
+                    if v.abs() > boot * 0.5 {
+                        v
+                    } else {
+                        boot
+                    }
                 }
                 None => boot,
             };
@@ -148,46 +184,74 @@ impl Device for NativeWaveguide {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n   = self.n_channels;
+        let n = self.n_channels;
         let wpc = self.wpc;
-        let in_block_base  = 0;
+        let in_block_base = 0;
         let out_block_base = wpc * n;
         for k in 0..n {
             let c = self.c_cached[k];
             let s = self.s_cached[k];
             // Per-channel input / output wires.
-            let in_re_fw  = self.nodes[in_block_base  + wpc * k];
-            let in_im_fw  = self.nodes[in_block_base  + wpc * k + 1];
-            let in_l      = self.nodes[in_block_base  + wpc * k + (wpc - 1)];
+            let in_re_fw = self.nodes[in_block_base + wpc * k];
+            let in_im_fw = self.nodes[in_block_base + wpc * k + 1];
+            let in_l = self.nodes[in_block_base + wpc * k + (wpc - 1)];
             let out_re_fw = self.nodes[out_block_base + wpc * k];
             let out_im_fw = self.nodes[out_block_base + wpc * k + 1];
-            let out_l     = self.nodes[out_block_base + wpc * k + (wpc - 1)];
+            let out_l = self.nodes[out_block_base + wpc * k + (wpc - 1)];
             // Forward path: out.re_fw = c·in.re_fw + s·in.im_fw etc.
-            stamp_potential_eq(mat, &self.branches, wpc * k,     out_re_fw,
-                &[(in_re_fw, -c), (in_im_fw, -s)]);
-            stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw,
-                &[(in_re_fw,  s), (in_im_fw, -c)]);
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                wpc * k,
+                out_re_fw,
+                &[(in_re_fw, -c), (in_im_fw, -s)],
+            );
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                wpc * k + 1,
+                out_im_fw,
+                &[(in_re_fw, s), (in_im_fw, -c)],
+            );
             // λ passes through unchanged.
-            stamp_potential_eq(mat, &self.branches, wpc * k + (wpc - 1), out_l,
-                &[(in_l, -1.0)]);
+            stamp_potential_eq(
+                mat,
+                &self.branches,
+                wpc * k + (wpc - 1),
+                out_l,
+                &[(in_l, -1.0)],
+            );
             if wpc == 5 {
                 // Backward path mirrors the forward physics with reversed
                 // direction: light at out_bw propagates back to in_bw with
                 // the same c, s.  in.re_bw = c·out.re_bw + s·out.im_bw,
                 // in.im_bw = -s·out.re_bw + c·out.im_bw.
-                let in_re_bw  = self.nodes[in_block_base  + wpc * k + 2];
-                let in_im_bw  = self.nodes[in_block_base  + wpc * k + 3];
+                let in_re_bw = self.nodes[in_block_base + wpc * k + 2];
+                let in_im_bw = self.nodes[in_block_base + wpc * k + 3];
                 let out_re_bw = self.nodes[out_block_base + wpc * k + 2];
                 let out_im_bw = self.nodes[out_block_base + wpc * k + 3];
-                stamp_potential_eq(mat, &self.branches, wpc * k + 2, in_re_bw,
-                    &[(out_re_bw, -c), (out_im_bw, -s)]);
-                stamp_potential_eq(mat, &self.branches, wpc * k + 3, in_im_bw,
-                    &[(out_re_bw,  s), (out_im_bw, -c)]);
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    wpc * k + 2,
+                    in_re_bw,
+                    &[(out_re_bw, -c), (out_im_bw, -s)],
+                );
+                stamp_potential_eq(
+                    mat,
+                    &self.branches,
+                    wpc * k + 3,
+                    in_im_bw,
+                    &[(out_re_bw, s), (out_im_bw, -c)],
+                );
             }
         }
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) { self.load_residual(b); }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) { self.load_jacobian(mat); }
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
 }
-

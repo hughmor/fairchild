@@ -1,6 +1,6 @@
 //! Regression tests for fc_photodetector's r_series parameter.
 
-use fairchild_core::{DeviceRegistry, dc_op_nr_with_registry};
+use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 /// Without r_series the PD's anode sits directly across r_shunt (default

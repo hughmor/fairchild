@@ -83,12 +83,17 @@ fn ring_oscillator_dc_op_converges() {
     // with the asymmetric W/L=20:10 we picked).
     for n in &["n1", "n2", "n3", "n4", "n5"] {
         let v = r.node_voltage(n).unwrap();
-        assert!(v > 0.4 && v < 1.4,
-            "V({n})={v:.3} is not near V_M (expected ~0.9 V for VDD=1.8)");
+        assert!(
+            v > 0.4 && v < 1.4,
+            "V({n})={v:.3} is not near V_M (expected ~0.9 V for VDD=1.8)"
+        );
     }
     // Convergence should be fast on a stable solver — well below ITL1=150.
-    assert!(r.iters <= 5,
-        "DC OP took {} attempts (homotopy levels); ring oscillator should converge directly", r.iters);
+    assert!(
+        r.iters <= 5,
+        "DC OP took {} attempts (homotopy levels); ring oscillator should converge directly",
+        r.iters
+    );
 }
 
 /// Transient test: under `.ic` (UIC) the loop oscillates.  Measure the
@@ -105,47 +110,57 @@ fn ring_oscillator_transient_oscillates() {
     opts.uic = true;
     // Tighten LTE — ring oscillators are sensitive to integration noise.
     opts.reltol = 1e-4;
-    let result = tran_nr_with_registry_var_opts(
-        &net, 50e-12, 100e-9, &registry, &opts,
-    ).expect("transient must complete");
+    let result = tran_nr_with_registry_var_opts(&net, 50e-12, 100e-9, &registry, &opts)
+        .expect("transient must complete");
 
-    assert!(result.time.len() > 100,
-        "expected many timepoints from an oscillating ring (got {})", result.time.len());
+    assert!(
+        result.time.len() > 100,
+        "expected many timepoints from an oscillating ring (got {})",
+        result.time.len()
+    );
 
     // Detect zero crossings of (V(n3) − VDD/2) in the second half of the run
     // — the first half is the start-up transient.
     let vdd_half = 0.9;
-    let n3 = result.node_voltages.get("n3").expect("V(n3) must be present");
+    let n3 = result
+        .node_voltages
+        .get("n3")
+        .expect("V(n3) must be present");
     let t = &result.time;
     let half = t.len() / 2;
     let mut crossings: Vec<f64> = Vec::new();
     for i in (half + 1)..t.len() {
         let a = n3[i - 1] - vdd_half;
-        let b = n3[i]     - vdd_half;
+        let b = n3[i] - vdd_half;
         if a.signum() != b.signum() && (a - b).abs() > 1e-6 {
             // Linear interpolate the actual crossing time.
             let frac = a / (a - b);
             crossings.push(t[i - 1] + frac * (t[i] - t[i - 1]));
         }
     }
-    assert!(crossings.len() >= 4,
+    assert!(
+        crossings.len() >= 4,
         "expected ≥4 zero crossings in second half (got {}); is the loop oscillating?",
-        crossings.len());
+        crossings.len()
+    );
 
     // Period = 2 × interval between consecutive same-direction crossings.
     // Average across all crossing pairs to smooth measurement noise.
     let intervals: Vec<f64> = crossings.windows(2).map(|w| w[1] - w[0]).collect();
     let mean_half_period: f64 = intervals.iter().sum::<f64>() / intervals.len() as f64;
     let period = 2.0 * mean_half_period;
-    let freq   = 1.0 / period;
+    let freq = 1.0 / period;
 
     // Analytic estimate: t_pd ≈ C·ΔV / I_avg, with I_avg ≈ ½·KP·(W/L)·(VDD − Vth)²
     // for the driving transistor.  For Level-1 with VDD=1.8, Vth=0.5, KP=200µ,
     // W/L=10, we get I_avg ≈ ½·200e-6·10·1.3² ≈ 1.7 mA → t_pd ≈ C·VDD/2/I
     // ≈ 100f·0.9/1.7m ≈ 53 ps → f ≈ 1/(2·5·53p) ≈ 1.9 GHz.  Level-1 is
     // optimistic vs real BSIM; allow a generous window.
-    assert!(freq > 500e6 && freq < 5e9,
-        "ring oscillator frequency f={:.2e} Hz outside expected 0.5–5 GHz band", freq);
+    assert!(
+        freq > 500e6 && freq < 5e9,
+        "ring oscillator frequency f={:.2e} Hz outside expected 0.5–5 GHz band",
+        freq
+    );
 }
 
 /// Stress test: same circuit, but compare BE vs GEAR results — both should
@@ -165,12 +180,12 @@ fn ring_oscillator_be_and_gear_agree_on_frequency() {
     let measure_period = |opts: &SimOptions| -> f64 {
         let r = tran_nr_with_registry_var_opts(&net, 50e-12, 60e-9, &registry, opts).unwrap();
         let n3 = r.node_voltages.get("n3").unwrap();
-        let t  = &r.time;
+        let t = &r.time;
         let half = t.len() / 2;
         let mut crossings = Vec::new();
         for i in (half + 1)..t.len() {
             let a = n3[i - 1] - 0.9;
-            let b = n3[i]     - 0.9;
+            let b = n3[i] - 0.9;
             if a.signum() != b.signum() && (a - b).abs() > 1e-6 {
                 let frac = a / (a - b);
                 crossings.push(t[i - 1] + frac * (t[i] - t[i - 1]));
@@ -189,7 +204,11 @@ fn ring_oscillator_be_and_gear_agree_on_frequency() {
     let p_gear = measure_period(&opts_gear);
 
     let rel = (p_be - p_gear).abs() / p_gear;
-    assert!(rel < 0.10,
+    assert!(
+        rel < 0.10,
         "BE period {:.3e} vs GEAR period {:.3e} differ by {:.1}%",
-        p_be, p_gear, rel * 100.0);
+        p_be,
+        p_gear,
+        rel * 100.0
+    );
 }

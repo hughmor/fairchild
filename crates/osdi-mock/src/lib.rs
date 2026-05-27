@@ -76,10 +76,10 @@ unsafe extern "C" fn write_jacobian_array_resist_impl(
 ) {
     let gd = *(model as *const f64);
     // 4 entries matching JACOBIAN_ENTRIES order: (0,0), (0,1), (1,0), (1,1).
-    *destination.add(0) = gd;   // ∂F[0]/∂V[0] = +gd
-    *destination.add(1) = -gd;  // ∂F[0]/∂V[1] = -gd
-    *destination.add(2) = -gd;  // ∂F[1]/∂V[0] = -gd
-    *destination.add(3) = gd;   // ∂F[1]/∂V[1] = +gd
+    *destination.add(0) = gd; // ∂F[0]/∂V[0] = +gd
+    *destination.add(1) = -gd; // ∂F[0]/∂V[1] = -gd
+    *destination.add(2) = -gd; // ∂F[1]/∂V[0] = -gd
+    *destination.add(3) = gd; // ∂F[1]/∂V[1] = +gd
 }
 
 // ---------------------------------------------------------------------------
@@ -87,10 +87,38 @@ unsafe extern "C" fn write_jacobian_array_resist_impl(
 // ---------------------------------------------------------------------------
 
 static JACOBIAN_ENTRIES: [OsdiJacobianEntry; 4] = [
-    OsdiJacobianEntry { nodes: OsdiNodePair { node_1: 0, node_2: 0 }, react_ptr_off: 0, flags: 0 },
-    OsdiJacobianEntry { nodes: OsdiNodePair { node_1: 0, node_2: 1 }, react_ptr_off: 0, flags: 0 },
-    OsdiJacobianEntry { nodes: OsdiNodePair { node_1: 1, node_2: 0 }, react_ptr_off: 0, flags: 0 },
-    OsdiJacobianEntry { nodes: OsdiNodePair { node_1: 1, node_2: 1 }, react_ptr_off: 0, flags: 0 },
+    OsdiJacobianEntry {
+        nodes: OsdiNodePair {
+            node_1: 0,
+            node_2: 0,
+        },
+        react_ptr_off: 0,
+        flags: 0,
+    },
+    OsdiJacobianEntry {
+        nodes: OsdiNodePair {
+            node_1: 0,
+            node_2: 1,
+        },
+        react_ptr_off: 0,
+        flags: 0,
+    },
+    OsdiJacobianEntry {
+        nodes: OsdiNodePair {
+            node_1: 1,
+            node_2: 0,
+        },
+        react_ptr_off: 0,
+        flags: 0,
+    },
+    OsdiJacobianEntry {
+        nodes: OsdiNodePair {
+            node_1: 1,
+            node_2: 1,
+        },
+        react_ptr_off: 0,
+        flags: 0,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -127,18 +155,18 @@ pub static OSDI_DESCRIPTORS: [OsdiDescriptor; 1] = [OsdiDescriptor {
     noise_sources: std::ptr::null_mut(),
 
     num_noise_src: 0,
-    num_params: 0,        // gd is hardcoded; no user-settable parameters
+    num_params: 0, // gd is hardcoded; no user-settable parameters
     num_instance_params: 0,
     num_opvars: 0,
     param_opvar: std::ptr::null_mut(),
 
-    node_mapping_offset: 0,         // [u32; 2] at byte 0 of instance buffer
-    jacobian_ptr_resist_offset: 8,  // unused (copy-based path); must not alias node_mapping
+    node_mapping_offset: 0,        // [u32; 2] at byte 0 of instance buffer
+    jacobian_ptr_resist_offset: 8, // unused (copy-based path); must not alias node_mapping
     num_states: 0,
     state_idx_off: 0,
     bound_step_offset: 0,
-    instance_size: 8,   // 2 × u32 = 8 bytes
-    model_size: 8,      // 1 × f64 = 8 bytes
+    instance_size: 8, // 2 × u32 = 8 bytes
+    model_size: 8,    // 1 × f64 = 8 bytes
 
     access: None,
     setup_model: Some(setup_model_impl),

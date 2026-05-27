@@ -28,17 +28,17 @@ pub struct ShockleyDiode {
     cathode: NodeId,
 
     // NR state (updated by every eval)
-    vd_prev: f64,        // junction Vd from last eval — pnjlim "old" reference
-    id_junction: f64,    // Id through the Shockley junction (before RS drop)
-    gd_junction: f64,    // dId/dVd at the junction
-    gd_eff: f64,         // effective terminal conductance = gd_j / (1 + gd_j·RS)
-    jeq_eff: f64,        // effective Norton source at terminal pair
-    vd_j_eval: f64,      // junction voltage at last eval (used by commit_timestep)
-    cj_total: f64,       // Cj_depl(Vd_j) + TT·gd_junction (0.0 when DC)
-    q_at_vd_j: f64,      // Q_total(Vd_j) at current NR iterate (0.0 when DC)
+    vd_prev: f64,     // junction Vd from last eval — pnjlim "old" reference
+    id_junction: f64, // Id through the Shockley junction (before RS drop)
+    gd_junction: f64, // dId/dVd at the junction
+    gd_eff: f64,      // effective terminal conductance = gd_j / (1 + gd_j·RS)
+    jeq_eff: f64,     // effective Norton source at terminal pair
+    vd_j_eval: f64,   // junction voltage at last eval (used by commit_timestep)
+    cj_total: f64,    // Cj_depl(Vd_j) + TT·gd_junction (0.0 when DC)
+    q_at_vd_j: f64,   // Q_total(Vd_j) at current NR iterate (0.0 when DC)
 
     // Reactive history (updated by commit_timestep, read by load_*_tran)
-    q_tprev: f64,        // Q_total at last accepted timestep
+    q_tprev: f64, // Q_total at last accepted timestep
 }
 
 impl ShockleyDiode {
@@ -82,15 +82,15 @@ impl ShockleyDiode {
         let mut unknown = Vec::new();
         for (k, v) in params {
             match k.as_str() {
-                "is"           => is  = *v,
-                "n"            => n   = *v,
-                "rs"           => rs  = *v,
+                "is" => is = *v,
+                "n" => n = *v,
+                "rs" => rs = *v,
                 "cjo" | "cj0" => cjo = *v,
-                "vj"           => vj  = *v,
-                "m" | "mj"    => mj  = *v,
-                "fc"           => fc  = *v,
-                "tt"           => tt  = *v,
-                _              => unknown.push(k.clone()),
+                "vj" => vj = *v,
+                "m" | "mj" => mj = *v,
+                "fc" => fc = *v,
+                "tt" => tt = *v,
+                _ => unknown.push(k.clone()),
             }
         }
         let mut d = Self::new(is, n);
@@ -145,8 +145,7 @@ impl ShockleyDiode {
         } else {
             // Charge at the FC·VJ boundary
             let x_fc = 1.0 - self.fc;
-            let q_fc = self.cjo * self.vj / (1.0 - self.mj)
-                * (1.0 - x_fc.powf(1.0 - self.mj));
+            let q_fc = self.cjo * self.vj / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
             let k = x_fc.powf(1.0 + self.mj);
             let f2 = 1.0 - self.fc * (1.0 + self.mj);
             let dv = v - fc_vj;
@@ -187,8 +186,12 @@ impl Device for ShockleyDiode {
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
-        debug_assert_eq!(terminals.len(), 2, "diode expects 2 terminals [anode, cathode]");
-        self.anode   = terminals[0];
+        debug_assert_eq!(
+            terminals.len(),
+            2,
+            "diode expects 2 terminals [anode, cathode]"
+        );
+        self.anode = terminals[0];
         self.cathode = terminals[1];
     }
 
@@ -219,21 +222,25 @@ impl Device for ShockleyDiode {
         //   gd_eff = gd_j / (1 + gd_j·RS)
         //   jeq_eff = (Id - gd_j·Vd_j) / (1 + gd_j·RS)
         let denom = 1.0 + self.gd_junction * self.rs;
-        self.gd_eff  = self.gd_junction / denom;
+        self.gd_eff = self.gd_junction / denom;
         self.jeq_eff = (self.id_junction - self.gd_junction * vd_j) / denom;
 
         if flags.transient {
-            self.cj_total  = self.cj_depl(vd_j) + self.tt * self.gd_junction;
+            self.cj_total = self.cj_depl(vd_j) + self.tt * self.gd_junction;
             self.q_at_vd_j = self.q_total(vd_j, self.id_junction);
         } else {
-            self.cj_total  = 0.0;
+            self.cj_total = 0.0;
             self.q_at_vd_j = 0.0;
         }
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        if let Some(a) = self.anode   { b[a] -= self.jeq_eff; }
-        if let Some(k) = self.cathode { b[k] += self.jeq_eff; }
+        if let Some(a) = self.anode {
+            b[a] -= self.jeq_eff;
+        }
+        if let Some(k) = self.cathode {
+            b[k] += self.jeq_eff;
+        }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
@@ -250,8 +257,12 @@ impl Device for ShockleyDiode {
         //   i_hist_stamp = alpha · (Cj·Vd_j + Q_tprev − Q(Vd_j))
         //   stamped as current source from cathode → anode (b[anode] += i_hist)
         let i_hist = alpha * (self.cj_total * self.vd_j_eval + self.q_tprev - self.q_at_vd_j);
-        if let Some(a) = self.anode   { b[a] += i_hist; }
-        if let Some(k) = self.cathode { b[k] -= i_hist; }
+        if let Some(a) = self.anode {
+            b[a] += i_hist;
+        }
+        if let Some(k) = self.cathode {
+            b[k] -= i_hist;
+        }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
@@ -281,7 +292,9 @@ impl Device for ShockleyDiode {
     /// matrix doesn't pick up vanishing entries from leakage.
     fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
         let id_mag = self.id_junction.abs();
-        if id_mag < 1e-18 { return Vec::new(); }
+        if id_mag < 1e-18 {
+            return Vec::new();
+        }
         const Q: f64 = 1.602176634e-19;
         let s_i = 2.0 * Q * id_mag;
         vec![(self.anode, self.cathode, s_i)]
@@ -311,7 +324,11 @@ mod tests {
         d.eval(&x, EvalFlags::dc(), &ctx());
         let vt = ctx().vt();
         let expected_gd = 1e-14 / vt + GMIN;
-        assert!((d.gd_eff - expected_gd).abs() < 1e-18, "gd at Vd=0: {:.4e}", d.gd_eff);
+        assert!(
+            (d.gd_eff - expected_gd).abs() < 1e-18,
+            "gd at Vd=0: {:.4e}",
+            d.gd_eff
+        );
         assert!(d.jeq_eff.abs() < 1e-30, "jeq at Vd=0: {:.4e}", d.jeq_eff);
     }
 
@@ -327,8 +344,14 @@ mod tests {
         let id_expected = is * ((vd / vt).exp() - 1.0);
         let gd_expected = is * (vd / vt).exp() / vt + GMIN;
         let jeq_expected = id_expected - gd_expected * vd;
-        assert!((d.gd_eff - gd_expected).abs() / gd_expected < 1e-9, "gd mismatch");
-        assert!((d.jeq_eff - jeq_expected).abs() / jeq_expected.abs() < 1e-9, "jeq mismatch");
+        assert!(
+            (d.gd_eff - gd_expected).abs() / gd_expected < 1e-9,
+            "gd mismatch"
+        );
+        assert!(
+            (d.jeq_eff - jeq_expected).abs() / jeq_expected.abs() < 1e-9,
+            "jeq mismatch"
+        );
     }
 
     #[test]
@@ -342,9 +365,15 @@ mod tests {
         let x = [0.6];
         d.eval(&x, EvalFlags::dc(), &ctx());
         // gd_eff < gd_junction
-        assert!(d.gd_eff < d.gd_junction, "RS should reduce effective conductance");
+        assert!(
+            d.gd_eff < d.gd_junction,
+            "RS should reduce effective conductance"
+        );
         let expected_gd_eff = d.gd_junction / (1.0 + d.gd_junction * 1.0);
-        assert!((d.gd_eff - expected_gd_eff).abs() / expected_gd_eff < 1e-9, "gd_eff formula");
+        assert!(
+            (d.gd_eff - expected_gd_eff).abs() / expected_gd_eff < 1e-9,
+            "gd_eff formula"
+        );
     }
 
     #[test]
@@ -358,12 +387,18 @@ mod tests {
         d.eval(&x, EvalFlags::tran(), &ctx());
         // At V=0: Cj = CJO (no voltage across the junction)
         let alpha = 1e8; // 1/h where h = 10 ns
-        let mut mat = MnaMatrix { a: vec![vec![0.0; 2]; 2], b: vec![0.0; 2] };
+        let mut mat = MnaMatrix {
+            a: vec![vec![0.0; 2]; 2],
+            b: vec![0.0; 2],
+        };
         d.load_jacobian_tran(&mut mat, alpha);
         let g_cap_expected = alpha * 4e-12; // Cj(0) * alpha
-        // Conductance stamp: a[0][0] includes gd_eff + g_cap; a[0][1] = -(gd_eff + g_cap)
+                                            // Conductance stamp: a[0][0] includes gd_eff + g_cap; a[0][1] = -(gd_eff + g_cap)
         let g_total = d.gd_eff + g_cap_expected;
-        assert!((mat.a[0][0] - g_total).abs() / g_total < 1e-6, "Jacobian stamp");
+        assert!(
+            (mat.a[0][0] - g_total).abs() / g_total < 1e-6,
+            "Jacobian stamp"
+        );
     }
 
     #[test]
@@ -377,8 +412,14 @@ mod tests {
         d.eval(&x, EvalFlags::dc(), &ctx());
         let mut b = [0.0f64; 2];
         d.load_residual(&mut b);
-        assert!((b[0] + d.jeq_eff).abs() < 1e-30, "b[anode] should be -jeq_eff");
-        assert!((b[1] - d.jeq_eff).abs() < 1e-30, "b[cathode] should be +jeq_eff");
+        assert!(
+            (b[0] + d.jeq_eff).abs() < 1e-30,
+            "b[anode] should be -jeq_eff"
+        );
+        assert!(
+            (b[1] - d.jeq_eff).abs() < 1e-30,
+            "b[cathode] should be +jeq_eff"
+        );
     }
 
     #[test]
@@ -386,7 +427,10 @@ mod tests {
         let mut d = make_diode(1e-14, 1.0);
         let vt = ctx().vt();
         let limited = d.pnjlim(10.0, 0.0, vt);
-        assert!(limited < 1.0, "pnjlim should limit large step: got {limited}");
+        assert!(
+            limited < 1.0,
+            "pnjlim should limit large step: got {limited}"
+        );
         assert!(limited > 0.0, "pnjlim result should be positive");
     }
 

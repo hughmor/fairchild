@@ -35,8 +35,8 @@ pub use mzm::NativeMzm;
 pub use phase_shifters::{
     NativePnPhaseShifter, NativePnPhaseShifterCap, NativePnPhaseShifterFull,
     NativePnPhaseShifterInj, NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap,
-    NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj,
-    NativeThermalPhaseShifter, NativeThermalPhaseShifterRc,
+    NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj, NativeThermalPhaseShifter,
+    NativeThermalPhaseShifterRc,
 };
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;
@@ -58,7 +58,9 @@ pub(super) fn dB_per_cm_to_neper_per_m(alpha_db_cm: f64) -> f64 {
 /// First-order dispersion-corrected effective index at wavelength `lambda`.
 #[inline]
 pub(super) fn n_eff_at_lambda(n_eff_0: f64, n_g_0: f64, wl_ref_m: f64, lambda: f64) -> f64 {
-    if wl_ref_m.abs() < 1e-30 { return n_eff_0; }
+    if wl_ref_m.abs() < 1e-30 {
+        return n_eff_0;
+    }
     n_eff_0 + (lambda - wl_ref_m) * (n_eff_0 - n_g_0) / wl_ref_m
 }
 
@@ -70,10 +72,14 @@ pub(super) fn stamp_potential_eq(
     out_node: NodeId,
     ins: &[(NodeId, f64)],
 ) {
-    let (Some(out), Some(j)) = (out_node, branches[branch_idx]) else { return };
+    let (Some(out), Some(j)) = (out_node, branches[branch_idx]) else {
+        return;
+    };
     mat.a[j][out] += 1.0;
     for &(in_node, k) in ins {
-        if let Some(in_i) = in_node { mat.a[j][in_i] += k; }
+        if let Some(in_i) = in_node {
+            mat.a[j][in_i] += k;
+        }
     }
     mat.a[out][j] += 1.0;
 }
@@ -83,65 +89,100 @@ pub(super) fn stamp_potential_eq(
 pub(super) fn stamp_resistor(mat: &mut MnaMatrix, a: NodeId, b: NodeId, g: f64) {
     if let Some(i) = a {
         mat.a[i][i] += g;
-        if let Some(j) = b { mat.a[i][j] -= g; }
+        if let Some(j) = b {
+            mat.a[i][j] -= g;
+        }
     }
     if let Some(j) = b {
         mat.a[j][j] += g;
-        if let Some(i) = a { mat.a[j][i] -= g; }
+        if let Some(i) = a {
+            mat.a[j][i] -= g;
+        }
     }
 }
 
 /// Stamp per-channel optical-branch equations for a PN-style phase shifter.
 pub(super) fn stamp_pn_optical(
-    mat: &mut MnaMatrix, nodes: &[NodeId], branches: &[Option<usize>],
-    n: usize, wpc: usize, c_cached: &[f64], s_cached: &[f64],
+    mat: &mut MnaMatrix,
+    nodes: &[NodeId],
+    branches: &[Option<usize>],
+    n: usize,
+    wpc: usize,
+    c_cached: &[f64],
+    s_cached: &[f64],
 ) {
     let bpc = if wpc == 5 { 5 } else { 3 };
     let lam = wpc - 1;
     let out_base = wpc * n;
     for k in 0..n {
-        let in_re_fw  = nodes[wpc * k];
-        let in_im_fw  = nodes[wpc * k + 1];
-        let in_l      = nodes[wpc * k + lam];
+        let in_re_fw = nodes[wpc * k];
+        let in_im_fw = nodes[wpc * k + 1];
+        let in_l = nodes[wpc * k + lam];
         let out_re_fw = nodes[out_base + wpc * k];
         let out_im_fw = nodes[out_base + wpc * k + 1];
-        let out_l     = nodes[out_base + wpc * k + lam];
-        let c = c_cached[k]; let s = s_cached[k];
-        stamp_potential_eq(mat, branches, bpc * k,     out_re_fw,
-            &[(in_re_fw, -c), (in_im_fw, -s)]);
-        stamp_potential_eq(mat, branches, bpc * k + 1, out_im_fw,
-            &[(in_re_fw,  s), (in_im_fw, -c)]);
-        stamp_potential_eq(mat, branches, bpc * k + (bpc - 1), out_l,
-            &[(in_l, -1.0)]);
+        let out_l = nodes[out_base + wpc * k + lam];
+        let c = c_cached[k];
+        let s = s_cached[k];
+        stamp_potential_eq(
+            mat,
+            branches,
+            bpc * k,
+            out_re_fw,
+            &[(in_re_fw, -c), (in_im_fw, -s)],
+        );
+        stamp_potential_eq(
+            mat,
+            branches,
+            bpc * k + 1,
+            out_im_fw,
+            &[(in_re_fw, s), (in_im_fw, -c)],
+        );
+        stamp_potential_eq(mat, branches, bpc * k + (bpc - 1), out_l, &[(in_l, -1.0)]);
         if wpc == 5 {
-            let in_re_bw  = nodes[wpc * k + 2];
-            let in_im_bw  = nodes[wpc * k + 3];
+            let in_re_bw = nodes[wpc * k + 2];
+            let in_im_bw = nodes[wpc * k + 3];
             let out_re_bw = nodes[out_base + wpc * k + 2];
             let out_im_bw = nodes[out_base + wpc * k + 3];
-            stamp_potential_eq(mat, branches, bpc * k + 2, in_re_bw,
-                &[(out_re_bw, -c), (out_im_bw, -s)]);
-            stamp_potential_eq(mat, branches, bpc * k + 3, in_im_bw,
-                &[(out_re_bw,  s), (out_im_bw, -c)]);
+            stamp_potential_eq(
+                mat,
+                branches,
+                bpc * k + 2,
+                in_re_bw,
+                &[(out_re_bw, -c), (out_im_bw, -s)],
+            );
+            stamp_potential_eq(
+                mat,
+                branches,
+                bpc * k + 3,
+                in_im_bw,
+                &[(out_re_bw, s), (out_im_bw, -c)],
+            );
         }
     }
 }
 
 /// Full Jacobian stamp for a PN+heater device with per-channel optics.
 pub(super) fn stamp_pn_ths_jacobian(
-    mat: &mut MnaMatrix, nodes: &[NodeId], branches: &[Option<usize>],
-    n: usize, wpc: usize, g_pn: f64, r_heater: f64,
-    c_cached: &[f64], s_cached: &[f64],
+    mat: &mut MnaMatrix,
+    nodes: &[NodeId],
+    branches: &[Option<usize>],
+    n: usize,
+    wpc: usize,
+    g_pn: f64,
+    r_heater: f64,
+    c_cached: &[f64],
+    s_cached: &[f64],
 ) {
     let elec = 2 * wpc * n;
-    stamp_resistor(mat, nodes[elec],     nodes[elec + 1], g_pn);
+    stamp_resistor(mat, nodes[elec], nodes[elec + 1], g_pn);
     stamp_resistor(mat, nodes[elec + 2], nodes[elec + 3], 1.0 / r_heater);
     stamp_pn_optical(mat, nodes, branches, n, wpc, c_cached, s_cached);
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::newton::dc_op_nr_with_registry;
     use crate::device_registry::DeviceRegistry;
+    use crate::newton::dc_op_nr_with_registry;
     use fairchild_parser::parse_spice;
 
     /// Drive a native waveguide directly through voltage sources on its
@@ -164,17 +205,19 @@ mod tests {
              V_wl in_wl 0 DC 1.55e-6\n\
              X1 in_re in_im in_wl out_re out_im out_wl fc_waveguide \
                 L_um=100 n_g=4.2 alpha_db_cm=2.0\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let registry = DeviceRegistry::new();
-        let r = dc_op_nr_with_registry(&netlist, &registry)
-            .expect("DC OP should converge");
+        let r = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP should converge");
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
-        let amp  = (v_re * v_re + v_im * v_im).sqrt();
+        let amp = (v_re * v_re + v_im * v_im).sqrt();
         let expected = (-23.0258509_f64 * 100e-6 / 2.0).exp(); // 0.99885
-        assert!((amp - expected).abs() < 1e-5,
-            "|A_out|={amp:.6} expected={expected:.6}");
+        assert!(
+            (amp - expected).abs() < 1e-5,
+            "|A_out|={amp:.6} expected={expected:.6}"
+        );
         // Output wavelength must equal input wavelength.
         let v_wl = r.node_voltage("out_wl").unwrap();
         assert!((v_wl - 1.55e-6).abs() < 1e-15);
@@ -190,8 +233,9 @@ mod tests {
              V_im a_im 0 DC 0.0\n\
              V_wl a_wl 0 DC 1.55e-6\n\
              X1 a_re a_im a_wl c_re c_im c_wl d_re d_im d_wl fc_splitter\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())
             .expect("DC OP should converge");
         let c_re = r.node_voltage("c_re").unwrap();
@@ -215,8 +259,9 @@ mod tests {
             "* laser test\n\
              X1 out_re out_im out_wl fc_cw_laser \
                 power_mW=4.0 phi_0_deg=0.0 wavelength_nm=1550\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
         // P = 4 mW → A = √(4e-3) ≈ 0.06325 V/m equivalent.
         let v_re = r.node_voltage("out_re").unwrap();
@@ -243,8 +288,9 @@ mod tests {
              R_load anode bias 1k\n\
              X1 in_re in_im in_wl anode 0 fc_photodetector \
                 responsivity=0.8 i_dark_a=1e-12 r_shunt=1e6\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())
             .expect("DC OP should converge");
         // P_opt = 1 W; I_ph = 0.8 A flowing cathode→anode in the device frame.
@@ -271,12 +317,16 @@ mod tests {
              V_heat heat 0 DC 0.0\n\
              X1 in_re in_im in_wl out_re out_im out_wl heat 0 fc_thermal_ps \
                 r_heater=1k p_pi=10m\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
-        assert!((v_re - 1.0).abs() < 1e-9, "zero-V should pass input through: out_re={v_re}");
+        assert!(
+            (v_re - 1.0).abs() < 1e-9,
+            "zero-V should pass input through: out_re={v_re}"
+        );
         assert!(v_im.abs() < 1e-9);
     }
 
@@ -293,12 +343,16 @@ mod tests {
              X1 in_re in_im in_wl out_re out_im out_wl heat 0 fc_thermal_ps \
                 r_heater=1k p_pi=10m\n\
              .op\n.end\n"
-        )).unwrap();
+        ))
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
         // φ = π → exp(-jπ)·(1+0j) = -1 → out_re = -1, out_im = 0.
-        assert!((v_re + 1.0).abs() < 1e-6, "at Vπ out_re should be ≈ -1: got {v_re}");
+        assert!(
+            (v_re + 1.0).abs() < 1e-6,
+            "at Vπ out_re should be ≈ -1: got {v_re}"
+        );
         assert!(v_im.abs() < 1e-6, "at Vπ out_im should be ≈ 0: got {v_im}");
     }
 
@@ -313,8 +367,9 @@ mod tests {
              V_bias bias 0 DC 0.0\n\
              X1 in_re in_im in_wl out_re out_im out_wl bias 0 fc_pn_ps \
                 L_um=1000 V_pi_L=2e-3 pin_at_ref=1 alpha_dB_cm=0\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
@@ -337,8 +392,9 @@ mod tests {
              V_bwl b_wl 0 DC 1.55e-6\n\
              X1 a_re a_im a_wl b_re b_im b_wl \
                 c_re c_im c_wl d_re d_im d_wl fc_dcoupler kappa_L=0.7853981633974483\n\
-             .op\n.end\n"
-        ).unwrap();
+             .op\n.end\n",
+        )
+        .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())
             .expect("DC OP should converge");
         // With a=(1,0), b=(0,0), κL=π/4 → t=s=1/√2:

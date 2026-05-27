@@ -14,7 +14,11 @@ fn mock_path() -> PathBuf {
     if p.ends_with("deps") {
         p.pop();
     }
-    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
     p.push(format!("libosdi_mock.{ext}"));
     p
 }
