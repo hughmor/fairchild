@@ -222,10 +222,10 @@ fn eval_fn(name: &str, args: &[f64]) -> Option<f64> {
         }),
         "ceil" => one(f64::ceil),
         "floor" => one(f64::floor),
-        "min" => args.get(0).and_then(|a| args.get(1).map(|b| a.min(*b))),
-        "max" => args.get(0).and_then(|a| args.get(1).map(|b| a.max(*b))),
-        "pow" => args.get(0).and_then(|a| args.get(1).map(|b| a.powf(*b))),
-        "atan2" => args.get(0).and_then(|a| args.get(1).map(|b| a.atan2(*b))),
+        "min" => args.first().and_then(|a| args.get(1).map(|b| a.min(*b))),
+        "max" => args.first().and_then(|a| args.get(1).map(|b| a.max(*b))),
+        "pow" => args.first().and_then(|a| args.get(1).map(|b| a.powf(*b))),
+        "atan2" => args.first().and_then(|a| args.get(1).map(|b| a.atan2(*b))),
         "if" => {
             // if(cond, then, else)
             if args.len() >= 3 {

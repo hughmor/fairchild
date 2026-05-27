@@ -1,12 +1,11 @@
 use super::common::{canon_node, parse_value};
 use super::directives::is_silent_directive;
 use super::element::parse_element_expanded;
-use crate::expr::Expr;
-use crate::{
-    Analysis, BehavioralKind, DcSweepSpec, Element, MeasAnalysis, MeasKind, MeasOp, Measurement,
-    ModelCard, ParseError, Waveform,
-};
+use crate::{Element, ParseError};
 use std::collections::{HashMap, HashSet};
+
+type CollectDefsResult = (HashMap<String, SubcktDef>, HashMap<String, f64>, Vec<(usize, String)>);
+type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
 
 // ─── internal types ──────────────────────────────────────────────────────────
 
@@ -26,14 +25,7 @@ pub(super) struct SubcktDef {
 /// definitions and a stray `.ends` are both hard errors.
 pub(super) fn collect_defs(
     lines: &[(usize, String)],
-) -> Result<
-    (
-        HashMap<String, SubcktDef>,
-        HashMap<String, f64>,
-        Vec<(usize, String)>,
-    ),
-    ParseError,
-> {
+) -> Result<CollectDefsResult, ParseError> {
     let mut subckt_defs: HashMap<String, SubcktDef> = HashMap::new();
     let mut global_params: HashMap<String, f64> = HashMap::new();
     let mut main_lines: Vec<(usize, String)> = Vec::new();
@@ -115,7 +107,7 @@ pub(super) fn collect_defs(
 pub(super) fn parse_subckt_header(
     line: &str,
     lineno: usize,
-) -> Result<(String, Vec<String>, Vec<(String, f64)>), ParseError> {
+) -> Result<SubcktHeader, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.len() < 2 {
         return Err(ParseError::FieldCount {

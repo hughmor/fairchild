@@ -217,6 +217,9 @@ fn run_tran_mode(
 // Helpers shared by run_tran and tran_nr
 // ---------------------------------------------------------------------------
 
+/// Companion state maps for capacitors and inductors: (Geq, Ieq) per element name.
+type CompanionStatePair = (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>);
+
 /// Initialise capacitor and inductor companion state from a solution vector.
 ///
 /// For capacitors: V_C_init = V(pos) - V(neg) from the provided x (typically the DC OP).
@@ -227,7 +230,7 @@ fn init_companions(
     step: f64,
     x: &[f64],
     _mode: IntegratorMode,
-) -> (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>) {
+) -> CompanionStatePair {
     let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
     let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
     for el in &netlist.elements {

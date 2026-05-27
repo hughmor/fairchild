@@ -353,8 +353,8 @@ pub fn dense_to_csc(a: &[Vec<f64>], threshold: f64) -> (Vec<i32>, Vec<i32>, Vec<
     let mut ax: Vec<f64> = Vec::new();
     ap.push(0);
     for j in 0..n {
-        for i in 0..n {
-            let v = a[i][j];
+        for (i, row) in a.iter().enumerate() {
+            let v = row[j];
             if v.abs() > threshold {
                 ai.push(i as i32);
                 ax.push(v);

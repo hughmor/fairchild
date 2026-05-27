@@ -206,7 +206,7 @@ pub(super) fn parse_pwl(s: &str, lineno: usize) -> Result<Waveform, ParseError> 
         .split_whitespace()
         .map(|tok| parse_value(tok, lineno))
         .collect::<Result<_, _>>()?;
-    if values.len() < 2 || values.len() % 2 != 0 {
+    if values.len() < 2 || !values.len().is_multiple_of(2) {
         return Err(ParseError::Syntax {
             line: lineno,
             msg: format!(

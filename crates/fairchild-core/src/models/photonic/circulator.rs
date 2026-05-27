@@ -1,4 +1,4 @@
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -32,6 +32,12 @@ pub struct NativeCirculator {
     branches: Vec<Option<usize>>,
 }
 
+impl Default for NativeCirculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeCirculator {
     pub fn new() -> Self {
         Self {
@@ -62,7 +68,7 @@ impl Device for NativeCirculator {
         self.wpc = 5;
         let stride = 3 * 5; // 3 ports × 5 wires per channel
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_circulator: terminal count must be {stride}·N for N ≥ 1 channels; got {}",
             terminals.len()
         );
@@ -135,4 +141,4 @@ impl Device for NativeCirculator {
     }
 }
 
-use super::{n_eff_at_lambda, stamp_potential_eq, C0};
+use super::stamp_potential_eq;

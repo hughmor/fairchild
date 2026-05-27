@@ -36,6 +36,12 @@ pub struct NativeThermalPhaseShifter {
     s_cached: f64,
 }
 
+impl Default for NativeThermalPhaseShifter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeThermalPhaseShifter {
     pub fn new() -> Self {
         Self {
@@ -65,7 +71,7 @@ impl Device for NativeThermalPhaseShifter {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_thermal_ps: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -238,6 +244,12 @@ pub struct NativeThermalPhaseShifterRc {
     s_cached: f64,
 }
 
+impl Default for NativeThermalPhaseShifterRc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeThermalPhaseShifterRc {
     pub fn new() -> Self {
         Self {
@@ -272,7 +284,7 @@ impl Device for NativeThermalPhaseShifterRc {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_thermal_ps_rc: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -594,6 +606,12 @@ pub struct NativePnPhaseShifter {
     s_cached: Vec<f64>,
 }
 
+impl Default for NativePnPhaseShifter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnPhaseShifter {
     pub fn new() -> Self {
         // Defaults: SOI rib waveguide PN modulator section, R = 8 µm bent.
@@ -643,7 +661,7 @@ impl Device for NativePnPhaseShifter {
         let stride = 2 * wpc; // in + out bundle
                               // Layout: wpc·N (in) + wpc·N (out) + 2 (anode, cathode).
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_pn_ps: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -899,6 +917,12 @@ pub struct NativePnPhaseShifterCap {
     alpha_eff_neper_m: f64,
 }
 
+impl Default for NativePnPhaseShifterCap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnPhaseShifterCap {
     pub fn new() -> Self {
         // Same baseline defaults as `fc_pn_ps` (bent rib SOI PN modulator).
@@ -945,7 +969,7 @@ impl Device for NativePnPhaseShifterCap {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_pn_ps_cap: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -1233,6 +1257,12 @@ pub struct NativePnThermalPhaseShifter {
     s_cached: Vec<f64>,
 }
 
+impl Default for NativePnThermalPhaseShifter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnThermalPhaseShifter {
     pub fn new() -> Self {
         // Same baseline as `fc_pn_ps`; adds a linear thermal heater pair.
@@ -1272,7 +1302,7 @@ impl Device for NativePnThermalPhaseShifter {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 4 && (terminals.len() - 4) % stride == 0,
+            terminals.len() >= stride + 4 && (terminals.len() - 4).is_multiple_of(stride),
             "fc_pn_th_ps: terminal count must be {stride}·N + 4 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -1539,6 +1569,12 @@ pub struct NativePnThermalPhaseShifterCap {
     alpha_eff_neper_m: f64,
 }
 
+impl Default for NativePnThermalPhaseShifterCap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnThermalPhaseShifterCap {
     pub fn new() -> Self {
         // Defaults from pn_modulator.py extraction (5e17/5e17 lateral PN,
@@ -1585,7 +1621,7 @@ impl Device for NativePnThermalPhaseShifterCap {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 4 && (terminals.len() - 4) % stride == 0,
+            terminals.len() >= stride + 4 && (terminals.len() - 4).is_multiple_of(stride),
             "fc_pn_th_ps_cap: terminal count must be {stride}·N + 4 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -1820,6 +1856,12 @@ pub struct NativePnPhaseShifterInj {
     v_pn_op: f64,
 }
 
+impl Default for NativePnPhaseShifterInj {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnPhaseShifterInj {
     pub fn new() -> Self {
         Self {
@@ -1860,7 +1902,7 @@ impl Device for NativePnPhaseShifterInj {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_pn_ps_inj: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -1949,7 +1991,7 @@ impl Device for NativePnPhaseShifterInj {
 
         // Shockley I-V (clamp exp argument for NR stability)
         let vt = ctx.vt() * self.n_diode;
-        let arg = (v_pn / vt).min(40.0).max(-40.0);
+        let arg = (v_pn / vt).clamp(-40.0, 40.0);
         let e = arg.exp();
         let i_diode = self.i_sat * (e - 1.0);
         self.g_d_cached = self.i_sat * e / vt;
@@ -2050,6 +2092,12 @@ pub struct NativePnThermalPhaseShifterInj {
     p_pi_th: f64,
 }
 
+impl Default for NativePnThermalPhaseShifterInj {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnThermalPhaseShifterInj {
     pub fn new() -> Self {
         Self {
@@ -2073,7 +2121,7 @@ impl Device for NativePnThermalPhaseShifterInj {
         self.inj.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 4 && (terminals.len() - 4) % stride == 0,
+            terminals.len() >= stride + 4 && (terminals.len() - 4).is_multiple_of(stride),
             "fc_pn_th_ps_inj: terminal count must be {stride}·N + 4 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -2210,6 +2258,12 @@ pub struct NativePnPhaseShifterFull {
     c_eff_cached: f64,
 }
 
+impl Default for NativePnPhaseShifterFull {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnPhaseShifterFull {
     pub fn new() -> Self {
         Self {
@@ -2258,7 +2312,7 @@ impl Device for NativePnPhaseShifterFull {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_pn_ps_full: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );
@@ -2386,7 +2440,7 @@ impl Device for NativePnPhaseShifterFull {
 
         // Electrical: Shockley I-V across the whole regime.
         let vt = ctx.vt() * self.n_diode;
-        let e = (v_pn / vt).min(40.0).max(-40.0).exp();
+        let e = (v_pn / vt).clamp(-40.0, 40.0).exp();
         let i_diode = self.i_sat * (e - 1.0);
         let g_d = self.i_sat * e / vt;
         self.g_pn_cached = g_d.max(1e-15);
@@ -2509,6 +2563,12 @@ pub struct NativePnThermalPhaseShifterFull {
     p_pi_th: f64,
 }
 
+impl Default for NativePnThermalPhaseShifterFull {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePnThermalPhaseShifterFull {
     pub fn new() -> Self {
         Self {
@@ -2531,7 +2591,7 @@ impl Device for NativePnThermalPhaseShifterFull {
         self.full.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 4 && (terminals.len() - 4) % stride == 0,
+            terminals.len() >= stride + 4 && (terminals.len() - 4).is_multiple_of(stride),
             "fc_pn_th_ps_full: terminal count must be {stride}·N + 4 (wpc={wpc}); got {}",
             terminals.len()
         );

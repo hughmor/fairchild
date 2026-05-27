@@ -193,19 +193,19 @@ pub fn ac_analysis_opts(
             b: vec![0.0; size],
         };
         dev.load_jacobian(&mut tmp);
-        for i in 0..size {
-            for j in 0..size {
-                g_mat[i][j] += tmp.a[i][j];
+        for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
+            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
+                *g += t;
             }
         }
     }
     // GMIN — node rows and OSDI internal-node rows.
-    for i in 0..n_nodes {
-        g_mat[i][i] += opts.gmin;
+    for (i, row) in g_mat.iter_mut().enumerate().take(n_nodes) {
+        row[i] += opts.gmin;
     }
     let vsrc_end = n_nodes + topo.vsrc_index.len();
-    for i in vsrc_end..size {
-        g_mat[i][i] += opts.gmin;
+    for (i, row) in g_mat.iter_mut().enumerate().skip(vsrc_end) {
+        row[i] += opts.gmin;
     }
 
     // --- Capacitance matrix C (purely imaginary part of Y) ---
@@ -377,7 +377,7 @@ fn dc_op(
 /// Stamp a 2-terminal passive element value into a matrix (G or C).
 /// Same pattern as stamp_conductance but directly into a raw matrix.
 fn stamp_passive_2port(
-    mat: &mut Vec<Vec<f64>>,
+    mat: &mut [Vec<f64>],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
@@ -411,7 +411,7 @@ fn build_ac_rhs(
     for el in &netlist.elements {
         match el {
             Element::VoltageSource { name, .. } => {
-                let drives = ac_source.map_or(true, |s| s.eq_ignore_ascii_case(name));
+                let drives = ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name));
                 if drives {
                     if let Some(&vi_idx) = topo.vsrc_index.get(name) {
                         b[n_nodes + vi_idx] += mag;
@@ -419,7 +419,7 @@ fn build_ac_rhs(
                 }
             }
             Element::CurrentSource { name, pos, neg, .. } => {
-                let drives = ac_source.map_or(true, |s| s.eq_ignore_ascii_case(name));
+                let drives = ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name));
                 if drives {
                     if let Some(&p) = topo.node_index.get(pos) {
                         b[p] -= mag;

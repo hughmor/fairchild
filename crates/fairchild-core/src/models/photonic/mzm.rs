@@ -1,5 +1,5 @@
 use super::stamp_potential_eq;
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -40,6 +40,12 @@ pub struct NativeMzm {
     t_amp_cached: f64,
 }
 
+impl Default for NativeMzm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeMzm {
     pub fn new() -> Self {
         Self {
@@ -70,7 +76,7 @@ impl Device for NativeMzm {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            terminals.len() >= stride + 2 && (terminals.len() - 2) % stride == 0,
+            terminals.len() >= stride + 2 && (terminals.len() - 2).is_multiple_of(stride),
             "fc_mzm: terminal count must be {stride}·N + 2 (wpc={wpc}); got {}",
             terminals.len()
         );

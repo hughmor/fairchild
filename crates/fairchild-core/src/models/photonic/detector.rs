@@ -1,4 +1,4 @@
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -54,6 +54,12 @@ pub struct NativePhotodetector {
     v_j_op: f64,
 }
 
+impl Default for NativePhotodetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativePhotodetector {
     pub fn new() -> Self {
         Self {
@@ -94,7 +100,7 @@ impl Device for NativePhotodetector {
         self.wpc = wpc;
         // Layout: wpc·N (bundle inputs) + 2 (anode, cathode).
         assert!(
-            terminals.len() >= wpc + 2 && (terminals.len() - 2) % wpc == 0,
+            terminals.len() >= wpc + 2 && (terminals.len() - 2).is_multiple_of(wpc),
             "fc_photodetector: terminal count must be {wpc}·N + 2 for N ≥ 1 channels; got {}",
             terminals.len()
         );

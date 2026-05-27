@@ -1,8 +1,7 @@
 use super::common::{canon_node, expand_bus_vectors, parse_value};
 use super::waveforms::parse_waveform;
 use crate::expr::Expr;
-use crate::{BehavioralKind, Element, ModelCard, ParseError, Waveform};
-use std::collections::HashMap;
+use crate::{BehavioralKind, Element, ModelCard, ParseError};
 
 pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -291,7 +290,7 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
 /// - R: `cpar=<val>` — parallel capacitance
 /// - L: `rser=<val>` — series ESR, `cpar=<val>` — parallel winding capacitance
 /// - C: `esr=<val>` — series resistance, `esl=<val>` — series inductance,
-///      `rpar=<val>` — parallel leakage resistance
+///   `rpar=<val>` — parallel leakage resistance
 pub(super) fn parse_element_expanded(
     line: &str,
     lineno: usize,
@@ -438,7 +437,7 @@ pub(super) fn parse_model(line: &str, lineno: usize) -> Result<Option<ModelCard>
     let name = tokens[1].to_string();
     let kind = tokens[2].to_lowercase();
     let rest = tokens[3..].join(" ");
-    let rest = rest.replace('(', " ").replace(')', " ");
+    let rest = rest.replace(['(', ')'], " ");
     let mut params = Vec::new();
     for tok in rest.split_whitespace() {
         if let Some((k, v)) = tok.split_once('=') {

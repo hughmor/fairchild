@@ -128,15 +128,13 @@ pub fn stamp_netlist_scaled_in_place(
     let n_nodes = topo.n_nodes();
     for (name, &vi_idx) in &topo.vsrc_index {
         let vi = n_nodes + vi_idx;
-        if let Some(el) = netlist
+        if let Some(Element::VoltageSource { waveform, .. }) = netlist
             .elements
             .iter()
             .find(|e| matches!(e, Element::VoltageSource { name: n, .. } if n == name))
         {
-            if let Element::VoltageSource { waveform, .. } = el {
-                let v_full = waveform.at(0.0);
-                mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
-            }
+            let v_full = waveform.at(0.0);
+            mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
         }
     }
     for el in &netlist.elements {
@@ -181,16 +179,14 @@ pub fn stamp_netlist_scaled(
     for (name, &vi_idx) in &topo.vsrc_index {
         let vi = n_nodes + vi_idx;
         // Find the source's waveform value and rescale.
-        if let Some(el) = netlist
+        if let Some(Element::VoltageSource { waveform, .. }) = netlist
             .elements
             .iter()
             .find(|e| matches!(e, Element::VoltageSource { name: n, .. } if n == name))
         {
-            if let Element::VoltageSource { waveform, .. } = el {
-                let v_full = waveform.at(0.0);
-                // The stamp put v_full into b[vi]; replace with v_full * source_scale.
-                mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
-            }
+            let v_full = waveform.at(0.0);
+            // The stamp put v_full into b[vi]; replace with v_full * source_scale.
+            mat.b[vi] = mat.b[vi] - v_full + v_full * source_scale;
         }
     }
     for el in &netlist.elements {
@@ -391,7 +387,7 @@ fn stamp_netlist_into(
 
 /// Add a conductance G between pos and neg (same as resistor with R=1/G).
 pub fn stamp_conductance(
-    a: &mut Vec<Vec<f64>>,
+    a: &mut [Vec<f64>],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
@@ -411,8 +407,8 @@ pub fn stamp_conductance(
 
 /// Stamp a voltage source at aux row `vi`: V(pos) - V(neg) = value.
 fn stamp_vsource(
-    a: &mut Vec<Vec<f64>>,
-    b: &mut Vec<f64>,
+    a: &mut [Vec<f64>],
+    b: &mut [f64],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
@@ -434,7 +430,7 @@ fn stamp_vsource(
 /// SPICE convention: positive current flows from pos through source to neg.
 ///   → b[pos] -= value,  b[neg] += value
 fn stamp_current_source(
-    b: &mut Vec<f64>,
+    b: &mut [f64],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
@@ -671,7 +667,7 @@ fn find_inductor_terminals<'a>(
 ///
 /// `g` is G12 (typically negative for positive coupling).
 fn stamp_mutual_conductance(
-    a: &mut Vec<Vec<f64>>,
+    a: &mut [Vec<f64>],
     idx: &IndexMap<String, usize>,
     pos1: &str,
     neg1: &str,

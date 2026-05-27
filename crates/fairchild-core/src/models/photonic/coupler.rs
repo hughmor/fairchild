@@ -1,5 +1,5 @@
 use super::stamp_potential_eq;
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -59,6 +59,12 @@ impl NativeDirectionalCoupler {
     }
 }
 
+impl Default for NativeDirectionalCoupler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Device for NativeDirectionalCoupler {
     fn num_terminals(&self) -> usize {
         self.nodes.len()
@@ -73,7 +79,7 @@ impl Device for NativeDirectionalCoupler {
         self.wpc = wpc;
         let stride = 4 * wpc; // 4 ports per channel
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_dcoupler: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );

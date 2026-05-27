@@ -1,4 +1,4 @@
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -21,6 +21,12 @@ pub struct NativeCwLaser {
     wpc: usize, // 3 (unidir) or 5 (bidir)
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
+}
+
+impl Default for NativeCwLaser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeCwLaser {

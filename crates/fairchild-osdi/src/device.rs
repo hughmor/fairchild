@@ -61,8 +61,8 @@ impl OsdiDevice {
     /// for the entire lifetime of the returned `OsdiDevice`.
     pub unsafe fn new(descriptor: *const OsdiDescriptor) -> Self {
         let desc = &*descriptor;
-        let model_u64s = ((desc.model_size as usize) + 7) / 8;
-        let inst_u64s = ((desc.instance_size as usize) + 7) / 8;
+        let model_u64s = (desc.model_size as usize).div_ceil(8);
+        let inst_u64s = (desc.instance_size as usize).div_ceil(8);
         OsdiDevice {
             _lib: None,
             descriptor,
@@ -83,8 +83,8 @@ impl OsdiDevice {
     pub fn from_library(lib: Arc<OsdiLibrary>, model_index: usize) -> Option<Self> {
         let descriptor = lib.descriptors().nth(model_index)? as *const OsdiDescriptor;
         let desc = unsafe { &*descriptor };
-        let model_u64s = ((desc.model_size as usize) + 7) / 8;
-        let inst_u64s = ((desc.instance_size as usize) + 7) / 8;
+        let model_u64s = (desc.model_size as usize).div_ceil(8);
+        let inst_u64s = (desc.instance_size as usize).div_ceil(8);
         Some(OsdiDevice {
             _lib: Some(lib),
             descriptor,
@@ -133,9 +133,9 @@ impl OsdiDevice {
             return None;
         }
         let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
-        // Use absolute index i (not relative j) — access() expects the absolute param_opvar index.
-        for i in n_inst..n_total {
-            if osdi_param_name_matches(&params[i], name) {
+        // enumerate() preserves the absolute index — access() expects the absolute param_opvar index.
+        for (i, param) in params.iter().enumerate().skip(n_inst) {
+            if osdi_param_name_matches(param, name) {
                 let id = PARA_KIND_MODEL | i as u32;
                 let ptr = unsafe {
                     access_fn(std::ptr::null_mut(), self.model_ptr(), id, ACCESS_FLAG_READ)
@@ -189,7 +189,7 @@ impl Device for OsdiDevice {
         self.mna_nodes = terminals
             .iter()
             .copied()
-            .chain(std::iter::repeat(None).take(num_nodes.saturating_sub(terminals.len())))
+            .chain(std::iter::repeat_n(None, num_nodes.saturating_sub(terminals.len())))
             .take(num_nodes)
             .collect();
 
@@ -449,8 +449,8 @@ impl Device for OsdiDevice {
         let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
 
         // Instance params: absolute indices 0..n_inst, kind = PARA_KIND_INST.
-        for i in 0..n_inst {
-            if osdi_param_name_matches(&params[i], name) {
+        for (i, param) in params.iter().enumerate().take(n_inst) {
+            if osdi_param_name_matches(param, name) {
                 let id = PARA_KIND_INST | i as u32;
                 let ptr = unsafe {
                     access_fn(
@@ -470,8 +470,8 @@ impl Device for OsdiDevice {
         }
 
         // Model params: absolute indices n_inst..n_total, kind = PARA_KIND_MODEL.
-        for i in n_inst..n_total {
-            if osdi_param_name_matches(&params[i], name) {
+        for (i, param) in params.iter().enumerate().skip(n_inst) {
+            if osdi_param_name_matches(param, name) {
                 let id = PARA_KIND_MODEL | i as u32;
                 let ptr = unsafe {
                     access_fn(

@@ -249,11 +249,9 @@ fn check_self_shorts(netlist: &Netlist, out: &mut Vec<Warning>) {
         if pos.eq_ignore_ascii_case(neg) {
             // V<name> a a DC 0 is the SPICE idiom for a 0-V ammeter, so don't
             // flag a zero-volt V source between matching nets.
-            if let Element::VoltageSource { waveform, .. } = el {
-                if let Waveform::Dc(v) = waveform {
-                    if *v == 0.0 {
-                        continue;
-                    }
+            if let Element::VoltageSource { waveform: Waveform::Dc(v), .. } = el {
+                if *v == 0.0 {
+                    continue;
                 }
             }
             out.push(Warning {

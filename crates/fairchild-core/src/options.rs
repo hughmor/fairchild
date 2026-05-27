@@ -98,7 +98,7 @@ pub struct SimOptions {
     ///   - on NR non-convergence: the top-5 rows of the residual vector with
     ///     node / source-branch names, and the device contributing the
     ///     largest residual to each.
-    /// Set via `.options verbose=1`, CLI `--verbose`, or pyo3 `verbose=True`.
+    ///     Set via `.options verbose=1`, CLI `--verbose`, or pyo3 `verbose=True`.
     pub verbose: bool,
 
     /// Enable bidirectional optical propagation.  When off (default),

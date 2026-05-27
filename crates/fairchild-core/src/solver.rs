@@ -5,27 +5,27 @@
 //! traits so the actual factorisation strategy can be swapped per simulation:
 //!
 //!  - `LinearSolver`   — owns the backend; entry-point for both one-shot
-//!                       solves and "build me a factorisation cache".
+//!    solves and "build me a factorisation cache".
 //!  - `Factorisation`  — reusable handle.  Owns the symbolic factorisation
-//!                       (and, on backends like KLU, the numeric LU too).
-//!                       The Newton-Raphson and transient loops own one of
-//!                       these across all iterations of a single circuit so
-//!                       the symbolic phase runs once and `refactor_and_solve`
-//!                       does only the value-update work each step.
+//!    (and, on backends like KLU, the numeric LU too).
+//!    The Newton-Raphson and transient loops own one of
+//!    these across all iterations of a single circuit so
+//!    the symbolic phase runs once and `refactor_and_solve`
+//!    does only the value-update work each step.
 //!
 //! Three backends ship today:
 //!
 //!  - `DenseSolver`         — faer partial-pivot LU.  Best for ≤ ~50 nodes
-//!                            where the sparse setup cost dominates.
+//!    where the sparse setup cost dominates.
 //!  - `FaerSparseSolver`    — faer sparse LU (`SparseColMat::sp_lu`).  Pure
-//!                            Rust, no C deps; default at larger N.  Cache
-//!                            handle saves the dense→CSC conversion but
-//!                            still runs full LU each refactor (faer 0.24
-//!                            does not expose a separate refactor path).
+//!    Rust, no C deps; default at larger N.  Cache
+//!    handle saves the dense→CSC conversion but
+//!    still runs full LU each refactor (faer 0.24
+//!    does not expose a separate refactor path).
 //!  - `KluSolver`           — SuiteSparse KLU via the `klu` cargo feature.
-//!                            Cache handle holds a `KluSymbolic` + reusable
-//!                            `KluNumeric`; `refactor_and_solve` calls
-//!                            `klu_refactor` — the major perf win.
+//!    Cache handle holds a `KluSymbolic` + reusable
+//!    `KluNumeric`; `refactor_and_solve` calls
+//!    `klu_refactor` — the major perf win.
 
 use faer::{linalg::solvers::Solve, Col, Mat};
 
@@ -243,9 +243,8 @@ impl LinearSolver for FaerSparseSolver {
         }
 
         let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
-        for i in 0..n {
-            for j in 0..n {
-                let v = a[i][j];
+        for (i, row) in a.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
                 if v.abs() > self.zero_threshold {
                     triplets.push(Triplet::new(i, j, v));
                 }

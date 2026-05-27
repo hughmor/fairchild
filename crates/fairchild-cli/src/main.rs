@@ -284,7 +284,15 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
     let mut keep_cols: Option<Vec<usize>> = None;
 
     for line in csv.lines() {
-        if keep_cols.is_none() {
+        if let Some(cols) = &keep_cols {
+            let fields: Vec<&str> = line.split(',').collect();
+            let row: Vec<&str> = cols
+                .iter()
+                .filter_map(|&i| fields.get(i).copied())
+                .collect();
+            out.push_str(&row.join(","));
+            out.push('\n');
+        } else {
             // Header row — determine which columns to keep
             let headers: Vec<&str> = line.split(',').collect();
             let cols: Vec<usize> = headers
@@ -298,15 +306,6 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
             out.push_str(&header_out.join(","));
             out.push('\n');
             keep_cols = Some(cols);
-        } else {
-            let cols = keep_cols.as_ref().unwrap();
-            let fields: Vec<&str> = line.split(',').collect();
-            let row: Vec<&str> = cols
-                .iter()
-                .filter_map(|&i| fields.get(i).copied())
-                .collect();
-            out.push_str(&row.join(","));
-            out.push('\n');
         }
     }
     out

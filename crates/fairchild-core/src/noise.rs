@@ -7,7 +7,7 @@
 //!      node V(out_pos) − V(out_neg).
 //!   3. For every uncorrelated noise source k at nodes (p,n) with one-sided
 //!      current PSD S_ik(f) [A²/Hz]:
-//!            S_V_out_k(f) = |λ[p] − λ[n]|² · S_ik(f).
+//!      S_V_out_k(f) = |λ[p] − λ[n]|² · S_ik(f).
 //!   4. Sum the contributions and divide by the squared signal-path gain to
 //!      get the input-referred PSD.
 //!
@@ -103,18 +103,18 @@ pub fn noise_analysis(
             b: vec![0.0; size],
         };
         dev.load_jacobian(&mut tmp);
-        for i in 0..size {
-            for j in 0..size {
-                g_mat[i][j] += tmp.a[i][j];
+        for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
+            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
+                *g += t;
             }
         }
     }
-    for i in 0..n_nodes {
-        g_mat[i][i] += opts.gmin;
+    for (i, row) in g_mat.iter_mut().enumerate().take(n_nodes) {
+        row[i] += opts.gmin;
     }
     let vsrc_end = n_nodes + topo.vsrc_index.len();
-    for i in vsrc_end..size {
-        g_mat[i][i] += opts.gmin;
+    for (i, row) in g_mat.iter_mut().enumerate().skip(vsrc_end) {
+        row[i] += opts.gmin;
     }
     let mut c_mat = vec![vec![0.0f64; size]; size];
     let mut l_mat = vec![vec![0.0f64; size]; size];
@@ -286,7 +286,7 @@ fn pick(v: &[f64], idx: Option<usize>) -> f64 {
 
 /// Stamp a passive 2-terminal element value (G or C) into a raw matrix.
 fn stamp_passive_2port(
-    mat: &mut Vec<Vec<f64>>,
+    mat: &mut [Vec<f64>],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,

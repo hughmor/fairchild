@@ -1,5 +1,5 @@
 use super::stamp_potential_eq;
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -25,6 +25,12 @@ pub struct NativeSplitter {
     wpc: usize,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
+}
+
+impl Default for NativeSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeSplitter {
@@ -54,7 +60,7 @@ impl Device for NativeSplitter {
         self.wpc = wpc;
         let stride = 3 * wpc; // 3 ports per channel
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_splitter: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );

@@ -32,7 +32,8 @@ pub struct Mosfet1 {
     cj: f64,   // zero-bias junction cap per unit area (F/m²)
     cjsw: f64, // zero-bias sidewall cap per unit perimeter (F/m)
     pb: f64,   // junction built-in potential (V)
-    mj: f64,   // junction grading coefficient
+    mj: f64,             // junction grading coefficient
+    #[allow(dead_code)]
     mjsw: f64, // sidewall grading coefficient (default = mj)
     fc: f64,   // forward-bias depletion-cap linearisation boundary
 

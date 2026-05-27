@@ -1,5 +1,5 @@
 use super::stamp_potential_eq;
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -15,6 +15,12 @@ pub struct NativeGratingCoupler {
     wpc: usize,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
+}
+
+impl Default for NativeGratingCoupler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeGratingCoupler {
@@ -43,7 +49,7 @@ impl Device for NativeGratingCoupler {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_grating_coupler: terminal count must be {stride}·N (wpc={wpc}); got {}",
             terminals.len()
         );

@@ -1,6 +1,4 @@
-use super::common::{canon_node, expand_bus_vectors, parse_value};
-use super::element::parse_element;
-use crate::{Element, ParseError, Waveform};
+use crate::{Element, ParseError};
 
 pub(super) fn scan_bidirectional(main_lines: &[(usize, String)]) -> bool {
     let mut bidir = false;

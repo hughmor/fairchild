@@ -1,5 +1,5 @@
 use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -40,6 +40,12 @@ pub struct NativeWaveguide {
     branches: Vec<Option<usize>>, // wpc per channel
     c_cached: Vec<f64>,
     s_cached: Vec<f64>,
+}
+
+impl Default for NativeWaveguide {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeWaveguide {
@@ -94,7 +100,7 @@ impl Device for NativeWaveguide {
         self.wpc = wpc;
         let stride = 2 * wpc; // in + out
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_waveguide: terminal count must be {stride}·N for N ≥ 1 channels (wpc={wpc}); got {}",
             terminals.len()
         );

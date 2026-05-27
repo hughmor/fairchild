@@ -92,8 +92,8 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
         "find" => {
             // Walk forward collecting expr tokens until WHEN or AT=.
             let mut split = toks.len();
-            for i in 4..toks.len() {
-                let lc = toks[i].to_lowercase();
+            for (i, tok) in toks.iter().enumerate().skip(4) {
+                let lc = tok.to_lowercase();
                 if lc == "when" || lc == "at" || lc.starts_with("at=") {
                     split = i;
                     break;
@@ -140,8 +140,8 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
             // .meas tran NAME DERIV <expr> AT=<t>
             // Find AT token.
             let mut split = toks.len();
-            for i in 4..toks.len() {
-                let lc = toks[i].to_lowercase();
+            for (i, tok) in toks.iter().enumerate().skip(4) {
+                let lc = tok.to_lowercase();
                 if lc == "at" || lc.starts_with("at=") {
                     split = i;
                     break;
@@ -165,8 +165,8 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
         "trig" => {
             // .meas tran NAME TRIG <expr1> [VAL=<v1>] [CROSS=<n>] TARG <expr2> [VAL=<v2>] [CROSS=<n>]
             let mut targ_idx = toks.len();
-            for i in 4..toks.len() {
-                if toks[i].to_lowercase() == "targ" {
+            for (i, tok) in toks.iter().enumerate().skip(4) {
+                if tok.to_lowercase() == "targ" {
                     targ_idx = i;
                     break;
                 }
@@ -248,8 +248,8 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
             };
             // FROM/TO are keywords; everything else is expression tokens.
             let mut split = toks.len();
-            for i in 4..toks.len() {
-                let lc = toks[i].to_lowercase();
+            for (i, tok) in toks.iter().enumerate().skip(4) {
+                let lc = tok.to_lowercase();
                 if lc == "from" || lc == "to" || lc.starts_with("from=") || lc.starts_with("to=") {
                     split = i;
                     break;

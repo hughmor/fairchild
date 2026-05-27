@@ -1,5 +1,5 @@
 use super::stamp_potential_eq;
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -38,6 +38,12 @@ pub struct NativeMux {
     branches: Vec<Option<usize>>,
 }
 
+impl Default for NativeMux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeMux {
     pub fn new() -> Self {
         Self {
@@ -63,7 +69,7 @@ impl Device for NativeMux {
         self.wpc = wpc;
         let stride = 2 * wpc; // bus channel (wpc) + per-channel wires (wpc)
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_mux: terminal count must be a positive multiple of {stride} \
              (wpc={wpc}: bus wires + per-channel wires); got {}",
             terminals.len()
@@ -118,6 +124,12 @@ pub struct NativeDemux {
     branches: Vec<Option<usize>>,
 }
 
+impl Default for NativeDemux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NativeDemux {
     pub fn new() -> Self {
         Self {
@@ -143,7 +155,7 @@ impl Device for NativeDemux {
         self.wpc = wpc;
         let stride = 2 * wpc;
         assert!(
-            !terminals.is_empty() && terminals.len() % stride == 0,
+            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
             "fc_demux: terminal count must be a positive multiple of {stride} \
              (wpc={wpc}: bus wires + per-channel wires); got {}",
             terminals.len()

@@ -18,12 +18,8 @@ use directives::{
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
 
-use crate::expr::Expr;
-use crate::{
-    AcVariation, Analysis, BehavioralKind, DcSweepSpec, Element, MeasAnalysis, MeasKind, MeasOp,
-    Measurement, ModelCard, Netlist, ParseError, Waveform,
-};
-use std::collections::{HashMap, HashSet};
+use crate::{Analysis, Element, Netlist, ParseError};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
@@ -432,7 +428,7 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
         if trimmed.starts_with('+') {
             if let Some(last) = result.last_mut() {
                 last.1.push(' ');
-                last.1.push_str(trimmed[1..].trim());
+                last.1.push_str(trimmed.strip_prefix('+').unwrap_or("").trim());
             }
             continue;
         }
@@ -466,6 +462,7 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AcVariation, BehavioralKind, Waveform};
 
     // ── existing tests (unchanged) ────────────────────────────────────────────
 

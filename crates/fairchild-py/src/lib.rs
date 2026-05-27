@@ -2,6 +2,10 @@
 //!
 //! Exposes `Circuit`, `SimResult`, and `WaveformSource` to Python.
 
+// pyo3's #[pymethods] macro expansion triggers this lint on PyResult<T> return
+// types as a false positive; suppress it for the whole crate.
+#![allow(clippy::useless_conversion)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,67 +54,59 @@ fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
             match el {
                 Element::Resistor {
                     name, resistance, ..
-                } => {
-                    if name.to_lowercase() == el_name
-                        && (param_name == "resistance" || param_name == "value")
-                    {
-                        *resistance = value;
-                    }
+                } if name.to_lowercase() == el_name
+                    && (param_name == "resistance" || param_name == "value") =>
+                {
+                    *resistance = value;
                 }
                 Element::Capacitor {
                     name, capacitance, ..
-                } => {
-                    if name.to_lowercase() == el_name
-                        && (param_name == "capacitance" || param_name == "value")
-                    {
-                        *capacitance = value;
-                    }
+                } if name.to_lowercase() == el_name
+                    && (param_name == "capacitance" || param_name == "value") =>
+                {
+                    *capacitance = value;
                 }
                 Element::Inductor {
                     name, inductance, ..
-                } => {
+                } if name.to_lowercase() == el_name
+                    && (param_name == "inductance" || param_name == "value") =>
+                {
+                    *inductance = value;
+                }
+                Element::VoltageSource { name, waveform, .. }
                     if name.to_lowercase() == el_name
-                        && (param_name == "inductance" || param_name == "value")
-                    {
-                        *inductance = value;
-                    }
+                        && (param_name == "dc"
+                            || param_name == "value"
+                            || param_name == "v") =>
+                {
+                    *waveform = Waveform::Dc(value);
                 }
-                Element::VoltageSource { name, waveform, .. } => {
+                Element::CurrentSource { name, waveform, .. }
                     if name.to_lowercase() == el_name
-                        && (param_name == "dc" || param_name == "value" || param_name == "v")
+                        && (param_name == "dc"
+                            || param_name == "value"
+                            || param_name == "i") =>
+                {
+                    *waveform = Waveform::Dc(value);
+                }
+                Element::XOsdi { name, params, .. } if name.to_lowercase() == el_name => {
+                    if let Some(entry) = params
+                        .iter_mut()
+                        .find(|(k, _)| k.to_lowercase() == param_name)
                     {
-                        *waveform = Waveform::Dc(value);
+                        entry.1 = value;
+                    } else {
+                        params.push((key[dot + 1..].to_string(), value));
                     }
                 }
-                Element::CurrentSource { name, waveform, .. } => {
-                    if name.to_lowercase() == el_name
-                        && (param_name == "dc" || param_name == "value" || param_name == "i")
+                Element::Mosfet { name, params, .. } if name.to_lowercase() == el_name => {
+                    if let Some(entry) = params
+                        .iter_mut()
+                        .find(|(k, _)| k.to_lowercase() == param_name)
                     {
-                        *waveform = Waveform::Dc(value);
-                    }
-                }
-                Element::XOsdi { name, params, .. } => {
-                    if name.to_lowercase() == el_name {
-                        if let Some(entry) = params
-                            .iter_mut()
-                            .find(|(k, _)| k.to_lowercase() == param_name)
-                        {
-                            entry.1 = value;
-                        } else {
-                            params.push((key[dot + 1..].to_string(), value));
-                        }
-                    }
-                }
-                Element::Mosfet { name, params, .. } => {
-                    if name.to_lowercase() == el_name {
-                        if let Some(entry) = params
-                            .iter_mut()
-                            .find(|(k, _)| k.to_lowercase() == param_name)
-                        {
-                            entry.1 = value;
-                        } else {
-                            params.push((key[dot + 1..].to_string(), value));
-                        }
+                        entry.1 = value;
+                    } else {
+                        params.push((key[dot + 1..].to_string(), value));
                     }
                 }
                 _ => {}
@@ -199,6 +195,7 @@ pub struct SimResult {
 }
 
 #[pymethods]
+#[allow(clippy::useless_conversion)]
 impl SimResult {
     /// 1-D numpy array of time points (empty for DC and AC).
     fn time<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
@@ -339,6 +336,7 @@ impl SimResult {
     ///
     /// Returns a Python dict mapping measurement name → value.  Empty for
     /// analyses that don't support measurements (DC OP, AC, DC sweep).
+    #[allow(clippy::useless_conversion)]
     fn measurements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new_bound(py);
         for (k, v) in &self.measurements {
@@ -503,7 +501,14 @@ pub struct Circuit {
     source_overrides: HashMap<String, Vec<(f64, f64)>>,
 }
 
+impl Default for Circuit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
+#[allow(clippy::useless_conversion)]
 impl Circuit {
     #[new]
     pub fn new() -> Self {
@@ -517,6 +522,7 @@ impl Circuit {
 
     /// Load a SPICE netlist from `path`, resolving `.include` directives
     /// relative to the file's parent directory.
+    #[allow(clippy::useless_conversion)]
     pub fn load(&mut self, path: &str) -> PyResult<()> {
         let p = PathBuf::from(path);
         let netlist = parse_spice_file(&p).map_err(parse_err)?;
@@ -526,6 +532,7 @@ impl Circuit {
     }
 
     /// Load a netlist from a SPICE string.
+    #[allow(clippy::useless_conversion)]
     pub fn load_str(&mut self, src: &str) -> PyResult<()> {
         let netlist = parse_spice(src).map_err(parse_err)?;
         self.netlist_dir = None;
@@ -580,6 +587,7 @@ impl Circuit {
     ///   These overlay any `.options` directives from the netlist.
     ///   Unrecognised kwargs raise `RuntimeError` immediately.
     #[pyo3(signature = (analysis, **kwargs))]
+    #[allow(clippy::useless_conversion)]
     pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
         let netlist = self
             .netlist
@@ -695,6 +703,7 @@ impl Circuit {
     ///
     /// Returns a list of `SimResult` objects, one per sweep point.
     #[pyo3(signature = (param, values, analysis, **kwargs))]
+    #[allow(clippy::useless_conversion)]
     pub fn sweep(
         &self,
         param: &str,

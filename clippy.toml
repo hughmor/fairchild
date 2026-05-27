@@ -1,0 +1,2 @@
+# Simulation functions legitimately need more than the default 7-argument limit.
+too-many-arguments-threshold = 12
