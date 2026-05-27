@@ -340,8 +340,8 @@ fn column_row_pattern(ap: &[i32], ai: &[i32]) -> Vec<(i32, i32)> {
     for j in 0..n_cols {
         let start = ap[j] as usize;
         let end = ap[j + 1] as usize;
-        for k in start..end {
-            out.push((j as i32, ai[k]));
+        for &row in &ai[start..end] {
+            out.push((j as i32, row));
         }
     }
     out

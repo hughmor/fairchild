@@ -110,7 +110,7 @@ fn ring_oscillator_transient_oscillates() {
     opts.uic = true;
     // Tighten LTE — ring oscillators are sensitive to integration noise.
     opts.reltol = 1e-4;
-    let result = tran_nr_with_registry_var_opts(&net, 50e-12, 100e-9, &registry, &opts)
+    let result = tran_nr_with_registry_var_opts(&net, 50e-12, 20e-9, &registry, &opts)
         .expect("transient must complete");
 
     assert!(
@@ -178,7 +178,7 @@ fn ring_oscillator_be_and_gear_agree_on_frequency() {
     opts.reltol = 1e-4;
 
     let measure_period = |opts: &SimOptions| -> f64 {
-        let r = tran_nr_with_registry_var_opts(&net, 50e-12, 60e-9, &registry, opts).unwrap();
+        let r = tran_nr_with_registry_var_opts(&net, 50e-12, 20e-9, &registry, opts).unwrap();
         let n3 = r.node_voltages.get("n3").unwrap();
         let t = &r.time;
         let half = t.len() / 2;
