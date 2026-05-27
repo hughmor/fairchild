@@ -297,27 +297,28 @@ fn expand_instance(
         }
 
         let substituted = substitute_params(trimmed, &inst_params, lineno)?;
-        let el = parse_element(&substituted, lineno)?;
-        let el = remap_element_nodes(el, &port_map, inst_name);
+        for el in parse_element_expanded(&substituted, lineno)? {
+            let el = remap_element_nodes(el, &port_map, inst_name);
 
-        // Recurse if this element is a nested subckt instance.
-        let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
-            subckt_defs.contains_key(model_name)
-        } else {
-            false
-        };
+            // Recurse if this element is a nested subckt instance.
+            let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
+                subckt_defs.contains_key(model_name)
+            } else {
+                false
+            };
 
-        if is_subckt_inst {
-            if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
-                let nested_def = subckt_defs.get(model_name).unwrap();
-                let nested = expand_instance(
-                    model_name, name, nets, params,
-                    nested_def, subckt_defs, &inst_params, expanding, lineno,
-                )?;
-                result.extend(nested);
+            if is_subckt_inst {
+                if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
+                    let nested_def = subckt_defs.get(model_name).unwrap();
+                    let nested = expand_instance(
+                        model_name, name, nets, params,
+                        nested_def, subckt_defs, &inst_params, expanding, lineno,
+                    )?;
+                    result.extend(nested);
+                }
+            } else {
+                result.push(el);
             }
-        } else {
-            result.push(el);
         }
     }
 
@@ -775,40 +776,40 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
         } else {
             // Element or instance line; substitute top-level params first.
             let substituted = substitute_params(trimmed, &global_params, *lineno)?;
-            let el = parse_element(&substituted, *lineno)?;
+            for base_el in parse_element_expanded(&substituted, *lineno)? {
+                // Bundle-port expansion (B2): any token in an XOsdi nets list
+                // that matches a declared `.optical_port` is replaced with its
+                // (re,im,λ) underlying wires.  When at least one referenced
+                // port has channels > 1, the instance replicates per channel.
+                // Returns one XOsdi per channel; for non-XOsdi elements or
+                // unreferenced ports, returns a single-element vec.
+                let expanded_elements = expand_optical_ports(base_el, &netlist.optical_ports, *lineno)?;
 
-            // Bundle-port expansion (B2): any token in an XOsdi nets list
-            // that matches a declared `.optical_port` is replaced with its
-            // (re,im,λ) underlying wires.  When at least one referenced
-            // port has channels > 1, the instance replicates per channel.
-            // Returns one XOsdi per channel; for non-XOsdi elements or
-            // unreferenced ports, returns a single-element vec.
-            let expanded_elements = expand_optical_ports(el, &netlist.optical_ports, *lineno)?;
+                for el in expanded_elements {
+                    let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
+                        subckt_defs.contains_key(model_name)
+                    } else {
+                        false
+                    };
 
-            for el in expanded_elements {
-                let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
-                    subckt_defs.contains_key(model_name)
-                } else {
-                    false
-                };
-
-                if is_subckt_inst {
-                    if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
-                        let def  = subckt_defs.get(model_name).unwrap();
-                        let flat = expand_instance(
-                            model_name, name, nets, params,
-                            def, &subckt_defs, &global_params, &mut expanding, *lineno,
-                        )?;
-                        if let Some(alter) = current_alter.as_mut() {
-                            alter.element_overrides.extend(flat);
-                        } else {
-                            netlist.elements.extend(flat);
+                    if is_subckt_inst {
+                        if let Element::XOsdi { ref name, ref nets, ref model_name, ref params } = el {
+                            let def  = subckt_defs.get(model_name).unwrap();
+                            let flat = expand_instance(
+                                model_name, name, nets, params,
+                                def, &subckt_defs, &global_params, &mut expanding, *lineno,
+                            )?;
+                            if let Some(alter) = current_alter.as_mut() {
+                                alter.element_overrides.extend(flat);
+                            } else {
+                                netlist.elements.extend(flat);
+                            }
                         }
+                    } else if let Some(alter) = current_alter.as_mut() {
+                        alter.element_overrides.push(el);
+                    } else {
+                        netlist.elements.push(el);
                     }
-                } else if let Some(alter) = current_alter.as_mut() {
-                    alter.element_overrides.push(el);
-                } else {
-                    netlist.elements.push(el);
                 }
             }
         }
@@ -1563,6 +1564,128 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
         }
         _ => Err(ParseError::UnknownElement { letter, line: lineno }),
     }
+}
+
+/// Like `parse_element` but recognises parasitic key=val tokens on R, L, C lines
+/// and expands them into equivalent sub-networks with internal `__`-prefixed nodes.
+///
+/// Supported parasitics:
+/// - R: `cpar=<val>` — parallel capacitance
+/// - L: `rser=<val>` — series ESR, `cpar=<val>` — parallel winding capacitance
+/// - C: `esr=<val>` — series resistance, `esl=<val>` — series inductance,
+///      `rpar=<val>` — parallel leakage resistance
+fn parse_element_expanded(line: &str, lineno: usize) -> Result<Vec<Element>, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 4 {
+        return parse_element(line, lineno).map(|e| vec![e]);
+    }
+
+    let name   = tokens[0].to_lowercase();
+    let letter = name.chars().next().unwrap();
+
+    match letter {
+        'r' | 'l' | 'c' => {}
+        _ => return parse_element(line, lineno).map(|e| vec![e]),
+    }
+
+    let mut rser: Option<f64> = None;
+    let mut cpar: Option<f64> = None;
+    let mut esr:  Option<f64> = None;
+    let mut esl:  Option<f64> = None;
+    let mut rpar: Option<f64> = None;
+    for tok in &tokens[4..] {
+        if let Some((k, v)) = tok.split_once('=') {
+            if let Ok(val) = parse_value(v, lineno) {
+                match k.to_lowercase().as_str() {
+                    "rser" => rser = Some(val),
+                    "cpar" => cpar = Some(val),
+                    "esr"  => esr  = Some(val),
+                    "esl"  => esl  = Some(val),
+                    "rpar" => rpar = Some(val),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if rser.is_none() && cpar.is_none() && esr.is_none() && esl.is_none() && rpar.is_none() {
+        return parse_element(line, lineno).map(|e| vec![e]);
+    }
+
+    let pos: String = canon_node(tokens[1]);
+    let neg: String = canon_node(tokens[2]);
+    let val: f64    = parse_value(tokens[3], lineno)?;
+
+    let mut elements: Vec<Element> = Vec::new();
+
+    match letter {
+        'r' => {
+            elements.push(Element::Resistor {
+                name: name.clone(), pos: pos.clone(), neg: neg.clone(), resistance: val,
+            });
+            if let Some(cv) = cpar {
+                elements.push(Element::Capacitor {
+                    name: format!("__c_{name}_cpar"),
+                    pos: pos.clone(), neg: neg.clone(), capacitance: cv,
+                });
+            }
+        }
+        'l' => {
+            // Series ESR: L → internal node → R → neg.
+            let l_neg = if rser.is_some() {
+                format!("__{name}_rn")
+            } else {
+                neg.clone()
+            };
+            elements.push(Element::Inductor {
+                name: name.clone(), pos: pos.clone(), neg: l_neg.clone(), inductance: val,
+            });
+            if let Some(rv) = rser {
+                elements.push(Element::Resistor {
+                    name: format!("__r_{name}_rser"),
+                    pos: l_neg, neg: neg.clone(), resistance: rv,
+                });
+            }
+            if let Some(cv) = cpar {
+                elements.push(Element::Capacitor {
+                    name: format!("__c_{name}_cpar"),
+                    pos: pos.clone(), neg: neg.clone(), capacitance: cv,
+                });
+            }
+        }
+        'c' => {
+            // Series chain: pos --[ESL?]--[ESR?]-- c_pos --[C]-- neg
+            let mut c_pos = pos.clone();
+            if let Some(lv) = esl {
+                let int_node = format!("__{name}_esln");
+                elements.push(Element::Inductor {
+                    name: format!("__l_{name}_esl"),
+                    pos: c_pos, neg: int_node.clone(), inductance: lv,
+                });
+                c_pos = int_node;
+            }
+            if let Some(rv) = esr {
+                let int_node = format!("__{name}_esrn");
+                elements.push(Element::Resistor {
+                    name: format!("__r_{name}_esr"),
+                    pos: c_pos, neg: int_node.clone(), resistance: rv,
+                });
+                c_pos = int_node;
+            }
+            elements.push(Element::Capacitor {
+                name: name.clone(), pos: c_pos, neg: neg.clone(), capacitance: val,
+            });
+            if let Some(rv) = rpar {
+                elements.push(Element::Resistor {
+                    name: format!("__r_{name}_rpar"),
+                    pos: pos.clone(), neg: neg.clone(), resistance: rv,
+                });
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(elements)
 }
 
 fn parse_model(line: &str, lineno: usize) -> Result<Option<ModelCard>, ParseError> {
@@ -2720,5 +2843,92 @@ Xlaser l_re l_im cw_laser power_mW=1.0
         let x = netlist.elements.iter().filter(|el| matches!(el, Element::XOsdi { .. })).count();
         assert_eq!(r, 1, "expected 1 resistor from subckt expansion");
         assert_eq!(x, 1, "expected 1 XOsdi remaining");
+    }
+
+    // ── passive parasitic expansion ───────────────────────────────────────────
+
+    #[test]
+    fn inductor_rser_expands_to_two_elements() {
+        let input = "V1 in 0 DC 1\nL1 in out 1m rser=10\n.op\n.end\n";
+        let net = parse_spice(input).unwrap();
+        // L1 expands into: Inductor(in → __l1_rn) + Resistor(__l1_rn → out)
+        let inductors: Vec<_> = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).collect();
+        let resistors: Vec<_> = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).collect();
+        assert_eq!(inductors.len(), 1, "expected 1 inductor");
+        assert_eq!(resistors.len(), 1, "expected 1 resistor (ESR)");
+        if let Element::Inductor { pos, neg, .. } = inductors[0] {
+            assert_eq!(pos, "in");
+            assert_eq!(neg, "__l1_rn");
+        }
+        if let Element::Resistor { pos, neg, resistance, .. } = resistors[0] {
+            assert_eq!(pos, "__l1_rn");
+            assert_eq!(neg, "out");
+            assert!((resistance - 10.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn inductor_rser_cpar_expands_to_three_elements() {
+        let input = "V1 in 0 DC 1\nL1 in out 1m rser=5 cpar=1p\n.op\n.end\n";
+        let net = parse_spice(input).unwrap();
+        let n_l = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).count();
+        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
+        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        assert_eq!(n_l, 1);
+        assert_eq!(n_r, 1);
+        assert_eq!(n_c, 1);
+        // cpar is across original pos/neg (in, out)
+        let cap = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
+        if let Element::Capacitor { pos, neg, capacitance, .. } = cap {
+            assert_eq!(pos, "in");
+            assert_eq!(neg, "out");
+            assert!((capacitance - 1e-12).abs() < 1e-24);
+        }
+    }
+
+    #[test]
+    fn capacitor_esr_esl_expands_to_three_elements() {
+        let input = "V1 in 0 DC 1\nC1 in 0 100n esr=0.1 esl=2n\n.op\n.end\n";
+        let net = parse_spice(input).unwrap();
+        let n_l = net.elements.iter().filter(|e| matches!(e, Element::Inductor { .. })).count();
+        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
+        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        assert_eq!(n_l, 1, "expected 1 inductor (ESL)");
+        assert_eq!(n_r, 1, "expected 1 resistor (ESR)");
+        assert_eq!(n_c, 1, "expected 1 capacitor");
+        // Chain: in --[ESL]--> __c1_esln --[ESR]--> __c1_esrn --[C]--> 0
+        let cap = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
+        if let Element::Capacitor { pos, neg, .. } = cap {
+            assert_eq!(pos, "__c1_esrn");
+            assert_eq!(neg, "0");
+        }
+    }
+
+    #[test]
+    fn capacitor_rpar_adds_parallel_resistor() {
+        let input = "V1 in 0 DC 1\nC1 in 0 100n rpar=1G\n.op\n.end\n";
+        let net = parse_spice(input).unwrap();
+        let n_r = net.elements.iter().filter(|e| matches!(e, Element::Resistor { .. })).count();
+        assert_eq!(n_r, 1, "expected 1 resistor (rpar)");
+        let r = net.elements.iter().find(|e| matches!(e, Element::Resistor { .. })).unwrap();
+        if let Element::Resistor { pos, neg, resistance, .. } = r {
+            assert_eq!(pos, "in");
+            assert_eq!(neg, "0");
+            assert!((resistance - 1e9).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn resistor_cpar_adds_parallel_cap() {
+        let input = "V1 in 0 DC 1\nR1 in 0 1k cpar=1p\n.op\n.end\n";
+        let net = parse_spice(input).unwrap();
+        let n_c = net.elements.iter().filter(|e| matches!(e, Element::Capacitor { .. })).count();
+        assert_eq!(n_c, 1);
+        let c = net.elements.iter().find(|e| matches!(e, Element::Capacitor { .. })).unwrap();
+        if let Element::Capacitor { pos, neg, capacitance, .. } = c {
+            assert_eq!(pos, "in");
+            assert_eq!(neg, "0");
+            assert!((capacitance - 1e-12).abs() < 1e-24);
+        }
     }
 }
