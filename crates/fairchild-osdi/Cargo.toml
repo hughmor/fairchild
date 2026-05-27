@@ -11,3 +11,4 @@ thiserror = { workspace = true }
 [dev-dependencies]
 fairchild-parser = { workspace = true }
 indexmap = { workspace = true }
+osdi-mock = { path = "../osdi-mock" }

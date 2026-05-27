@@ -5,7 +5,6 @@ members = [
     "crates/fairchild-cli",
     "crates/fairchild-osdi",
     "crates/fairchild-klu",
-    "crates/osdi-mock",
     "crates/fairchild-py",
 ]
 resolver = "2"

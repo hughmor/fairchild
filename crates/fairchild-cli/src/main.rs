@@ -13,6 +13,7 @@ use fairchild_core::{
     freq_decade, freq_linear, freq_oct,
     tran_nr_with_registry_opts, tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
 };
+#[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist};
 
@@ -323,44 +324,56 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
     registry.register_builtin_mosfets(&netlist.models);
     registry.register_builtin_bjts(&netlist.models);
 
-    // Photonic-model authoring guidance: as of the B-phase refactor, native
-    // Rust photonic devices (`fc_waveguide`, `fc_dcoupler`, `fc_splitter`,
-    // `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`) are the recommended
-    // path.  Surface a one-shot info note so users with `.osdi` photonic
-    // models know there's a faster, cleaner alternative.
-    if !quiet && !netlist.osdi_paths.is_empty() {
-        let photonic_count = netlist.osdi_paths.iter()
-            .filter(|p| p.contains("photonic")
-                || p.contains("waveguide")
-                || p.contains("mrr")
-                || p.contains("mzi")
-                || p.contains("laser"))
-            .count();
-        if photonic_count > 0 {
-            eprintln!(
-                "info: {} OSDI photonic library/libraries loaded — note that native Rust devices \
-                 (fc_waveguide etc.) are now the recommended path; see fairchild-osdi crate \
-                 docs for the deprecation rationale.",
-                photonic_count
-            );
+    #[cfg(feature = "osdi")]
+    {
+        // Photonic-model authoring guidance: as of the B-phase refactor, native
+        // Rust photonic devices (`fc_waveguide`, `fc_dcoupler`, `fc_splitter`,
+        // `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`) are the recommended
+        // path.  Surface a one-shot info note so users with `.osdi` photonic
+        // models know there's a faster, cleaner alternative.
+        if !quiet && !netlist.osdi_paths.is_empty() {
+            let photonic_count = netlist.osdi_paths.iter()
+                .filter(|p| p.contains("photonic")
+                    || p.contains("waveguide")
+                    || p.contains("mrr")
+                    || p.contains("mzi")
+                    || p.contains("laser"))
+                .count();
+            if photonic_count > 0 {
+                eprintln!(
+                    "info: {} OSDI photonic library/libraries loaded — note that native Rust devices \
+                     (fc_waveguide etc.) are now the recommended path; see fairchild-osdi crate \
+                     docs for the deprecation rationale.",
+                    photonic_count
+                );
+            }
+        }
+
+        for osdi_path in &netlist.osdi_paths {
+            let path = if std::path::Path::new(osdi_path).is_absolute() {
+                PathBuf::from(osdi_path)
+            } else if let Some(dir) = netlist_dir {
+                dir.join(osdi_path)
+            } else {
+                PathBuf::from(osdi_path)
+            };
+
+            let lib = unsafe { OsdiLibrary::open(&path) }.unwrap_or_else(|e| {
+                eprintln!("error: cannot load OSDI library '{}': {e}", path.display());
+                std::process::exit(1);
+            });
+            let lib = Arc::new(lib);
+            lib.register_into(&mut registry);
         }
     }
 
-    for osdi_path in &netlist.osdi_paths {
-        let path = if std::path::Path::new(osdi_path).is_absolute() {
-            PathBuf::from(osdi_path)
-        } else if let Some(dir) = netlist_dir {
-            dir.join(osdi_path)
-        } else {
-            PathBuf::from(osdi_path)
-        };
-
-        let lib = unsafe { OsdiLibrary::open(&path) }.unwrap_or_else(|e| {
-            eprintln!("error: cannot load OSDI library '{}': {e}", path.display());
-            std::process::exit(1);
-        });
-        let lib = Arc::new(lib);
-        lib.register_into(&mut registry);
+    #[cfg(not(feature = "osdi"))]
+    if !netlist.osdi_paths.is_empty() {
+        eprintln!(
+            "warn: netlist references {} .osdi file(s) but this build was compiled without \
+             OSDI support (--features osdi). Those libraries will be ignored.",
+            netlist.osdi_paths.len()
+        );
     }
 
     registry

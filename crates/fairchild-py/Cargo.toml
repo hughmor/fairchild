@@ -10,9 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 fairchild-core   = { path = "../fairchild-core" }
 fairchild-parser = { path = "../fairchild-parser" }
-fairchild-osdi   = { path = "../fairchild-osdi" }
+fairchild-osdi   = { path = "../fairchild-osdi", optional = true }
 pyo3             = { version = "0.22", features = ["extension-module"] }
 numpy            = "0.22"
 
 [features]
+default = ["osdi"]
+osdi = ["dep:fairchild-osdi"]
 klu = ["fairchild-core/klu"]

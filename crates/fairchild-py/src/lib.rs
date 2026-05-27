@@ -19,6 +19,7 @@ use fairchild_core::{
     tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
     AcResult, DcSweepResult, DeviceRegistry, NrResult, SimError, SimOptions, TranResult,
 };
+#[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
 
 // ---------------------------------------------------------------------------
@@ -727,6 +728,7 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
     registry.register_builtin_mosfets(&netlist.models);
     registry.register_builtin_bjts(&netlist.models);
 
+    #[cfg(feature = "osdi")]
     for osdi_path in &netlist.osdi_paths {
         let path = if std::path::Path::new(osdi_path).is_absolute() {
             PathBuf::from(osdi_path)
@@ -742,6 +744,14 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
             )))?;
         let lib = Arc::new(lib);
         lib.register_into(&mut registry);
+    }
+
+    #[cfg(not(feature = "osdi"))]
+    if !netlist.osdi_paths.is_empty() {
+        return Err(PyRuntimeError::new_err(format!(
+            "netlist references .osdi files but this build was compiled without OSDI support; \
+             rebuild with --features osdi or remove the .osdi references"
+        )));
     }
 
     Ok(registry)
