@@ -34,13 +34,17 @@ FC_BIN_DEBUG   = REPO_ROOT / "target" / "debug"  / "fairchild"
 # t_sample: time (s) at which to compare fairchild vs ngspice voltage, or None
 # for DC-only circuits.
 BENCHMARKS = [
-    ("RC step response",       "rc_step.sp",       "out",  2e-3),
-    ("RLC resonator",          "rlc_resonator.sp", "n2",   0.5e-3),
-    ("Diode rectifier",        "diode_rectifier.sp","out", 2e-6),
-    ("CMOS inverter",          "cmos_inverter.sp", "out",  60e-9),
-    ("BJT CE amplifier",       "bjt_ce_amp.sp",    "c",    100e-9),
-    ("Ring osc 3-stage",       "ring_osc_3.sp",    "n1",   None),
-    ("Ring osc 11-stage",      "ring_osc_11.sp",   "n1",   None),
+    ("RC step response",       "rc_step.sp",         "out",  2e-3),
+    ("RLC resonator",          "rlc_resonator.sp",   "n2",   0.5e-3),
+    ("Diode rectifier",        "diode_rectifier.sp", "out",  2e-6),
+    ("CMOS inverter",          "cmos_inverter.sp",   "out",  60e-9),
+    ("BJT CE amplifier",       "bjt_ce_amp.sp",      "c",    100e-9),
+    ("Schmitt trigger",        "schmitt_trigger.sp", "out",  0.2e-6),
+    ("Ring osc 3-stage",       "ring_osc_3.sp",      "n1",   None),
+    ("Ring osc 5-stage",       "ring_osc_5.sp",      "n1",   None),
+    ("Ring osc 11-stage",      "ring_osc_11.sp",     "n1",   None),
+    ("Ring osc 21-stage",      "ring_osc_21.sp",     "n1",   None),
+    ("Ring osc 51-stage",      "ring_osc_51.sp",     "n1",   None),
 ]
 
 
@@ -115,6 +119,16 @@ def ngspice_sample(netlist_path: Path, node: str, t_sample: float, ng_bin: str) 
     return None
 
 
+def _ngspice_tmp_with_control(circuit: Path, node: str) -> str:
+    """Return path to a temp .sp file with a .control block so ngspice runs in batch mode."""
+    src = circuit.read_text()
+    lines = [l for l in src.splitlines() if l.strip().lower() != ".end"]
+    ctrl = f".control\nrun\nprint {node}\n.endc\n.end\n"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
+        f.write("\n".join(lines) + "\n" + ctrl)
+        return f.name
+
+
 def run_benchmark(label: str, spice_file: str, node: str | None, t_sample: float | None,
                   fc_bin: str, ng_bin: str | None) -> dict:
     circuit = CIRCUITS / spice_file
@@ -134,17 +148,25 @@ def run_benchmark(label: str, spice_file: str, node: str | None, t_sample: float
         fc_v = parse_csv_node(fc_proc.stdout, node, t_sample)
     result["fairchild_v"] = fc_v
 
-    # ngspice
+    # ngspice — must inject a .control block so it actually runs in batch mode
     if ng_bin:
-        ng_ms, ng_proc = wall_ms([ng_bin, "-b", str(circuit)])
-        result["ngspice_ms"] = round(ng_ms, 1)
-        result["ngspice_ok"] = ng_proc.returncode == 0
+        ng_tmp = _ngspice_tmp_with_control(circuit, node or "v(0)")
+        try:
+            ng_ms, ng_proc = wall_ms([ng_bin, "-b", ng_tmp])
+            result["ngspice_ms"] = round(ng_ms, 1)
+            ng_ok = ng_proc.returncode in (0, 1)  # ngspice exits 1 on some warnings
+            result["ngspice_ok"] = ng_ok
 
-        if fc_ok and ng_proc.returncode == 0 and node and t_sample is not None:
-            ng_v = ngspice_sample(circuit, node, t_sample, ng_bin)
-            result["ngspice_v"] = ng_v
-            if fc_v is not None and ng_v is not None and ng_v != 0:
-                result["rel_error"] = abs(fc_v - ng_v) / abs(ng_v)
+            if fc_ok and ng_ok and node and t_sample is not None:
+                ng_v = ngspice_sample(circuit, node, t_sample, ng_bin)
+                result["ngspice_v"] = ng_v
+                if fc_v is not None and ng_v is not None and ng_v != 0:
+                    result["rel_error"] = abs(fc_v - ng_v) / abs(ng_v)
+        finally:
+            try:
+                os.unlink(ng_tmp)
+            except OSError:
+                pass
 
     return result
 

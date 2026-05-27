@@ -27,14 +27,14 @@ state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
 
 | Category | Coverage |
 |---|---|
-| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), B (behavioral), X (subckt / OSDI) |
+| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), BJT (Gummel-Poon), B (behavioral), X (subckt / OSDI) |
 | Sources | DC, PULSE, PWL, SIN, EXP, SFFM, AM |
 | Analyses | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | Solvers | NR with `pnjlim` / `fetlim`; BE, TR, GEAR (BDF-2); dense or sparse LU |
 | Directives | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`/`.endl`, `.include`, `.param`, `.subckt`/`.ends`, `.temp` (sweep), `.alter`, `.model`, `.osdi` |
 | Output | CSV (stdout / file), Nutmeg rawfile (ngspice-compatible) |
 
-What's not yet supported: BJT, switches `S`/`W`, transmission lines,
+What's not yet supported: switches `S`/`W`, transmission lines,
 `.disto`, `.pz`, native `.mc` Monte Carlo, PSF/FSDB binary output. See
 [`sotu.md`](sotu.md) §3 for the live status list.
 
@@ -138,7 +138,8 @@ examples/
 │   ├── diode_rectifier.sp        ← half-wave rectifier
 │   ├── cmos_inverter.sp          ← Level 1 NMOS + PMOS, VDD = 3.3 V
 │   ├── nmos_dc_sweep.sp          ← .dc sweep over V_GS
-│   └── ring_oscillator.sp        ← 5-stage CMOS ring; tests DC + GEAR
+│   ├── ring_oscillator.sp        ← 5-stage CMOS ring; tests DC + GEAR
+│   └── bjt_ce_amplifier.sp       ← NPN common-emitter amp (BJT GP L1)
 └── photonic/
     ├── native_mrr_modulator.{sp,py}        ← electro-optic micro-ring
     ├── native_mrr_wavelength_sweep.py      ← parametric λ sweep
@@ -153,6 +154,34 @@ channel — no MUX/DEMUX device needed because the bundle-port abstraction
 makes each wavelength its own independent SVEA channel.
 
 ---
+
+## Benchmarks
+
+Head-to-head accuracy and performance vs ngspice. See [`docs/benchmarks.md`](docs/benchmarks.md) for the full table and methodology.
+
+### Accuracy (RMS error vs ngspice)
+
+![Accuracy overlay](docs/plots/accuracy_analog.png)
+
+Linear circuits (RC, RLC, diode) match ngspice to sub-1 mV RMS. Switching
+circuits (CMOS inverter, BJT CE amp) show higher RMS error due to missing
+junction capacitances (Cgs/Cgd and CJE/CJC — known limitation, next
+correctness priority).
+
+### Performance scaling
+
+![Scaling plot](docs/plots/scaling_wall_time.png)
+
+Fairchild is 1.5–4× faster than ngspice on the CMOS ring oscillator family
+(Level-1 MOSFET, 3–51 stages). Advantage is largest on small circuits due to
+lower startup overhead; both simulators show similar scaling exponents.
+
+Reproduce:
+```bash
+cargo build --release
+python3 benchmarks/plot.py    # generates docs/plots/*.png
+python3 benchmarks/run_all.py  # generates point-sample JSON for tables
+```
 
 ## Validation
 
@@ -187,9 +216,11 @@ crates/
   fairchild-osdi/     OSDI v0.4 runtime (compatibility shim — see crate docstring
                       for deprecation rationale).
   fairchild-py/       PyO3 Python package: Circuit / SimResult / WaveformSource.
-examples/             Ready-to-run SPICE netlists + Python driver scripts.
-docs/                 user-guide.md, photonic_models.md (legacy OSDI catalog),
-                      generated comparison plots.
+examples/             Ready-to-run SPICE netlists per discipline (electronic, photonic).
+benchmarks/           Head-to-head comparison circuits + scripts vs ngspice.
+                      `run_all.py` → JSON, `plot.py` → docs/plots/*.png.
+docs/                 user-guide.md, benchmarks.md, photonic_models.md (legacy),
+                      docs/plots/ (generated accuracy + scaling figures).
 scripts/              kicad_to_fairchild.py (KiCad netlist post-processor;
                       native fc_* devices).
 legacy/               Archived Verilog-A photonic models + OSDI examples.
@@ -203,16 +234,12 @@ See [`sotu.md`](sotu.md) for the live status list.
 
 The major work ahead, in rough order:
 
-1. **Benchmark page** — CI and nightly benchmarks are wired up; what's
-   missing is a published benchmark page with head-to-head accuracy and
-   performance comparisons against ngspice (and HSPICE / PrimeSim where
-   licences allow). A credible benchmark page is the cheapest move with the
-   biggest visibility return.
+1. **MOSFET + BJT junction capacitances** — Cgs/Cgd/Cbs/Cbd and CJE/CJC
+   are parsed but not yet stamped. Required for correct switching edge timing.
 2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.
-3. **Remaining analog elements** — BJT (Gummel-Poon), switches `S`/`W`,
-   transmission lines.
+3. **Remaining analog elements** — switches `S`/`W`, transmission lines.
 4. **Adjoint sensitivity** (the original Phase 4 differentiator).
 5. **Tier-2 moats**: envelope-following, S-parameter Touchstone blocks with
    time-domain convolution, harmonic balance / PSS, WDM cross-channel
