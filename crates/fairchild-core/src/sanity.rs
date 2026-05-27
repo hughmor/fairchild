@@ -228,6 +228,7 @@ fn element_name(el: &Element) -> &str {
         Element::CurrentSource { name, .. } => name,
         Element::Diode         { name, .. } => name,
         Element::Mosfet        { name, .. } => name,
+        Element::Bjt           { name, .. } => name,
         Element::Behavioral    { name, .. } => name,
         Element::XOsdi         { name, .. } => name,
     }

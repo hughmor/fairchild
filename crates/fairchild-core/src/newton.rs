@@ -100,6 +100,9 @@ pub fn build_device_names(netlist: &Netlist) -> Vec<String> {
             Element::Mosfet { name, model_name, .. } => {
                 names.push(format!("{name} ({model_name})"));
             }
+            Element::Bjt { name, model_name, .. } => {
+                names.push(format!("{name} ({model_name})"));
+            }
             Element::Behavioral { name, kind, .. } => {
                 names.push(format!("{name} ({kind:?})"));
             }
@@ -142,6 +145,15 @@ pub fn build_devices(
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     devices.push(factory(&[d, g, s, b], ctx));
                 }
+            }
+            Element::Bjt { collector, base, emitter, substrate, model_name, .. } => {
+                let c: NodeId = topo.node_index.get(collector).copied();
+                let b: NodeId = topo.node_index.get(base).copied();
+                let e: NodeId = topo.node_index.get(emitter).copied();
+                let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
+                let dev = registry.build_bjt(model_name, &[c, b, e, s], ctx)
+                    .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                devices.push(dev);
             }
             Element::Behavioral { name, pos, neg, kind, expr } => {
                 let dev = BehavioralDevice::build(
@@ -388,6 +400,11 @@ fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>)
         Element::Mosfet { name, drain, gate, source, bulk, .. } => {
             (name.clone(),
              net_match(drain) || net_match(gate) || net_match(source) || net_match(bulk),
+             None)
+        }
+        Element::Bjt { name, collector, base, emitter, substrate, .. } => {
+            (name.clone(),
+             net_match(collector) || net_match(base) || net_match(emitter) || net_match(substrate),
              None)
         }
         Element::Behavioral { name, pos, neg, .. } => {
@@ -882,6 +899,7 @@ pub fn dc_op_nr_opts(netlist: &Netlist, opts: &SimOptions) -> Result<NrResult, S
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
     registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_bjts(&netlist.models);
     dc_op_nr_with_registry_opts(netlist, &registry, opts)
 }
 

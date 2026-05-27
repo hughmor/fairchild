@@ -261,7 +261,7 @@ fn stamp_netlist_into(
                 // SPICE: current flows from n+ through source to n- → subtract from n+, add to n-.
                 stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, waveform.at(t));
             }
-            Element::Diode { .. } | Element::Mosfet { .. }
+            Element::Diode { .. } | Element::Mosfet { .. } | Element::Bjt { .. }
             | Element::XOsdi { .. } | Element::Behavioral { .. } => {
                 // Nonlinear; stamped by the Device trait inside the Newton-Raphson loop.
             }
@@ -354,6 +354,12 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 add_node(&mut node_index, gate);
                 add_node(&mut node_index, source);
                 add_node(&mut node_index, bulk);
+            }
+            Element::Bjt { collector, base, emitter, substrate, .. } => {
+                add_node(&mut node_index, collector);
+                add_node(&mut node_index, base);
+                add_node(&mut node_index, emitter);
+                add_node(&mut node_index, substrate);
             }
             Element::VoltageSource { name, pos, neg, .. } => {
                 add_node(&mut node_index, pos);

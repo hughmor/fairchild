@@ -70,6 +70,15 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                     }
                 }
             }
+            Element::Bjt { collector, base, emitter, substrate, .. } => {
+                for n in &[collector, base, emitter, substrate] { record(n, &mut nodes); }
+                let terms = [collector.as_str(), base.as_str(), emitter.as_str(), substrate.as_str()];
+                for i in 0..terms.len() {
+                    for j in (i + 1)..terms.len() {
+                        add_edge(terms[i], terms[j], &mut adj);
+                    }
+                }
+            }
             Element::XOsdi { nets, .. } => {
                 // OSDI device models (including the photonic Norton-equivalent
                 // library) self-stamp their own diagonals — every terminal has

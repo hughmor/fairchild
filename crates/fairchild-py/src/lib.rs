@@ -725,6 +725,7 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
     registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_bjts(&netlist.models);
 
     for osdi_path in &netlist.osdi_paths {
         let path = if std::path::Path::new(osdi_path).is_absolute() {

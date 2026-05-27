@@ -6,7 +6,7 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
+    GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
     NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter,
     NativePnPhaseShifterCap, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
     NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
@@ -32,6 +32,8 @@ pub struct DeviceRegistry {
     factories: HashMap<String, Factory>,
     /// MOSFET model cards stored for W/L instance-param injection in build_devices.
     pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
+    /// BJT model cards: model_name → (is_pnp, params).
+    pub(crate) bjt_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
 }
 
 impl DeviceRegistry {
@@ -39,6 +41,7 @@ impl DeviceRegistry {
         let mut reg = Self {
             factories: HashMap::new(),
             mosfet_cards: HashMap::new(),
+            bjt_cards: HashMap::new(),
         };
         // Native photonic passives are always available — no .model card or
         // .osdi import required to instantiate `fc_waveguide`, `fc_dcoupler`,
@@ -148,6 +151,42 @@ impl DeviceRegistry {
                 (is_pmos, card.params.clone()),
             );
         }
+    }
+
+    /// Populate the registry from `.model NPN` / `.model PNP` cards.
+    pub fn register_builtin_bjts(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let kind = card.kind.to_lowercase();
+            let is_pnp = match kind.as_str() {
+                "npn" => false,
+                "pnp" => true,
+                _ => continue,
+            };
+            let (_, unknown) = GummelPoonBjt::from_model_params(is_pnp, &card.params);
+            if !unknown.is_empty() {
+                eprintln!(
+                    "warning: BJT model '{}' params not yet implemented (using defaults): {}",
+                    card.name,
+                    unknown.join(", ")
+                );
+            }
+            self.bjt_cards.insert(card.name.clone(), (is_pnp, card.params.clone()));
+        }
+    }
+
+    /// Build a `GummelPoonBjt` instance for a `Q` element, injecting the
+    /// stored model-card parameters. Returns `None` if the model name is unknown.
+    pub(crate) fn build_bjt(
+        &self,
+        model_name: &str,
+        terminals: &[NodeId],
+        ctx: &SimContext,
+    ) -> Option<Box<dyn Device>> {
+        let (is_pnp, model_params) = self.bjt_cards.get(model_name)?;
+        let (mut dev, _) = GummelPoonBjt::from_model_params(*is_pnp, model_params);
+        dev.setup_model(ctx);
+        dev.setup_instance(terminals, ctx);
+        Some(Box::new(dev))
     }
 
     /// Register the always-available native photonic devices.

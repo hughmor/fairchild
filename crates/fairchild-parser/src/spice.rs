@@ -202,6 +202,10 @@ fn remap_element_nodes(
         Element::Mosfet { name, drain, gate, source, bulk, model_name, params } =>
             Element::Mosfet { name: format!("{prefix}.{name}"), drain: rn(&drain), gate: rn(&gate),
                               source: rn(&source), bulk: rn(&bulk), model_name, params },
+        Element::Bjt { name, collector, base, emitter, substrate, model_name, params } =>
+            Element::Bjt { name: format!("{prefix}.{name}"), collector: rn(&collector),
+                           base: rn(&base), emitter: rn(&emitter), substrate: rn(&substrate),
+                           model_name, params },
         Element::XOsdi { name, nets, model_name, params } =>
             Element::XOsdi { name: format!("{prefix}.{name}"),
                              nets: nets.iter().map(|n| rn(n)).collect(), model_name, params },
@@ -1448,6 +1452,46 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 source:     canon_node(tokens[3]),
                 bulk:       canon_node(tokens[4]),
                 model_name: tokens[5].to_lowercase(),
+                params,
+            })
+        }
+        'q' => {
+            // Q<name> collector base emitter [substrate] model [param=val ...]
+            // Substrate is optional; defaults to "0" (ground) when omitted.
+            if tokens.len() < 5 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥5 (Qname collector base emitter model)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            // Detect whether tokens[4] is the model name or the substrate node.
+            // Strategy: if tokens.len() >= 6 and tokens[4] does NOT contain '='
+            // and tokens[5] does NOT look like a value, treat tokens[4] as
+            // substrate. Otherwise, treat tokens[4] as the model name.
+            let (substrate, model_name, param_start) =
+                if tokens.len() >= 6 && !tokens[4].contains('=') && !tokens[5].contains('=') {
+                    // Five positional fields: C B E S model
+                    (canon_node(tokens[4]), tokens[5].to_lowercase(), 6)
+                } else {
+                    // Four positional fields: C B E model
+                    ("0".to_string(), tokens[4].to_lowercase(), 5)
+                };
+            let mut params = Vec::new();
+            for tok in &tokens[param_start..] {
+                if let Some((k, v)) = tok.split_once('=') {
+                    if let Ok(val) = parse_value(v, lineno) {
+                        params.push((k.to_lowercase(), val));
+                    }
+                }
+            }
+            Ok(Element::Bjt {
+                name,
+                collector: canon_node(tokens[1]),
+                base:      canon_node(tokens[2]),
+                emitter:   canon_node(tokens[3]),
+                substrate,
+                model_name,
                 params,
             })
         }

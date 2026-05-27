@@ -24,7 +24,7 @@ pub use device::{Device, EvalFlags, NodeId, SimContext};
 pub use device_registry::DeviceRegistry;
 pub use error::SimError;
 pub use mna::CircuitTopology;
-pub use models::{Mosfet1, ShockleyDiode};
+pub use models::{GummelPoonBjt, Mosfet1, ShockleyDiode};
 pub use newton::{
     build_devices, dc_op_nr, dc_op_nr_opts,
     dc_op_nr_with_devices, dc_op_nr_with_devices_opts,

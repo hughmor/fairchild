@@ -144,6 +144,7 @@ fn element_name(el: &Element) -> String {
         Element::CurrentSource { name, .. } |
         Element::Diode         { name, .. } |
         Element::Mosfet        { name, .. } |
+        Element::Bjt           { name, .. } |
         Element::XOsdi         { name, .. } |
         Element::Behavioral    { name, .. } => name.to_lowercase(),
     }
@@ -396,6 +397,18 @@ pub enum Element {
         model_name: String,
         params: Vec<(String, f64)>,
     },
+    /// SPICE BJT: `Q<name> collector base emitter [substrate] model [params]`
+    Bjt {
+        name: String,
+        collector: NodeName,
+        base: NodeName,
+        emitter: NodeName,
+        /// Substrate node — typically tied to ground or emitter.  Defaults to
+        /// "0" (ground) when the netlist omits it.
+        substrate: NodeName,
+        model_name: String,
+        params: Vec<(String, f64)>,
+    },
     /// Generic OSDI instance: `X<name> <net0> <net1> ... <model_name> [param=value ...]`
     /// Port order matches terminal order in the OSDI descriptor.
     XOsdi {
@@ -513,6 +526,10 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
             Element::Mosfet { name, drain, gate, source, bulk, .. } => {
                 check(name, drain)?; check(name, gate)?;
                 check(name, source)?; check(name, bulk)?;
+            }
+            Element::Bjt { name, collector, base, emitter, substrate, .. } => {
+                check(name, collector)?; check(name, base)?;
+                check(name, emitter)?; check(name, substrate)?;
             }
             // XOsdi is intentionally not checked: mixed-domain connections are valid.
             Element::XOsdi { .. } => {}
