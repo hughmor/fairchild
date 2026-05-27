@@ -321,6 +321,7 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_diodes(&netlist.models);
     registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_bjts(&netlist.models);
 
     // Photonic-model authoring guidance: as of the B-phase refactor, native
     // Rust photonic devices (`fc_waveguide`, `fc_dcoupler`, `fc_splitter`,

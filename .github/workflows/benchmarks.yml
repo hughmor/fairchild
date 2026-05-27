@@ -1,0 +1,56 @@
+name: Benchmarks
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC nightly
+  workflow_dispatch:        # also triggerable manually
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-bench-
+
+      - name: Install ngspice
+        run: sudo apt-get install -y ngspice
+
+      - name: Build fairchild (release)
+        run: cargo build --release
+
+      - name: Run benchmarks
+        run: python3 benchmarks/run_all.py --output benchmarks/results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: benchmarks/results.json
+          retention-days: 90
+
+      - name: Print summary
+        run: |
+          echo "### Benchmark results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          python3 -c "
+          import json, sys
+          data = json.load(open('benchmarks/results.json'))
+          print(f\"{'Circuit':<25} {'FC (ms)':>9} {'NG (ms)':>9} {'OK':>4}\")
+          print('-' * 52)
+          for r in data['results']:
+              ng = f\"{r.get('ngspice_ms','—'):>9}\" if 'ngspice_ms' in r else '        —'
+              ok = '✓' if r.get('fairchild_ok') else '✗'
+              print(f\"{ok} {r['label']:<23} {r['fairchild_ms']:>9.1f} {ng}\")
+          " >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
