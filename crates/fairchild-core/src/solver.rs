@@ -441,11 +441,8 @@ pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
             #[cfg(feature = "klu")]
             { Box::new(KluSolver) }
             #[cfg(not(feature = "klu"))]
-            {
-                eprintln!("warning: KLU backend requested but `klu` cargo feature \
-                           is not enabled; falling back to faer-sparse.");
-                Box::new(FaerSparseSolver::default())
-            }
+            unreachable!("SolverKind::Klu reached make_solver without the `klu` feature — \
+                          SimOptions::set should have rejected it earlier")
         }
         SolverKind::Auto   => {
             if n < 50 { Box::new(DenseSolver) }

@@ -15,13 +15,27 @@ pub struct MeasureResult {
 }
 
 /// Evaluate all `Measurement`s against a transient run.
+///
+/// Only `.meas tran` directives are evaluated; `.meas ac` and `.meas dc`
+/// directives emit a warning and are skipped (AC and DC measurements require
+/// the corresponding result type and are not yet implemented).
 pub fn evaluate_measurements(
     measurements: &[Measurement],
     result: &TranResult,
 ) -> Vec<MeasureResult> {
     use fairchild_parser::MeasAnalysis;
     measurements.iter()
-        .filter(|m| matches!(m.analysis, MeasAnalysis::Tran))
+        .filter(|m| {
+            if !matches!(m.analysis, MeasAnalysis::Tran) {
+                eprintln!(
+                    "warning: .meas '{}' is not a transient measurement and will be skipped \
+                     — only `.meas tran` is currently supported",
+                    m.name
+                );
+                return false;
+            }
+            true
+        })
         .map(|m| {
             let v = eval_one(&m.kind, result);
             MeasureResult { name: m.name.clone(), value: v }
