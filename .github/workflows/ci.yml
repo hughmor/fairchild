@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install SuiteSparse (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libsuitesparse-dev
+
+      - name: Install SuiteSparse (macOS)
+        if: runner.os == 'macOS'
+        run: brew install suite-sparse
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test (default features)
+        run: cargo test --workspace
+
+      - name: Clippy (with klu)
+        run: cargo clippy --workspace --all-targets --features klu -- -D warnings
+
+      - name: Test (with klu)
+        run: cargo test --workspace --features klu
+
+      - name: Check benchmarks compile
+        run: cargo test --workspace --benches
