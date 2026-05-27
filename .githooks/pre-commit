@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+echo "→ cargo fmt --check"
+cargo fmt --check
+
+echo "→ cargo clippy -D warnings"
+cargo clippy --workspace -- -D warnings

@@ -111,9 +111,9 @@ fn rc_thermal_noise_vs_analytic() {
         );
     };
 
-    check_analytic(0, freqs[0]);   // ~10 Hz
-    check_analytic(3, freqs[3]);   // ~100 Hz
-    check_analytic(6, freqs[6]);   // ~1000 Hz
+    check_analytic(0, freqs[0]); // ~10 Hz
+    check_analytic(3, freqs[3]); // ~100 Hz
+    check_analytic(6, freqs[6]); // ~1000 Hz
 
     // ngspice comparison (optional — skip if absent or output unparseable).
     let Some(ng) = ngspice_noise() else {

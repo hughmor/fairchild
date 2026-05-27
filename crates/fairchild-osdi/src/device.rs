@@ -189,7 +189,10 @@ impl Device for OsdiDevice {
         self.mna_nodes = terminals
             .iter()
             .copied()
-            .chain(std::iter::repeat_n(None, num_nodes.saturating_sub(terminals.len())))
+            .chain(std::iter::repeat_n(
+                None,
+                num_nodes.saturating_sub(terminals.len()),
+            ))
             .take(num_nodes)
             .collect();
 

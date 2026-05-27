@@ -428,7 +428,8 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
         if trimmed.starts_with('+') {
             if let Some(last) = result.last_mut() {
                 last.1.push(' ');
-                last.1.push_str(trimmed.strip_prefix('+').unwrap_or("").trim());
+                last.1
+                    .push_str(trimmed.strip_prefix('+').unwrap_or("").trim());
             }
             continue;
         }

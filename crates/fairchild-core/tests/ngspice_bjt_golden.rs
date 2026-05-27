@@ -254,7 +254,11 @@ fn ngspice_meas_bjt(netlist: &str) -> Option<HashMap<String, f64>> {
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 #[test]

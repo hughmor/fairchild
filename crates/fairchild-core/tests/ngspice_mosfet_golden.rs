@@ -201,13 +201,23 @@ fn ngspice_meas_tran(netlist: &str) -> Option<HashMap<String, f64>> {
         if let Some((key, val)) = line.split_once('=') {
             let key = key.trim().to_lowercase();
             if key.starts_with("v_") {
-                if let Ok(v) = val.trim().split_whitespace().next().unwrap_or("").parse::<f64>() {
+                if let Ok(v) = val
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .parse::<f64>()
+                {
                     map.insert(key, v);
                 }
             }
         }
     }
-    if map.is_empty() { None } else { Some(map) }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 #[test]

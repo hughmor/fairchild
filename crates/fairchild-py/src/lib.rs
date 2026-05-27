@@ -75,17 +75,13 @@ fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
                 }
                 Element::VoltageSource { name, waveform, .. }
                     if name.to_lowercase() == el_name
-                        && (param_name == "dc"
-                            || param_name == "value"
-                            || param_name == "v") =>
+                        && (param_name == "dc" || param_name == "value" || param_name == "v") =>
                 {
                     *waveform = Waveform::Dc(value);
                 }
                 Element::CurrentSource { name, waveform, .. }
                     if name.to_lowercase() == el_name
-                        && (param_name == "dc"
-                            || param_name == "value"
-                            || param_name == "i") =>
+                        && (param_name == "dc" || param_name == "value" || param_name == "i") =>
                 {
                     *waveform = Waveform::Dc(value);
                 }

@@ -159,8 +159,7 @@ impl GummelPoonBjt {
                 "fc" => fc = *v,
                 // Accepted but not yet modelled.
                 "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cjs"
-                | "vjs" | "mjs" | "xtb" | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc"
-                | "tnom" => {}
+                | "vjs" | "mjs" | "xtb" | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
                 _ => unknown.push(k.clone()),
             }
         }
