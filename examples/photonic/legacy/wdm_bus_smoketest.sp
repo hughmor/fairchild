@@ -8,8 +8,8 @@
 * Run:
 *   fairchild -f wdm_bus_smoketest.sp --probe "V(ph_a_0),V(ph_a_1)"
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * Declare 2-channel optical bus (expands to ch_re_0 ch_im_0 ch_wl_0 ch_re_1 ch_im_1 ch_wl_1)
 .optical_bus 2 ch_re ch_im ch_wl

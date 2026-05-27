@@ -1,7 +1,7 @@
 * MZI push-pull modulator — compound subckt demo
 *
 * NOTE: This example currently DOES NOT CONVERGE.  See the known-bug note in
-* va-models/photonic/subckts/mzi_pn_l1.spc.  Use the monolithic model instead:
+* legacy/va-models/photonic/subckts/mzi_pn_l1.spc.  Use the monolithic model instead:
 *   examples/photonic/sweep_mzi_pn.py  (uses mzi_modulator_pn_l1.osdi directly)
 *
 * Sweeps the differential PN bias to trace the MZI transfer function.
@@ -18,13 +18,13 @@
 *   done
 
 * ——— Load compiled OSDI models ———
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/directional_coupler.osdi
-.osdi ../../va-models/build/pn_phase_shifter_l1.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/directional_coupler.osdi
+.osdi ../../legacy/va-models/build/pn_phase_shifter_l1.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * ——— Load compound MZI subckt definition ———
-.include ../../va-models/photonic/subckts/mzi_pn_l1.spc
+.include ../../legacy/legacy/va-models/photonic/subckts/mzi_pn_l1.spc
 
 * ——— CW laser at 1550 nm, 1 mW ———
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0

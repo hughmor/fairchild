@@ -12,9 +12,9 @@
 *   Vpi_L = 2.0 V·cm, L = 500 µm → Vpi ≈ 4.0 V for π phase shift
 *   Reverse bias: 0 V → -3 V gives ~3π/4 phase shift
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/pn_phase_shifter_l1.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/pn_phase_shifter_l1.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * CW laser: 1 mW at 1550 nm
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0

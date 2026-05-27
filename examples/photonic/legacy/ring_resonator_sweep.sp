@@ -2,7 +2,7 @@
 *
 * Models: cw_laser, directional_coupler, waveguide, photodetector (OSDI v0.4)
 * Compile VA models before running:
-*   cd va-models && make
+*   cd legacy/va-models && bash build.sh
 *
 * Circuit:
 *   CW laser → directional coupler (kappa=0.1) → through port → photodetector
@@ -19,10 +19,10 @@
 * or invoke directly with a single wavelength:
 *   fairchild -f ring_resonator_sweep.sp
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/directional_coupler.osdi
-.osdi ../../va-models/build/waveguide.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/directional_coupler.osdi
+.osdi ../../legacy/va-models/build/waveguide.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 Xlaser     laser_re laser_im                                           cw_laser \
            power_mW=1.0 wavelength_nm=1550.0

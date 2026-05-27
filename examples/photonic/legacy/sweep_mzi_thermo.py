@@ -16,7 +16,7 @@ L2: external T_node thermal ports (arm 1 driven, arm 2 at 0 V).
     Same steady-state physics as L1 with Rth = 50 kΩ to ground.
 
 Requirements: fairchild Python package (maturin develop), numpy, matplotlib.
-Compiled OSDI models in va-models/build/.
+Compiled OSDI models in legacy/va-models/build/.
 """
 
 import math
@@ -32,7 +32,7 @@ except ImportError:
     sys.exit("fairchild not installed — run 'maturin develop' from the repo root first.")
 
 HERE  = pathlib.Path(__file__).resolve().parent
-BUILD = HERE.parents[1] / "va-models" / "build"
+BUILD = HERE.parents[2] / "legacy" / "va-models" / "build"
 
 # ── MZI / heater parameters ────────────────────────────────────────────────────
 
@@ -184,7 +184,7 @@ def main():
     for name in ("cw_laser", "mzi_modulator_thermo_l1", "mzi_modulator_thermo_l2",
                  "photodetector"):
         if not (BUILD / f"{name}.osdi").exists():
-            sys.exit(f"Missing: {BUILD / name}.osdi — compile va-models first.")
+            sys.exit(f"Missing: {BUILD / name}.osdi — compile legacy/va-models first.")
 
     print(f"MZI thermo Vπ ≈ {VPI:.3f} V")
 

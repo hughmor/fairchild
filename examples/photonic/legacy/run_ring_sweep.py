@@ -24,7 +24,7 @@ Examples:
     python examples/photonic/run_ring_sweep.py --alpha 0.0
 
 Requirements:
-    - Compiled va-models (run `cd va-models && make` first)
+    - Compiled va-models (run `cd legacy/va-models && bash build.sh` first)
     - matplotlib  (pip install matplotlib)
 """
 
@@ -38,7 +38,7 @@ import sys
 import tempfile
 
 # Repository root (two levels up from scripts/)
-REPO_ROOT = pathlib.Path(__file__).parent.parent.parent  # photonic/ -> examples/ -> repo root
+REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.parent  # legacy/ -> photonic/ -> examples/ -> repo root
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def parse_args():
@@ -67,7 +67,7 @@ def parse_args():
     p.add_argument("--n-points",  type=int,   default=101,
                    help="Number of wavelength sweep points")
     p.add_argument("--model-dir", type=str,   default=None,
-                   help="Directory containing .osdi model files (default: va-models/build)")
+                   help="Directory containing .osdi model files (default: legacy/va-models/build)")
     p.add_argument("--no-sim",    action="store_true",
                    help="Skip simulation; plot CMT only")
     p.add_argument("--no-plot",   action="store_true",
@@ -114,7 +114,7 @@ def cmt_transmission(wl_m, kappa_0, l_ring_m, n_g, alpha_db_cm):
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 def run_simulation(args, wl_start, wl_end, csv_path):
-    model_dir = args.model_dir or str(REPO_ROOT / "va-models" / "build")
+    model_dir = args.model_dir or str(REPO_ROOT / "legacy" / "va-models" / "build")
     env = {
         **os.environ,
         "RING_KAPPA_0":     str(args.kappa),

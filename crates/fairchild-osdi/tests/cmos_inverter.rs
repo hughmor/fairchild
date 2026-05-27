@@ -8,11 +8,11 @@
 ///   Vin=0V   → NMOS off, PMOS on  → Vout ≈ VDD = 5V
 ///   Vin=5V   → PMOS off, NMOS on  → Vout ≈ 0V
 ///
-/// Pre-condition: va-models/build/nmos_l1.osdi and va-models/build/pmos_l1.osdi must exist.
+/// Pre-condition: legacy/va-models/build/nmos_l1.osdi and legacy/va-models/build/pmos_l1.osdi must exist.
 /// Build with:
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
-///   openvaf-r va-models/nmos_l1.va --output va-models/build/nmos_l1.osdi
-///   openvaf-r va-models/pmos_l1.va --output va-models/build/pmos_l1.osdi
+///   openvaf-r legacy/va-models/nmos_l1.va --output legacy/va-models/build/nmos_l1.osdi
+///   openvaf-r legacy/va-models/pmos_l1.va --output legacy/va-models/build/pmos_l1.osdi
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,12 +23,12 @@ use fairchild_parser::parse_spice;
 
 fn nmos_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/nmos_l1.osdi")
+        .join("../../../legacy/va-models/build/nmos_l1.osdi")
 }
 
 fn pmos_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/pmos_l1.osdi")
+        .join("../../../legacy/va-models/build/pmos_l1.osdi")
 }
 
 fn load_cmos_registry() -> Option<DeviceRegistry> {
@@ -40,8 +40,8 @@ fn load_cmos_registry() -> Option<DeviceRegistry> {
             "Skipping: OSDI models not found.\n\
              Build with:\n  \
              DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \\\n  \
-             openvaf-r va-models/nmos_l1.va --output va-models/build/nmos_l1.osdi\n  \
-             openvaf-r va-models/pmos_l1.va --output va-models/build/pmos_l1.osdi"
+             openvaf-r legacy/va-models/nmos_l1.va --output legacy/va-models/build/nmos_l1.osdi\n  \
+             openvaf-r legacy/va-models/pmos_l1.va --output legacy/va-models/build/pmos_l1.osdi"
         );
         return None;
     }

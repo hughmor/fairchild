@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 
 fn osdi_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/diode_shockley.osdi")
+        .join("../../../legacy/va-models/build/diode_shockley.osdi")
 }
 
 #[test]

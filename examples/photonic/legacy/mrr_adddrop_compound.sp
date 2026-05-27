@@ -12,13 +12,13 @@
 * Run:
 *   fairchild -f mrr_adddrop_compound.sp --probe "V(thru_p),V(drop_p)"
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/directional_coupler.osdi
-.osdi ../../va-models/build/pn_phase_shifter_l1.osdi
-.osdi ../../va-models/build/waveguide.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/directional_coupler.osdi
+.osdi ../../legacy/va-models/build/pn_phase_shifter_l1.osdi
+.osdi ../../legacy/va-models/build/waveguide.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
-.include ../../va-models/photonic/subckts/mrr_adddrop_pn_l1.spc
+.include ../../legacy/va-models/photonic/subckts/mrr_adddrop_pn_l1.spc
 
 Xlaser lre lim wl cw_laser power_mW=1.0 wavelength_nm=1544.1
 

@@ -4,11 +4,11 @@
 /// Circuit: Ib=1mA → node "b" → D1 (anode b, cathode 0)
 /// Expected: V(b) = Vt * ln(Ib/Is + 1) with Is=1e-14, N=1, T=300.15 K
 ///
-/// Pre-condition: va-models/build/diode_shockley.osdi must exist.
+/// Pre-condition: legacy/va-models/build/diode_shockley.osdi must exist.
 /// Build it with:
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
-///   /path/to/openvaf-r va-models/diode_shockley.va \
-///     --output va-models/build/diode_shockley.osdi
+///   /path/to/openvaf-r legacy/va-models/diode_shockley.va \
+///     --output legacy/va-models/build/diode_shockley.osdi
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use fairchild_parser::parse_spice;
 
 fn osdi_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/diode_shockley.osdi")
+        .join("../../../legacy/va-models/build/diode_shockley.osdi")
 }
 
 /// Analytical forward-voltage for the Shockley diode: V = Vt * ln(I/Is + 1).
@@ -35,8 +35,8 @@ fn osdi_diode_current_source_bias() {
         eprintln!(
             "Skipping: {} not found.\n\
              Run: DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \\\n\
-             openvaf-r va-models/diode_shockley.va \\\n\
-             --output va-models/build/diode_shockley.osdi",
+             openvaf-r legacy/va-models/diode_shockley.va \\\n\
+             --output legacy/va-models/build/diode_shockley.osdi",
             path.display()
         );
         return;

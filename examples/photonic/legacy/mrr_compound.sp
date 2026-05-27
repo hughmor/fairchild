@@ -16,13 +16,13 @@
 *   done
 
 * ——— Load compiled OSDI models ———
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/directional_coupler.osdi
-.osdi ../../va-models/build/pn_phase_shifter_l1.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/directional_coupler.osdi
+.osdi ../../legacy/va-models/build/pn_phase_shifter_l1.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * ——— Load compound MRR subckt definition ———
-.include ../../va-models/photonic/subckts/mrr_allpass_pn_l1.spc
+.include ../../legacy/va-models/photonic/subckts/mrr_allpass_pn_l1.spc
 
 * ——— CW laser at 1544.1 nm (near ring resonance) ———
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.1

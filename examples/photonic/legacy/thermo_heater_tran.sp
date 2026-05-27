@@ -14,9 +14,9 @@
 * Run: fairchild -f thermo_heater_tran.sp --probe "V(ph_a),V(T_dev)"
 * Plot the optical output V(ph_a) and temperature V(T_dev) over time.
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/thermo_phase_shifter_l2.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/thermo_phase_shifter_l2.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * CW laser
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1550.0

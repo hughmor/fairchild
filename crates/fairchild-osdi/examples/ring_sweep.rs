@@ -16,7 +16,7 @@
 //!   RING_WL_END_NM     = 1558.0    sweep end wavelength (nm)
 //!   RING_N_POINTS      = 101       number of wavelength points
 //!   RING_CSV_OUT       = ring_resonator_sweep.csv  output CSV path
-//!   RING_MODEL_DIR     = ../../va-models/build     directory for .osdi files
+//!   RING_MODEL_DIR     = ../../../legacy/va-models/build     directory for .osdi files
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ fn main() {
     let model_dir   = std::env::var("RING_MODEL_DIR")
         .unwrap_or_else(|_| {
             // default: relative to this example's manifest dir at compile time
-            format!("{}/../../va-models/build", env!("CARGO_MANIFEST_DIR"))
+            format!("{}/../../../legacy/va-models/build", env!("CARGO_MANIFEST_DIR"))
         });
 
     let l_ring_m = l_ring_um * 1e-6;
@@ -85,7 +85,7 @@ fn main() {
         let path = model_path(&model_dir, name);
         if !path.exists() {
             eprintln!("error: model not found: {}", path.display());
-            eprintln!("  Compile with: cd va-models && make");
+            eprintln!("  Compile with: cd legacy/va-models && bash build.sh");
             std::process::exit(1);
         }
         let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.unwrap_or_else(|e| {

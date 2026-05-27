@@ -37,13 +37,13 @@ const R_LOAD: f64 = 1e3;         // load resistance
 
 fn model_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../va-models/build/{name}.osdi"))
+        .join(format!("../../../legacy/va-models/build/{name}.osdi"))
 }
 
 fn skip_if_missing(path: &PathBuf) -> bool {
     if !path.exists() {
         eprintln!(
-            "Skipping: {} not found. Compile va-models first with openvaf-r.",
+            "Skipping: {} not found. Compile legacy/va-models first with openvaf-r.",
             path.display()
         );
         true

@@ -10,7 +10,7 @@ L1: integrated thermal model (R_thermal = 30 kK/W, R_heater = 500 Ω).
 L2: external T_node thermal network (Rth connected to ground in netlist).
 
 Requirements: fairchild Python package (maturin develop), numpy, matplotlib.
-Compiled OSDI models in va-models/build/.
+Compiled OSDI models in legacy/va-models/build/.
 """
 
 import math
@@ -27,7 +27,7 @@ except ImportError:
     sys.exit("fairchild not installed — run 'maturin develop' from the repo root first.")
 
 HERE  = pathlib.Path(__file__).resolve().parent
-BUILD = HERE.parents[1] / "va-models" / "build"
+BUILD = HERE.parents[2] / "legacy" / "va-models" / "build"
 
 # ── Parameters ─────────────────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ def main():
     for name in ("cw_laser", "mrr_heater_l1_adddrop", "mrr_heater_l2_adddrop",
                  "photodetector"):
         if not (BUILD / f"{name}.osdi").exists():
-            sys.exit(f"Missing: {BUILD / name}.osdi — compile va-models first.")
+            sys.exit(f"Missing: {BUILD / name}.osdi — compile legacy/va-models first.")
 
     print(f"Heater Vπ ≈ {VPI_HEATER:.3f} V")
     wl = np.linspace(WL_START, WL_END, N_WL)

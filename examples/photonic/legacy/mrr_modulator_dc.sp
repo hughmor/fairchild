@@ -17,9 +17,9 @@
 *     fairchild -f mrr_modulator_dc.sp --param "Vbias.value=$V" --probe "V(ph_a)"
 *   done
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/mrr_modulator_l1.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/mrr_modulator_l1.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * CW laser at 1544.12 nm (near ring resonance)
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.12

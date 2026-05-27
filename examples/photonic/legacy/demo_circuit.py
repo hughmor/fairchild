@@ -3,7 +3,7 @@ demo_circuit.py — Basic fairchild Python API demo using the ring resonator.
 
 NOTE: The ring resonator uses OSDI-compiled photonic models (cw_laser,
 directional_coupler, waveguide, photodetector).  Those models must be compiled
-(cd va-models && make) and the .osdi paths in the netlist must be valid.
+(cd legacy/va-models && bash build.sh) and the .osdi paths in the netlist must be valid.
 Without compiled models the simulation will raise a RuntimeError for
 'unknown model'; the API calls themselves are still illustrative.
 
@@ -52,7 +52,7 @@ try:
     print(f"  V(ph_a) = {ph_a[0]:.6e} V  (photodetector output)")
 except RuntimeError as exc:
     print(f"  Simulation error: {exc}")
-    print("  (Compile OSDI models with 'cd va-models && make' to run this demo.)")
+    print("  (Compile OSDI models with 'cd legacy/va-models && bash build.sh' to run this demo.)")
 
 # ---------------------------------------------------------------------------
 # 4. Parametric wavelength sweep
@@ -66,4 +66,4 @@ try:
         print(f"  wavelength_nm={wl:.1f}  V(ph_a)={v:.6e} V")
 except RuntimeError as exc:
     print(f"  Sweep error: {exc}")
-    print("  (Compile OSDI models with 'cd va-models && make' to run this demo.)")
+    print("  (Compile OSDI models with 'cd legacy/va-models && bash build.sh' to run this demo.)")

@@ -8,7 +8,7 @@ for voltage curves [0, -2, -4, -6, -8] V.  An analytical CMT reference (dashed
 grey) is overlaid on the L1 subplot.
 
 Requirements: fairchild Python package (maturin develop), numpy, matplotlib.
-Compiled OSDI models in va-models/build/.
+Compiled OSDI models in legacy/va-models/build/.
 """
 
 import math
@@ -25,7 +25,7 @@ except ImportError:
     sys.exit("fairchild not installed — run 'maturin develop' from the repo root first.")
 
 HERE  = pathlib.Path(__file__).resolve().parent
-BUILD = HERE.parents[1] / "va-models" / "build"
+BUILD = HERE.parents[2] / "legacy" / "va-models" / "build"
 
 # ── Ring parameters ────────────────────────────────────────────────────────────
 
@@ -188,7 +188,7 @@ def main():
                  "mrr_modulator_l3", "photodetector"):
         if not (BUILD / f"{name}.osdi").exists():
             sys.exit(f"Missing OSDI model: {BUILD / name}.osdi\n"
-                     "Compile va-models first: cd va-models && ./build.sh")
+                     "Compile va-models first: cd legacy/va-models && ./build.sh")
 
     wl = np.linspace(WL_START, WL_END, N_WL)
 

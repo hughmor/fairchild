@@ -16,9 +16,9 @@
 * At λ = 1544 nm, ΔT = 10 K:
 *   Δφ = 2π × 1.86e-4 × 10 × 100e-6 / 1544e-9 = 0.76 rad ≈ λ/8 shift
 
-.osdi ../../va-models/build/cw_laser.osdi
-.osdi ../../va-models/build/mrr_heater_l1.osdi
-.osdi ../../va-models/build/photodetector.osdi
+.osdi ../../legacy/va-models/build/cw_laser.osdi
+.osdi ../../legacy/va-models/build/mrr_heater_l1.osdi
+.osdi ../../legacy/va-models/build/photodetector.osdi
 
 * CW laser near ring resonance
 Xlaser  lre lim wl  cw_laser  power_mW=1.0 wavelength_nm=1544.12

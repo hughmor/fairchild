@@ -2,8 +2,8 @@
 ///
 /// Pre-condition: run
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
-///   /path/to/openvaf-r va-models/diode_shockley.va \
-///     --output va-models/build/diode_shockley.osdi
+///   /path/to/openvaf-r legacy/va-models/diode_shockley.va \
+///     --output legacy/va-models/build/diode_shockley.osdi
 /// or the test will skip with a helpful message.
 
 use std::ffi::CStr;
@@ -13,7 +13,7 @@ use fairchild_osdi::OsdiLibrary;
 
 fn osdi_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/diode_shockley.osdi")
+        .join("../../../legacy/va-models/build/diode_shockley.osdi")
 }
 
 #[test]
@@ -24,8 +24,8 @@ fn load_shockley_osdi_descriptor() {
             "diode_shockley.osdi not found at {}\n\
              Compile it first:\n\
              DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \\\n\
-             /path/to/openvaf-r va-models/diode_shockley.va \\\n\
-             --output va-models/build/diode_shockley.osdi",
+             /path/to/openvaf-r legacy/va-models/diode_shockley.va \\\n\
+             --output legacy/va-models/build/diode_shockley.osdi",
             path.display()
         );
         return;

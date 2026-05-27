@@ -8,7 +8,7 @@ and drop port (dashed) transmission vs wavelength, with curves for voltages
 [0, -3, -6, -9] V.  The add port is left dark (no input signal).
 
 Requirements: fairchild Python package (maturin develop), numpy, matplotlib.
-Compiled OSDI models in va-models/build/.
+Compiled OSDI models in legacy/va-models/build/.
 """
 
 import math
@@ -25,7 +25,7 @@ except ImportError:
     sys.exit("fairchild not installed — run 'maturin develop' from the repo root first.")
 
 HERE  = pathlib.Path(__file__).resolve().parent
-BUILD = HERE.parents[1] / "va-models" / "build"
+BUILD = HERE.parents[2] / "legacy" / "va-models" / "build"
 
 # ── Parameters ─────────────────────────────────────────────────────────────────
 
@@ -215,7 +215,7 @@ def main():
                 "mrr_modulator_l3_adddrop", "photodetector")
     for name in required:
         if not (BUILD / f"{name}.osdi").exists():
-            sys.exit(f"Missing: {BUILD / name}.osdi — compile va-models first.")
+            sys.exit(f"Missing: {BUILD / name}.osdi — compile legacy/va-models first.")
 
     wl = np.linspace(WL_START, WL_END, N_WL)
 

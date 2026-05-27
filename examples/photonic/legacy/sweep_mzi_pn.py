@@ -15,7 +15,7 @@ L2: push-pull dual-arm (anode1/cathode1 and anode2/cathode2).
     Effective Vπ ≈ 20 V for Soref–Bennett model at n_dep0 = 5e16 cm⁻³.
 
 Requirements: fairchild Python package (maturin develop), numpy, matplotlib.
-Compiled OSDI models in va-models/build/.
+Compiled OSDI models in legacy/va-models/build/.
 """
 
 import math
@@ -31,7 +31,7 @@ except ImportError:
     sys.exit("fairchild not installed — run 'maturin develop' from the repo root first.")
 
 HERE  = pathlib.Path(__file__).resolve().parent
-BUILD = HERE.parents[1] / "va-models" / "build"
+BUILD = HERE.parents[2] / "legacy" / "va-models" / "build"
 
 # ── MZI parameters ─────────────────────────────────────────────────────────────
 
@@ -188,7 +188,7 @@ def main():
     for name in ("cw_laser", "mzi_modulator_pn_l1", "mzi_modulator_pn_l2",
                  "photodetector"):
         if not (BUILD / f"{name}.osdi").exists():
-            sys.exit(f"Missing: {BUILD / name}.osdi — compile va-models first.")
+            sys.exit(f"Missing: {BUILD / name}.osdi — compile legacy/va-models first.")
 
     print(f"MZI L1 Vπ = {VPI_L1:.1f} V  (single-arm)")
     print(f"MZI L2 Vπ ≈ {VPI_L2_PP:.1f} V  (push-pull, ideal linear estimate)")

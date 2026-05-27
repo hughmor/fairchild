@@ -1,11 +1,11 @@
 /// Validates that OpenVAF-compiled optical discipline models load via OSDI.
 /// Confirms no compiler fork is needed — custom natures/disciplines are transparent to OSDI.
 ///
-/// Pre-condition: va-models/build/test_optical_discipline.osdi must exist.
+/// Pre-condition: legacy/va-models/build/test_optical_discipline.osdi must exist.
 /// Build it with:
 ///   DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \
-///   openvaf-r va-models/test_optical_discipline.va \
-///     --output va-models/build/test_optical_discipline.osdi
+///   openvaf-r legacy/va-models/test_optical_discipline.va \
+///     --output legacy/va-models/build/test_optical_discipline.osdi
 
 use std::ffi::CStr;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use fairchild_osdi::OsdiLibrary;
 
 fn osdi_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../va-models/build/test_optical_discipline.osdi")
+        .join("../../../legacy/va-models/build/test_optical_discipline.osdi")
 }
 
 #[test]
@@ -24,8 +24,8 @@ fn load_optical_discipline_osdi() {
         eprintln!(
             "Skipping: {} not found.\n\
              Run: DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib \\\n\
-             openvaf-r va-models/test_optical_discipline.va \\\n\
-             --output va-models/build/test_optical_discipline.osdi",
+             openvaf-r legacy/va-models/test_optical_discipline.va \\\n\
+             --output legacy/va-models/build/test_optical_discipline.osdi",
             path.display()
         );
         return;

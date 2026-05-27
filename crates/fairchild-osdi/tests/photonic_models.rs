@@ -2,8 +2,8 @@
 ///
 /// Tests: descriptor sanity + DC OP physics validation.
 ///
-/// Pre-condition: photonic models must be compiled to va-models/build/*.osdi.
-/// Build script: va-models/build.sh or run manually with openvaf-r.
+/// Pre-condition: photonic models must be compiled to legacy/va-models/build/*.osdi.
+/// Build script: legacy/va-models/build.sh or run manually with openvaf-r.
 ///
 /// Physics baseline (coupled-mode theory / analytical):
 ///   CW laser (1 mW, 0°): V(out_re) = sqrt(1e-3) ≈ 0.031623, V(out_im) = 0.0
@@ -19,13 +19,13 @@ use fairchild_parser::parse_spice;
 
 fn model_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../va-models/build/{name}.osdi"))
+        .join(format!("../../../legacy/va-models/build/{name}.osdi"))
 }
 
 fn skip_if_missing(path: &PathBuf) -> bool {
     if !path.exists() {
         eprintln!(
-            "Skipping: {} not found. Compile va-models first with openvaf-r.",
+            "Skipping: {} not found. Compile legacy/va-models first with openvaf-r.",
             path.display()
         );
         true
