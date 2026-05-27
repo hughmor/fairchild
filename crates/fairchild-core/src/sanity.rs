@@ -221,16 +221,17 @@ fn check_duplicate_refdes(netlist: &Netlist, out: &mut Vec<Warning>) {
 
 fn element_name(el: &Element) -> &str {
     match el {
-        Element::Resistor      { name, .. } => name,
-        Element::Capacitor     { name, .. } => name,
-        Element::Inductor      { name, .. } => name,
-        Element::VoltageSource { name, .. } => name,
-        Element::CurrentSource { name, .. } => name,
-        Element::Diode         { name, .. } => name,
-        Element::Mosfet        { name, .. } => name,
-        Element::Bjt           { name, .. } => name,
-        Element::Behavioral    { name, .. } => name,
-        Element::XOsdi         { name, .. } => name,
+        Element::Resistor         { name, .. } => name,
+        Element::Capacitor        { name, .. } => name,
+        Element::Inductor         { name, .. } => name,
+        Element::CoupledInductors { name, .. } => name,
+        Element::VoltageSource    { name, .. } => name,
+        Element::CurrentSource    { name, .. } => name,
+        Element::Diode            { name, .. } => name,
+        Element::Mosfet           { name, .. } => name,
+        Element::Bjt              { name, .. } => name,
+        Element::Behavioral       { name, .. } => name,
+        Element::XOsdi            { name, .. } => name,
     }
 }
 

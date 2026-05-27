@@ -99,6 +99,10 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                 record(pos, &mut nodes); record(neg, &mut nodes);
                 add_edge(pos, neg, &mut adj);
             }
+            Element::CoupledInductors { .. } => {
+                // K element only affects transient; L1/L2 terminals are
+                // already handled by their Inductor elements.
+            }
         }
     }
 

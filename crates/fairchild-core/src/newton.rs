@@ -414,6 +414,10 @@ fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>)
             let hits = nets.iter().any(|n| net_match(n));
             (format!("{name} ({model_name})"), hits, None)
         }
+        Element::CoupledInductors { name, .. } => {
+            // K elements reference inductor names, not net names directly.
+            (name.clone(), false, None)
+        }
     }
 }
 

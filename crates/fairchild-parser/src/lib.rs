@@ -137,16 +137,17 @@ impl Netlist {
 /// Extract the name (case-folded) from any Element variant, for alter matching.
 fn element_name(el: &Element) -> String {
     match el {
-        Element::Resistor      { name, .. } |
-        Element::Capacitor     { name, .. } |
-        Element::Inductor      { name, .. } |
-        Element::VoltageSource { name, .. } |
-        Element::CurrentSource { name, .. } |
-        Element::Diode         { name, .. } |
-        Element::Mosfet        { name, .. } |
-        Element::Bjt           { name, .. } |
-        Element::XOsdi         { name, .. } |
-        Element::Behavioral    { name, .. } => name.to_lowercase(),
+        Element::Resistor          { name, .. } |
+        Element::Capacitor         { name, .. } |
+        Element::Inductor          { name, .. } |
+        Element::CoupledInductors  { name, .. } |
+        Element::VoltageSource     { name, .. } |
+        Element::CurrentSource     { name, .. } |
+        Element::Diode             { name, .. } |
+        Element::Mosfet            { name, .. } |
+        Element::Bjt               { name, .. } |
+        Element::XOsdi             { name, .. } |
+        Element::Behavioral        { name, .. } => name.to_lowercase(),
     }
 }
 
@@ -370,6 +371,16 @@ pub enum Element {
         neg: NodeName,
         inductance: f64,
     },
+    /// Coupled inductors: `K<name> L1 L2 coupling`
+    ///
+    /// Adds mutual inductance M = coupling * sqrt(L1.value * L2.value) between
+    /// two existing inductors.  Transient-only — no DC effect.
+    CoupledInductors {
+        name: String,
+        l1: String,
+        l2: String,
+        coupling: f64,
+    },
     VoltageSource {
         name: String,
         pos: NodeName,
@@ -533,6 +544,8 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
             }
             // XOsdi is intentionally not checked: mixed-domain connections are valid.
             Element::XOsdi { .. } => {}
+            // CoupledInductors only references inductor names, not nets.
+            Element::CoupledInductors { .. } => {}
             Element::Behavioral { name, pos, neg, .. } => { check(name, pos)?; check(name, neg)?; }
         }
     }

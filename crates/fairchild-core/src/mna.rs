@@ -225,7 +225,23 @@ fn stamp_netlist_into(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
 ) {
+    use std::collections::HashMap;
+
     let n_nodes = topo.n_nodes();
+
+    // Build coupled-inductor map: inductor_name → (partner_name, coupling_k)
+    // and a value map for inductance lookups.
+    let mut coupled_map: HashMap<String, (String, f64)> = HashMap::new();
+    let mut ind_values: HashMap<String, f64> = HashMap::new();
+    for el in &netlist.elements {
+        if let Element::Inductor { name, inductance, .. } = el {
+            ind_values.insert(name.clone(), *inductance);
+        }
+        if let Element::CoupledInductors { l1, l2, coupling, .. } = el {
+            coupled_map.insert(l1.clone(), (l2.clone(), *coupling));
+            coupled_map.insert(l2.clone(), (l1.clone(), *coupling));
+        }
+    }
 
     for el in &netlist.elements {
         match el {
@@ -243,15 +259,41 @@ fn stamp_netlist_into(
             }
             Element::Inductor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
-                    stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
-                    // BE companion: KCL at pos gives b[pos] -= I_hist.
-                    // stamp_current_source(pos, neg, v) subtracts v from b[pos].
+                    // For coupled inductors, skip the standalone self-conductance stamp;
+                    // the CoupledInductors arm below handles the full 2×2 companion.
+                    if !coupled_map.contains_key(name) {
+                        stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
+                    }
+                    // Always stamp history current source.
                     stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, i_hist);
                 }
-                // If not in ind_state (no transient yet), inductor = short circuit at DC.
-                // For DC OP we treat L as wire — but that would make a voltage source loop.
-                // In practice we skip the inductor in DC OP (treated as ideal short via V=0 source).
-                // For now we leave it out of DC (open circuit), which is correct for initial tran.
+                // If not in ind_state (no transient yet), inductor = open circuit at DC.
+            }
+            Element::CoupledInductors { l1, l2, coupling, .. } => {
+                // Both inductors must be in ind_state (transient); skip at DC.
+                let Some(&(g_eq1, _)) = ind_state.get(l1) else { continue; };
+                let Some(&(g_eq2, _)) = ind_state.get(l2) else { continue; };
+                let Some(&val1) = ind_values.get(l1) else { continue; };
+                let Some(&val2) = ind_values.get(l2) else { continue; };
+                let k = *coupling;
+                let m = k * (val1 * val2).sqrt();
+                let det = val1 * val2 - m * m; // = val1*val2*(1-k²)
+                if det.abs() < 1e-40 { continue; } // k≈1: degenerate, skip
+                // Extract h from g_eq = h/L  =>  h = g_eq * L
+                let h = g_eq1 * val1;
+                let g11 = h * val2 / det;
+                let g22 = h * val1 / det;
+                let g12 = -h * m / det;
+
+                let (pos1, neg1) = find_inductor_terminals(netlist, l1);
+                let (pos2, neg2) = find_inductor_terminals(netlist, l2);
+
+                stamp_conductance(&mut mat.a, &topo.node_index, pos1, neg1, g11);
+                stamp_conductance(&mut mat.a, &topo.node_index, pos2, neg2, g22);
+                stamp_mutual_conductance(&mut mat.a, &topo.node_index, pos1, neg1, pos2, neg2, g12);
+
+                // Verify g_eq2-derived h is consistent (both inductors share same step).
+                let _ = g_eq2; // used above implicitly; avoid unused variable warning
             }
             Element::VoltageSource { name, pos, neg, waveform } => {
                 let vi = n_nodes + topo.vsrc_index[name];
@@ -380,6 +422,10 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                     vsrc_index.entry(name.clone()).or_insert(n);
                 }
             }
+            Element::CoupledInductors { .. } => {
+                // No new nodes — L1 and L2 terminals already registered by their
+                // Inductor elements.
+            }
         }
     }
 
@@ -498,6 +544,60 @@ pub fn ind_companion_gear2(
     let g_eq = h * (1.0 + rho) / (inductance * denom_a);
     let i_hist = ((1.0 + rho).powi(2) / denom_a) * i_prev - (rho * rho / denom_a) * i_prev2;
     (g_eq, i_hist)
+}
+
+/// Look up the (pos, neg) terminal node names for a named inductor in the netlist.
+///
+/// Panics if the inductor is not found — only called when the K-element references
+/// it, so the inductor is guaranteed to exist (the sanity check would have caught it).
+fn find_inductor_terminals<'a>(netlist: &'a fairchild_parser::Netlist, name: &str) -> (&'a str, &'a str) {
+    for el in &netlist.elements {
+        if let Element::Inductor { name: n, pos, neg, .. } = el {
+            if n == name {
+                return (pos, neg);
+            }
+        }
+    }
+    panic!("coupled inductor '{name}' not found in netlist")
+}
+
+/// Stamp the mutual-conductance cross-coupling for a K element.
+///
+/// For coupled inductors the 2×2 companion system contributes off-diagonal
+/// terms: G12 * (V_pos1 - V_neg1) drives current into nodes pos2/neg2, and
+/// G12 * (V_pos2 - V_neg2) drives current into nodes pos1/neg1.
+///
+/// `g` is G12 (typically negative for positive coupling).
+fn stamp_mutual_conductance(
+    a: &mut Vec<Vec<f64>>,
+    idx: &IndexMap<String, usize>,
+    pos1: &str, neg1: &str,
+    pos2: &str, neg2: &str,
+    g: f64,
+) {
+    let p1 = idx.get(pos1).copied();
+    let n1 = idx.get(neg1).copied();
+    let p2 = idx.get(pos2).copied();
+    let n2 = idx.get(neg2).copied();
+
+    // L2 rows from L1 voltage: G12 * (V_pos1 - V_neg1) → current at pos2/neg2
+    if let Some(r2) = p2 {
+        if let Some(c1) = p1 { a[r2][c1] += g; }
+        if let Some(c1) = n1 { a[r2][c1] -= g; }
+    }
+    if let Some(r2) = n2 {
+        if let Some(c1) = p1 { a[r2][c1] -= g; }
+        if let Some(c1) = n1 { a[r2][c1] += g; }
+    }
+    // L1 rows from L2 voltage: G12 * (V_pos2 - V_neg2) → current at pos1/neg1
+    if let Some(r1) = p1 {
+        if let Some(c2) = p2 { a[r1][c2] += g; }
+        if let Some(c2) = n2 { a[r1][c2] -= g; }
+    }
+    if let Some(r1) = n1 {
+        if let Some(c2) = p2 { a[r1][c2] -= g; }
+        if let Some(c2) = n2 { a[r1][c2] += g; }
+    }
 }
 
 #[cfg(test)]

@@ -240,6 +240,13 @@ fn advance_companions(
     mode: IntegratorMode,
     first_tr: bool,
 ) {
+    // Snapshot i_hist values BEFORE the main loop advances them.
+    // Needed by the K-element post-pass which must read old history.
+    use std::collections::HashMap;
+    let i_hist_snapshot: HashMap<String, f64> = ind_state.iter()
+        .map(|(k, &(_, ih))| (k.clone(), ih))
+        .collect();
+
     for el in &netlist.elements {
         match el {
             Element::Capacitor { name, pos, neg, capacitance } => {
@@ -281,6 +288,86 @@ fn advance_companions(
             _ => {}
         }
     }
+
+    // Post-pass: correct ind_state for coupled inductor pairs (K elements).
+    //
+    // The main loop above used the standalone formula IL = G_eq*VL + I_hist.
+    // For coupled pairs we need:
+    //   IL1 = G11*VL1 + G12*VL2 + I_hist1_old
+    //   IL2 = G12*VL1 + G22*VL2 + I_hist2_old
+    //
+    // We use i_hist_snapshot (old values) to avoid reading partially-updated state.
+    //
+    // K correction is only valid for BE/Gear.  In TR mode the companion update
+    // uses the trapezoidal formula (ind_companion_tr_advance) whose state is
+    // incompatible with the BE-derived G11/G22/G12 stamps.  Silently skipping
+    // avoids wrong numbers; a proper TR K correction is a future TODO.
+    if matches!(mode, IntegratorMode::BackwardEuler | IntegratorMode::Gear) {
+    let mut ind_vals_local: HashMap<String, f64> = HashMap::new();
+    for el in &netlist.elements {
+        if let Element::Inductor { name, inductance, .. } = el {
+            ind_vals_local.insert(name.clone(), *inductance);
+        }
+    }
+
+    for el in &netlist.elements {
+        if let Element::CoupledInductors { l1, l2, coupling, .. } = el {
+            let Some(&val1) = ind_vals_local.get(l1) else { continue; };
+            let Some(&val2) = ind_vals_local.get(l2) else { continue; };
+            // g_eq1 after the main loop advance = h/val1 (unchanged by the main loop
+            // since ind_companion preserves the g_eq formula).
+            let Some(&(g_eq1, _)) = ind_state.get(l1) else { continue; };
+            let Some(&(g_eq2, _)) = ind_state.get(l2) else { continue; };
+            let i_hist1 = i_hist_snapshot.get(l1).copied().unwrap_or(0.0);
+            let i_hist2 = i_hist_snapshot.get(l2).copied().unwrap_or(0.0);
+
+            // Find terminal nodes for voltage lookup.
+            let vl1 = {
+                let (pos1, neg1) = find_inductor_terminals_by_name(netlist, l1);
+                topo.node_voltage(pos1, x).unwrap_or(0.0)
+                    - topo.node_voltage(neg1, x).unwrap_or(0.0)
+            };
+            let vl2 = {
+                let (pos2, neg2) = find_inductor_terminals_by_name(netlist, l2);
+                topo.node_voltage(pos2, x).unwrap_or(0.0)
+                    - topo.node_voltage(neg2, x).unwrap_or(0.0)
+            };
+
+            let k = *coupling;
+            let m = k * (val1 * val2).sqrt();
+            let det = val1 * val2 - m * m;
+            if det.abs() < 1e-40 { continue; }
+
+            // h = g_eq * L  (g_eq = h/L)
+            let h = g_eq1 * val1;
+            let g11 = h * val2 / det;
+            let g22 = h * val1 / det;
+            let g12 = -h * m / det;
+
+            let il1 = g11 * vl1 + g12 * vl2 + i_hist1;
+            let il2 = g12 * vl1 + g22 * vl2 + i_hist2;
+
+            // Overwrite with corrected currents.
+            ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
+            ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
+
+            // Suppress unused variable warnings for g_eq2.
+            let _ = g_eq2;
+        }
+    }
+    } // end if BackwardEuler | Gear
+}
+
+/// Find the (pos, neg) terminal names for a named inductor — tran.rs variant.
+fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a str, &'a str) {
+    for el in &netlist.elements {
+        if let Element::Inductor { name: n, pos, neg, .. } = el {
+            if n == name {
+                return (pos, neg);
+            }
+        }
+    }
+    panic!("coupled inductor '{name}' not found in netlist")
 }
 
 /// Seed device-internal reactive-branch companion state from the DC OP.

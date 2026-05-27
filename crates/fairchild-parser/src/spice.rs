@@ -212,6 +212,13 @@ fn remap_element_nodes(
         Element::Behavioral { name, pos, neg, kind, expr } =>
             Element::Behavioral { name: format!("{prefix}.{name}"),
                                   pos: rn(&pos), neg: rn(&neg), kind, expr },
+        Element::CoupledInductors { name, l1, l2, coupling } =>
+            Element::CoupledInductors {
+                name: format!("{prefix}.{name}"),
+                l1: format!("{prefix}.{l1}"),
+                l2: format!("{prefix}.{l2}"),
+                coupling,
+            },
     }
 }
 
@@ -1493,6 +1500,29 @@ fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
                 substrate,
                 model_name,
                 params,
+            })
+        }
+        'k' => {
+            // K<name> L1 L2 coupling
+            if tokens.len() < 4 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥4 (Kname L1 L2 coupling)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            let coupling: f64 = parse_value(tokens[3], lineno)?;
+            if !(0.0..=1.0).contains(&coupling) {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!("coupling must be in [0,1], got {coupling}"),
+                });
+            }
+            Ok(Element::CoupledInductors {
+                name,
+                l1: tokens[1].to_lowercase(),
+                l2: tokens[2].to_lowercase(),
+                coupling,
             })
         }
         'x' => {
