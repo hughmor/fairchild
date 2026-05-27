@@ -27,16 +27,16 @@ state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
 
 | Category | Coverage |
 |---|---|
-| Elements | R, L, C, V, I, D, MOSFET (Level 1), B (behavioral), X (subckt / OSDI) |
+| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), B (behavioral), X (subckt / OSDI) |
 | Sources | DC, PULSE, PWL, SIN, EXP, SFFM, AM |
 | Analyses | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | Solvers | NR with `pnjlim` / `fetlim`; BE, TR, GEAR (BDF-2); dense or sparse LU |
 | Directives | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`/`.endl`, `.include`, `.param`, `.subckt`/`.ends`, `.temp` (sweep), `.alter`, `.model`, `.osdi` |
 | Output | CSV (stdout / file), Nutmeg rawfile (ngspice-compatible) |
 
-What's not yet supported: BJT, coupled inductors `K`, switches `S`/`W`,
-transmission lines, `.disto`, `.pz`, native `.mc` Monte Carlo, PSF/FSDB binary
-output. See [`sotu.md`](sotu.md) §3 for the live status list.
+What's not yet supported: BJT, switches `S`/`W`, transmission lines,
+`.disto`, `.pz`, native `.mc` Monte Carlo, PSF/FSDB binary output. See
+[`sotu.md`](sotu.md) §3 for the live status list.
 
 ### Electro-optic co-simulation
 
@@ -143,7 +143,7 @@ examples/
     ├── native_mrr_modulator.{sp,py}        ← electro-optic micro-ring
     ├── native_mrr_wavelength_sweep.py      ← parametric λ sweep
     ├── native_wdm_mrr_modulator.{sp,py}    ← 2-channel WDM through one ring
-    └── legacy/                              ← pre-Phase-B OSDI examples
+    └── legacy/                              ← archived; OSDI-based examples
 ```
 
 Photonic examples come with a `README.md` describing the topology of each
@@ -192,7 +192,7 @@ docs/                 user-guide.md, photonic_models.md (legacy OSDI catalog),
                       generated comparison plots.
 scripts/              kicad_to_fairchild.py (KiCad netlist post-processor;
                       native fc_* devices).
-va-models/            Legacy Verilog-A photonic models + build scripts.
+legacy/               Archived Verilog-A photonic models + OSDI examples.
 ```
 
 ---
@@ -203,16 +203,16 @@ See [`sotu.md`](sotu.md) for the live status list.
 
 The major work ahead, in rough order:
 
-1. **Benchmark suite + CI** — head-to-head accuracy and performance
-   comparisons against ngspice (and HSPICE / PrimeSim where licences allow),
-   nightly in CI. The repo currently has comparison plots only for tiny
-   circuits; a credible benchmark page is the cheapest move with the biggest
-   visibility return.
+1. **Benchmark page** — CI and nightly benchmarks are wired up; what's
+   missing is a published benchmark page with head-to-head accuracy and
+   performance comparisons against ngspice (and HSPICE / PrimeSim where
+   licences allow). A credible benchmark page is the cheapest move with the
+   biggest visibility return.
 2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.
-3. **Remaining analog elements** — BJT (Gummel-Poon), `K` coupled inductors,
-   switches, transmission lines.
+3. **Remaining analog elements** — BJT (Gummel-Poon), switches `S`/`W`,
+   transmission lines.
 4. **Adjoint sensitivity** (the original Phase 4 differentiator).
 5. **Tier-2 moats**: envelope-following, S-parameter Touchstone blocks with
    time-domain convolution, harmonic balance / PSS, WDM cross-channel
