@@ -15,7 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NETLIST = os.path.join(HERE, "giona_mod_bank.sp")
+NETLIST = os.path.join(HERE, "giona_mod_bank_full.sp")
 FAIRCHILD = os.path.abspath(os.path.join(HERE, "..", "..", "target", "release", "fairchild"))
 
 

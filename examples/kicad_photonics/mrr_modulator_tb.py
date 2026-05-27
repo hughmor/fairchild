@@ -179,28 +179,4 @@ plt.tight_layout()
 
 # %%
 
-
-### GIONA
-
-GIONA_NETLIST_PATH = HERE / "giona_ff_netlist.sp"
-giona = fairchild.Circuit()
-giona.load(str(GIONA_NETLIST_PATH))
-giona_results = giona.run(
-    # "tran", step=1e-12, stop=1e-6,
-    "op",
-    method="gear",
-    reltol=1e-2,
-    abstol=1e-10,
-    variable_step=True,
-    itl1=200,
-    itl4=100,
-    max_rejections=50,
-    srcsteps=21,
-    solver="sparse",
-    verbose=True,
-)
-
-
-
-
 # %%
