@@ -71,6 +71,16 @@ D<name>  <anode> <cathode>  <model_name>
 
 Requires a `.model … D (…)` card.
 
+### BJT (Gummel-Poon Level 1, NPN / PNP)
+
+```
+Q<name>  <collector> <base> <emitter> [<substrate>]  <model_name>
+```
+
+Substrate node is optional; if absent it is tied to ground internally.
+
+Requires a `.model … NPN (…)` or `.model … PNP (…)` card.
+
 ### MOSFET (Level 1, Shichman-Hodges)
 
 ```
@@ -135,6 +145,31 @@ The DC operating point uses `v0` (or the value at `t = t0` for PWL).
 |-----------|-------------|---------|
 | `IS` | Saturation current (A) | 1e-14 |
 | `N`  | Ideality factor | 1.0 |
+
+### BJT Gummel-Poon Level 1 (`NPN` / `PNP`)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `IS` | Transport saturation current (A) | 1e-16 |
+| `BF` (`HFE`) | Forward current gain β | 100 |
+| `BR` (`HRC`) | Reverse current gain | 1 |
+| `NF` | Forward emission coefficient | 1.0 |
+| `NR` | Reverse emission coefficient | 1.0 |
+| `VAF` (`VA`) | Forward Early voltage (V); `∞` = no Early effect | ∞ |
+| `VAR` (`VB`) | Reverse Early voltage (V) | ∞ |
+| `TF` | Forward transit time (s) — B-E diffusion charge | 0 |
+| `TR` | Reverse transit time (s) — B-C diffusion charge | 0 |
+| `CJE` | Zero-bias B-E depletion capacitance (F) | 0 |
+| `VJE` | B-E built-in junction potential (V) | 0.75 |
+| `MJE` | B-E grading coefficient | 0.33 |
+| `CJC` | Zero-bias B-C depletion capacitance (F) | 0 |
+| `VJC` | B-C built-in junction potential (V) | 0.75 |
+| `MJC` | B-C grading coefficient | 0.33 |
+| `FC` | Forward-bias depletion cap linearisation coefficient | 0.5 |
+
+Both transit-time diffusion charges (TF·IF, TR·IR) and depletion junction
+capacitances (CJE, CJC) are stamped as companion models in transient analysis.
+Series resistances RB/RC/RE are accepted and silently ignored (Tier-2 gap).
 
 ### MOSFET Level 1 (`NMOS` / `PMOS`)
 

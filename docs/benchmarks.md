@@ -36,10 +36,10 @@ dominated by edge-timing offset, not waveform shape disagreement. The MOSFET
 Level 1 model fully stamps Meyer gate capacitances (Cgs/Cgd/Cgb) and depletion
 junction caps (Cbs/Cbd) — the benchmark model cards above omit CGSO/CGDO/CJ/CJSW
 parameters, so those capacitances are zero in this run. The BJT Gummel-Poon
-model does not yet stamp CJE/CJC junction capacitances. The steady-state
-voltages and oscillation frequency are correct; only switching edge timing
-differs. Adding cap parameters to the model cards (or implementing BJT CJE/CJC)
-will bring the switching circuits into full agreement.
+model stamps both transit-time diffusion charges (TF·IF, TR·IR) and depletion
+junction capacitances (CJE, CJC) — the benchmark model card omits these
+parameters, so the capacitances are zero in this run. Adding cap parameters to
+the benchmark model cards will bring edge timing into full agreement.
 
 ---
 
@@ -73,7 +73,7 @@ show similar scaling exponents, indicating equivalent algorithmic complexity.
 ## Known gaps
 
 - **MOSFET Cgs/Cgd/Cbs/Cbd** are implemented but benchmark model cards omit CGSO/CGDO/CJ/CJSW → caps are zero in the runs above.
-- **BJT CJE/CJC** not yet stamped → switching edges unphysically fast for BJT circuits.
+- **BJT CJE/CJC** are now implemented but the benchmark model card omits them → switching edges are unphysically fast in this run.
 - Ring oscillator benchmark uses synthetic circuits; no real-circuit scaling data yet.
 - ngspice comparison is on macOS developer hardware, not the CI runner.
   CI numbers (ubuntu-latest) will differ; see Actions → Benchmarks for nightly results.

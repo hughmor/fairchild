@@ -1,9 +1,10 @@
 //! Gummel-Poon Level 1 bipolar junction transistor (BJT).
 //!
 //! Implements the Ebers-Moll transport form with the following model parameters:
-//! IS, BF, BR, NF, NR, VAF, VAR, TF, TR.  Series resistances (RB, RC, RE)
-//! and junction capacitances (CJE, CJC) are accepted and noted for future use;
-//! the current implementation treats them as zero.
+//! IS, BF, BR, NF, NR, VAF, VAR, TF, TR, CJE, VJE, MJE, CJC, VJC, MJC, FC.
+//! Transit-time diffusion charges (TF·IF, TR·IR) and depletion junction
+//! capacitances (CJE, CJC) are both stamped in transient analysis.
+//! Series resistances (RB, RC, RE) are accepted but not yet modelled.
 //!
 //! ## Sign convention and polarity
 //!
@@ -21,6 +22,39 @@ use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
 const GMIN: f64 = 1e-12;
+
+/// Depletion capacitance at junction voltage `v` (SPICE3 piecewise model).
+fn cj_depl(c0: f64, v: f64, vj: f64, mj: f64, fc: f64) -> f64 {
+    if c0 == 0.0 {
+        return 0.0;
+    }
+    let fc_vj = fc * vj;
+    if v < fc_vj {
+        c0 * (1.0 - v / vj).powf(-mj)
+    } else {
+        let k = (1.0 - fc).powf(1.0 + mj);
+        c0 / k * (1.0 - fc * (1.0 + mj) + mj * v / vj)
+    }
+}
+
+/// Charge integral Q(v) for depletion capacitance (antiderivative of cj_depl).
+fn q_depl(c0: f64, v: f64, vj: f64, mj: f64, fc: f64) -> f64 {
+    if c0 == 0.0 {
+        return 0.0;
+    }
+    let fc_vj = fc * vj;
+    if v < fc_vj {
+        let x = 1.0 - v / vj;
+        c0 * vj / (1.0 - mj) * (1.0 - x.powf(1.0 - mj))
+    } else {
+        let x_fc = 1.0 - fc;
+        let q_fc = c0 * vj / (1.0 - mj) * (1.0 - x_fc.powf(1.0 - mj));
+        let k = x_fc.powf(1.0 + mj);
+        let f2 = 1.0 - fc * (1.0 + mj);
+        let dv = v - fc_vj;
+        q_fc + c0 / k * (f2 * dv + mj / (2.0 * vj) * (v * v - fc_vj * fc_vj))
+    }
+}
 
 /// Gummel-Poon Level 1 BJT.
 pub struct GummelPoonBjt {
@@ -64,6 +98,23 @@ pub struct GummelPoonBjt {
     qbc_now: f64,
     cbe_eff: f64, // dQBE/dVBE_eff = TF*gf (capacitive conductance)
     cbc_eff: f64, // dQBC/dVBC_eff = TR*gr
+
+    // ── Depletion junction cap model parameters ───────────────────────────────
+    cje: f64, // zero-bias B-E depletion capacitance (F)
+    vje: f64, // B-E junction potential (V)
+    mje: f64, // B-E grading coefficient
+    cjc: f64, // zero-bias B-C depletion capacitance (F)
+    vjc: f64, // B-C junction potential (V)
+    mjc: f64, // B-C grading coefficient
+    fc: f64,  // forward-bias cap linearisation coefficient
+
+    // ── Depletion cap transient state ─────────────────────────────────────────
+    cje_eval: f64,  // CJE(VBE_eff) at current NR iterate
+    cjc_eval: f64,  // CJC(VBC_eff) at current NR iterate
+    q_je_eval: f64, // depletion charge at current NR iterate
+    q_jc_eval: f64,
+    q_je_prev: f64, // depletion charge at last committed timestep
+    q_jc_prev: f64,
 }
 
 impl GummelPoonBjt {
@@ -79,6 +130,14 @@ impl GummelPoonBjt {
         let mut var = f64::INFINITY;
         let mut tf = 0.0;
         let mut tr = 0.0;
+        // Depletion cap params — SPICE3 defaults.
+        let mut cje = 0.0;
+        let mut vje = 0.75;
+        let mut mje = 0.33;
+        let mut cjc = 0.0;
+        let mut vjc = 0.75;
+        let mut mjc = 0.33;
+        let mut fc = 0.5;
         let mut unknown = Vec::new();
         for (k, v) in params {
             match k.to_lowercase().as_str() {
@@ -91,10 +150,17 @@ impl GummelPoonBjt {
                 "var" | "vb" => var = *v,
                 "tf" => tf = *v,
                 "tr" => tr = *v,
+                "cje" => cje = *v,
+                "vje" => vje = *v,
+                "mje" => mje = *v,
+                "cjc" => cjc = *v,
+                "vjc" => vjc = *v,
+                "mjc" => mjc = *v,
+                "fc" => fc = *v,
                 // Accepted but not yet modelled.
-                "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cje"
-                | "cjc" | "vje" | "vjc" | "mje" | "mjc" | "fc" | "cjs" | "vjs" | "mjs" | "xtb"
-                | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
+                "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cjs"
+                | "vjs" | "mjs" | "xtb" | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc"
+                | "tnom" => {}
                 _ => unknown.push(k.clone()),
             }
         }
@@ -129,6 +195,19 @@ impl GummelPoonBjt {
             qbc_now: 0.0,
             cbe_eff: 0.0,
             cbc_eff: 0.0,
+            cje,
+            vje,
+            mje,
+            cjc,
+            vjc,
+            mjc,
+            fc,
+            cje_eval: 0.0,
+            cjc_eval: 0.0,
+            q_je_eval: 0.0,
+            q_jc_eval: 0.0,
+            q_je_prev: 0.0,
+            q_jc_prev: 0.0,
         };
         (dev, unknown)
     }
@@ -254,11 +333,19 @@ impl Device for GummelPoonBjt {
             self.cbc_eff = self.tr * self.gr;
             self.qbe_now = self.tf * if_val / q1;
             self.qbc_now = self.tr * ir_val;
+            self.cje_eval = cj_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
+            self.cjc_eval = cj_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
+            self.q_je_eval = q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
+            self.q_jc_eval = q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
         } else {
             self.cbe_eff = 0.0;
             self.cbc_eff = 0.0;
             self.qbe_now = 0.0;
             self.qbc_now = 0.0;
+            self.cje_eval = 0.0;
+            self.cjc_eval = 0.0;
+            self.q_je_eval = 0.0;
+            self.q_jc_eval = 0.0;
         }
     }
 
@@ -330,6 +417,28 @@ impl Device for GummelPoonBjt {
                 b[c] -= pol * i_bc;
             }
         }
+        // B-E depletion cap companion: CJE
+        if self.cje_eval != 0.0 {
+            let i_je = alpha * (self.cje_eval * self.vbe_eff + self.q_je_prev - self.q_je_eval);
+            let pol = self.polarity;
+            if let Some(bk) = self.base {
+                b[bk] += pol * i_je;
+            }
+            if let Some(e) = self.emitter {
+                b[e] -= pol * i_je;
+            }
+        }
+        // B-C depletion cap companion: CJC
+        if self.cjc_eval != 0.0 {
+            let i_jc = alpha * (self.cjc_eval * self.vbc_eff + self.q_jc_prev - self.q_jc_eval);
+            let pol = self.polarity;
+            if let Some(bk) = self.base {
+                b[bk] += pol * i_jc;
+            }
+            if let Some(c) = self.collector {
+                b[c] -= pol * i_jc;
+            }
+        }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
@@ -360,6 +469,22 @@ impl Device for GummelPoonBjt {
             stamp!(c, bk, -c_bc);
             stamp!(c, c, c_bc);
         }
+        // B-E depletion cap: CJE
+        if self.cje_eval != 0.0 {
+            let g_je = alpha * self.cje_eval;
+            stamp!(bk, bk, g_je);
+            stamp!(bk, e, -g_je);
+            stamp!(e, bk, -g_je);
+            stamp!(e, e, g_je);
+        }
+        // B-C depletion cap: CJC
+        if self.cjc_eval != 0.0 {
+            let g_jc = alpha * self.cjc_eval;
+            stamp!(bk, bk, g_jc);
+            stamp!(bk, c, -g_jc);
+            stamp!(c, bk, -g_jc);
+            stamp!(c, c, g_jc);
+        }
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
@@ -378,6 +503,8 @@ impl Device for GummelPoonBjt {
         let ir_val = self.is * (exp_bc - 1.0);
         self.qbe_tprev = self.tf * if_val;
         self.qbc_tprev = self.tr * ir_val;
+        self.q_je_prev = q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
+        self.q_jc_prev = q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
     }
 
     fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
@@ -474,6 +601,55 @@ mod tests {
             beta_measured,
             bf
         );
+    }
+
+    #[test]
+    fn cje_cjc_stamps_in_jacobian_tran() {
+        // Verify that CJE and CJC add companion conductances to the Jacobian
+        // during transient analysis and are zero for DC.
+        let (mut q, _) = GummelPoonBjt::from_model_params(
+            false,
+            &[
+                ("is".into(), 1e-15),
+                ("bf".into(), 100.0),
+                ("cje".into(), 2e-12),
+                ("cjc".into(), 1e-12),
+            ],
+        );
+        q.setup_model(&ctx());
+        // C=0, B=1, E=2
+        q.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
+        q.vbe_prev = 0.65;
+        q.vbc_prev = -4.35;
+        let x = [5.0_f64, 0.65, 0.0];
+
+        // DC eval: depletion caps must be zero in Jacobian.
+        q.eval(&x, EvalFlags::dc(), &ctx());
+        assert_eq!(q.cje_eval, 0.0, "cje_eval must be zero in DC");
+        assert_eq!(q.cjc_eval, 0.0, "cjc_eval must be zero in DC");
+
+        // Transient eval: caps should be non-zero.
+        q.eval(&x, EvalFlags::tran(), &ctx());
+        assert!(q.cje_eval > 0.0, "cje_eval should be positive in transient");
+        assert!(q.cjc_eval > 0.0, "cjc_eval should be positive in transient");
+
+        // The Jacobian diagonal at B (node 1) should include alpha * (cbe_eff + cbc_eff + cje + cjc).
+        let mut mat = MnaMatrix::zeros(3);
+        let alpha = 1.0 / 1e-9; // 1/h for 1ns step
+        q.load_jacobian_tran(&mut mat, alpha);
+        // J[B][B] must include contributions from both depletion caps (and transit-time caps).
+        // At minimum, alpha*cje_eval + alpha*cjc_eval must be present.
+        let min_expected = alpha * (q.cje_eval + q.cjc_eval);
+        assert!(
+            mat.a[1][1] >= min_expected,
+            "J[B][B]={:.3e} < expected depletion contribution {:.3e}",
+            mat.a[1][1],
+            min_expected
+        );
+        // Off-diagonal B-E must be negative (conductance from B to E).
+        assert!(mat.a[1][2] < 0.0, "J[B][E] should be negative from CJE");
+        // Off-diagonal B-C must be negative.
+        assert!(mat.a[1][0] < 0.0, "J[B][C] should be negative from CJC");
     }
 
     #[test]
