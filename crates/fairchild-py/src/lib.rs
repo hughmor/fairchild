@@ -538,7 +538,6 @@ impl Circuit {
     ///   analysis: `"op"` for DC, `"tran"` for transient, `"ac"` for AC sweep.
     ///
     ///   For `"tran"`: `stop` (s) and `step` (s) are required.
-    ///   Optional: `variable_step=True` enables LTE-controlled variable-step.
     ///
     ///   For `"ac"`: `fstart` (Hz), `fstop` (Hz), `points` (int, default 20),
     ///   `variation` (`"dec"`, `"oct"`, `"lin"`, default `"dec"`),
@@ -546,8 +545,12 @@ impl Circuit {
     ///
     ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
     ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
-    ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C).
+    ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C),
+    ///   `solver` (`"dense"` | `"sparse"` | `"auto"` | `"klu"`),
+    ///   `variable_step` (bool, enables LTE-controlled variable-step transient),
+    ///   `lambda_center_nm`, `enable_bidirectional`, `sanity_check`, and more.
     ///   These overlay any `.options` directives from the netlist.
+    ///   Unrecognised kwargs raise `RuntimeError` immediately.
     #[pyo3(signature = (analysis, **kwargs))]
     pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
         let netlist = self.netlist.as_ref()
@@ -601,8 +604,8 @@ impl Circuit {
                 })
             }
             "tran" | "transient" => {
-                let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
-                let result = if variable_step {
+                let (stop, step) = parse_tran_kwargs(kwargs)?;
+                let result = if opts.variable_step {
                     tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
                 } else {
                     tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
@@ -666,8 +669,8 @@ impl Circuit {
                     SimResult { inner: SimResultInner::Dc(r), measurements: Vec::new() }
                 }
                 "tran" | "transient" => {
-                    let (stop, step, variable_step) = parse_tran_kwargs(kwargs)?;
-                    let r = if variable_step {
+                    let (stop, step) = parse_tran_kwargs(kwargs)?;
+                    let r = if opts.variable_step {
                         tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
                     } else {
                         tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
@@ -747,22 +750,18 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
 // Helper: parse tran kwargs
 // ---------------------------------------------------------------------------
 
-fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64, bool)> {
+fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)> {
     let mut stop: Option<f64> = None;
     let mut step: Option<f64> = None;
-    let mut variable_step = false;
 
     if let Some(kw) = kwargs {
         if let Some(v) = kw.get_item("stop")? { stop = Some(v.extract::<f64>()?); }
         if let Some(v) = kw.get_item("step")? { step = Some(v.extract::<f64>()?); }
-        if let Some(v) = kw.get_item("variable_step")? {
-            variable_step = v.extract::<bool>()?;
-        }
     }
 
     let stop = stop.ok_or_else(|| PyRuntimeError::new_err("tran requires 'stop' kwarg (seconds)"))?;
     let step = step.ok_or_else(|| PyRuntimeError::new_err("tran requires 'step' kwarg (seconds)"))?;
-    Ok((stop, step, variable_step))
+    Ok((stop, step))
 }
 
 // ---------------------------------------------------------------------------
@@ -770,39 +769,53 @@ fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64, 
 // ---------------------------------------------------------------------------
 
 /// Build a `SimOptions` by starting from the netlist's `.options` directives
-/// and overlaying any Python kwargs the user passed.  Kwargs that are not
-/// recognised as solver options are silently ignored (they may be analysis
-/// kwargs like `stop`/`step`/`fstart`).
+/// and overlaying any Python kwargs the user passed.
+///
+/// Analysis-specific kwargs (`stop`, `step`, `fstart`, `src`, etc.) are
+/// silently skipped — they are consumed by the `parse_*_kwargs` helpers.
+/// Every other kwarg is forwarded to `SimOptions::set`; an unrecognised or
+/// unavailable key raises `PyRuntimeError` so misspellings surface immediately.
 fn build_sim_options(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimOptions> {
     let mut opts = SimOptions::from_netlist(netlist);
     if let Some(kw) = kwargs {
-        // Map of Python kwarg name -> SimOptions key (most are identical).
-        const OPTION_KEYS: &[&str] = &[
-            "reltol", "abstol", "vntol", "vmax", "gmin",
-            "itl1", "itl4", "maxstep", "max_step", "gmin_max", "srcsteps",
-            "method", "uic", "temp", "pnjlim", "solver", "verbose",
+        // Keywords consumed by parse_tran/ac/dc/noise_kwargs or run() itself.
+        // Any kwarg NOT in this list is forwarded to SimOptions::set().
+        const SKIP: &[&str] = &[
+            "alter",                                   // .alter block selector
+            "stop", "step",                            // tran / dc sweep
+            "src", "start", "src2",                    // dc sweep
+            "start2", "stop2", "step2",                // dc sweep nested
+            "fstart", "fstop", "points", "variation",  // ac / noise
+            "out_pos", "out_neg", "out",               // noise
         ];
-        for key in OPTION_KEYS {
-            if let Some(v) = kw.get_item(key)? {
-                // Accept either a raw number or a string token.
-                let value_str: String = if let Ok(s) = v.extract::<String>() {
-                    s
-                } else if let Ok(f) = v.extract::<f64>() {
-                    format!("{f:e}")
-                } else if let Ok(i) = v.extract::<i64>() {
-                    i.to_string()
-                } else if let Ok(b) = v.extract::<bool>() {
-                    if b { "1".into() } else { "0".into() }
-                } else {
+        for (k, v) in kw.iter() {
+            let key: String = k.extract()?;
+            if SKIP.contains(&key.as_str()) { continue; }
+            // Accept bool before numeric to avoid True → 1.0 path.
+            let value_str: String = if let Ok(b) = v.extract::<bool>() {
+                if b { "1".into() } else { "0".into() }
+            } else if let Ok(s) = v.extract::<String>() {
+                s
+            } else if let Ok(i) = v.extract::<i64>() {
+                i.to_string()
+            } else if let Ok(f) = v.extract::<f64>() {
+                format!("{f:e}")
+            } else {
+                return Err(PyRuntimeError::new_err(format!(
+                    "kwarg '{key}': expected number, string, or bool"
+                )));
+            };
+            if !opts.set(&key, &value_str) {
+                if key == "solver" {
                     return Err(PyRuntimeError::new_err(format!(
-                        "kwarg '{key}': expected number, string, or bool"
-                    )));
-                };
-                if !opts.set(key, &value_str) {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "unknown solver option '{key}={value_str}'"
+                        "unsupported solver '{value_str}' — valid values: dense, sparse, auto; \
+                         use 'klu' only when fairchild is built with `--features klu` \
+                         and SuiteSparse is installed (`brew install suite-sparse`)"
                     )));
                 }
+                return Err(PyRuntimeError::new_err(format!(
+                    "unrecognised option '{key}={value_str}'"
+                )));
             }
         }
     }

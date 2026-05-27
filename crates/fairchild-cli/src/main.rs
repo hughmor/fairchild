@@ -11,7 +11,7 @@ use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements,
     freq_decade, freq_linear, freq_oct,
-    tran_nr_with_registry_opts, DeviceRegistry, SimOptions,
+    tran_nr_with_registry_opts, tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
 };
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist};
@@ -77,9 +77,10 @@ struct Cli {
     /// top of any `.options` directives in the netlist.  Can be repeated.
     ///
     /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
-    /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp.
+    /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
+    /// variable_step.
     ///
-    /// Example: --opt reltol=1e-5 --opt method=gear
+    /// Example: --opt reltol=1e-5 --opt method=gear --opt variable_step=1
     #[arg(long = "opt", value_name = "KEY=VALUE")]
     options: Vec<String>,
 
@@ -117,6 +118,12 @@ struct Cli {
     ///   auto   — pick from system size (default)
     #[arg(long, value_name = "dense|sparse|klu|auto")]
     solver: Option<String>,
+
+    /// Use the LTE-controlled variable-step transient solver.  `step` in the
+    /// netlist becomes the initial / maximum timestep rather than a fixed
+    /// stride.  Equivalent to `.options variable_step=1`.
+    #[arg(long)]
+    variable_step: bool,
 
     /// Bundle all `.alter` × `.temp` corner outputs into the single
     /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
@@ -286,12 +293,13 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
         }
     };
 
-    if let Some(v) = &cli.reltol   { apply("reltol",  v); }
-    if let Some(v) = &cli.gmin     { apply("gmin",    v); }
-    if let Some(v) = &cli.method   { apply("method",  v); }
-    if let Some(v) = &cli.max_step { apply("maxstep", v); }
-    if cli.no_pnjlim               { apply("pnjlim",  "0"); }
-    if let Some(v) = &cli.solver   { apply("solver",  v); }
+    if let Some(v) = &cli.reltol      { apply("reltol",        v); }
+    if let Some(v) = &cli.gmin       { apply("gmin",          v); }
+    if let Some(v) = &cli.method     { apply("method",        v); }
+    if let Some(v) = &cli.max_step   { apply("maxstep",       v); }
+    if cli.no_pnjlim                 { apply("pnjlim",        "0"); }
+    if let Some(v) = &cli.solver     { apply("solver",        v); }
+    if cli.variable_step             { apply("variable_step", "1"); }
 
     for raw in &cli.options {
         if let Some((k, v)) = raw.split_once('=') {
@@ -702,9 +710,16 @@ fn run_corner_analyses_ctx(
             }
 
             Analysis::Tran { step, stop } => {
-                if ctx.verbose { eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?})...", opts.method); }
+                if ctx.verbose {
+                    let mode = if opts.variable_step { "variable-step" } else { "fixed-step" };
+                    eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?} {mode})...", opts.method);
+                }
                 let t0 = Instant::now();
-                let result = tran_nr_with_registry_opts(netlist, *step, *stop, registry, opts).unwrap_or_else(|e| {
+                let result = if opts.variable_step {
+                    tran_nr_with_registry_var_opts(netlist, *step, *stop, registry, opts)
+                } else {
+                    tran_nr_with_registry_opts(netlist, *step, *stop, registry, opts)
+                }.unwrap_or_else(|e| {
                     eprintln!("error: tran failed: {e}");
                     std::process::exit(1);
                 });

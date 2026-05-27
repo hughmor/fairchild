@@ -110,6 +110,14 @@ pub struct SimOptions {
     /// Set via `.options enable_bidirectional=1` or `--opt
     /// enable_bidirectional=1`.
     pub bidirectional_propagation: bool,
+
+    /// Use the LTE-controlled variable-step transient solver instead of the
+    /// default fixed-step solver.  The variable-step solver adapts the
+    /// internal timestep to keep local truncation error below the
+    /// `reltol`/`vntol` budget; `step` becomes the initial (and maximum)
+    /// timestep rather than the fixed stride.  Set via `.options
+    /// variable_step=1`, CLI `--variable-step`, or Python `variable_step=True`.
+    pub variable_step: bool,
 }
 
 impl Default for SimOptions {
@@ -135,6 +143,7 @@ impl Default for SimOptions {
             bidirectional_propagation: false,
             verbose:        false,
             sanity_check:   true,
+            variable_step:  false,
         }
     }
 }
@@ -222,6 +231,10 @@ impl SimOptions {
                 self.bidirectional_propagation = matches!(value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on");
             }
+            "variable_step" | "variablestep" => {
+                self.variable_step = matches!(value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on");
+            }
             "max_rejections" => self.max_rejections = parse_int(value).unwrap_or(self.max_rejections),
             "method" => {
                 match value.to_lowercase().as_str() {
@@ -250,7 +263,13 @@ impl SimOptions {
                 self.solver = match value.to_lowercase().as_str() {
                     "dense"  => SolverKind::Dense,
                     "sparse" | "faer-sparse" | "faer_sparse" => SolverKind::Sparse,
-                    "klu" | "suitesparse" | "suitesparse-klu" => SolverKind::Klu,
+                    "klu" | "suitesparse" | "suitesparse-klu" => {
+                        // Reject at options-parse time when KLU feature is absent so
+                        // callers (Python, CLI) can surface a clear error rather than
+                        // silently falling back to faer-sparse.
+                        if cfg!(not(feature = "klu")) { return false; }
+                        SolverKind::Klu
+                    }
                     "auto"   => SolverKind::Auto,
                     _ => return false,
                 };

@@ -520,6 +520,7 @@ pub fn tran_nr_with_registry_opts(
     loop {
         // --- NR loop for this time step ---
         let alpha = 1.0 / step;
+        let mut step_converged = false;
         for _iter in 0..opts.itl4 {
             crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t, &cap_state, &ind_state);
 
@@ -570,7 +571,11 @@ pub fn tran_nr_with_registry_opts(
                 .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
 
             x = x_next;
-            if converged { break; }
+            if converged { step_converged = true; break; }
+        }
+
+        if !step_converged {
+            return Err(SimError::NoConvergence { iters: opts.itl4 });
         }
 
         push_timepoint(&mut result, t, &topo, &x);
@@ -1282,6 +1287,32 @@ mod tests {
     }
 
     #[test]
+    fn tran_nr_fixed_step_errors_on_nonconvergence() {
+        // RC driven by a 1V step. With itl4=1 and reltol=1e-30, even a
+        // single NR iteration on a diode/RC circuit should fail to converge.
+        // We just want to confirm the function returns Err rather than Ok.
+        use crate::options::SimOptions;
+        use crate::device_registry::DeviceRegistry;
+        let netlist = parse_spice(
+            "* non-converge test\nVdd a 0 DC 5\nR1 a b 1k\nD1 b 0 myd\n\
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 2u\n.end\n"
+        ).unwrap();
+        let registry = {
+            let mut r = DeviceRegistry::new();
+            r.register_builtin_diodes(&netlist.models);
+            r
+        };
+        // itl4=1 + reltol=0 is enough to guarantee NR never converges.
+        let mut opts = SimOptions::from_netlist(&netlist);
+        opts.itl4 = 1;
+        opts.reltol = 0.0;
+        opts.vntol = 0.0;
+        let result = tran_nr_with_registry_opts(&netlist, 1e-6, 2e-6, &registry, &opts);
+        assert!(result.is_err(), "expected Err on non-convergence, got Ok");
+        let err_str = result.err().unwrap().to_string();
+        assert!(err_str.contains("did not converge"), "unexpected error: {err_str}");
+    }
+
     fn write_nutmeg_tran() {
         let netlist = parse_spice(
             "* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n",

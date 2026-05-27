@@ -33,7 +33,7 @@ pub use newton::{
 };
 pub use options::SimOptions;
 pub use sanity::check_netlist_sanity;
-pub use solver::lu_solve;
+pub use solver::{lu_solve, SolverKind};
 pub use tran::{
     run_tran, run_tran_tr,
     tran_nr, tran_nr_tr, tran_nr_var,
