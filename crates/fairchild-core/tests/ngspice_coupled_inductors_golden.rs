@@ -41,7 +41,7 @@ fn ngspice_meas_tran(netlist: &str) -> Option<HashMap<String, f64>> {
         if let Some((lhs, rhs)) = line.split_once('=') {
             let key = lhs.trim().to_lowercase();
             if key.starts_with("v_") {
-                if let Ok(val) = rhs.trim().split_whitespace().next()?.parse::<f64>() {
+                if let Ok(val) = rhs.split_whitespace().next()?.parse::<f64>() {
                     map.insert(key, val);
                 }
             }
@@ -76,16 +76,16 @@ K1 l1 l2 0.9\n\
     let v_n2 = result.voltage_at("n2", 5e-6).expect("n2");
 
     assert!(
-        v_n1 >= 0.2 && v_n1 <= 0.9,
+        (0.2..=0.9).contains(&v_n1),
         "V(n1) at 5µs = {v_n1:.4}V — expected mid-transient [0.2, 0.9]V"
     );
     assert!(
-        v_n2 >= 0.1 && v_n2 <= 0.9,
+        (0.1..=0.9).contains(&v_n2),
         "V(n2) at 5µs = {v_n2:.4}V — expected coupled [0.1, 0.9]V"
     );
     let ratio = v_n2 / v_n1;
     assert!(
-        ratio >= 0.3 && ratio <= 1.1,
+        (0.3..=1.1).contains(&ratio),
         "V(n2)/V(n1) = {ratio:.4} — expected coupling ratio [0.3, 1.1]"
     );
 

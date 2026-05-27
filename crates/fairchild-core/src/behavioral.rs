@@ -165,53 +165,6 @@ impl BehavioralDevice {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use fairchild_parser::parse_spice;
-
-    #[test]
-    fn behavioral_current_source_linear_expression() {
-        // B1 with pos=out, neg=0 pulls I = V(in)·1mA out of `out`.  SPICE
-        // convention: positive I from + node through source to − node, so the
-        // external network must source that current back into `out` via R2;
-        // for R2=1k that pins V(out) = −I·R = −1V.
-        let net = parse_spice(
-            "* b\nV1 in 0 DC 1\nR1 in nin 1\n\
-             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n.end\n",
-        )
-        .unwrap();
-        let r = crate::newton::dc_op_nr(&net).unwrap();
-        let v_out = r.node_voltage("out").unwrap();
-        assert!((v_out + 1.0).abs() < 1e-4, "V(out)={v_out}");
-    }
-
-    #[test]
-    fn behavioral_voltage_source_simple() {
-        // B1 V = V(in) * 2.  V(in) = 1, so V(out) = 2.
-        let net = parse_spice(
-            "* bv\nV1 in 0 DC 1\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n.end\n",
-        )
-        .unwrap();
-        let r = crate::newton::dc_op_nr(&net).unwrap();
-        let v_out = r.node_voltage("out").unwrap();
-        assert!((v_out - 2.0).abs() < 1e-4, "V(out)={v_out}");
-    }
-
-    #[test]
-    fn behavioral_nonlinear_square() {
-        // B1 V = V(in) ^ 2.  V(in) = 0.7, so V(out) should converge to 0.49.
-        let net = parse_spice(
-            "* bv\nV1 in 0 DC 0.7\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n.end\n",
-        )
-        .unwrap();
-        let r = crate::newton::dc_op_nr(&net).unwrap();
-        let v_out = r.node_voltage("out").unwrap();
-        assert!((v_out - 0.49).abs() < 1e-3, "V(out)={v_out}");
-    }
-}
-
 impl Device for BehavioralDevice {
     fn num_terminals(&self) -> usize {
         2
@@ -328,5 +281,52 @@ impl Device for BehavioralDevice {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fairchild_parser::parse_spice;
+
+    #[test]
+    fn behavioral_current_source_linear_expression() {
+        // B1 with pos=out, neg=0 pulls I = V(in)·1mA out of `out`.  SPICE
+        // convention: positive I from + node through source to − node, so the
+        // external network must source that current back into `out` via R2;
+        // for R2=1k that pins V(out) = −I·R = −1V.
+        let net = parse_spice(
+            "* b\nV1 in 0 DC 1\nR1 in nin 1\n\
+             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
+        let r = crate::newton::dc_op_nr(&net).unwrap();
+        let v_out = r.node_voltage("out").unwrap();
+        assert!((v_out + 1.0).abs() < 1e-4, "V(out)={v_out}");
+    }
+
+    #[test]
+    fn behavioral_voltage_source_simple() {
+        // B1 V = V(in) * 2.  V(in) = 1, so V(out) = 2.
+        let net = parse_spice(
+            "* bv\nV1 in 0 DC 1\nR1 in 0 1k\n\
+             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
+        let r = crate::newton::dc_op_nr(&net).unwrap();
+        let v_out = r.node_voltage("out").unwrap();
+        assert!((v_out - 2.0).abs() < 1e-4, "V(out)={v_out}");
+    }
+
+    #[test]
+    fn behavioral_nonlinear_square() {
+        // B1 V = V(in) ^ 2.  V(in) = 0.7, so V(out) should converge to 0.49.
+        let net = parse_spice(
+            "* bv\nV1 in 0 DC 0.7\nR1 in 0 1k\n\
+             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
+        let r = crate::newton::dc_op_nr(&net).unwrap();
+        let v_out = r.node_voltage("out").unwrap();
+        assert!((v_out - 0.49).abs() < 1e-3, "V(out)={v_out}");
     }
 }

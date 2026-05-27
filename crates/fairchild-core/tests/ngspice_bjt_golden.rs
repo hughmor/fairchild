@@ -248,7 +248,7 @@ fn ngspice_meas_bjt(netlist: &str) -> Option<HashMap<String, f64>> {
         if let Some((lhs, rhs)) = line.split_once('=') {
             let key = lhs.trim().to_lowercase();
             if key.starts_with("v_") {
-                if let Ok(val) = rhs.trim().split_whitespace().next()?.parse::<f64>() {
+                if let Ok(val) = rhs.split_whitespace().next()?.parse::<f64>() {
                     map.insert(key, val);
                 }
             }

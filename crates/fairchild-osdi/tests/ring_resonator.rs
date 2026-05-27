@@ -17,7 +17,7 @@
 ///
 /// Validation: resonance dip in simulated V(ph_a) must be within 0.1 nm of the
 /// CMT analytical resonance wavelength.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fairchild_core::{
@@ -39,7 +39,7 @@ fn model_path(name: &str) -> PathBuf {
         .join(format!("../../../legacy/va-models/build/{name}.osdi"))
 }
 
-fn skip_if_missing(path: &PathBuf) -> bool {
+fn skip_if_missing(path: &Path) -> bool {
     if !path.exists() {
         eprintln!(
             "Skipping: {} not found. Compile legacy/va-models first with openvaf-r.",
@@ -148,7 +148,7 @@ fn access_ptr_diagnostic() {
     dev.setup_instance(&[Some(0), Some(1), Some(2)], &ctx);
 
     let model_raw = dev.model_ptr_raw();
-    let n_model_words = (model_size + 7) / 8;
+    let n_model_words = model_size.div_ceil(8);
     eprintln!("\nModel buffer after setup (as f64):");
     for i in 0..n_model_words.min(12) {
         let v = unsafe { *((model_raw as *const f64).add(i)) };

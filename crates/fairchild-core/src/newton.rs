@@ -1338,9 +1338,11 @@ mod tests {
              .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
         )
         .unwrap();
-        let mut opts = SimOptions::default();
-        opts.reltol = 1e-10;
-        opts.vntol = 1e-12;
+        let opts = SimOptions {
+            reltol: 1e-10,
+            vntol: 1e-12,
+            ..Default::default()
+        };
         let r = dc_op_nr_opts(&net, &opts).unwrap();
         let vb = r.node_voltage("b").unwrap();
         assert!(vb > 0.5 && vb < 0.8);

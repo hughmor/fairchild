@@ -463,7 +463,7 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AcVariation, BehavioralKind, Waveform};
+    use crate::{BehavioralKind, Waveform};
 
     // ── existing tests (unchanged) ────────────────────────────────────────────
 

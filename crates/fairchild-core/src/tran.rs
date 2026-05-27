@@ -1443,12 +1443,16 @@ mod tests {
         let mut registry = crate::device_registry::DeviceRegistry::new();
         registry.register_builtin_diodes(&net.models);
 
-        let mut opts_be = crate::options::SimOptions::default();
-        opts_be.method = IntegratorMode::BackwardEuler;
+        let opts_be = crate::options::SimOptions {
+            method: IntegratorMode::BackwardEuler,
+            ..Default::default()
+        };
         let r_be = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_be).unwrap();
 
-        let mut opts_g = crate::options::SimOptions::default();
-        opts_g.method = IntegratorMode::Gear;
+        let opts_g = crate::options::SimOptions {
+            method: IntegratorMode::Gear,
+            ..Default::default()
+        };
         let r_g = tran_nr_with_registry_var_opts(&net, 200e-6, 4e-3, &registry, &opts_g).unwrap();
 
         let tau = 1e-3;
@@ -1555,6 +1559,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn write_nutmeg_tran() {
         let netlist =
             parse_spice("* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n")

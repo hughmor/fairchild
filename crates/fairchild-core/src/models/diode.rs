@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn pnjlim_compresses_large_steps() {
-        let mut d = make_diode(1e-14, 1.0);
+        let d = make_diode(1e-14, 1.0);
         let vt = ctx().vt();
         let limited = d.pnjlim(10.0, 0.0, vt);
         assert!(

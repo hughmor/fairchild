@@ -101,8 +101,10 @@ fn run_dc_op(netlist_src: &str, kind: SolverKind) {
         r.register_builtin_diodes(&netlist.models);
         r
     };
-    let mut opts = SimOptions::default();
-    opts.solver = kind;
+    let opts = SimOptions {
+        solver: kind,
+        ..Default::default()
+    };
     dc_op_nr_with_registry_opts(&netlist, &registry, &opts).expect("dc op");
 }
 

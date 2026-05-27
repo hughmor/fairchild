@@ -428,7 +428,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let x = klu_solve_dense(&a, &b).unwrap();
         // Cross-check by direct multiplication.
-        let mut r = vec![0.0; 4];
+        let mut r = [0.0; 4];
         for i in 0..4 {
             for j in 0..4 {
                 r[i] += a[i][j] * x[j];

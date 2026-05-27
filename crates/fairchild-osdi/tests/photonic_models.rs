@@ -9,7 +9,7 @@
 ///   CW laser (1 mW, 0°): V(out_re) = sqrt(1e-3) ≈ 0.031623, V(out_im) = 0.0
 ///   Photodetector (1 mW in, R=1.0 A/W, R_load=1kΩ): V(ph_a) ≈ 1.0 V
 use std::ffi::CStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
@@ -21,7 +21,7 @@ fn model_path(name: &str) -> PathBuf {
         .join(format!("../../../legacy/va-models/build/{name}.osdi"))
 }
 
-fn skip_if_missing(path: &PathBuf) -> bool {
+fn skip_if_missing(path: &Path) -> bool {
     if !path.exists() {
         eprintln!(
             "Skipping: {} not found. Compile legacy/va-models first with openvaf-r.",

@@ -52,7 +52,6 @@ fn ngspice_op_node(spice_with_print: &str, node: &str) -> Option<f64> {
         if line.to_lowercase().starts_with(&prefix) {
             if let Some(eq) = line.find('=') {
                 let val: f64 = line[eq + 1..]
-                    .trim()
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
@@ -201,13 +200,7 @@ fn ngspice_meas_tran(netlist: &str) -> Option<HashMap<String, f64>> {
         if let Some((key, val)) = line.split_once('=') {
             let key = key.trim().to_lowercase();
             if key.starts_with("v_") {
-                if let Ok(v) = val
-                    .trim()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .parse::<f64>()
-                {
+                if let Ok(v) = val.split_whitespace().next().unwrap_or("").parse::<f64>() {
                     map.insert(key, v);
                 }
             }
@@ -247,7 +240,7 @@ fn cmos_inverter_caps_switching_time() {
 
     // Shape check: output must be mid-transition (not stuck at either rail).
     assert!(
-        fc_v >= 0.3 && fc_v <= 3.0,
+        (0.3..=3.0).contains(&fc_v),
         "V(out) at t=15ns = {fc_v:.4}V — expected mid-transition [0.3, 3.0]V; \
         caps (CGSO/CGDO/CJ/CJSW on MOSFETs + CL=10p) are required to slow the edge \
         enough that the output is still switching at 15ns"

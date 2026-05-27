@@ -65,7 +65,7 @@ fn ngspice_tran_at(netlist: &str, node: &str, at_time: f64) -> Option<f64> {
         if lc.starts_with(&meas_name.to_lowercase()) {
             if let Some(rest) = lc.strip_prefix(&meas_name.to_lowercase()) {
                 if let Some(eq_rest) = rest.trim().strip_prefix('=') {
-                    let val_str = eq_rest.trim().split_whitespace().next().unwrap_or("");
+                    let val_str = eq_rest.split_whitespace().next().unwrap_or("");
                     if let Ok(v) = val_str.parse::<f64>() {
                         return Some(v);
                     }

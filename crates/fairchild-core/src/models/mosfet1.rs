@@ -746,7 +746,7 @@ mod tests {
         m.setup_model(&ctx());
         m.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
         // At Vbs = -1V (reverse biased bulk-source junction), cap should be < cbs0
-        let x = [3.0_f64, 2.0, 0.0, -1.0];
+        let _x = [3.0_f64, 2.0, 0.0, -1.0];
         // But wait, bulk is None (gnd) and we have 3 nodes → need to drop to 3-node test
         // Use 3 nodes with bulk grounded.
         let (mut m2, _) = Mosfet1::from_model_params(
