@@ -9,7 +9,7 @@ electro-optic / thermal tuning curves.
 Topology
 --------
 MZI modulator with two directional couplers and two phase-shifter arms,
-based on the KiCad-generated single_modulator_tb.cir.
+based on the Fairchild-format single_modulator_tb.sp netlist.
 
     IN ──► WG1 ──► CPL1 ──┬──► PS_arm1 ──┬──► CPL2 ──► WG3 ──► THRU
                            └──► PS_arm2 ──┘
@@ -187,22 +187,22 @@ MODELS: dict[str, dict] = {
 
 # ── netlist builder ───────────────────────────────────────────────────────────
 
-# Terminal layout for each model's PS SPICE line:
-#   {in_} {out} <electrical ports> type=X model=<name> {params}
-# Bundle ports (optical in/out) each expand to 3 wires internally.
+# Terminal layout for each model's PS SPICE line (Fairchild subcircuit format).
+# Optical bundle ports each expand to 3 wires internally; electrical ports follow.
+# anode=GND, cathode=PN_BIAS → V_pn = -PN_BIAS (reverse-bias convention).
 _PS_LINE_TEMPLATES = {
-    "fc_pn_ps":        "{name} {in_} {out} GND PN_BIAS type=X model=fc_pn_ps {params}",
-    "fc_pn_ps_cap":    "{name} {in_} {out} GND PN_BIAS type=X model=fc_pn_ps_cap {params}",
-    "fc_thermal_ps":   "{name} {in_} {out} HEAT_BIAS GND type=X model=fc_thermal_ps {params}",
-    "fc_thermal_ps_rc":"{name} {in_} {out} HEAT_BIAS GND type=X model=fc_thermal_ps_rc {params}",
-    "fc_pn_th_ps":     "{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND type=X model=fc_pn_th_ps {params}",
-    "fc_pn_th_ps_cap": "{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND type=X model=fc_pn_th_ps_cap {params}",
+    "fc_pn_ps":         "X{name} {in_} {out} GND PN_BIAS fc_pn_ps {params}",
+    "fc_pn_ps_cap":     "X{name} {in_} {out} GND PN_BIAS fc_pn_ps_cap {params}",
+    "fc_thermal_ps":    "X{name} {in_} {out} HEAT_BIAS GND fc_thermal_ps {params}",
+    "fc_thermal_ps_rc": "X{name} {in_} {out} HEAT_BIAS GND fc_thermal_ps_rc {params}",
+    "fc_pn_th_ps":      "X{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND fc_pn_th_ps {params}",
+    "fc_pn_th_ps_cap":  "X{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND fc_pn_th_ps_cap {params}",
 }
 
 # MZI arm connections (cross-coupled topology from the KiCad netlist).
 _ARM_CONNECTIONS = [
-    ("Net-CPL2-b1", "Net-CPL1-a2"),  # arm 1
-    ("Net-CPL1-b2", "Net-CPL2-a1"),  # arm 2
+    ("CPL2_b1", "CPL1_a2"),  # arm 1
+    ("CPL1_b2", "CPL2_a1"),  # arm 2
 ]
 
 
@@ -239,30 +239,40 @@ def build_netlist(
     for i, (in_, out) in enumerate(_ARM_CONNECTIONS, start=1):
         ps_lines.append(tmpl.format(name=f"PS{i}", in_=in_, out=out, params=ps_spice))
 
+    # All optical nets must be declared so the parser expands them to 3-wire bundles.
+    optical_ports = [
+        "IN_OPT", "THRU_OPT", "DROP_OPT", "ADD_OPT",
+        "CWL_OUT", "GC_DROP_OUT", "GC_THRU_OUT",
+        "CPL1_a1", "CPL1_a2", "CPL1_b1", "CPL1_b2",
+        "CPL2_a1", "CPL2_a2", "CPL2_b1", "CPL2_b2",
+    ]
+    port_decls = [f".optical_port {p}" for p in optical_ports]
+
     return "\n".join([
         ".title MZI modulator — parameter fit",
-        f"CWL1 IN_OPT type=X model=fc_cw_laser power_mW=1.0 wavelength_nm={wavelength_nm:.6f}",
+        *port_decls,
+        ".op",
+        f"XCWL1 CWL_OUT fc_cw_laser power_mW=1.0 wavelength_nm={wavelength_nm:.6f}",
         "V1 VDD GND DC 2",
         f"V_PN  PN_BIAS  GND DC {v_pn:.6g}",
         f"V_HEAT HEAT_BIAS GND DC {v_heat:.6g}",
         "R1 V_DROP GND 1k",
         "R2 V_THRU GND 1k",
-        "PD1 DROP_OPT VDD V_DROP type=X model=fc_photodetector"
+        "XGC_IN  CWL_OUT IN_OPT fc_grating_coupler alpha_dB=6.5",
+        "XGC_DROP DROP_OPT GC_DROP_OUT fc_grating_coupler alpha_dB=6.5",
+        "XGC_THRU THRU_OPT GC_THRU_OUT fc_grating_coupler alpha_dB=6.5",
+        "XPD1 GC_DROP_OUT VDD V_DROP fc_photodetector"
         " responsivity=0.7 i_dark_a=1e-9 r_shunt=20k",
-        "PD2 THRU_OPT VDD V_THRU type=X model=fc_photodetector"
+        "XPD2 GC_THRU_OUT VDD V_THRU fc_photodetector"
         " responsivity=0.7 i_dark_a=1e-9 r_shunt=20k",
-        "WG1 IN_OPT Net-CPL1-a1 type=X model=fc_waveguide"
-        " l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
-        "WG2 Net-CPL2-b2 DROP_OPT type=X model=fc_waveguide"
-        " l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
-        "WG3 Net-CPL1-b1 THRU_OPT type=X model=fc_waveguide"
-        " l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
-        "WG4 ADD_OPT Net-CPL2-a2 type=X model=fc_waveguide"
-        " l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
-        f"CPL1 Net-CPL1-a1 Net-CPL1-a2 Net-CPL1-b1 Net-CPL1-b2"
-        f" type=X model=fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
-        f"CPL2 Net-CPL2-a1 Net-CPL2-a2 Net-CPL2-b1 Net-CPL2-b2"
-        f" type=X model=fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
+        "XWG1 IN_OPT CPL1_a1 fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
+        "XWG2 CPL2_b2 DROP_OPT fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
+        "XWG3 CPL1_b1 THRU_OPT fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
+        "XWG4 ADD_OPT CPL2_a2 fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0",
+        f"XCPL1 CPL1_a1 CPL1_a2 CPL1_b1 CPL1_b2"
+        f" fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
+        f"XCPL2 CPL2_a1 CPL2_a2 CPL2_b1 CPL2_b2"
+        f" fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
         *ps_lines,
         ".end",
     ]) + "\n"
@@ -283,6 +293,8 @@ def wavelength_sweep(
 
     The result is proportional to transmitted optical power:
         P_thru = V_THRU / (responsivity · R_load)
+
+    TODO: should we use the optical signal instead?
     """
     netlist0 = build_netlist(model, ps_params, coupler_kappa_l,
                              wavelengths_nm[0], v_pn, v_heat)
@@ -291,7 +303,7 @@ def wavelength_sweep(
 
     v_thru = np.empty(len(wavelengths_nm))
     for i, wl in enumerate(wavelengths_nm):
-        ckt.set_param("CWL1", "wavelength_nm", wl)
+        ckt.set_param("XCWL1", "wavelength_nm", wl)
         ckt.set_param("V_PN", "dc", v_pn)
         ckt.set_param("V_HEAT", "dc", v_heat)
         try:
