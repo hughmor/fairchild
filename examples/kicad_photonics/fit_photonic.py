@@ -18,7 +18,7 @@ Experimental data formats (CSV, first row is header)
 -----------------------------------------------------
   spectrum.csv       :  wavelength_nm,  transmission_dB
   eo_tuning.csv      :  v_pn_V,         resonance_nm
-  thermal_tuning.csv :  v_heat_V,        resonance_nm
+  thermal_tuning.csv :  i_heat_A,        resonance_nm
 
 Usage
 -----
@@ -67,6 +67,11 @@ except ImportError:
         "fairchild Python extension not found.\n"
         "Build it with:  maturin develop --release -m crates/fairchild-py/Cargo.toml"
     )
+
+import lightlab as ll
+from lightlab.util.data import Spectrum
+from lightlab.util.sweep import NdSweeper
+
 
 
 # ── parameter specification ───────────────────────────────────────────────────
@@ -190,19 +195,27 @@ MODELS: dict[str, dict] = {
 # Terminal layout for each model's PS SPICE line (Fairchild subcircuit format).
 # Optical bundle ports each expand to 3 wires internally; electrical ports follow.
 # anode=GND, cathode=PN_BIAS → V_pn = -PN_BIAS (reverse-bias convention).
+# {heat_p}/{heat_n} are filled per-arm for series heater wiring.
 _PS_LINE_TEMPLATES = {
     "fc_pn_ps":         "X{name} {in_} {out} GND PN_BIAS fc_pn_ps {params}",
     "fc_pn_ps_cap":     "X{name} {in_} {out} GND PN_BIAS fc_pn_ps_cap {params}",
-    "fc_thermal_ps":    "X{name} {in_} {out} HEAT_BIAS GND fc_thermal_ps {params}",
-    "fc_thermal_ps_rc": "X{name} {in_} {out} HEAT_BIAS GND fc_thermal_ps_rc {params}",
-    "fc_pn_th_ps":      "X{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND fc_pn_th_ps {params}",
-    "fc_pn_th_ps_cap":  "X{name} {in_} {out} GND PN_BIAS HEAT_BIAS GND fc_pn_th_ps_cap {params}",
+    "fc_thermal_ps":    "X{name} {in_} {out} {heat_p} {heat_n} fc_thermal_ps {params}",
+    "fc_thermal_ps_rc": "X{name} {in_} {out} {heat_p} {heat_n} fc_thermal_ps_rc {params}",
+    "fc_pn_th_ps":      "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps {params}",
+    "fc_pn_th_ps_cap":  "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps_cap {params}",
 }
 
-# MZI arm connections (cross-coupled topology from the KiCad netlist).
+# MZI arm optical connections (cross-coupled topology).
 _ARM_CONNECTIONS = [
     ("CPL2_b1", "CPL1_a2"),  # arm 1
     ("CPL1_b2", "CPL2_a1"),  # arm 2
+]
+
+# Series heater wiring: arm1 top → shared midpoint → arm2 bottom → GND.
+# A single current source drives current through both heaters in series.
+_HEATER_CONNECTIONS = [
+    ("HEAT_BIAS", "HEAT_MID"),  # arm 1
+    ("HEAT_MID",  "GND"),       # arm 2
 ]
 
 
@@ -216,7 +229,7 @@ def build_netlist(
     coupler_kappa_l: float,
     wavelength_nm: float,
     v_pn: float = 0.0,
-    v_heat: float = 0.0,
+    i_heat: float = 0.0,
 ) -> str:
     """
     Build a complete SPICE netlist string for the MZI modulator.
@@ -228,7 +241,7 @@ def build_netlist(
     coupler_kappa_l: κ·L for both directional couplers
     wavelength_nm  : CW laser wavelength (nm)
     v_pn           : PN bias voltage (V)
-    v_heat         : heater voltage (V)
+    i_heat         : heater drive current (A); flows through both heaters in series
     """
     # Remove coupler param from ps_params if it leaked in
     ps_p = {k: v for k, v in ps_params.items() if k != "kappa_l"}
@@ -236,8 +249,13 @@ def build_netlist(
 
     tmpl = _PS_LINE_TEMPLATES[model]
     ps_lines = []
-    for i, (in_, out) in enumerate(_ARM_CONNECTIONS, start=1):
-        ps_lines.append(tmpl.format(name=f"PS{i}", in_=in_, out=out, params=ps_spice))
+    for i, ((in_, out), (heat_p, heat_n)) in enumerate(
+        zip(_ARM_CONNECTIONS, _HEATER_CONNECTIONS), start=1
+    ):
+        ps_lines.append(tmpl.format(
+            name=f"PS{i}", in_=in_, out=out, params=ps_spice,
+            heat_p=heat_p, heat_n=heat_n,
+        ))
 
     # All optical nets must be declared so the parser expands them to 3-wire bundles.
     optical_ports = [
@@ -255,7 +273,7 @@ def build_netlist(
         f"XCWL1 CWL_OUT fc_cw_laser power_mW=1.0 wavelength_nm={wavelength_nm:.6f}",
         "V1 VDD GND DC 2",
         f"V_PN  PN_BIAS  GND DC {v_pn:.6g}",
-        f"V_HEAT HEAT_BIAS GND DC {v_heat:.6g}",
+        f"IHEAT HEAT_BIAS GND DC {i_heat:.6g}",
         "R1 V_DROP GND 1k",
         "R2 V_THRU GND 1k",
         "XGC_IN  CWL_OUT IN_OPT fc_grating_coupler alpha_dB=6.5",
@@ -286,18 +304,16 @@ def wavelength_sweep(
     coupler_kappa_l: float,
     wavelengths_nm: np.ndarray,
     v_pn: float = 0.0,
-    v_heat: float = 0.0,
+    i_heat: float = 0.0,
 ) -> np.ndarray:
     """
     Run a DC OP at each wavelength and return V_THRU (V).
 
     The result is proportional to transmitted optical power:
         P_thru = V_THRU / (responsivity · R_load)
-
-    TODO: should we use the optical signal instead?
     """
     netlist0 = build_netlist(model, ps_params, coupler_kappa_l,
-                             wavelengths_nm[0], v_pn, v_heat)
+                             wavelengths_nm[0], v_pn, i_heat)
     ckt = fc.Circuit()
     ckt.load_str(netlist0)
 
@@ -305,7 +321,7 @@ def wavelength_sweep(
     for i, wl in enumerate(wavelengths_nm):
         ckt.set_param("XCWL1", "wavelength_nm", wl)
         ckt.set_param("V_PN", "dc", v_pn)
-        ckt.set_param("V_HEAT", "dc", v_heat)
+        ckt.set_param("IHEAT", "dc", i_heat)
         try:
             r = ckt.run("op")
             v_thru[i] = max(float(r["V_THRU"][0]), 1e-30)
@@ -453,29 +469,29 @@ def _synthetic_thermal_tuning(
     model: str,
     all_specs: list[ParamSpec],
     coupler_kappa_l: float,
-    v_heat_range: tuple = (0.0, 3.0),
+    i_heat_range: tuple = (0.0, 20e-3),
     n_points: int = 9,
     center_nm: float = 1550.0,
     scan_span_nm: float = 4.0,
     noise_nm: float = 0.02,
     rng_seed: int = 44,
 ) -> Optional[Dataset]:
-    """Synthetic resonance-shift vs heater-voltage dataset."""
+    """Synthetic resonance-shift vs heater-current dataset."""
     info = MODELS[model]
     if not info["has_heater"]:
         return None
     rng = np.random.default_rng(rng_seed)
     wls = np.linspace(center_nm - scan_span_nm / 2,
                       center_nm + scan_span_nm / 2, 41)
-    voltages = np.linspace(v_heat_range[0], v_heat_range[1], n_points)
+    currents = np.linspace(i_heat_range[0], i_heat_range[1], n_points)
     ps_p = {s.name: s.value for s in all_specs}
     resonances = []
-    for v in voltages:
-        vt = wavelength_sweep(model, ps_p, coupler_kappa_l, wls, v_heat=v)
+    for i in currents:
+        vt = wavelength_sweep(model, ps_p, coupler_kappa_l, wls, i_heat=i)
         res = find_extremum_wavelength(wls, vt, kind="min")
         resonances.append(res)
-    resonances = np.array(resonances) + rng.normal(0.0, noise_nm, size=len(voltages))
-    return Dataset(kind="thermal_tuning", x=voltages, y=resonances)
+    resonances = np.array(resonances) + rng.normal(0.0, noise_nm, size=len(currents))
+    return Dataset(kind="thermal_tuning", x=currents, y=resonances)
 
 
 # ── loss function ─────────────────────────────────────────────────────────────
@@ -518,9 +534,9 @@ def _loss(
 
         elif ds.kind == "thermal_tuning":
             residuals = []
-            for v_heat, res_meas in zip(ds.x, ds.y):
+            for i_heat, res_meas in zip(ds.x, ds.y):
                 vt = wavelength_sweep(model, ps_params, kappa_l, scan_wls_nm,
-                                      v_heat=v_heat)
+                                      i_heat=i_heat)
                 res_sim = find_extremum_wavelength(scan_wls_nm, vt, ds.extremum)
                 residuals.append(res_sim - res_meas)
             r = np.array(residuals)
@@ -658,11 +674,11 @@ def plot_fit(
             sim_res = []
             for v in ds.x:
                 v_pn = v if ds.kind == "eo_tuning" else 0.0
-                v_heat = v if ds.kind == "thermal_tuning" else 0.0
+                i_heat = v if ds.kind == "thermal_tuning" else 0.0
                 vt = wavelength_sweep(model, best, kappa_l, scan_wls,
-                                      v_pn=v_pn, v_heat=v_heat)
+                                      v_pn=v_pn, i_heat=i_heat)
                 sim_res.append(find_extremum_wavelength(scan_wls, vt, ds.extremum))
-            xlabel = "V_PN (V)" if ds.kind == "eo_tuning" else "V_heat (V)"
+            xlabel = "V_PN (V)" if ds.kind == "eo_tuning" else "I_heat (A)"
             ax.plot(ds.x, sim_res, label="simulation (fit)", lw=2)
             ax.plot(ds.x, ds.y, "o", ms=4, label="measured")
             ax.set_xlabel(xlabel)
@@ -704,7 +720,7 @@ def main():
     ap.add_argument("--eo", metavar="CSV",
                     help="path to EO tuning CSV (v_pn_V, resonance_nm)")
     ap.add_argument("--thermal", metavar="CSV",
-                    help="path to thermal tuning CSV (v_heat_V, resonance_nm)")
+                    help="path to thermal tuning CSV (i_heat_A, resonance_nm)")
     ap.add_argument("--center-nm", type=float, default=1550.0,
                     help="centre wavelength for sweeps (default: 1550 nm)")
     ap.add_argument("--span-nm", type=float, default=5.0,
