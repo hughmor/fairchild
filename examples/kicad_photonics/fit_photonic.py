@@ -14,15 +14,21 @@ Topology: add-drop MRM
                                      CPL1_b2 ──► WG2 ──► DROP
 ---------------------------------------------------------------------------
 
-Supported models (both have PN junction + heater):
+Supported models (all have PN junction + heater):
   fc_pn_th_ps       — linear EO (L1)
   fc_pn_th_ps_cap   — depletion-mode with C_j(V) + da/dV (L2)
+  fc_pn_th_ps_full  — piecewise PN: depletion + injection + TPA/self-heat (L3)
 
 Staged fitting strategy:
-  Stage 1 — passive  : fit n_eff, alpha_dB_cm, kappa_l from 0 V / 0 mA spectrum
-  Stage 2 — thermal  : fit p_pi_th from heater current sweeps
-  Stage 3 — EO       : fit v_pi_l from junction voltage sweeps
-  Pre-fit            : r_heater from heater I/V; g_pn from junction I/V
+  Stage 1 — passive      : fit n_eff, alpha_dB_cm, kappa_l from 0 V / 0 mA spectrum
+  Stage 2 — thermal      : fit p_pi_th from heater current sweeps
+  Stage 3 — EO           : fit v_pi_l (L1/L2) or dn_dv_rev + da_dv_rev (L3) from JV≤0
+  Stage 4 — injection    : fit dn_dv_inj + da_dv_inj (L3 only) from 0 < JV ≤ 0.9 V
+  Pre-fit                : r_heater from heater I/V; g_pn or (i_sat, n_diode) from I/V
+
+V=0 self-consistency note (L3): the model guarantees continuity at V=0 by construction —
+  both phi_eo_rev and phi_eo_inj are identically zero at v_pn=0, so separate depletion
+  and injection fits always "meet at V=0" without any explicit constraint.
 
 Setup
 -----
@@ -223,6 +229,53 @@ _COUPLER = [
               description="coupler kappa*L (shared for both CPL1 and CPL2)"),
 ]
 
+# ── Full-model (fc_pn_th_ps_full) parameter groups ──────────────────────────
+
+_PN_REV_FULL = [
+    # phi_eo_rev = 2π·L·dn_dv_rev·v_pn/λ.  With swapped terminal wiring v_pn = JV,
+    # so for a typical Si PN ring (reverse bias → red shift) dn_dv_rev < 0.
+    # Allow both signs so DE can find the correct direction.
+    ParamSpec("dn_dv_rev", -5.024e-5, fixed=False, bounds=(-5e-3, 5e-3),
+              description="reverse-bias Δn_eff/dV (depletion, 1/V); negative → red shift"),
+    ParamSpec("da_dv_rev", 7.83,      fixed=False, bounds=(0.0, 200.0),
+              description="reverse-bias FCA loss slope (Np/m/V)"),
+    # Junction cap: unfittable without dynamic (AC) data — held fixed
+    ParamSpec("c_j0",      1.375e-13, fixed=True, bounds=(1e-15, 1e-11),
+              description="zero-bias junction capacitance (F) [fixed: no AC data]"),
+    ParamSpec("v_bi",      0.917,     fixed=True, bounds=(0.3, 1.4),
+              description="built-in voltage (V) [fixed: no AC data]"),
+    ParamSpec("m_j",       0.5,       fixed=True, bounds=(0.2, 0.95),
+              description="junction grading coefficient [fixed: no AC data]"),
+]
+
+_PN_FWD_FULL = [
+    # i_sat and n_diode pre-fit from log-linear region of forward I/V
+    ParamSpec("i_sat",      1e-12,    fixed=True,  bounds=(1e-20, 1e-6),
+              description="Shockley saturation current (A) [pre-fit from I/V]"),
+    ParamSpec("n_diode",    1.05,     fixed=True,  bounds=(0.5, 5.0),
+              description="diode ideality factor [pre-fit from I/V]"),
+    # Carrier lifetime: only observable from AC / transient data
+    ParamSpec("tau_carrier", 10e-9,   fixed=True,  bounds=(0.1e-9, 100e-9),
+              description="carrier lifetime (s) [fixed: AC-only observable]"),
+    ParamSpec("dn_dv_inj",  1.311e-4, fixed=False, bounds=(1e-7, 1e-2),
+              description="injection Δn_eff per (exp(V/Vt)−1) [dimensionless coeff]"),
+    ParamSpec("da_dv_inj",  150.0,    fixed=False, bounds=(0.0, 2000.0),
+              description="injection FCA loss prefactor (Np/m per carrier unit)"),
+]
+
+_SELF_HEATING = [
+    # TPA and thermal: negligible at ~−10 dBm optical power at the ring.
+    # r_th can be fit from optical-power-dependent sweeps, but not this dataset.
+    ParamSpec("beta_tpa",  7.9e-12,   fixed=True, bounds=(1e-13, 1e-10),
+              description="TPA coefficient (m/W) [fixed: Si literature, low power]"),
+    ParamSpec("a_eff_m2",  1.257e-13, fixed=True, bounds=(1e-14, 1e-12),
+              description="effective mode area (m²) [fixed: WG simulation]"),
+    ParamSpec("r_th",      0.0,       fixed=True, bounds=(0.0, 1e5),
+              description="thermal resistance (K/W) [fixed=0: constant optical power]"),
+    ParamSpec("dn_dt",     1.86e-4,   fixed=True, bounds=(1e-5, 1e-3),
+              description="thermo-optic dn/dT (1/K) [fixed: crystalline Si]"),
+]
+
 MODELS: dict[str, dict] = {
     "fc_pn_th_ps": {
         "description": "PN + thermal — combined, linear EO (L1)",
@@ -238,18 +291,29 @@ MODELS: dict[str, dict] = {
         "has_heater":  True,
         "has_cap":     True,
     },
+    "fc_pn_th_ps_full": {
+        "description": "PN + thermal — full piecewise model: depletion + injection + TPA (L3)",
+        "ps_params":   _WAVEGUIDE + _PN_REV_FULL + _PN_FWD_FULL + _SELF_HEATING + _HEATER,
+        "has_pn":      True,
+        "has_heater":  True,
+        "has_cap":     True,
+        "has_injection": True,
+    },
 }
 
 
 #%% ── netlist builder ─────────────────────────────────────────────────────────
 
-# fc_pn_th_ps terminal order (from phase_shifters.rs):
-#   in, out, anode, cathode, heat_p, heat_n
-# anode=GND, cathode=PN_BIAS → forward convention: V_pn = PN_BIAS (positive = reverse bias)
-# heat_p / heat_n filled per-arm for series heater wiring.
+# fc_pn_th_ps / fc_pn_th_ps_cap terminal order: [in, out, anode, cathode, heat_p, heat_n]
+#   anode=GND, cathode=PN_BIAS → v_pn_physics = PN_BIAS; positive PN_BIAS = reverse bias ✓
+#
+# fc_pn_th_ps_full terminal order: [in, out, anode, cathode, heat_p, heat_n]
+#   SWAPPED: anode=PN_BIAS, cathode=GND → v_pn_physics = PN_BIAS (same dataset convention).
+#   With this wiring: PN_BIAS < 0 → depletion branch activates; PN_BIAS > 0 → injection. ✓
 _PS_LINE_TEMPLATES = {
-    "fc_pn_th_ps":     "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps {params}",
-    "fc_pn_th_ps_cap": "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps_cap {params}",
+    "fc_pn_th_ps":      "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps {params}",
+    "fc_pn_th_ps_cap":  "X{name} {in_} {out} GND PN_BIAS {heat_p} {heat_n} fc_pn_th_ps_cap {params}",
+    "fc_pn_th_ps_full": "X{name} {in_} {out} PN_BIAS GND {heat_p} {heat_n} fc_pn_th_ps_full {params}",
 }
 
 # Ring arm optical connections: CPL1_b1 → PS1 → CPL2_a2, CPL2_b2 → PS2 → CPL1_a1
@@ -488,6 +552,32 @@ def prefit_g_pn(sd: SweepData) -> float:
     return g_pn
 
 
+def prefit_diode_iv(sd: SweepData) -> tuple[float, float]:
+    """
+    Fit Shockley diode parameters (i_sat, n_diode) from forward I/V.
+
+    Log-space linear fit in 0.3–0.6 V where I ≈ I_sat·exp(V/(n·Vt)).
+    Returns (i_sat [A], n_diode).
+    """
+    i_junc_A = sd.i_junc_mA.mean(axis=0) * 1e-3    # average over HC axis, convert to A
+    jv_V = sd.jv_V
+
+    # Fit in the exponential regime, before ohmic-series-resistance dominates
+    mask = (jv_V >= 0.3) & (jv_V <= 0.6) & (i_junc_A > 0)
+    if mask.sum() < 3:
+        print("  Pre-fit diode I/V: insufficient points — using defaults.")
+        return 1e-12, 1.05
+
+    # log(I) = log(i_sat) + V / (n * Vt)  →  linear fit gives slope = 1/(n·Vt)
+    Vt = 0.025852   # kT/q at 300 K
+    log_I = np.log(i_junc_A[mask])
+    slope, intercept = np.polyfit(jv_V[mask], log_I, 1)
+    i_sat  = float(np.exp(intercept))
+    n_diode = float(np.clip(1.0 / (slope * Vt), 0.5, 5.0))
+    print(f"  Pre-fit diode: i_sat={i_sat:.3e} A, n_diode={n_diode:.3f}")
+    return i_sat, n_diode
+
+
 #%% ── staged fitting ─────────────────────────────────────────────────────────
 
 def _run_de(objective, specs, x0, label="", maxiter=200, popsize=12, seed=0, verbose=True):
@@ -542,8 +632,14 @@ def stage1_passive(
         coupler_specs = deepcopy(_COUPLER)
 
     # Fix EO and thermal; free only passive optical params + kappa_l
-    freeze = {"v_pi_l", "g_pn", "c_j0", "v_bi", "m_j", "da_dv",
-              "r_heater", "p_pi_th", "tau_th"}
+    freeze = {
+        "v_pi_l", "g_pn", "c_j0", "v_bi", "m_j", "da_dv",
+        "r_heater", "p_pi_th", "tau_th",
+        # Full-model EO/injection/self-heating params (frozen in Stage 1)
+        "dn_dv_rev", "da_dv_rev", "dn_dv_inj", "da_dv_inj",
+        "i_sat", "n_diode", "tau_carrier",
+        "beta_tpa", "a_eff_m2", "r_th", "dn_dt",
+    }
     for s in base_specs:
         if s.name in freeze:
             s.fixed = True
@@ -706,6 +802,131 @@ def stage3_eo(
     return best
 
 
+def stage3_eo_full(
+    model: str,
+    sd: SweepData,
+    stage2_result: dict[str, float],
+    base_specs: Optional[list[ParamSpec]] = None,
+    coupler_specs: Optional[list[ParamSpec]] = None,
+    n_jv_points: int = 8,
+    maxiter: int = 200,
+    popsize: int = 12,
+    verbose: bool = True,
+) -> dict[str, float]:
+    """
+    Stage 3 (full model): fit dn_dv_rev and da_dv_rev from reverse-bias spectra (JV ≤ 0).
+
+    V=0 self-consistency is guaranteed by model construction: both phi_eo_rev and
+    phi_eo_inj are exactly zero at v_pn=0, so depletion and injection fits always
+    meet at V=0 without any explicit constraint.  The slope discontinuity at V=0 is
+    physically intentional (depletion ↔ injection are different mechanisms).
+    """
+    if base_specs is None:
+        base_specs = deepcopy(MODELS[model]["ps_params"])
+    if coupler_specs is None:
+        coupler_specs = deepcopy(_COUPLER)
+
+    for s in base_specs + coupler_specs:
+        s.fixed = True
+        if s.name in stage2_result:
+            s.value = stage2_result[s.name]
+
+    for s in base_specs:
+        if s.name in {"dn_dv_rev", "da_dv_rev"}:
+            s.fixed = False
+
+    jv_rev = sd.jv_V[sd.jv_V <= 0]
+    if len(jv_rev) == 0:
+        print("  Stage 3 (depletion): no reverse-bias JV points — skipping.")
+        return stage2_result
+    n_pts  = min(n_jv_points, len(jv_rev))
+    jv_sel = jv_rev[np.round(np.linspace(0, len(jv_rev) - 1, n_pts)).astype(int)]
+
+    i0  = int(np.argmin(np.abs(sd.hc_mA)))
+    wls = sd.wl_nm
+    combined = base_specs + coupler_specs
+
+    def objective(x):
+        params = _unpack(x, combined)
+        kl     = params.pop("kappa_l")
+        loss   = 0.0
+        for jv in jv_sel:
+            j_jv   = int(np.argmin(np.abs(sd.jv_V - jv)))
+            meas_T = sd.T_dB[i0, j_jv]
+            sim_T  = wavelength_sweep(model, params, kl, wls, v_pn=jv)
+            loss  += _spectrum_loss(sim_T, meas_T)
+        return loss / len(jv_sel)
+
+    x0   = _pack(_free_specs(combined))
+    best = {**stage2_result,
+            **_run_de(objective, combined, x0,
+                      label="Stage 3 (EO depletion, full)", maxiter=maxiter,
+                      popsize=popsize, verbose=verbose)}
+    return best
+
+
+def stage4_eo_injection(
+    model: str,
+    sd: SweepData,
+    stage3_result: dict[str, float],
+    base_specs: Optional[list[ParamSpec]] = None,
+    coupler_specs: Optional[list[ParamSpec]] = None,
+    n_jv_points: int = 8,
+    maxiter: int = 200,
+    popsize: int = 12,
+    verbose: bool = True,
+) -> dict[str, float]:
+    """
+    Stage 4 (full model): fit dn_dv_inj and da_dv_inj from forward-bias spectra.
+
+    Restricted to 0 < JV ≤ 0.9 V — the Shockley exponential clamps at 40·Vt ≈ 1.04 V,
+    so fitting beyond ~0.9 V is unreliable.
+    """
+    if base_specs is None:
+        base_specs = deepcopy(MODELS[model]["ps_params"])
+    if coupler_specs is None:
+        coupler_specs = deepcopy(_COUPLER)
+
+    for s in base_specs + coupler_specs:
+        s.fixed = True
+        if s.name in stage3_result:
+            s.value = stage3_result[s.name]
+
+    for s in base_specs:
+        if s.name in {"dn_dv_inj", "da_dv_inj"}:
+            s.fixed = False
+
+    # Restrict to 0 < JV ≤ 0.9 V (below Shockley clamp at 40·Vt ≈ 1.04 V)
+    jv_fwd = sd.jv_V[(sd.jv_V > 0) & (sd.jv_V <= 0.9)]
+    if len(jv_fwd) == 0:
+        print("  Stage 4 (injection): no forward-bias JV points (0–0.9 V) — skipping.")
+        return stage3_result
+    n_pts  = min(n_jv_points, len(jv_fwd))
+    jv_sel = jv_fwd[np.round(np.linspace(0, len(jv_fwd) - 1, n_pts)).astype(int)]
+
+    i0  = int(np.argmin(np.abs(sd.hc_mA)))
+    wls = sd.wl_nm
+    combined = base_specs + coupler_specs
+
+    def objective(x):
+        params = _unpack(x, combined)
+        kl     = params.pop("kappa_l")
+        loss   = 0.0
+        for jv in jv_sel:
+            j_jv   = int(np.argmin(np.abs(sd.jv_V - jv)))
+            meas_T = sd.T_dB[i0, j_jv]
+            sim_T  = wavelength_sweep(model, params, kl, wls, v_pn=jv)
+            loss  += _spectrum_loss(sim_T, meas_T)
+        return loss / len(jv_sel)
+
+    x0   = _pack(_free_specs(combined))
+    best = {**stage3_result,
+            **_run_de(objective, combined, x0,
+                      label="Stage 4 (EO injection, full)", maxiter=maxiter,
+                      popsize=popsize, verbose=verbose)}
+    return best
+
+
 def fit_staged(
     model: str = "fc_pn_th_ps",
     path: str = DATA_PATH,
@@ -731,10 +952,16 @@ def fit_staged(
     print(f"  Wavelength window: {sd.wl_nm[0]:.3f} … {sd.wl_nm[-1]:.3f} nm"
           f" ({N_SIM_PTS} pts)")
 
+    is_full = (model == "fc_pn_th_ps_full")
+
     # ── pre-fits from electrical data ──────────────────────────────────────
     print("\nPre-fitting electrical parameters …")
     r_heater = prefit_r_heater(sd)
-    g_pn     = prefit_g_pn(sd)
+
+    if is_full:
+        i_sat, n_diode = prefit_diode_iv(sd)
+    else:
+        g_pn = prefit_g_pn(sd)
 
     # Apply pre-fit values to all relevant ParamSpec lists
     def _apply_prefit(specs):
@@ -742,8 +969,14 @@ def fit_staged(
             if s.name == "r_heater":
                 s.value = r_heater
                 s.fixed = True
-            elif s.name == "g_pn":
+            elif not is_full and s.name == "g_pn":
                 s.value = g_pn
+                s.fixed = True
+            elif is_full and s.name == "i_sat":
+                s.value = i_sat
+                s.fixed = True
+            elif is_full and s.name == "n_diode":
+                s.value = n_diode
                 s.fixed = True
         return specs
 
@@ -765,12 +998,27 @@ def fit_staged(
     # ── Stage 3: EO ───────────────────────────────────────────────────────
     base3 = _apply_prefit(deepcopy(MODELS[model]["ps_params"]))
     cpl3  = deepcopy(_COUPLER)
-    print("\nStage 3 — EO (v_pi_l) …")
-    s3 = stage3_eo(model, sd, s2, base_specs=base3, coupler_specs=cpl3,
-                   verbose=verbose)
+    if is_full:
+        print("\nStage 3 — EO depletion (dn_dv_rev, da_dv_rev) …")
+        s3 = stage3_eo_full(model, sd, s2, base_specs=base3, coupler_specs=cpl3,
+                            verbose=verbose)
+    else:
+        print("\nStage 3 — EO (v_pi_l) …")
+        s3 = stage3_eo(model, sd, s2, base_specs=base3, coupler_specs=cpl3,
+                       verbose=verbose)
 
-    print_results(s3)
-    return s3
+    # ── Stage 4: injection EO (full model only) ───────────────────────────
+    if is_full:
+        base4 = _apply_prefit(deepcopy(MODELS[model]["ps_params"]))
+        cpl4  = deepcopy(_COUPLER)
+        print("\nStage 4 — EO injection (dn_dv_inj, da_dv_inj) …")
+        s4 = stage4_eo_injection(model, sd, s3, base_specs=base4, coupler_specs=cpl4,
+                                 verbose=verbose)
+    else:
+        s4 = s3
+
+    print_results(s4)
+    return s4
 
 
 #%% ── result reporting & plotting ────────────────────────────────────────────
@@ -934,7 +1182,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="fc_pn_th_ps",
-                    choices=list(MODELS.keys()))
+                    choices=list(MODELS.keys()),
+                    help="phase-shifter model (default: fc_pn_th_ps)")
     ap.add_argument("--data", default=DATA_PATH,
                     help="path to NdSweeper pickle (without extension)")
     ap.add_argument("--quick-sim", action="store_true",
