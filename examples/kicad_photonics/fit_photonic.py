@@ -39,6 +39,7 @@ Setup
 
 #%% ── imports ────────────────────────────────────────────────────────────────
 
+import json
 import sys
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -1021,6 +1022,22 @@ def fit_staged(
     return s4
 
 
+#%% ── result save / load ─────────────────────────────────────────────────────
+
+def save_params(best: dict[str, float], model: str, path: str) -> None:
+    """Save best-fit params and model name to a JSON file."""
+    with open(path, "w") as f:
+        json.dump({"model": model, "params": best}, f, indent=2)
+    print(f"Parameters saved: {path}")
+
+
+def load_params(path: str) -> tuple[str, dict[str, float]]:
+    """Load model name and params dict from a JSON file saved by save_params()."""
+    with open(path) as f:
+        data = json.load(f)
+    return data["model"], {k: float(v) for k, v in data["params"].items()}
+
+
 #%% ── result reporting & plotting ────────────────────────────────────────────
 
 def print_results(best: dict[str, float]):
@@ -1030,34 +1047,43 @@ def print_results(best: dict[str, float]):
     print()
 
 
+def _sel_indices(arr: np.ndarray, n: int, lo: float = -np.inf, hi: float = np.inf) -> np.ndarray:
+    """Return n evenly-spaced indices into arr restricted to [lo, hi]."""
+    mask = (arr >= lo) & (arr <= hi)
+    full_idx = np.where(mask)[0]
+    if len(full_idx) == 0:
+        return np.array([], dtype=int)
+    chosen = np.round(np.linspace(0, len(full_idx) - 1, min(n, len(full_idx)))).astype(int)
+    return full_idx[chosen]
+
+
+def _style_legend(ax, loc="lower right"):
+    """Add a solid/dashed sim/data legend entry."""
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], color="k", lw=1.8, label="sim"),
+               Line2D([0], [0], color="k", lw=1.2, ls="--", label="data")]
+    ax.legend(handles=handles, fontsize=8, loc=loc)
+
+
 def plot_ring_fit(
     model: str,
     best: dict[str, float],
     sd: SweepData,
     out_path: str = "ring_fit.png",
-    n_panels: int = 4,
 ):
-    """
-    Plot measured vs fitted spectra for a selection of bias conditions.
-
-    Panel layout:
-      [0] passive (0 mA, 0 V)
-      [1] max heater current
-      [2] max reverse bias
-      [3] max forward bias
-    """
+    """Four-panel overview: passive, thermal, EO reverse, EO forward."""
     if not _HAS_MPL:
         print("matplotlib not available — skipping plot.")
         return
 
-    kl = best.get("kappa_l", _COUPLER[0].value)
+    kl  = best.get("kappa_l", _COUPLER[0].value)
     wls = sd.wl_nm
 
-    i0 = int(np.argmin(np.abs(sd.hc_mA)))
-    j0 = int(np.argmin(np.abs(sd.jv_V)))
+    i0    = int(np.argmin(np.abs(sd.hc_mA)))
+    j0    = int(np.argmin(np.abs(sd.jv_V)))
     i_max = int(np.argmax(sd.hc_mA))
-    j_rev = int(np.argmin(sd.jv_V))    # most negative (max reverse bias)
-    j_fwd = int(np.argmax(sd.jv_V))    # most positive (max forward bias)
+    j_rev = int(np.argmin(sd.jv_V))
+    j_fwd = int(np.argmax(sd.jv_V))
 
     cases = [
         ("passive (0 mA, 0 V)",
@@ -1070,19 +1096,18 @@ def plot_ring_fit(
          dict(v_pn=sd.jv_V[j_fwd], i_heat=0.0), i0, j_fwd),
     ]
 
-    fig, axes = plt.subplots(1, len(cases), figsize=(5 * len(cases), 4),
-                             sharey=False)
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4), sharey=False)
     for ax, (title, kwargs, i, j) in zip(axes, cases):
         meas_T = sd.T_dB[i, j]
         sim_T  = wavelength_sweep(model, best, kl, wls, **kwargs)
-        ax.plot(wls, _normalise_spectrum(sim_T),  lw=2, label="sim")
-        ax.plot(wls, _normalise_spectrum(meas_T), "--", lw=1.5, label="meas")
+        ax.plot(wls, _normalise_spectrum(sim_T),  lw=1.8)
+        ax.plot(wls, _normalise_spectrum(meas_T), ls="--", lw=1.2)
         ax.set_title(title, fontsize=9)
         ax.set_xlabel("Wavelength (nm)")
         ax.set_ylabel("Transmission (dB, norm.)")
-        ax.legend(fontsize=8)
+    _style_legend(axes[0])
 
-    fig.suptitle(f"Ring fit — {model}", y=1.01)
+    fig.suptitle(f"Ring fit — {model}")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Plot saved: {out_path}")
@@ -1095,18 +1120,15 @@ def plot_2d_sweep(
     sd: SweepData,
     out_path: str = "ring_sweep.png",
 ):
-    """
-    2-D colour map of resonance shift vs heater current and junction voltage.
-    Left panel: measured; right panel: simulated.
-    """
+    """2-D colour map of resonance shift vs heater current and junction voltage."""
     if not _HAS_MPL:
         return
 
     kl  = best.get("kappa_l", _COUPLER[0].value)
     wls = sd.wl_nm
 
-    i0 = int(np.argmin(np.abs(sd.hc_mA)))
-    j0 = int(np.argmin(np.abs(sd.jv_V)))
+    i0        = int(np.argmin(np.abs(sd.hc_mA)))
+    j0        = int(np.argmin(np.abs(sd.jv_V)))
     res0_meas = _find_resonance(wls, sd.T_dB[i0, j0])
 
     n_hc, n_jv = len(sd.hc_mA), len(sd.jv_V)
@@ -1137,6 +1159,217 @@ def plot_2d_sweep(
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Plot saved: {out_path}")
     plt.close(fig)
+
+
+def plot_iv_curves(
+    model: str,
+    best: dict[str, float],
+    sd: SweepData,
+    out_path: str = "iv_curves.png",
+):
+    """
+    Heater I-V and diode I-V: model vs data.
+
+    Left panel  — heater: V = 2·R_arm·I (model) vs measured heater voltage.
+    Right panel — diode: Shockley or linear conductance (model) vs measured junction current.
+                  Lower inset uses log scale on the forward-bias half to show
+                  Shockley fit quality.
+    """
+    if not _HAS_MPL:
+        return
+
+    # ── heater I-V ────────────────────────────────────────────────────────
+    hc_A         = sd.hc_mA * 1e-3
+    v_heat_meas  = sd.v_heat_V.mean(axis=1)      # average over JV axis
+    r_heater     = best.get("r_heater", 184.1)
+    v_heat_model = 2.0 * r_heater * hc_A
+
+    # ── diode I-V ─────────────────────────────────────────────────────────
+    jv_V          = sd.jv_V
+    i_junc_mA_meas = sd.i_junc_mA.mean(axis=0)   # average over HC axis
+
+    Vt = 0.025852   # kT/q at 300 K
+    if model == "fc_pn_th_ps_full":
+        n_d   = best.get("n_diode", 1.05)
+        i_sat = best.get("i_sat",   1e-12)
+        i_model_A = i_sat * (np.exp(np.clip(jv_V / (n_d * Vt), -40, 40)) - 1.0)
+    else:
+        g_pn      = best.get("g_pn", 1e-3)
+        i_model_A = g_pn * jv_V
+    i_model_mA = i_model_A * 1e3
+
+    fig = plt.figure(figsize=(12, 4))
+    gs  = fig.add_gridspec(1, 2, wspace=0.35)
+
+    # Left: heater I-V
+    ax1 = fig.add_subplot(gs[0])
+    ax1.plot(sd.hc_mA, v_heat_model, lw=1.8, label=f"model  (2·{r_heater:.0f} Ω)")
+    ax1.plot(sd.hc_mA, v_heat_meas,  ls="--", lw=1.2, label="data")
+    ax1.set_xlabel("Heater Current (mA)")
+    ax1.set_ylabel("Heater Voltage (V)")
+    ax1.set_title("Heater I-V")
+    ax1.legend(fontsize=8)
+
+    # Right: diode I-V — two stacked sub-axes sharing X
+    gs_r = gs[1].subgridspec(2, 1, hspace=0.08, height_ratios=[1, 1])
+    ax2t = fig.add_subplot(gs_r[0])   # linear, full range
+    ax2b = fig.add_subplot(gs_r[1], sharex=ax2t)   # log, forward only
+
+    for ax, yscale, fwd_only, ylabel in [
+        (ax2t, "linear", False, "I_junc (mA)"),
+        (ax2b, "log",    True,  "I_junc (mA, log)"),
+    ]:
+        if fwd_only:
+            mask = jv_V > 0
+            x    = jv_V[mask]
+            ym   = i_model_mA[mask]
+            yd   = i_junc_mA_meas[mask]
+            # only keep positive values for log scale
+            pos  = (ym > 0) & (yd > 0)
+            ax.plot(x[pos], ym[pos], lw=1.8)
+            ax.plot(x[pos], yd[pos], ls="--", lw=1.2)
+            ax.set_yscale("log")
+        else:
+            ax.plot(jv_V, i_model_mA,     lw=1.8,         label="model")
+            ax.plot(jv_V, i_junc_mA_meas, ls="--", lw=1.2, label="data")
+            ax.legend(fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    ax2b.set_xlabel("Junction Voltage (V)")
+    ax2t.set_title("Diode I-V")
+    plt.setp(ax2t.get_xticklabels(), visible=False)
+
+    fig.suptitle(f"I-V curves — {model}")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {out_path}")
+    plt.close(fig)
+
+
+def plot_spectra_vs_jv(
+    model: str,
+    best: dict[str, float],
+    sd: SweepData,
+    out_path: str = "spectra_vs_jv.png",
+    n_curves: int = 6,
+):
+    """
+    Spectra at two fixed heater currents (0 mA and 2 mA), sweeping junction voltage.
+
+    n_curves uniformly-spaced JV points are shown per panel, coloured by JV using
+    the coolwarm map (blue = most negative, red = most positive).
+    Solid lines = simulation; dashed lines = data.
+    """
+    if not _HAS_MPL:
+        return
+
+    kl  = best.get("kappa_l", _COUPLER[0].value)
+    wls = sd.wl_nm
+
+    jv_idx = _sel_indices(sd.jv_V, n_curves)
+    cmap   = plt.get_cmap("coolwarm")
+    norm   = plt.Normalize(vmin=sd.jv_V.min(), vmax=sd.jv_V.max())
+
+    # Fixed heater currents: 0 mA and 2 mA (closest available)
+    hc_targets = [0.0, 2.0]
+    hc_indices = [int(np.argmin(np.abs(sd.hc_mA - t))) for t in hc_targets]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+    for ax, i_hc in zip(axes, hc_indices):
+        hc_mA = sd.hc_mA[i_hc]
+        for j_jv in jv_idx:
+            jv    = sd.jv_V[j_jv]
+            color = cmap(norm(jv))
+            sim_T  = wavelength_sweep(model, best, kl, wls,
+                                      v_pn=jv, i_heat=hc_mA * 1e-3)
+            meas_T = sd.T_dB[i_hc, j_jv]
+            ax.plot(wls, _normalise_spectrum(sim_T),  color=color, lw=1.8)
+            ax.plot(wls, _normalise_spectrum(meas_T), color=color, lw=1.0, ls="--")
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Transmission (dB, norm.)")
+        ax.set_title(f"HC = {hc_mA:.1f} mA")
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="Junction Voltage (V)")
+    _style_legend(axes[0])
+
+    fig.suptitle(f"Spectra vs junction voltage — {model}")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {out_path}")
+    plt.close(fig)
+
+
+def plot_spectra_vs_hc(
+    model: str,
+    best: dict[str, float],
+    sd: SweepData,
+    out_path: str = "spectra_vs_hc.png",
+    n_curves: int = 6,
+):
+    """
+    Spectra at three fixed junction voltages, sweeping heater current.
+
+    Three panels: max reverse bias, moderate forward (~1 V), max forward.
+    n_curves uniformly-spaced HC points (≥ 0 mA) per panel, coloured by heater
+    current using the plasma map (dark = low, bright = high).
+    Solid lines = simulation; dashed lines = data.
+    """
+    if not _HAS_MPL:
+        return
+
+    kl  = best.get("kappa_l", _COUPLER[0].value)
+    wls = sd.wl_nm
+
+    hc_idx = _sel_indices(sd.hc_mA, n_curves, lo=0.0)
+    hc_sel = sd.hc_mA[hc_idx]
+    cmap   = plt.get_cmap("plasma")
+    norm   = plt.Normalize(vmin=hc_sel.min(), vmax=hc_sel.max())
+
+    # Three JV slices
+    j_rev = int(np.argmin(sd.jv_V))
+    j_mod = int(np.argmin(np.abs(sd.jv_V - 1.0)))
+    j_fwd = int(np.argmax(sd.jv_V))
+    jv_cases = [
+        (j_rev, f"JV = {sd.jv_V[j_rev]:.2f} V  (max reverse)"),
+        (j_mod, f"JV = {sd.jv_V[j_mod]:.2f} V  (≈+1 V)"),
+        (j_fwd, f"JV = {sd.jv_V[j_fwd]:.2f} V  (max forward)"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4), sharey=True)
+    for ax, (j_jv, jv_label) in zip(axes, jv_cases):
+        jv = sd.jv_V[j_jv]
+        for i_hc in hc_idx:
+            hc    = sd.hc_mA[i_hc]
+            color = cmap(norm(hc))
+            sim_T  = wavelength_sweep(model, best, kl, wls,
+                                      v_pn=jv, i_heat=hc * 1e-3)
+            meas_T = sd.T_dB[i_hc, j_jv]
+            ax.plot(wls, _normalise_spectrum(sim_T),  color=color, lw=1.8)
+            ax.plot(wls, _normalise_spectrum(meas_T), color=color, lw=1.0, ls="--")
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Transmission (dB, norm.)")
+        ax.set_title(jv_label, fontsize=9)
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label="Heater Current (mA)")
+    _style_legend(axes[0])
+
+    fig.suptitle(f"Spectra vs heater current — {model}")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {out_path}")
+    plt.close(fig)
+
+
+def plot_all(model: str, best: dict[str, float], sd: SweepData, prefix: str = "") -> None:
+    """Run all plot functions with a shared filename prefix."""
+    p = (prefix + "_") if prefix else ""
+    plot_ring_fit(model, best, sd,         out_path=f"{p}ring_fit.png")
+    plot_2d_sweep(model, best, sd,         out_path=f"{p}ring_sweep.png")
+    plot_iv_curves(model, best, sd,        out_path=f"{p}iv_curves.png")
+    plot_spectra_vs_jv(model, best, sd,    out_path=f"{p}spectra_vs_jv.png")
+    plot_spectra_vs_hc(model, best, sd,    out_path=f"{p}spectra_vs_hc.png")
 
 
 #%% ── quick diagnostics ──────────────────────────────────────────────────────
@@ -1188,18 +1421,31 @@ if __name__ == "__main__":
                     help="path to NdSweeper pickle (without extension)")
     ap.add_argument("--quick-sim", action="store_true",
                     help="run a quick simulation with default params and exit")
-    ap.add_argument("--plot-result", metavar="PKL",
-                    help="load a previously-saved result dict and plot it")
+    ap.add_argument("--load-params", metavar="JSON",
+                    help="skip fitting; load params from JSON and plot only")
+    ap.add_argument("--save-params", metavar="JSON", default=None,
+                    help="path to save best-fit params (default: <model>_fit.json)")
+    ap.add_argument("--plot-prefix", default="",
+                    help="filename prefix for all output plots")
     ap.add_argument("--maxiter", type=int, default=200)
     ap.add_argument("--popsize", type=int, default=12)
     args = ap.parse_args()
 
     if args.quick_sim:
         quick_sim(args.model)
-    else:
-        best = fit_staged(model=args.model, path=args.data, verbose=True)
+        sys.exit(0)
 
-        sweep = load_sweep(args.data)
-        sd    = extract_data(sweep)
-        plot_ring_fit(args.model, best, sd)
-        plot_2d_sweep(args.model, best, sd)
+    sweep = load_sweep(args.data)
+    sd    = extract_data(sweep)
+
+    if args.load_params:
+        model, best = load_params(args.load_params)
+        print(f"Loaded params from {args.load_params}  (model={model})")
+        print_results(best)
+    else:
+        best  = fit_staged(model=args.model, path=args.data, verbose=True)
+        model = args.model
+        json_path = args.save_params or f"{model}_fit.json"
+        save_params(best, model, json_path)
+
+    plot_all(model, best, sd, prefix=args.plot_prefix or model)
