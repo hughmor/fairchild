@@ -7,5 +7,8 @@ VIN  in  0   PULSE(0 0.8 10n 1n 1n 40n 100n)
 RB   in  b   10k
 RC   cc  c   3.3k
 Q1   c b 0 0 npn1
-.tran 1n 200n
+* Step is 1/10 the 1 ns input edge so both simulators resolve the transition.
+* A 1 ns step on a 1 ns edge under-resolves it (fairchild fixed-step vs ngspice
+* adaptive), which inflates pointwise RMS even though DC levels match exactly.
+.tran 0.1n 200n
 .end

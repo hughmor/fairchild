@@ -68,13 +68,24 @@ pub struct GummelPoonBjt {
     var: f64,      // reverse Early voltage (V)
     tf: f64,       // forward transit time (s) — B-E diffusion charge
     tr: f64,       // reverse transit time (s) — B-C diffusion charge
+    rb: f64,       // base ohmic series resistance (Ω); 0 = no internal node
+    rc: f64,       // collector ohmic series resistance (Ω)
+    re: f64,       // emitter ohmic series resistance (Ω)
     polarity: f64, // +1 NPN, -1 PNP
     vcrit: f64,    // pnjlim critical voltage (derived)
 
     // ── Terminal bindings ─────────────────────────────────────────────────────
+    // The intrinsic transistor physics operates on the *internal* nodes
+    // (collector/base/emitter).  When a series resistance is non-zero, an extra
+    // internal node is allocated and the resistor connects it to the matching
+    // external terminal (collector_ext/base_ext/emitter_ext).  When the series
+    // resistance is zero the internal node simply aliases the external terminal.
     collector: NodeId,
     base: NodeId,
     emitter: NodeId,
+    collector_ext: NodeId,
+    base_ext: NodeId,
+    emitter_ext: NodeId,
 
     // ── Cached per-NR-iteration quantities (set by eval) ─────────────────────
     vbe_eff: f64, // effective junction voltage B-E (after pnjlim, polarity-corrected)
@@ -130,6 +141,9 @@ impl GummelPoonBjt {
         let mut var = f64::INFINITY;
         let mut tf = 0.0;
         let mut tr = 0.0;
+        let mut rb = 0.0;
+        let mut rc = 0.0;
+        let mut re = 0.0;
         // Depletion cap params — SPICE3 defaults.
         let mut cje = 0.0;
         let mut vje = 0.75;
@@ -150,6 +164,9 @@ impl GummelPoonBjt {
                 "var" | "vb" => var = *v,
                 "tf" => tf = *v,
                 "tr" => tr = *v,
+                "rb" => rb = *v,
+                "rc" => rc = *v,
+                "re" => re = *v,
                 "cje" => cje = *v,
                 "vje" => vje = *v,
                 "mje" => mje = *v,
@@ -158,8 +175,8 @@ impl GummelPoonBjt {
                 "mjc" => mjc = *v,
                 "fc" => fc = *v,
                 // Accepted but not yet modelled.
-                "rb" | "rc" | "re" | "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cjs"
-                | "vjs" | "mjs" | "xtb" | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
+                "ikf" | "ikr" | "ise" | "isc" | "ne" | "nc" | "cjs" | "vjs" | "mjs" | "xtb"
+                | "eg" | "xti" | "kf" | "af" | "ptf" | "xcjc" | "tnom" => {}
                 _ => unknown.push(k.clone()),
             }
         }
@@ -173,11 +190,17 @@ impl GummelPoonBjt {
             var,
             tf,
             tr,
+            rb,
+            rc,
+            re,
             polarity: if is_pnp { -1.0 } else { 1.0 },
             vcrit: 0.0,
             collector: None,
             base: None,
             emitter: None,
+            collector_ext: None,
+            base_ext: None,
+            emitter_ext: None,
             vbe_eff: 0.0,
             vbc_eff: 0.0,
             gf: GMIN,
@@ -238,10 +261,38 @@ impl Device for GummelPoonBjt {
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
         // Terminals order: [C, B, E, S] — substrate (S) is ignored in this implementation.
         debug_assert!(terminals.len() >= 3, "BJT expects [C, B, E, S]");
+        self.collector_ext = terminals[0];
+        self.base_ext = terminals[1];
+        self.emitter_ext = terminals[2];
+        // Internal (intrinsic) nodes default to aliasing the external terminals;
+        // bind_extra_nodes() re-points them to fresh internal nodes where a series
+        // resistance is present.
         self.collector = terminals[0];
         self.base = terminals[1];
         self.emitter = terminals[2];
         // terminals[3] = substrate — tied to ground by caller; not stamped separately.
+    }
+
+    /// One internal node per non-zero ohmic series resistance (RB, RC, RE).
+    fn num_extra_nodes(&self) -> usize {
+        (self.rb > 0.0) as usize + (self.rc > 0.0) as usize + (self.re > 0.0) as usize
+    }
+
+    /// Bind internal collector'/base'/emitter' nodes for the series resistances.
+    /// Order is fixed (base, collector, emitter) so the assignment is stable.
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        let mut idx = first_idx;
+        if self.rb > 0.0 {
+            self.base = Some(idx);
+            idx += 1;
+        }
+        if self.rc > 0.0 {
+            self.collector = Some(idx);
+            idx += 1;
+        }
+        if self.re > 0.0 {
+            self.emitter = Some(idx);
+        }
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
@@ -389,6 +440,33 @@ impl Device for GummelPoonBjt {
         stamp!(e, bk, -(gf - gce) - (gpi + gmu));
         stamp!(e, c, -gce - (-gmu));
         stamp!(e, e, gf + gpi);
+
+        // Series ohmic resistances: a conductance 1/R between each external
+        // terminal and its internal node.  When R = 0 the internal node aliases
+        // the external one and no resistor is stamped.  The `stamp!` macro skips
+        // grounded (None) terminals, which correctly yields a conductance-to-
+        // ground when an external terminal is ground.
+        if self.rb > 0.0 {
+            let g = 1.0 / self.rb;
+            stamp!(self.base_ext, self.base_ext, g);
+            stamp!(self.base_ext, self.base, -g);
+            stamp!(self.base, self.base_ext, -g);
+            stamp!(self.base, self.base, g);
+        }
+        if self.rc > 0.0 {
+            let g = 1.0 / self.rc;
+            stamp!(self.collector_ext, self.collector_ext, g);
+            stamp!(self.collector_ext, self.collector, -g);
+            stamp!(self.collector, self.collector_ext, -g);
+            stamp!(self.collector, self.collector, g);
+        }
+        if self.re > 0.0 {
+            let g = 1.0 / self.re;
+            stamp!(self.emitter_ext, self.emitter_ext, g);
+            stamp!(self.emitter_ext, self.emitter, -g);
+            stamp!(self.emitter, self.emitter_ext, -g);
+            stamp!(self.emitter, self.emitter, g);
+        }
     }
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
@@ -649,6 +727,65 @@ mod tests {
         assert!(mat.a[1][2] < 0.0, "J[B][E] should be negative from CJE");
         // Off-diagonal B-C must be negative.
         assert!(mat.a[1][0] < 0.0, "J[B][C] should be negative from CJC");
+    }
+
+    #[test]
+    fn series_resistances_allocate_internal_nodes_and_stamp() {
+        // RB and RC present, RE absent → two internal nodes; the intrinsic
+        // collector/base move to fresh internal nodes while the emitter aliases
+        // its external terminal.  The external terminals couple to the internal
+        // nodes only through the series conductances 1/RB and 1/RC.
+        let (mut q, unknown) = GummelPoonBjt::from_model_params(
+            false,
+            &[
+                ("is".into(), 1e-15),
+                ("bf".into(), 100.0),
+                ("rb".into(), 1000.0),
+                ("rc".into(), 50.0),
+            ],
+        );
+        assert!(unknown.is_empty(), "rb/rc must be recognised: {unknown:?}");
+        q.setup_model(&ctx());
+        // External: C=0, B=1, E=2.
+        q.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
+        assert_eq!(q.num_extra_nodes(), 2, "RB and RC each need an internal node");
+        // Allocate internal nodes starting at index 3.
+        q.bind_extra_nodes(3);
+        assert_eq!(q.base, Some(3), "internal base = first extra node");
+        assert_eq!(q.collector, Some(4), "internal collector = second extra node");
+        assert_eq!(q.emitter, Some(2), "emitter aliases external (RE = 0)");
+
+        q.vbe_prev = 0.7;
+        q.vbc_prev = -4.3;
+        // x indexed by node: ext C,B,E then int B',C'.
+        let x = [5.0_f64, 0.7, 0.0, 0.7, 5.0];
+        q.eval(&x, EvalFlags::dc(), &ctx());
+
+        let mut mat = MnaMatrix::zeros(5);
+        q.load_jacobian(&mut mat);
+        // External base row sees only the RB conductance (intrinsic physics is on
+        // the internal base node 3).
+        assert!(
+            (mat.a[1][1] - 1.0 / 1000.0).abs() < 1e-12,
+            "ext-base diagonal should equal 1/RB, got {:.6e}",
+            mat.a[1][1]
+        );
+        assert!(
+            (mat.a[1][3] + 1.0 / 1000.0).abs() < 1e-12,
+            "ext-base↔int-base coupling should be -1/RB, got {:.6e}",
+            mat.a[1][3]
+        );
+        // External collector row sees only the RC conductance.
+        assert!(
+            (mat.a[0][0] - 1.0 / 50.0).abs() < 1e-12,
+            "ext-collector diagonal should equal 1/RC, got {:.6e}",
+            mat.a[0][0]
+        );
+        assert!(
+            (mat.a[0][4] + 1.0 / 50.0).abs() < 1e-12,
+            "ext-collector↔int-collector coupling should be -1/RC, got {:.6e}",
+            mat.a[0][4]
+        );
     }
 
     #[test]

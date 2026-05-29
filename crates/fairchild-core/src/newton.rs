@@ -163,7 +163,13 @@ pub fn build_devices(
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
+                if let Some(mut dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx)
+                {
+                    let extras = dev.num_extra_nodes();
+                    if extras > 0 {
+                        let first = topo.allocate_extra_rows(extras);
+                        dev.bind_extra_nodes(first);
+                    }
                     devices.push(dev);
                 } else {
                     let factory = registry
@@ -184,9 +190,16 @@ pub fn build_devices(
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
-                let dev = registry
+                let mut dev = registry
                     .build_bjt(model_name, &[c, b, e, s], ctx)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
+                // RB/RC/RE series resistances declare internal nodes (one per
+                // non-zero resistance); allocate MNA rows and bind them.
+                let extras = dev.num_extra_nodes();
+                if extras > 0 {
+                    let first = topo.allocate_extra_rows(extras);
+                    dev.bind_extra_nodes(first);
+                }
                 devices.push(dev);
             }
             Element::Behavioral {

@@ -27,19 +27,40 @@ adaptive timepoints within the shared time window.
 | RC step response | 0.02 mV | 6×10⁻⁶ | Linear — essentially identical |
 | RLC resonator | 16.15 mV | 9.4×10⁻⁴ | Small phase drift from different adaptive steppers |
 | Diode rectifier | 0.05 mV | 9.8×10⁻⁵ | Nonlinear — excellent agreement |
-| CMOS inverter | 201 mV | 0 (sampled in steady state) | Edge timing differs; see note below |
-| BJT CE amplifier | 503 mV | 0 (sampled in steady state) | Edge timing differs; see note below |
-| Schmitt trigger | 324 mV | 2.8×10⁻⁴ (in HIGH state) | Hysteresis behavior matches; edge timing differs |
+| CMOS inverter | 62.9 mV | 0 (sampled in steady state) | Flat regions match <1 mV; residual is a ~40 ps Meyer-cap edge-shape difference |
+| BJT CE amplifier | 7.5 mV | 0 (sampled in steady state) | DC levels match exactly; residual is sub-ns edge sampling |
+| Schmitt trigger | 11.5 mV | 2.8×10⁻⁴ (in HIGH state) | Hysteresis + held-low level (~VTO) both match (see note) |
 
-**Note on switching circuits.** The CMOS inverter and BJT CE amp RMS errors are
-dominated by edge-timing offset, not waveform shape disagreement. The MOSFET
-Level 1 model fully stamps Meyer gate capacitances (Cgs/Cgd/Cgb) and depletion
-junction caps (Cbs/Cbd) — the benchmark model cards above omit CGSO/CGDO/CJ/CJSW
-parameters, so those capacitances are zero in this run. The BJT Gummel-Poon
-model stamps both transit-time diffusion charges (TF·IF, TR·IR) and depletion
-junction capacitances (CJE, CJC) — the benchmark model card omits these
-parameters, so the capacitances are zero in this run. Adding cap parameters to
-the benchmark model cards will bring edge timing into full agreement.
+**Note on switching circuits (2026-05-30 audit).** Earlier revisions reported
+much larger RMS errors (CMOS 201 mV, BJT 503 mV, Schmitt 324 mV). A node-by-node
+diagnosis split these into three distinct causes:
+
+- **BJT CE amp — sampling, not a model defect.** The circuit has no reactive
+  elements and its model card sets no caps/transit time, so its DC levels track
+  ngspice *exactly* (on = 2.080 V, off = 5.000 V in both). The old 503 mV came
+  entirely from a 1 ns `.tran` step under-resolving the 1 ns input edge
+  (fairchild fixed-step vs ngspice adaptive). Resolving the edge (`.tran 0.1n`)
+  drops the error to ~7 mV.
+- **CMOS inverter — sampling plus a small Meyer-cap edge difference.** Flat
+  regions already match to <1 mV (Meyer gate + depletion junction caps are
+  stamped and working). The residual after edge resolution (`.tran 0.2n`) is a
+  ~40 ps difference in the fall/rise *shape* — an inherent property of the
+  approximate Meyer gate-charge model, not a DC error.
+- **Schmitt trigger — a real bug, now fixed.** In the held-LOW state the
+  feedback NMOS (gate = out) cuts off near VTO and the pull-up is off, leaving
+  the output a high-impedance node. With **no junction/overlap caps** (the old
+  model card) that node has zero capacitance; fairchild's diagonal gmin
+  discharged it to 0 V while ngspice held it at ~VTO (0.5 V). Adding realistic
+  parasitic caps (CGSO/CGDO/CJ/CJSW + AS/AD/PS/PD, as a real PDK device has)
+  gives the node real capacitance — it now holds ~0.5 V in both simulators, and
+  the RMS drops from 324 mV to ~11 mV. (The deeper observation — fairchild adds
+  gmin to every node diagonal as a shunt-to-ground, where ngspice adds it across
+  device junctions — is tracked as a solver follow-up; it only affects
+  pathological zero-capacitance floating nodes.)
+
+The benchmark netlists were updated accordingly: finer `.tran` steps on the BJT
+and CMOS circuits (so both simulators resolve the input edges), and parasitic
+caps on the Schmitt transistors.
 
 ---
 
