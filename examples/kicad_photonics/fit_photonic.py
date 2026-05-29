@@ -78,7 +78,11 @@ DATA_PATH = str(
 # Restrict to the resonance window of our target ring (nm).
 WL_LO, WL_HI = 1545.8, 1547.5
 # Number of wavelength points for simulation (downsampled from measured).
-N_SIM_PTS = 100
+N_SIM_PTS = 250
+# Discard forward-bias data beyond this voltage (dataset-specific bad-data limit).
+JV_HI = 1.0
+# Parallel shunt resistor present on the physical device under test (Ω).
+R_SHUNT_OHM = 2000.0
 
 
 #%% ── data loading helpers ───────────────────────────────────────────────────
@@ -141,15 +145,22 @@ def extract_data(sweep: NdSweeper) -> SweepData:
     v_heat_V  = np.asarray(sweep.data["Heater Voltage (V)"],    dtype=float)
     i_junc_mA = np.asarray(sweep.data["Junction Current (mA)"], dtype=float)
 
+    # Discard bad data beyond JV_HI (dataset-specific cutoff).
+    jv_mask  = jv_V <= JV_HI
+    jv_V     = jv_V[jv_mask]
+    jv_cols  = np.where(jv_mask)[0]     # original column indices kept
+    v_heat_V  = v_heat_V[:, jv_mask]
+    i_junc_mA = i_junc_mA[:, jv_mask]
+
     n_hc, n_jv = len(hc_mA), len(jv_V)
     # Use the first valid spectrum to set the shared wavelength axis.
-    wl0, _ = _trim_spectrum(spectra[0, 0])
+    wl0, _ = _trim_spectrum(spectra[0, jv_cols[0]])
     wl_sim, _ = _downsample(wl0, wl0)   # just the axis
 
     T_dB = np.empty((n_hc, n_jv, N_SIM_PTS), dtype=float)
     for i in range(n_hc):
-        for j in range(n_jv):
-            wl, T = _trim_spectrum(spectra[i, j])
+        for j, orig_j in enumerate(jv_cols):
+            wl, T = _trim_spectrum(spectra[i, orig_j])
             _, T_ds = _downsample(wl, T)
             T_dB[i, j] = T_ds
 
@@ -262,6 +273,9 @@ _PN_FWD_FULL = [
               description="injection Δn_eff per (exp(V/Vt)−1) [dimensionless coeff]"),
     ParamSpec("da_dv_inj",  150.0,    fixed=False, bounds=(0.0, 2000.0),
               description="injection FCA loss prefactor (Np/m per carrier unit)"),
+    # Series resistance pre-fit from diode I/V; held fixed during EO stages
+    ParamSpec("r_series",   0.0,      fixed=True,  bounds=(0.0, 5000.0),
+              description="series resistance (Ω) [pre-fit from diode I/V]"),
 ]
 
 _SELF_HEATING = [
@@ -358,6 +372,7 @@ def build_netlist(
     v_pn           : PN reverse-bias voltage (V)
     i_heat         : heater drive current (A); series through both arms
     """
+    # kappa_l is a coupler param (separate element), not a phase-shifter param.
     ps_p = {k: v for k, v in ps_params.items() if k != "kappa_l"}
     ps_spice = _params_to_spice(ps_p)
 
@@ -399,6 +414,9 @@ def build_netlist(
         f"XCPL1 CPL1_a1 CPL1_a2 CPL1_b1 CPL1_b2 fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
         f"XCPL2 CPL2_a1 CPL2_a2 CPL2_b1 CPL2_b2 fc_dcoupler kappa_L={coupler_kappa_l:.8g}",
         *ps_lines,
+        # COMMENTED OUT BECAUSE DATA DOESN'T FULLY DETERMINE THIS FIT MODEL # Physical 2 kΩ shunt resistor present on the measured device (pads to GND).
+        # *(["R_SHUNT  PN_BIAS  GND  {:.0f}".format(R_SHUNT_OHM)]
+        #   if model == "fc_pn_th_ps_full" else []),
         ".end",
     ]) + "\n"
 
@@ -510,6 +528,41 @@ def _bounds(specs: list[ParamSpec]) -> list[tuple]:
     return [s.bounds for s in specs if not s.fixed]
 
 
+#%% ── diode model helpers ────────────────────────────────────────────────────
+
+def _diode_current_rs(
+    v_arr: np.ndarray,
+    i_sat: float,
+    n: float,
+    vt: float,
+    r_s: float,
+) -> np.ndarray:
+    """
+    Vectorized Newton-Raphson for the Shockley-with-series-resistance model.
+
+    Solves V = V_j + R_s · I_d(V_j) for each element of v_arr, where
+    I_d(V_j) = i_sat · (exp(V_j / (n·Vt)) − 1).
+
+    For R_s ≤ 0 falls back to direct Shockley (no iteration needed).
+    """
+    clamp = 40.0
+    if r_s <= 0.0:
+        return i_sat * (np.exp(np.clip(v_arr / (n * vt), -clamp, clamp)) - 1.0)
+
+    vj = np.array(v_arr, dtype=float)          # initial guess: V_j = V
+    for _ in range(60):
+        e   = np.exp(np.clip(vj / (n * vt), -clamp, clamp))
+        i_d = i_sat * (e - 1.0)
+        F   = vj + r_s * i_d - v_arr           # residual
+        dF  = 1.0 + r_s * i_sat * e / (n * vt) # Jacobian
+        delta = F / dF
+        vj   -= delta
+        if np.max(np.abs(delta)) < 1e-14:
+            break
+    e_final = np.exp(np.clip(vj / (n * vt), -clamp, clamp))
+    return i_sat * (e_final - 1.0)
+
+
 #%% ── pre-fitting from electrical I/V ────────────────────────────────────────
 
 def prefit_r_heater(sd: SweepData) -> float:
@@ -553,30 +606,70 @@ def prefit_g_pn(sd: SweepData) -> float:
     return g_pn
 
 
-def prefit_diode_iv(sd: SweepData) -> tuple[float, float]:
+def prefit_diode_iv(sd: SweepData) -> tuple[float, float, float]:
     """
-    Fit Shockley diode parameters (i_sat, n_diode) from forward I/V.
+    Fit Shockley+series-resistance diode (i_sat, n_diode, r_series) from forward I/V.
 
-    Log-space linear fit in 0.3–0.6 V where I ≈ I_sat·exp(V/(n·Vt)).
-    Returns (i_sat [A], n_diode).
+    First bootstraps (i_sat, n_diode) from a log-linear fit in 0.3–0.6 V,
+    then jointly fits all three parameters over the full 0.1 V–JV_HI range
+    in log-current space using L-BFGS-B.
+
+    Returns (i_sat [A], n_diode, r_series [Ω]).
     """
-    i_junc_A = sd.i_junc_mA.mean(axis=0) * 1e-3    # average over HC axis, convert to A
-    jv_V = sd.jv_V
-
-    # Fit in the exponential regime, before ohmic-series-resistance dominates
-    mask = (jv_V >= 0.3) & (jv_V <= 0.6) & (i_junc_A > 0)
-    if mask.sum() < 3:
-        print("  Pre-fit diode I/V: insufficient points — using defaults.")
-        return 1e-12, 1.05
-
-    # log(I) = log(i_sat) + V / (n * Vt)  →  linear fit gives slope = 1/(n·Vt)
     Vt = 0.025852   # kT/q at 300 K
-    log_I = np.log(i_junc_A[mask])
-    slope, intercept = np.polyfit(jv_V[mask], log_I, 1)
-    i_sat  = float(np.exp(intercept))
-    n_diode = float(np.clip(1.0 / (slope * Vt), 0.5, 5.0))
-    print(f"  Pre-fit diode: i_sat={i_sat:.3e} A, n_diode={n_diode:.3f}")
-    return i_sat, n_diode
+    i_meas_A = sd.i_junc_mA.mean(axis=0) * 1e-3    # average over HC axis, A
+    # Subtract the physical 2 kΩ shunt so we fit the diode branch alone.
+    i_junc_A = i_meas_A - sd.jv_V / R_SHUNT_OHM
+
+    # Full fitting range: forward bias with positive diode current.
+    fit_mask = (sd.jv_V >= 0.1) & (i_junc_A > 1e-10)
+    if fit_mask.sum() < 3:
+        print("  Pre-fit diode I/V: insufficient points — using defaults.")
+        return 1e-12, 1.05, 0.0
+
+    v_fit = sd.jv_V[fit_mask]
+    i_fit = i_junc_A[fit_mask]
+
+    # Bootstrap: log-linear fit in 0.3–0.6 V (exponential regime, R_s negligible).
+    # After shunt subtraction, the 0.3–0.6 V region may have near-zero diode residual
+    # (shunt current ~0.15–0.3 mA dominates), so fall back to safe defaults if needed.
+    narrow = (sd.jv_V >= 0.3) & (sd.jv_V <= 0.6) & (i_junc_A > 0)
+    if narrow.sum() >= 2:
+        slope0, ic0 = np.polyfit(sd.jv_V[narrow], np.log(i_junc_A[narrow]), 1)
+        i_sat0 = float(np.exp(ic0))
+        n0     = float(np.clip(1.0 / (slope0 * Vt), 0.5, 5.0))
+        if not (1e-20 < i_sat0 < 1e-3) or not (0.5 < n0 < 5.0):
+            i_sat0, n0 = 1e-12, 1.05
+    else:
+        i_sat0, n0 = 1e-12, 1.05
+
+    # Bootstrap R_s: at the highest V point, V_j_ideal = n·Vt·log(I/i_sat+1),
+    # so R_s ≈ (V - V_j_ideal) / I.
+    v_hi, i_hi = v_fit[-1], i_fit[-1]
+    v_j_ideal  = n0 * Vt * np.log(max(i_hi / i_sat0 + 1.0, 1.0))
+    r_s0       = max((v_hi - v_j_ideal) / i_hi, 1.0) if i_hi > 0 else 1.0
+
+    # Joint L-BFGS-B fit in log-current space: x = [log(i_sat), n, r_s]
+    def objective(x):
+        i_s = float(np.exp(np.clip(x[0], -50, 0)))
+        n_d = float(x[1])
+        r_s = float(x[2])
+        i_pred = _diode_current_rs(v_fit, i_s, n_d, Vt, r_s)
+        log_pred = np.log(np.maximum(i_pred, 1e-30))
+        return float(np.mean((log_pred - np.log(i_fit)) ** 2))
+
+    x0 = [np.log(max(i_sat0, 1e-30)), n0, r_s0]
+    res = minimize(
+        objective, x0, method="L-BFGS-B",
+        bounds=[(-45.0, -5.0), (0.5, 5.0), (0.0, 5000.0)],
+        options={"ftol": 1e-12, "gtol": 1e-9, "maxiter": 2000},
+    )
+    i_sat   = float(np.exp(res.x[0]))
+    n_diode = float(np.clip(res.x[1], 0.5, 5.0))
+    r_series = float(max(res.x[2], 0.0))
+    print(f"  Pre-fit diode: i_sat={i_sat:.3e} A, n_diode={n_diode:.3f}, "
+          f"r_series={r_series:.1f} Ω  (loss={res.fun:.4e})")
+    return i_sat, n_diode, r_series
 
 
 #%% ── staged fitting ─────────────────────────────────────────────────────────
@@ -960,7 +1053,7 @@ def fit_staged(
     r_heater = prefit_r_heater(sd)
 
     if is_full:
-        i_sat, n_diode = prefit_diode_iv(sd)
+        i_sat, n_diode, r_series = prefit_diode_iv(sd)
     else:
         g_pn = prefit_g_pn(sd)
 
@@ -978,6 +1071,9 @@ def fit_staged(
                 s.fixed = True
             elif is_full and s.name == "n_diode":
                 s.value = n_diode
+                s.fixed = True
+            elif is_full and s.name == "r_series":
+                s.value = r_series
                 s.fixed = True
         return specs
 
@@ -1190,9 +1286,11 @@ def plot_iv_curves(
 
     Vt = 0.025852   # kT/q at 300 K
     if model == "fc_pn_th_ps_full":
-        n_d   = best.get("n_diode", 1.05)
-        i_sat = best.get("i_sat",   1e-12)
-        i_model_A = i_sat * (np.exp(np.clip(jv_V / (n_d * Vt), -40, 40)) - 1.0)
+        n_d    = best.get("n_diode",  1.05)
+        i_sat  = best.get("i_sat",    1e-12)
+        r_s    = best.get("r_series", 0.0)
+        # Total current = diode branch + physical 2 kΩ shunt branch.
+        i_model_A = _diode_current_rs(jv_V, i_sat, n_d, Vt, r_s) + jv_V / R_SHUNT_OHM
     else:
         g_pn      = best.get("g_pn", 1e-3)
         i_model_A = g_pn * jv_V
@@ -1203,7 +1301,7 @@ def plot_iv_curves(
 
     # Left: heater I-V
     ax1 = fig.add_subplot(gs[0])
-    ax1.plot(sd.hc_mA, v_heat_model, lw=1.8, label=f"model  (2·{r_heater:.0f} Ω)")
+    ax1.plot(sd.hc_mA, v_heat_model, lw=1.8, label=f"model (2·{r_heater:.0f} Ω)")
     ax1.plot(sd.hc_mA, v_heat_meas,  ls="--", lw=1.2, label="data")
     ax1.set_xlabel("Heater Current (mA)")
     ax1.set_ylabel("Heater Voltage (V)")
@@ -1362,6 +1460,90 @@ def plot_spectra_vs_hc(
     plt.close(fig)
 
 
+def explore_diode_models(
+    sd: SweepData,
+    best: Optional[dict[str, float]] = None,
+    out_path: str = "diode_models.png",
+) -> None:
+    """
+    Compare diode I-V models against measured forward-bias data.
+
+    Top panel  — log I-V: data points, pure Shockley (narrow fit), Shockley+Rs.
+    Bottom panel — log10 residuals (model / data) with RMS in legend.
+
+    If best is provided and contains i_sat/n_diode/r_series, those values are used
+    for the Shockley+Rs model instead of re-running the fit.
+    """
+    if not _HAS_MPL:
+        return
+
+    Vt = 0.025852
+    i_meas_A = sd.i_junc_mA.mean(axis=0) * 1e-3
+    # Subtract physical 2 kΩ shunt so we compare diode-only model to diode-only data.
+    i_diode_A = i_meas_A - sd.jv_V / R_SHUNT_OHM
+
+    # Model 1: pure Shockley bootstrapped from 0.3–0.6 V of shunt-corrected current.
+    narrow = (sd.jv_V >= 0.3) & (sd.jv_V <= 0.6) & (i_diode_A > 0)
+    if narrow.sum() >= 2:
+        slope0, ic0 = np.polyfit(sd.jv_V[narrow], np.log(i_diode_A[narrow]), 1)
+        i_sat0 = float(np.exp(ic0))
+        n0     = float(np.clip(1.0 / (slope0 * Vt), 0.5, 5.0))
+        if not (1e-20 < i_sat0 < 1e-3) or not (0.5 < n0 < 5.0):
+            i_sat0, n0 = 1e-12, 1.05
+    else:
+        i_sat0, n0 = 1e-12, 1.05
+    i_shockley = i_sat0 * (np.exp(np.clip(sd.jv_V / (n0 * Vt), -40, 40)) - 1.0)
+
+    # Model 2: Shockley+Rs — use best dict if available to avoid re-fitting.
+    if best is not None and "i_sat" in best and "r_series" in best:
+        i_sat_rs = best["i_sat"]
+        n_rs     = best.get("n_diode", 1.05)
+        r_s      = best["r_series"]
+    else:
+        i_sat_rs, n_rs, r_s = prefit_diode_iv(sd)
+    i_rs = _diode_current_rs(sd.jv_V, i_sat_rs, n_rs, Vt, r_s)
+
+    # Restrict comparison to forward bias with positive shunt-corrected data.
+    fwd = (sd.jv_V >= 0.1) & (i_diode_A > 1e-10)
+    v_fwd  = sd.jv_V[fwd]
+    id_fwd = i_diode_A[fwd]
+    is_fwd = np.maximum(i_shockley[fwd], 1e-30)
+    ir_fwd = np.maximum(i_rs[fwd],       1e-30)
+
+    rms_s  = float(np.sqrt(np.mean((np.log10(is_fwd / np.maximum(id_fwd, 1e-30))) ** 2)))
+    rms_rs = float(np.sqrt(np.mean((np.log10(ir_fwd / np.maximum(id_fwd, 1e-30))) ** 2)))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
+                                   gridspec_kw={"hspace": 0.06})
+
+    # Top: log I-V
+    ax1.semilogy(v_fwd, id_fwd * 1e3, "ko", ms=3, zorder=5, label="data (shunt-corrected)")
+    ax1.semilogy(v_fwd, is_fwd * 1e3, "b-", lw=1.8,
+                 label=f"Shockley  (I_sat={i_sat0:.2e} A, n={n0:.3f})")
+    ax1.semilogy(v_fwd, ir_fwd * 1e3, "r-", lw=1.8,
+                 label=f"Shockley+Rs  (Rs={r_s:.0f} Ω, n={n_rs:.3f})")
+    ax1.set_ylabel("I_diode (mA, shunt-corrected)")
+    ax1.legend(fontsize=8)
+    ax1.set_title("Diode model comparison (shunt-corrected data)")
+    ax1.grid(True, which="both", alpha=0.3)
+
+    # Bottom: log-residuals
+    res_s  = np.log10(is_fwd / np.maximum(id_fwd, 1e-30))
+    res_rs = np.log10(ir_fwd / np.maximum(id_fwd, 1e-30))
+    ax2.plot(v_fwd, res_s,  "b-", lw=1.5, label=f"Shockley   RMS={rms_s:.3f} dec")
+    ax2.plot(v_fwd, res_rs, "r-", lw=1.5, label=f"Shockley+Rs  RMS={rms_rs:.3f} dec")
+    ax2.axhline(0, color="k", lw=0.6)
+    ax2.set_ylabel("log10(I_model / I_data)")
+    ax2.set_xlabel("Junction Voltage (V)")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, which="both", alpha=0.3)
+
+    fig.suptitle("Diode I-V model exploration")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {out_path}")
+    plt.close(fig)
+
+
 def plot_all(model: str, best: dict[str, float], sd: SweepData, prefix: str = "") -> None:
     """Run all plot functions with a shared filename prefix."""
     p = (prefix + "_") if prefix else ""
@@ -1370,6 +1552,8 @@ def plot_all(model: str, best: dict[str, float], sd: SweepData, prefix: str = ""
     plot_iv_curves(model, best, sd,        out_path=f"{p}iv_curves.png")
     plot_spectra_vs_jv(model, best, sd,    out_path=f"{p}spectra_vs_jv.png")
     plot_spectra_vs_hc(model, best, sd,    out_path=f"{p}spectra_vs_hc.png")
+    if model == "fc_pn_th_ps_full":
+        explore_diode_models(sd, best=best, out_path=f"{p}diode_models.png")
 
 
 #%% ── quick diagnostics ──────────────────────────────────────────────────────
