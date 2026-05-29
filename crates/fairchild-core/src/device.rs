@@ -25,6 +25,15 @@ pub struct SimContext {
     /// carry 3 wires (re, im, λ) and devices only stamp the forward
     /// direction.  Sourced from `SimOptions::bidirectional_propagation`.
     pub bidirectional_propagation: bool,
+    /// When true, devices exposing a group delay (optical waveguides) model it
+    /// as a true delay line rather than an instantaneous transmission.  Sourced
+    /// from `SimOptions::waveguide_delay`.
+    pub waveguide_delay: bool,
+    /// Absolute transient time of the step currently being evaluated (s).  The
+    /// transient loop updates this before each device `eval`/`load_*` so delay
+    /// lines can look up historical port values at `time_s - τ`.  Zero during
+    /// DC operating-point and AC analyses.
+    pub time_s: f64,
 }
 
 impl Default for SimContext {
@@ -35,6 +44,8 @@ impl Default for SimContext {
             jlim_enabled: true,
             lambda_center_m: 1.55e-6,
             bidirectional_propagation: false,
+            waveguide_delay: false,
+            time_s: 0.0,
         }
     }
 }

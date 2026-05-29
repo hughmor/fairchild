@@ -592,7 +592,7 @@ pub fn tran_nr_with_registry_opts(
         crate::sanity::check_netlist_sanity(netlist);
     }
     crate::connectivity::check_connectivity(netlist)?;
-    let ctx = opts.sim_context();
+    let mut ctx = opts.sim_context();
     let mode = opts.method;
 
     // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
@@ -675,6 +675,9 @@ pub fn tran_nr_with_registry_opts(
     loop {
         // --- NR loop for this time step ---
         let alpha = 1.0 / step;
+        // Expose the absolute time of this step to devices (delay lines look up
+        // historical port values at `time_s − τ`).
+        ctx.time_s = t;
         let mut step_converged = false;
         for _iter in 0..opts.itl4 {
             crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t, &cap_state, &ind_state);
@@ -840,7 +843,7 @@ pub fn tran_nr_with_registry_var_opts(
         crate::sanity::check_netlist_sanity(netlist);
     }
     crate::connectivity::check_connectivity(netlist)?;
-    let ctx = opts.sim_context();
+    let mut ctx = opts.sim_context();
     let step = step.min(opts.max_step);
     let (topo, mut x) = if opts.uic {
         let topo = CircuitTopology::build(netlist);
@@ -981,6 +984,9 @@ pub fn tran_nr_with_registry_var_opts(
         }
         let h_actual = h_want.max(h_min);
         let t_next = t + h_actual;
+        // Expose the trial-step time to devices (delay lines look up historical
+        // port values at `time_s − τ`).
+        ctx.time_s = t_next;
 
         // Order control: GEAR-2 needs two accepted steps of history.  Demote
         // to BE on the first two steps, after any rejection (history stale),

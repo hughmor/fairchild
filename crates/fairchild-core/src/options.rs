@@ -118,6 +118,18 @@ pub struct SimOptions {
     /// timestep rather than the fixed stride.  Set via `.options
     /// variable_step=1`, CLI `--variable-step`, or Python `variable_step=True`.
     pub variable_step: bool,
+
+    /// Model the group delay of optical waveguides (and any device exposing a
+    /// group delay τ_g) as a true delay line: the output optical envelope is
+    /// the input envelope delayed by τ_g = L·n_g/c, reconstructed from a
+    /// per-channel history buffer.  When off (default) the waveguide applies an
+    /// instantaneous transmission `exp(-αL/2)·exp(-jβL)` — correct for DC and
+    /// steady-state spectra, and cheaper, but it ignores the finite transit
+    /// time that matters at modulation bandwidths comparable to 1/τ_g.  For an
+    /// electrical transmission line the delay is intrinsic and always modelled;
+    /// this flag governs only the photonic waveguide.  Set via `.options
+    /// waveguide_delay=1` or `--opt waveguide_delay=1`.
+    pub waveguide_delay: bool,
 }
 
 impl Default for SimOptions {
@@ -144,6 +156,7 @@ impl Default for SimOptions {
             verbose: false,
             sanity_check: true,
             variable_step: false,
+            waveguide_delay: false,
         }
     }
 }
@@ -178,6 +191,8 @@ impl SimOptions {
             jlim_enabled: self.pnjlim,
             lambda_center_m: self.lambda_center_m,
             bidirectional_propagation: self.bidirectional_propagation,
+            waveguide_delay: self.waveguide_delay,
+            time_s: 0.0,
         }
     }
 
@@ -242,6 +257,12 @@ impl SimOptions {
             }
             "variable_step" | "variablestep" => {
                 self.variable_step = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
+            }
+            "waveguide_delay" | "wg_delay" | "optical_delay" => {
+                self.waveguide_delay = matches!(
                     value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on"
                 );
