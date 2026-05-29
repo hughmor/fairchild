@@ -344,9 +344,71 @@ The next steps for this integration, in rough order:
    regression-test schematic.
 2. **Bus-syntax auto-expansion in the wrapper** — translate KiCad buses
    `opt[0..3]` into `.optical_port opt 4` plus per-channel wiring.
-3. **KiCad action plugin** — adds a "Run fairchild" button to KiCad that
-   invokes the wrapper + simulator + opens a matplotlib plot of the
-   probed signals. Skips the command-line step.
+3. **One-button driver** — ✅ `scripts/kicad_fairchild.py` chains
+   schematic → SPICE export → transpile → simulate in one command, and can be
+   registered as a KiCad schematic-editor "button" (see §9). Remaining: an
+   in-editor results viewer.
 4. **`fairchild.viewer`** Python helper — wrap matplotlib for common signal
    shapes (V vs t, optical power vs t for `(re, im)` pairs, AC magnitude /
    phase, noise PSD).
+
+---
+
+## 9. One-button driver — `scripts/kicad_fairchild.py`
+
+`kicad_fairchild.py` collapses the whole §4–§5 flow into a single command:
+
+```
+schematic (.kicad_sch)  ──kicad-cli──▶  SPICE export (.cir)
+                        ──kicad_to_fairchild.py──▶  fairchild netlist (run_*.sp)
+                        ──fairchild -f──▶  results (CSV / rawfile)
+```
+
+It locates `kicad-cli` automatically (PATH, then the standard KiCad install
+locations on macOS / Linux / Windows; override with `--kicad-cli`). `kicad-cli`
+ships with KiCad 7 and later.
+
+### Command-line use
+
+```bash
+# From a schematic (runs the whole pipeline and simulates):
+python3 scripts/kicad_fairchild.py my.kicad_sch --tran "5n 2u" --run \
+        --probe "V(pd_anode)" --sim-output results.csv
+
+# From an already-exported .cir (skips kicad-cli — useful on a sim-only box):
+python3 scripts/kicad_fairchild.py my_export.cir --tran "5n 2u" --run
+
+# Enable the optical group-delay model for high-speed links:
+python3 scripts/kicad_fairchild.py link.kicad_sch --tran "1p 2n" \
+        --opt waveguide_delay=1 --run
+```
+
+### The schematic-editor "button"
+
+KiCad's stable, version-portable hook for a schematic-side button is the
+**BOM / netlist-generator** mechanism (eeschema → *Tools → Generate Bill of
+Materials…* on KiCad 7/8; the *BOM* / netlist generator dialog on 9/10), **not**
+the `pcbnew` action-plugin API (that only adds buttons to the PCB editor). Add a
+generator with the command line:
+
+```
+python3 "/path/to/fairchild/scripts/kicad_fairchild.py" "%I" -o "%O" --tran "5n 2u"
+```
+
+eeschema passes the intermediate netlist as `%I`; the driver detects the XML,
+recovers the source schematic from its `<design source=…>` field, exports SPICE
+via `kicad-cli`, and transpiles. Press *Generate* to produce the fairchild
+netlist; add `--run` to simulate in the same click.
+
+> The command-line and `.cir` paths are exercised by the repo's example
+> circuits. The KiCad-side button (the `kicad-cli` export step and the eeschema
+> generator registration) depends on your local KiCad install and should be
+> validated there once — it is not covered by CI.
+
+### KiCad 9+ IPC API (future)
+
+KiCad 9 introduced an out-of-process **IPC plugin API** that can add a true
+toolbar button and read the live schematic without a netlist round-trip. That is
+the eventual home for an integrated "Run fairchild + plot" action; the
+BOM-generator hook above is the portable interim that works on every version
+back to KiCad 7.
