@@ -110,11 +110,18 @@ impl Device for NativeThermalPhaseShifter {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec_base = 2 * wpc * n;
+        // Heater terminal voltages; terminals follow all optical bundles.
         let v_a = self.nodes[elec_base].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
+        // Heater voltage and instantaneous Joule power: P = V²/R.
         let v = v_a - v_c;
         let p = v * v / self.r_heater;
+        // Thermo-optic phase shift: φ = π · P / P_pi, where P_pi is the
+        // heater power that produces a π phase shift (steady state).
+        // Same phase applied to all optical channels — one physical heater.
         let phi = std::f64::consts::PI * p / self.p_pi;
+        // Cache t_amp·cos(φ) and t_amp·sin(φ) for the optical stamp.
+        // Here t_amp = 1 (no optical loss in a pure heater model).
         self.c_cached = phi.cos();
         self.s_cached = phi.sin();
     }
@@ -330,12 +337,18 @@ impl Device for NativeThermalPhaseShifterRc {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec_base = 2 * wpc * n;
+        // Heater terminal voltages (anode, cathode follow all optical bundles).
         let v_a = self.nodes[elec_base].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         self.v_h_op = v_a - v_c;
-        // Read T from the state row.
+        // T is the thermal state variable (extra MNA row).  It carries units of
+        // "power-equivalent watts": at steady state T = P = V²/R, so the phase
+        // formula below reduces to the L1 model's φ = π·P/P_pi.
+        // During a transient, T follows a first-order low-pass with time
+        // constant τ_th: dT/dt = (P − T)/τ_th, discretised by BE/GEAR in
+        // load_residual_tran / load_jacobian_tran.
         self.t_op = self.t_state_idx.map_or(0.0, |i| x[i]);
-        // Phase from T (filtered power).
+        // Phase shift driven by the *filtered* heater power T(t).
         let phi = std::f64::consts::PI * self.t_op / self.p_pi;
         self.c_cached = phi.cos();
         self.s_cached = phi.sin();
@@ -743,23 +756,25 @@ impl Device for NativePnPhaseShifter {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec_base = 2 * wpc * n;
+        // PN junction terminal voltage: V_pn = V_anode − V_cathode.
         let v_a = self.nodes[elec_base].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
         let two_pi = 2.0 * std::f64::consts::PI;
+        // Propagation loss: field amplitude decays as exp(−α·L/2).
+        // α is in Neper/m; divide by 2 because intensity ~ |E|².
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
-        let lam = wpc - 1;
-        // Reference absolute propagation phase at λ_ref.  When `pin_at_ref`
-        // is on we subtract it so the device is "transparent" at λ = λ_ref;
-        // otherwise we use the full absolute phase so each ring's natural
-        // resonance position depends on L (correct physics for multi-ring
-        // designs).
+        let lam = wpc - 1; // wavelength wire index within each bundle
+        // Optional absolute-phase subtraction at λ_ref (see pin_at_ref docs).
+        // When enabled: device is "transparent" at λ_ref — useful for single-ring
+        // testbenches; disable for multi-ring designs with different L values.
         let phi_ref = if self.pin_at_ref {
             two_pi * self.n_eff * self.length_m / self.wl_ref_m
         } else {
             0.0
         };
         for k in 0..n {
+            // Per-channel λ; fall back to λ_ref if the wire is undriven.
             let lambda = match self.nodes[wpc * k + lam] {
                 Some(i) => {
                     let v = x[i];
@@ -771,11 +786,17 @@ impl Device for NativePnPhaseShifter {
                 }
                 None => self.wl_ref_m,
             };
+            // Group-index dispersion: n_eff(λ) ≈ n_eff_ref + (n_eff_ref − n_g)·(λ−λ_ref)/λ_ref.
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
+            // Propagation phase: φ_prop = 2π · n_eff(λ) · L / λ  (minus pinned ref if set).
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
+            // Linear EO phase: φ_eo = 2π · L · (dn/dV) · V_pn / λ.
+            // dn_dv is calibrated to measurement; sign convention: positive dn_dv
+            // means forward bias increases n_eff (injection regime).
             let phi_eo = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
             let phi = phi_prop + phi_eo;
+            // Store t_amp·cos(φ) and t_amp·sin(φ) for the Jacobian optical stamp.
             self.c_cached[k] = t_amp * phi.cos();
             self.s_cached[k] = t_amp * phi.sin();
         }
@@ -1064,27 +1085,37 @@ impl Device for NativePnPhaseShifterCap {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec_base = 2 * wpc * n;
+        // Junction terminal voltage.
         let v_a = self.nodes[elec_base].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec_base + 1].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
 
-        // C_j(V_pn) with linear continuation above the depletion singularity.
-        // Knee chosen at V_bi/2 — matches SPICE diode convention.
+        // ── Junction capacitance C_j(V_pn) ───────────────────────────────
+        // Abrupt/graded junction depletion model:
+        //   C_j(V) = C_j0 / (1 − V/V_bi)^m_j   for V < V_bi/2
+        // The formula diverges at V → V_bi (forward bias exceeds built-in
+        // potential).  We switch to a linear tangent at V_bi/2 to stay finite
+        // and keep the Jacobian smooth through the NR iterations.
         let v_knee = 0.5 * self.v_bi;
         self.c_j_cached = if v_pn < v_knee {
             self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
         } else {
-            // Linear extrapolation: c(V_knee) + (dc/dV at knee) · (V_pn − V_knee).
+            // Linear continuation: C(V_knee) + (dC/dV)|_knee · (V − V_knee).
             let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
             let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
             c_knee + dc_dv * (v_pn - v_knee)
         };
-        // Bias-dependent loss: α(V) = α_0 + (da/dV) · max(0, −V_pn) — only
-        // adds extra absorption in reverse bias (free-carrier-like).
+
+        // ── Bias-dependent FCA loss ───────────────────────────────────────
+        // Free-carrier absorption grows linearly with reverse voltage in the
+        // depletion layer: α(V) = α_0 + (dα/dV) · max(0, −V_pn).
+        // The clamp to ≥ 0 ensures no extra loss in forward bias.
         let v_rev = (-v_pn).max(0.0);
         self.alpha_eff_neper_m = self.alpha_neper_m + self.da_dv * v_rev;
+        // Amplitude transmission factor: field ∝ exp(−α·L/2).
         let t_amp = (-self.alpha_eff_neper_m * self.length_m / 2.0).exp();
 
+        // ── Per-channel phase (WDM-aware) ─────────────────────────────────
         let two_pi = 2.0 * std::f64::consts::PI;
         let lam = wpc - 1;
         let phi_ref = if self.pin_at_ref {
@@ -1104,9 +1135,12 @@ impl Device for NativePnPhaseShifterCap {
                 }
                 None => self.wl_ref_m,
             };
+            // Group-index dispersion correction (first-order Taylor in Δλ).
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
+            // Propagation phase + optional pin correction.
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
+            // Linear EO phase: φ_eo = 2π · L · (dn/dV) · V_pn / λ.
             let phi_eo = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
             let phi = phi_prop + phi_eo;
             self.c_cached[k] = t_amp * phi.cos();
@@ -1389,15 +1423,22 @@ impl Device for NativePnThermalPhaseShifter {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec = 2 * wpc * n;
-        let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
-        let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        // Two independent electrical interfaces: PN junction (anode/cathode)
+        // and resistive heater (heat_p/heat_n).  Four electrical terminals follow
+        // the optical bundles in the terminal vector.
+        let v_a  = self.nodes[elec].map_or(0.0, |i| x[i]);
+        let v_c  = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_hp = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
         let v_hn = self.nodes[elec + 3].map_or(0.0, |i| x[i]);
+        // PN voltage drives the small-signal EO phase shift.
         let v_pn = v_a - v_c;
+        // Heater Joule power → thermo-optic phase shift.
+        // P_heat = V_h² / R_heater;  φ_th = π · P / P_pi_th.
         let v_h = v_hp - v_hn;
         let p_heat = v_h * v_h / self.r_heater;
         let phi_th = std::f64::consts::PI * p_heat / self.p_pi_th;
         let two_pi = 2.0 * std::f64::consts::PI;
+        // Constant amplitude loss (waveguide + FCA at nominal bias).
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
         let lam = wpc - 1;
         let phi_ref = if self.pin_at_ref {
@@ -1418,9 +1459,12 @@ impl Device for NativePnThermalPhaseShifter {
                 None => self.wl_ref_m,
             };
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
+            // Propagation phase at this channel's wavelength.
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
+            // Linear EO contribution: φ_eo = 2π L (dn/dV) V_pn / λ.
             let phi_eo = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
+            // Total phase: φ = φ_prop + φ_EO(V_pn) + φ_thermal(P_heat).
             let phi = phi_prop + phi_eo + phi_th;
             self.c_cached[k] = t_amp * phi.cos();
             self.s_cached[k] = t_amp * phi.sin();
@@ -1723,16 +1767,20 @@ impl Device for NativePnThermalPhaseShifterCap {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec = 2 * wpc * n;
-        let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
-        let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        // Four electrical terminals (PN anode/cathode + heater +/−).
+        let v_a  = self.nodes[elec].map_or(0.0, |i| x[i]);
+        let v_c  = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_hp = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
         let v_hn = self.nodes[elec + 3].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
+        // Thermal phase: P_heat = V_h²/R → φ_th = π·P_heat/P_pi_th.
         let v_h = v_hp - v_hn;
         let p_heat = v_h * v_h / self.r_heater;
         let phi_th = std::f64::consts::PI * p_heat / self.p_pi_th;
 
-        // C_j(V) with linear continuation past the V_bi/2 knee.
+        // ── Depletion capacitance C_j(V_pn) ──────────────────────────────
+        // Standard junction formula with linear tail above V_bi/2
+        // to prevent singularity during NR in forward bias.
         let v_knee = 0.5 * self.v_bi;
         self.c_j_cached = if v_pn < v_knee {
             self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
@@ -1741,11 +1789,15 @@ impl Device for NativePnThermalPhaseShifterCap {
             let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
             c_knee + dc_dv * (v_pn - v_knee)
         };
-        // Bias-dependent loss: α(V) = α_0 + da_dv·max(0, -V).
+        // ── Bias-dependent FCA loss ───────────────────────────────────────
+        // α(V) = α_0 + (dα/dV) · max(0, −V_pn):
+        // extra absorption only in reverse bias (free carriers from depletion).
         let v_rev = (-v_pn).max(0.0);
         self.alpha_eff_neper_m = self.alpha_neper_m + self.da_dv * v_rev;
+        // Field amplitude factor: exp(−α_eff · L / 2).
         let t_amp = (-self.alpha_eff_neper_m * self.length_m / 2.0).exp();
 
+        // ── Per-channel phase ─────────────────────────────────────────────
         let two_pi = 2.0 * std::f64::consts::PI;
         let lam = wpc - 1;
         let phi_ref = if self.pin_at_ref {
@@ -1768,7 +1820,9 @@ impl Device for NativePnThermalPhaseShifterCap {
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
+            // Linear depletion EO: φ_eo = 2π L (dn/dV) V_pn / λ.
             let phi_eo = two_pi * self.length_m * self.dn_dv * v_pn / lambda;
+            // Total phase sums propagation, EO, and thermo-optic contributions.
             let phi = phi_prop + phi_eo + phi_th;
             self.c_cached[k] = t_amp * phi.cos();
             self.s_cached[k] = t_amp * phi.sin();
@@ -1984,25 +2038,38 @@ impl Device for NativePnPhaseShifterInj {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec = 2 * wpc * n;
+        // Junction terminal voltage.
         let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
         self.v_pn_op = v_pn;
 
-        // Shockley I-V (clamp exp argument for NR stability)
+        // ── Electrical: Shockley forward I-V ─────────────────────────────
+        // Thermal voltage with ideality: V_T = n_diode · k·T/q.
         let vt = ctx.vt() * self.n_diode;
+        // Clamp the exponent to ±40 to prevent overflow in NR; the diode
+        // enters saturation well before 40·V_T ≈ 1 V.
         let arg = (v_pn / vt).clamp(-40.0, 40.0);
         let e = arg.exp();
         let i_diode = self.i_sat * (e - 1.0);
+        // Small-signal conductance at the operating point: g_d = dI/dV.
         self.g_d_cached = self.i_sat * e / vt;
-        // Norton equivalent: I_eq = I(V_op) - g · V_op
+        // Norton equivalent stamp: I = g_d·V_pn + I_eq, where I_eq = I_d − g_d·V_pn
+        // keeps the linearised model consistent with the operating-point current.
         self.i_eq_cached = i_diode - self.g_d_cached * v_pn;
-        // Diffusion capacitance (forward bias only — small under reverse)
+        // Diffusion (transit-time) capacitance: C_d = τ_carrier · g_d.
+        // This represents minority carriers stored in the quasi-neutral region;
+        // it only matters in forward bias and is small under reverse.
         self.c_d_cached = self.tau_carrier * self.g_d_cached;
 
-        // Optical: injection-driven Δn and Δα, only forward bias contributes.
+        // ── Optical: injection-induced Δn and Δα ─────────────────────────
+        // `inj` = max(0, exp(V/V_T) − 1) is the normalised injected carrier
+        // density; clamped to ≥ 0 so reverse-bias contributes nothing.
         let inj = (e - 1.0).max(0.0);
+        // Injection FCA loss: α(V) = α_0 + da_dv_inj · inj.
+        // da_dv_inj encodes the Soref-Bennett α ∝ ΔN relationship.
         let alpha_eff = self.alpha_neper_m + self.da_dv_inj * inj;
+        // Field amplitude factor: exp(−α · L / 2).
         let t_amp = (-alpha_eff * self.length_m / 2.0).exp();
 
         let two_pi = 2.0 * std::f64::consts::PI;
@@ -2027,9 +2094,11 @@ impl Device for NativePnPhaseShifterInj {
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
-            // For injection, we add a Soref-Bennett-shaped Δn (negative for
-            // more carriers → less n).  Linear coefficient `dn_dv_inj` is the
-            // slope at V=0; full exponential form scales as (e-1)/1V.
+            // Injection EO phase (Soref-Bennett form):
+            //   Δn_inj = −K_inj · (exp(V/V_T) − 1)  (negative: more carriers → lower n)
+            //   φ_eo_inj = 2π L Δn_inj / λ = −2π L K_inj · inj / λ
+            // dn_dv_inj here plays the role of K_inj (same units as dn_dv in
+            // the depletion model but driven by the injection carrier density).
             let phi_eo = -two_pi * self.length_m * self.dn_dv_inj * inj / lambda;
             let phi = phi_prop + phi_eo;
             self.c_cached[k] = t_amp * phi.cos();
@@ -2242,6 +2311,10 @@ pub struct NativePnPhaseShifterFull {
     da_dv_inj: f64,
     // Common
     alpha_neper_m: f64,
+    // Ohmic series resistance in the PN contact/via stack (Ω).
+    // When non-zero, the terminal voltage V_pn ≠ junction voltage V_j;
+    // Newton-Raphson in eval() solves V_j implicitly each iteration.
+    r_series: f64,
     // TPA + thermal
     beta_tpa_m_per_w: f64,
     a_eff_m2: f64,
@@ -2283,6 +2356,7 @@ impl NativePnPhaseShifterFull {
             dn_dv_inj: 1.311e-4,
             da_dv_inj: 150.0,
             alpha_neper_m: dB_per_cm_to_neper_per_m(1.0),
+            r_series: 0.0,
             beta_tpa_m_per_w: 7.9e-12,
             a_eff_m2: 1.257e-13,
             r_th_k_per_w: 0.0, // user must set
@@ -2426,6 +2500,10 @@ impl Device for NativePnPhaseShifterFull {
                 self.pin_at_ref = value != 0.0;
                 true
             }
+            "r_series" => {
+                self.r_series = value.max(0.0);
+                true
+            }
             _ => false,
         }
     }
@@ -2434,74 +2512,157 @@ impl Device for NativePnPhaseShifterFull {
         let n = self.n_channels;
         let wpc = self.wpc;
         let elec = 2 * wpc * n;
+
+        // ── 1. Electrical: junction voltage ───────────────────────────────
+        // Terminal voltages from the MNA solution vector.
         let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
         let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        // v_pn is the voltage applied *at the device terminals* (anode − cathode).
+        // With non-zero series resistance R_s this differs from the actual
+        // junction voltage v_junc: v_pn = v_junc + R_s · I_d(v_junc).
         let v_pn = v_a - v_c;
 
-        // Electrical: Shockley I-V across the whole regime.
+        // ── 2. Electrical: Shockley I-V (with series resistance if set) ───
+        // Thermal voltage scaled by ideality: V_T = n_diode · k·T/q.
         let vt = ctx.vt() * self.n_diode;
-        let e = (v_pn / vt).clamp(-40.0, 40.0).exp();
-        let i_diode = self.i_sat * (e - 1.0);
-        let g_d = self.i_sat * e / vt;
-        self.g_pn_cached = g_d.max(1e-15);
-        self.i_eq_cached = i_diode - g_d * v_pn;
 
-        // Capacitance: piecewise C_j (reverse) vs C_d (forward).
+        // Solve for the junction voltage v_junc by Newton-Raphson on
+        //   F(v_j) = v_j + R_s · I_sat · (exp(v_j/V_T) − 1) − v_pn = 0
+        // When R_s = 0 the solution is trivially v_j = v_pn (one iteration).
+        let v_junc = if self.r_series <= 0.0 {
+            v_pn
+        } else {
+            let mut vj = v_pn; // initial guess: ignore drop across R_s
+            for _ in 0..50 {
+                let arg = (vj / vt).clamp(-40.0, 40.0);
+                let e = arg.exp();
+                let id = self.i_sat * (e - 1.0);
+                // Residual: how far we are from satisfying the KVL equation.
+                let f = vj + self.r_series * id - v_pn;
+                // Derivative dF/dv_j = 1 + R_s · (dI_d/dv_j) = 1 + R_s · g_d.
+                let gd = self.i_sat * e / vt;
+                let df = 1.0 + self.r_series * gd;
+                let delta = f / df;
+                vj -= delta;
+                if delta.abs() < 1e-12 {
+                    break;
+                }
+            }
+            vj
+        };
+
+        // Evaluate diode quantities at the converged junction voltage.
+        let arg = (v_junc / vt).clamp(-40.0, 40.0);
+        let e = arg.exp();
+        // Shockley current through the junction: I_d = I_sat · (exp(v_j/V_T) − 1).
+        let i_diode = self.i_sat * (e - 1.0);
+        // Small-signal conductance: g_d = dI_d/dv_j = I_sat · exp(v_j/V_T) / V_T.
+        let g_d = self.i_sat * e / vt;
+
+        // ── 3. MNA Norton stamp (accounts for series resistance) ──────────
+        // With R_s the effective conductance seen from the terminals differs
+        // from g_d.  Linearise: I_d ≈ I_d(v_j_op) + g_d · (v_j − v_j_op).
+        // Substituting v_j = v_pn − R_s · I_d and solving:
+        //   G_eff = g_d / (1 + g_d · R_s)
+        // The Norton current is then: I_eq = I_d − G_eff · v_pn.
+        let g_eff = g_d / (1.0 + g_d * self.r_series);
+        self.g_pn_cached = g_eff.max(1e-15);
+        self.i_eq_cached = i_diode - g_eff * v_pn;
+
+        // ── 4. Piecewise junction capacitance C_j(v_j) + diffusion C_d ───
+        // Depletion capacitance (abrupt/graded junction model):
+        //   C_j(V) = C_j0 / (1 − V/V_bi)^m_j   for V < V_bi/2
+        // Linearly continued above the V_bi/2 knee to avoid the singularity
+        // when NR wanders into strong forward bias.
         let c_j_v = {
             let v_knee = 0.5 * self.v_bi;
-            if v_pn < v_knee {
-                self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
+            if v_junc < v_knee {
+                self.c_j0 / (1.0 - v_junc / self.v_bi).powf(self.m_j)
             } else {
+                // Tangent at V_bi/2: c(V_knee) + (dc/dV)|_knee · (V − V_knee).
                 let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
                 let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
-                c_knee + dc_dv * (v_pn - v_knee)
+                c_knee + dc_dv * (v_junc - v_knee)
             }
         };
+        // Diffusion (transit-time) capacitance, dominant in strong forward bias:
+        //   C_d = τ_carrier · g_d
+        // Together they form the total effective cap for the reactive branch.
         let c_d_v = self.tau_carrier * g_d;
         self.c_eff_cached = c_j_v + c_d_v;
 
-        // Optical: sum of contributions.  Compute |A|² at the input for TPA
-        // and self-heating (use channel-0; aggregating across WDM is left to L4).
+        // ── 5. Optical intensity (for TPA and self-heating) ───────────────
+        // Use channel-0 forward amplitude squared as a proxy for intensity.
+        // (WDM aggregation across channels is deferred to higher-level models.)
         let v_re_0 = self.nodes[0].map_or(0.0, |i| x[i]);
         let v_im_0 = self.nodes[1].map_or(0.0, |i| x[i]);
         let intensity_w = (v_re_0 * v_re_0 + v_im_0 * v_im_0).max(0.0);
-        let alpha_tpa = self.beta_tpa_m_per_w * intensity_w / self.a_eff_m2;
+
+        // ── 6. Loss: FCA + TPA ────────────────────────────────────────────
+        // `inj` = exp(v_j/V_T) − 1 clamped to ≥ 0 (injection carrier density
+        // is proportional to forward current; no carrier injection in reverse).
         let inj = (e - 1.0).max(0.0);
-        let v_rev = (-v_pn).max(0.0);
+        // `v_rev` = |V_pn| under reverse bias, 0 in forward (depletion FCA).
+        let v_rev = (-v_junc).max(0.0);
+        // Two-photon absorption (TPA): α_TPA = β_TPA · I / A_eff.
+        let alpha_tpa = self.beta_tpa_m_per_w * intensity_w / self.a_eff_m2;
+        // Total loss coefficient (Np/m):
+        //   α_total = α_0 + α_rev(V) + α_inj(V) + α_TPA(I)
+        //   α_rev  = da_dv_rev · max(0, −v_j)   (depletion free-carrier absorption)
+        //   α_inj  = da_dv_inj · (exp(v_j/V_T)−1) (injection FCA, forward bias)
         let alpha_fca = self.alpha_neper_m + self.da_dv_rev * v_rev + self.da_dv_inj * inj;
         let alpha_total = alpha_fca + alpha_tpa;
+        // Amplitude transmission: field ∝ exp(−α·L/2), power ∝ exp(−α·L).
         let t_amp = (-alpha_total * self.length_m / 2.0).exp();
 
-        // Self-heating Δn (static): ΔT = R_th · P_abs;  P_abs ≈ α · L · |A|².
+        // ── 7. Self-heating Δn (quasi-static) ────────────────────────────
+        // Absorbed optical power: P_abs ≈ α_total · L · I (watts into heat).
+        // Static ΔT = R_th · P_abs, yielding thermo-optic index change
+        //   Δn_th = (dn/dT) · ΔT = dn_dt · R_th · P_abs
         let p_abs = alpha_total * self.length_m * intensity_w;
         let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
 
+        // ── 8. Per-channel optical phase (WDM-aware) ─────────────────────
         let two_pi = 2.0 * std::f64::consts::PI;
-        let lam = wpc - 1;
+        let lam = wpc - 1; // index of the wavelength wire within each bundle
+        // Optional absolute-phase pinning: subtract φ_0 = 2π n_eff L / λ_ref
+        // so the device is "transparent" at λ = λ_ref (useful for testbench
+        // rings designed to be on-resonance at the laser wavelength).
         let phi_ref = if self.pin_at_ref {
             two_pi * self.n_eff * self.length_m / self.wl_ref_m
         } else {
             0.0
         };
         for k in 0..n {
+            // Per-channel wavelength (falls back to λ_ref for undriven ports).
             let lambda = match self.nodes[wpc * k + lam] {
                 Some(i) => {
                     let v = x[i];
-                    if v.abs() > 1e-9 {
-                        v
-                    } else {
-                        self.wl_ref_m
-                    }
+                    if v.abs() > 1e-9 { v } else { self.wl_ref_m }
                 }
                 None => self.wl_ref_m,
             };
+            // Group-index dispersion correction:
+            //   n_eff(λ) ≈ n_eff_ref + (n_eff_ref − n_g) · (λ − λ_ref) / λ_ref
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
+            // Absolute propagation phase: φ_prop = 2π · n_eff(λ) · L / λ.
             let phi_abs = two_pi * n_eff_lam * self.length_m / lambda;
             let phi_prop = phi_abs - phi_ref;
-            let phi_eo_rev = two_pi * self.length_m * self.dn_dv_rev * v_pn / lambda;
+            // Depletion EO phase: φ_eo_rev = 2π L · (dn_dv_rev · v_j) / λ.
+            // dn_dv_rev is negative for Si PN (carrier depletion reduces n).
+            let phi_eo_rev = two_pi * self.length_m * self.dn_dv_rev * v_junc / lambda;
+            // Injection EO phase (Soref-Bennett):
+            //   Δn_inj ∝ −K · (exp(v_j/V_T)−1)  (negative: more carriers → less n)
             let phi_eo_inj = -two_pi * self.length_m * self.dn_dv_inj * inj / lambda;
+            // Thermo-optic phase from absorbed light (negligible at −10 dBm ring power).
             let phi_self = two_pi * self.length_m * dn_self / lambda;
+            // Total phase: propagation + depletion EO + injection EO + self-heat.
             let phi = phi_prop + phi_eo_rev + phi_eo_inj + phi_self;
+            // MNA optical stamp coefficients:
+            //   out_re = t_amp · (cos φ · in_re − sin φ · in_im)   → c_cached
+            //   out_im = t_amp · (sin φ · in_re + cos φ · in_im)  (uses s_cached)
+            // We store t_amp·cos(φ) and t_amp·sin(φ) so load_jacobian can stamp
+            // them directly into the potential-equation rows without extra work.
             self.c_cached[k] = t_amp * phi.cos();
             self.s_cached[k] = t_amp * phi.sin();
         }
