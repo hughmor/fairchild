@@ -27,6 +27,7 @@ examples/kicad_photonics/results/
 examples/kicad_photonics/giona_out
 examples/kicad_photonics/giona_ff_transient.py
 examples/kicad_photonics/~*
+examples/kicad_photonics/data/
 
 
 # kicad_to_fairchild.py transpiled wrappers + sim outputs
