@@ -9,10 +9,13 @@ Outputs (to docs/plots/):
 Usage:
     python benchmarks/plot.py [--release] [--no-ngspice]
 
-Methodology: fairchild uses default options. ngspice uses default options.
-Both simulators run on identical netlists. Timing is median of 3 end-to-end
-runs (including binary load + parse). Failed circuits appear as labelled
-gray panels rather than being silently dropped.
+Methodology: the accuracy panels run fairchild and ngspice with default
+options on identical netlists. The scaling plot forces each fairchild solver
+backend in turn (--solver dense|sparse|klu) to compare them head-to-head, with
+ngspice on its default solver. Timing is median of 3 end-to-end runs (including
+binary load + parse). KLU requires a build with --features klu; it is probed at
+runtime and skipped if absent. Dense LU is capped at DENSE_MAX_NODES nodes
+(O(N^3)). Failed circuits appear as labelled gray panels rather than dropped.
 """
 
 import argparse
@@ -62,6 +65,20 @@ SCALING_CIRCUITS = [
 ]
 
 N_TIMING_RUNS = 3   # median of this many runs for wall-clock timing
+
+# Solver backends compared in the scaling plot. KLU requires the binary to be
+# built with `--features klu`; it is probed at runtime and skipped if absent.
+SCALING_BACKENDS = ["dense", "sparse", "klu"]
+# Dense LU is O(N^3) per factorisation; cap it so the suite stays quick. Beyond
+# this node count dense is skipped (and the cap is noted on the plot) — its
+# steep curve up to the cap already shows the asymptotic disadvantage.
+DENSE_MAX_NODES = 250
+# (colour, marker, legend label) per backend.
+BACKEND_STYLE = {
+    "dense":  ("#9C27B0", "o", "fairchild — dense LU (faer)"),
+    "sparse": ("#2196F3", "s", "fairchild — sparse LU (faer)"),
+    "klu":    ("#FF9800", "^", "fairchild — KLU (SuiteSparse)"),
+}
 
 # Matplotlib style
 BLUE   = "#2196F3"
@@ -288,11 +305,32 @@ def plot_accuracy(fc_bin: str, ng_bin: str | None) -> Path:
 # Plot 2: scaling wall-clock
 # ---------------------------------------------------------------------------
 
-def plot_scaling(fc_bin: str, ng_bin: str | None) -> Path:
-    print("\n  Timing ring oscillator scaling (median of {} runs each) ...".format(N_TIMING_RUNS))
+def backend_available(fc_bin: str, backend: str) -> bool:
+    """Probe whether the fairchild binary supports a solver backend (KLU needs
+    the `klu` cargo feature)."""
+    probe = subprocess.run(
+        [fc_bin, "-f", str(CIRCUITS / "ring_osc_3.sp"), "--solver", backend],
+        capture_output=True, text=True, timeout=30,
+    )
+    return probe.returncode == 0
 
-    fc_nodes, fc_times = [], []
+
+def plot_scaling(fc_bin: str, ng_bin: str | None) -> Path:
+    print("\n  Timing ring oscillator scaling per solver backend "
+          f"(median of {N_TIMING_RUNS} runs each) ...")
+
+    # Which backends does this binary actually support?
+    backends = []
+    for b in SCALING_BACKENDS:
+        if backend_available(fc_bin, b):
+            backends.append(b)
+        else:
+            print(f"    backend '{b}' unavailable (rebuild with --features klu?) — skipping")
+
+    # data[backend] = (nodes, times); ngspice tracked separately
+    data: dict[str, tuple[list[int], list[float]]] = {b: ([], []) for b in backends}
     ng_nodes, ng_times = [], []
+    dense_capped = False
 
     for fname, stages in SCALING_CIRCUITS:
         netlist = CIRCUITS / fname
@@ -309,20 +347,24 @@ def plot_scaling(fc_bin: str, ng_bin: str | None) -> Path:
                 f.write(body + "\n" + control)
                 tmp_ng = f.name
 
-        print(f"    ring_osc_{stages}: ", end="", flush=True)
+        print(f"    ring_osc_{stages} (n≈{n_nodes}): ", end="", flush=True)
 
-        fc_ms = time_median_ms([fc_bin, "-f", str(netlist)])
-        fc_nodes.append(n_nodes)
-        fc_times.append(fc_ms)
-        print(f"fc={fc_ms:.0f} ms  ", end="", flush=True)
+        for b in backends:
+            if b == "dense" and n_nodes > DENSE_MAX_NODES:
+                dense_capped = True
+                print(f"{b}=skip ", end="", flush=True)
+                continue
+            ms = time_median_ms([fc_bin, "-f", str(netlist), "--solver", b])
+            data[b][0].append(n_nodes)
+            data[b][1].append(ms)
+            print(f"{b}={ms:.0f} ", end="", flush=True)
 
         if ng_bin and tmp_ng:
             ng_ms = time_median_ms([ng_bin, "-b", tmp_ng])
             ng_nodes.append(n_nodes)
             ng_times.append(ng_ms)
-            print(f"ng={ng_ms:.0f} ms")
-        else:
-            print()
+            print(f"ngspice={ng_ms:.0f}", end="")
+        print()
 
         if tmp_ng:
             try:
@@ -331,29 +373,31 @@ def plot_scaling(fc_bin: str, ng_bin: str | None) -> Path:
                 pass
 
     # ---- plot ----
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, ax = plt.subplots(figsize=(7.5, 5))
 
-    ax.loglog(fc_nodes, fc_times, "o-", color=BLUE, lw=2, ms=6,
-              label="fairchild", zorder=3)
+    for b in backends:
+        nodes, times = data[b]
+        if not nodes:
+            continue
+        color, marker, label = BACKEND_STYLE[b]
+        ax.loglog(nodes, times, marker=marker, ls="-", color=color, lw=1.8, ms=6,
+                  label=label, zorder=3)
     if ng_nodes:
-        ax.loglog(ng_nodes, ng_times, "s--", color=RED, lw=1.8, ms=6,
-                  label="ngspice", alpha=0.9, zorder=2)
+        ax.loglog(ng_nodes, ng_times, marker="x", ls="--", color=RED, lw=1.6, ms=7,
+                  label="ngspice (default solver)", alpha=0.9, zorder=2)
 
-    # Annotate points with stage counts
-    for (stages_val, n, t) in zip(
-        [s for _, s in SCALING_CIRCUITS],
-        fc_nodes, fc_times
-    ):
-        ax.annotate(f"{stages_val}-stage", (n, t),
-                    textcoords="offset points", xytext=(5, 3),
-                    fontsize=7.5, color=BLUE)
+    if dense_capped:
+        ax.text(0.02, 0.98,
+                f"dense LU capped at n ≤ {DENSE_MAX_NODES} (O(N³); larger N omitted)",
+                transform=ax.transAxes, ha="left", va="top", fontsize=7.5,
+                color=BACKEND_STYLE["dense"][0])
 
     ax.set_xlabel("Approximate node count (2N+1 for N-stage ring oscillator)", fontsize=9)
-    ax.set_ylabel("Wall-clock time (ms, median of 3 runs)", fontsize=9)
-    ax.set_title("Transient simulation time vs circuit size\n"
-                 "CMOS ring oscillator family (Level-1 MOSFET)",
+    ax.set_ylabel(f"Wall-clock time (ms, median of {N_TIMING_RUNS} runs)", fontsize=9)
+    ax.set_title("Transient simulation time vs circuit size, by solver backend\n"
+                 "CMOS ring oscillator family (Level-1 MOSFET), end-to-end wall-clock",
                  fontsize=10)
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8, loc="lower right")
     ax.grid(True, which="both", lw=0.4)
     ax.tick_params(labelsize=8)
     fig.tight_layout()
