@@ -18,13 +18,20 @@ use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind,
 use crate::mna::MnaMatrix;
 
 /// Per-segment optical perturbation produced by a [`PhotonicActiveModel`] at the
-/// current operating point: an effective-index change `Δn_eff` (added to the
-/// segment index) and an excess loss `Δα` (Neper/m, added to the propagation
-/// loss). Both are mechanism-agnostic — the segment never asks how they were
-/// produced — so any drive physics reduces to this pair.
+/// current operating point:
+///   - `dn_eff` — effective-index change (a λ-dependent phase `2π·Δn_eff·L/λ`,
+///     e.g. free-carrier dispersion or Pockels via index);
+///   - `dphi` — a λ-independent direct phase (e.g. a calibrated thermo-optic
+///     `φ_th = π·P/P_π`, applied identically to every WDM channel);
+///   - `dalpha_neper_m` — excess propagation loss.
+///
+/// All are mechanism-agnostic and additive — the segment never asks how they
+/// were produced — so any drive physics, and any composition of drives, reduces
+/// to this triple.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OpticalPerturbation {
     pub dn_eff: f64,
+    pub dphi: f64,
     pub dalpha_neper_m: f64,
 }
 
@@ -142,7 +149,7 @@ impl Device for ActiveOpticalDevice {
         // Delay-on-phase-shifters is a future step; today's classes are
         // instantaneous, so the segment runs with the delay line disengaged.
         self.seg
-            .refresh(x, pert.dn_eff, pert.dalpha_neper_m, false, ctx);
+            .refresh(x, pert.dn_eff, pert.dphi, pert.dalpha_neper_m, false, ctx);
     }
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -193,6 +200,22 @@ pub fn pn_phase_shifter() -> ActiveOpticalDevice {
 pub fn pn_phase_shifter_cap() -> ActiveOpticalDevice {
     let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
     ActiveOpticalDevice::new(seg, Box::new(PnDrive::with_depletion_cap()))
+}
+
+/// Build the `fc_thermal_ps` device — a metal-heater thermo-optic phase shifter
+/// (no PN junction). A pure phase rotation `φ = π·P/P_π`, modelled on a
+/// zero-length segment (no propagation phase, no loss).
+pub fn thermal_phase_shifter() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(0.0, 2.445, 4.19, 0.0);
+    ActiveOpticalDevice::new(seg, Box::new(Heater::new()))
+}
+
+/// Build the `fc_pn_th_ps` device — a PN phase shifter with a metal heater
+/// bolted on (Δn_eff from V_pn and φ_th from Joule power sum). Terminal order:
+/// optical bundle, then anode, cathode, heat_p, heat_n.
+pub fn pn_thermal_phase_shifter() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
+    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(PnDrive::new()))))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -299,6 +322,7 @@ impl PhotonicActiveModel for PnDrive {
         let v_rev = (-v_pn).max(0.0);
         OpticalPerturbation {
             dn_eff: self.dn_dv * v_pn,
+            dphi: 0.0,
             dalpha_neper_m: self.da_dv * v_rev,
         }
     }
@@ -364,6 +388,159 @@ impl PhotonicActiveModel for PnDrive {
             }
             _ => false,
         }
+    }
+}
+
+/// Resistive metal-heater drive (thermo-optic). A heater resistor `1/R_heater`
+/// between `heat_p`/`heat_n`; Joule power `P = V²/R` produces a calibrated,
+/// wavelength-independent phase `φ_th = π·P/P_π` applied to every channel — the
+/// `fc_thermal_ps` physics. No optical loss, no index dispersion (it is a pure
+/// phase rotation; modelled on a zero-length segment when standalone).
+pub struct Heater {
+    r_heater: f64,
+    p_pi: f64,
+    heat_p: NodeId,
+    heat_n: NodeId,
+}
+
+impl Heater {
+    pub fn new() -> Self {
+        Heater {
+            r_heater: 1000.0,
+            p_pi: 10e-3,
+            heat_p: None,
+            heat_n: None,
+        }
+    }
+}
+
+impl Default for Heater {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhotonicActiveModel for Heater {
+    fn num_electrical_terminals(&self) -> usize {
+        2 // heat_p, heat_n
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        self.heat_p = electrical[0];
+        self.heat_n = electrical[1];
+    }
+
+    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], _ctx: &SimContext) -> OpticalPerturbation {
+        let v = self.heat_p.map_or(0.0, |i| x[i]) - self.heat_n.map_or(0.0, |i| x[i]);
+        let p = v * v / self.r_heater;
+        OpticalPerturbation {
+            dn_eff: 0.0,
+            dphi: std::f64::consts::PI * p / self.p_pi,
+            dalpha_neper_m: 0.0,
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.heat_p, self.heat_n, 1.0 / self.r_heater);
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        match name {
+            "r_heater" | "r" => {
+                self.r_heater = value;
+                true
+            }
+            // `p_pi_th` is the alias the combined PN+thermal devices used.
+            "p_pi" | "p_pi_w" | "p_pi_th" => {
+                self.p_pi = value;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Compose any drive model with a metal heater bolted on. The heater's
+/// `heat_p`/`heat_n` terminals follow the inner model's electrical terminals;
+/// Δn/Δφ/Δα sum, electrical stamps and reactive branches concatenate. This is
+/// the orthogonal "+ optional heater" axis — `WithHeater::new(PnDrive::new())`
+/// is `fc_pn_th_ps`, `WithHeater::new(PnDrive::with_depletion_cap())` is
+/// `fc_pn_th_ps_cap`, etc. — applicable to any future drive (Pockels, …).
+pub struct WithHeater {
+    inner: Box<dyn PhotonicActiveModel>,
+    heater: Heater,
+}
+
+impl WithHeater {
+    pub fn new(inner: Box<dyn PhotonicActiveModel>) -> Self {
+        WithHeater {
+            inner,
+            heater: Heater::new(),
+        }
+    }
+}
+
+impl PhotonicActiveModel for WithHeater {
+    fn num_electrical_terminals(&self) -> usize {
+        self.inner.num_electrical_terminals() + self.heater.num_electrical_terminals()
+    }
+
+    fn num_internal_nodes(&self) -> usize {
+        self.inner.num_internal_nodes() + self.heater.num_internal_nodes()
+    }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.inner.setup_model(ctx);
+        self.heater.setup_model(ctx);
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        let ni = self.inner.num_electrical_terminals();
+        self.inner.set_terminals(&electrical[..ni]);
+        self.heater.set_terminals(&electrical[ni..]);
+    }
+
+    fn bind_internal(&mut self, first_idx: usize) {
+        self.inner.bind_internal(first_idx);
+        self.heater
+            .bind_internal(first_idx + self.inner.num_internal_nodes());
+    }
+
+    fn eval(&mut self, x: &[f64], intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
+        let a = self.inner.eval(x, intensity_w, ctx);
+        let b = self.heater.eval(x, intensity_w, ctx);
+        OpticalPerturbation {
+            dn_eff: a.dn_eff + b.dn_eff,
+            dphi: a.dphi + b.dphi,
+            dalpha_neper_m: a.dalpha_neper_m + b.dalpha_neper_m,
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        self.inner.stamp(mat);
+        self.heater.stamp(mat);
+    }
+
+    fn stamp_residual(&self, b: &mut [f64]) {
+        self.inner.stamp_residual(b);
+        self.heater.stamp_residual(b);
+    }
+
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        let mut v = self.inner.reactive_branches();
+        v.extend(self.heater.reactive_branches());
+        v
+    }
+
+    fn commit(&mut self, x: &[f64]) {
+        self.inner.commit(x);
+        self.heater.commit(x);
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        let i = self.inner.set_param(name, value);
+        let h = self.heater.set_param(name, value);
+        i || h
     }
 }
 

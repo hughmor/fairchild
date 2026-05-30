@@ -217,9 +217,12 @@ impl OpticalSegment {
     }
 
     /// Recompute the cached transmission coefficients for every channel from
-    /// the segment's own propagation plus the supplied per-segment perturbation
-    /// `Δn_eff` (added to the effective index) and `Δα` (added to the loss, in
-    /// Neper/m). A passive segment passes `dn_eff = dalpha = 0`.
+    /// the segment's own propagation plus the supplied per-segment perturbation:
+    /// `Δn_eff` (added to the effective index — a λ-*dependent* phase
+    /// `2π·Δn_eff·L/λ`, e.g. free-carrier dispersion), `Δφ` (a λ-*independent*
+    /// direct phase added to every channel, e.g. a calibrated thermo-optic
+    /// `φ_th = π·P/P_π`), and `Δα` (added to the loss, Neper/m). A passive
+    /// segment passes all three as 0.
     ///
     /// `delay_active` engages the group-delay line (the owning device decides
     /// when — e.g. `flags.transient && ctx.waveguide_delay && τ>0`).
@@ -227,6 +230,7 @@ impl OpticalSegment {
         &mut self,
         x: &[f64],
         dn_eff: f64,
+        dphi: f64,
         dalpha_neper_m: f64,
         delay_active: bool,
         ctx: &SimContext,
@@ -247,8 +251,9 @@ impl OpticalSegment {
         for k in 0..self.n_channels {
             let lambda = self.lambda_of(x, k);
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
-            // Δn_eff folds into the index, exactly as φ_eo = 2π·Δn_eff·L/λ.
-            let phi = two_pi * (n_eff_lam + dn_eff) * self.length_m / lambda - phi_ref;
+            // Δn_eff folds into the index (φ_eo = 2π·Δn_eff·L/λ); Δφ adds a
+            // wavelength-independent rotation (heater, Pockels-with-fixed-gap…).
+            let phi = two_pi * (n_eff_lam + dn_eff) * self.length_m / lambda - phi_ref + dphi;
             self.c_cached[k] = t_amp * phi.cos();
             self.s_cached[k] = t_amp * phi.sin();
         }
@@ -428,7 +433,7 @@ mod tests {
         let mut seg = lossless_segment(2.0);
         let x = vec![0.7, 0.0, 0.0, 0.0, 0.0, 0.0];
         // delay_active=false ⇒ instantaneous path.
-        seg.refresh(&x, 0.0, 0.0, false, &SimContext::default());
+        seg.refresh(&x, 0.0, 0.0, 0.0, false, &SimContext::default());
         assert!(!seg.delay_active());
         seg.commit(&x);
         assert!(seg.delay_is_empty(), "no history accumulates when off");
@@ -443,16 +448,16 @@ mod tests {
         for step in 0..=3 {
             let t = step as f64;
             let x = vec![t, 0.0, 0.0, 0.0, 0.0, 0.0]; // in_re = t
-            seg.refresh(&x, 0.0, 0.0, true, &ctx_delay(t));
+            seg.refresh(&x, 0.0, 0.0, 0.0, true, &ctx_delay(t));
             assert!(seg.delay_active());
             seg.commit(&x);
         }
         // Query at t = 3 ⇒ delayed source is the input at t − τ = 1.
         let xq = vec![3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        seg.refresh(&xq, 0.0, 0.0, true, &ctx_delay(3.0));
+        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.0));
         assert!((seg.delayed()[0] - 1.0).abs() < 1e-12, "got {}", seg.delayed()[0]);
         // Linear interpolation between samples: t − τ = 1.5 ⇒ 1.5.
-        seg.refresh(&xq, 0.0, 0.0, true, &ctx_delay(3.5));
+        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.5));
         assert!((seg.delayed()[0] - 1.5).abs() < 1e-12, "got {}", seg.delayed()[0]);
     }
 
@@ -460,10 +465,10 @@ mod tests {
     fn delay_preserves_energy_and_stamps_residual() {
         let mut seg = lossless_segment(1.0);
         let x0 = vec![0.6, 0.8, 0.0, 0.0, 0.0, 0.0]; // |A| = 1
-        seg.refresh(&x0, 0.0, 0.0, true, &ctx_delay(0.0));
+        seg.refresh(&x0, 0.0, 0.0, 0.0, true, &ctx_delay(0.0));
         seg.commit(&x0);
         let xq = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        seg.refresh(&xq, 0.0, 0.0, true, &ctx_delay(1.0));
+        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(1.0));
         let mut b = vec![0.0; 9];
         seg.stamp_residual(&mut b);
         let out_mag2 = b[6] * b[6] + b[7] * b[7];

@@ -72,7 +72,7 @@ impl Device for NativeWaveguide {
         // and when there is a finite group delay. DC/AC and the default
         // (instantaneous) path are unaffected. Passive ⇒ no perturbation.
         let delay_active = flags.transient && ctx.waveguide_delay && self.seg.tau_g_s() > 0.0;
-        self.seg.refresh(x, 0.0, 0.0, delay_active, ctx);
+        self.seg.refresh(x, 0.0, 0.0, 0.0, delay_active, ctx);
     }
 
     fn load_residual(&self, b: &mut [f64]) {
