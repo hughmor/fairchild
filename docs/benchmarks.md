@@ -55,8 +55,9 @@ diagnosis split these into three distinct causes:
   gives the node real capacitance — it now holds ~0.5 V in both simulators, and
   the RMS drops from 324 mV to ~11 mV. (The deeper observation — fairchild adds
   gmin to every node diagonal as a shunt-to-ground, where ngspice adds it across
-  device junctions — is tracked as a solver follow-up; it only affects
-  pathological zero-capacitance floating nodes.)
+  device junctions — affects DC-floating / zero-capacitance nodes generally. It
+  is a deliberate architectural divergence under review; the full design
+  discussion (what/where/why/implications/options) is in `sotu.md` §E.)
 
 The benchmark netlists were updated accordingly: finer `.tran` steps on the BJT
 and CMOS circuits (so both simulators resolve the input edges), and parasitic
