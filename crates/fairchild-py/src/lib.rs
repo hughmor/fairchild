@@ -809,9 +809,7 @@ fn apply_source_overrides(netlist: &mut Netlist, overrides: &HashMap<String, Vec
 
 fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<DeviceRegistry> {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
-    registry.register_builtin_bjts(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
 
     #[cfg(feature = "osdi")]
     for osdi_path in &netlist.osdi_paths {

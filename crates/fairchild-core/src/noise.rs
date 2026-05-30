@@ -362,7 +362,7 @@ mod tests {
         )
         .unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
-        registry.register_builtin_diodes(&net.models);
+        registry.register_builtin_models(&net.models);
         let opts = SimOptions::default();
         let r = noise_analysis(&net, &[1e3], "out", "0", "v1", &registry, &opts).unwrap();
 
@@ -394,7 +394,7 @@ mod tests {
                    .noise V(b) Vbias DEC 1 1k 1k\n.end\n";
         let net = parse_spice(src).unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
-        registry.register_builtin_diodes(&net.models);
+        registry.register_builtin_models(&net.models);
         let opts = SimOptions::default();
         let r = noise_analysis(&net, &[1e3], "b", "0", "vbias", &registry, &opts).unwrap();
 

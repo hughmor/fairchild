@@ -8,10 +8,10 @@ use crate::mna::MnaMatrix;
 use crate::models::{
     pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full, pn_phase_shifter_inj,
     pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_full,
-    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter, GummelPoonBjt,
-    Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
-    NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativeSplitter,
-    NativeWaveguide, ShockleyDiode,
+    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter,
+    ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux,
+    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
+    NativeSplitter, NativeWaveguide, ShockleyDiode,
 };
 
 // Factory closures are `Arc` so the alias mechanism (B6) can clone a target
@@ -172,6 +172,89 @@ impl DeviceRegistry {
             self.bjt_cards
                 .insert(card.name.clone(), (is_pnp, card.params.clone()));
         }
+    }
+
+    /// Register active-photonic `.model` cards with a `LEVEL` selector, à la
+    /// MOSFET LEVEL. A card `.model myps fc_pn_ps LEVEL=2` registers `myps` as a
+    /// depletion-cap PN phase shifter; the model-card params (L_um, dn_dv, …)
+    /// are baked in, and per-instance params on the `X…` line still apply on
+    /// top. The base type (`fc_pn_ps` / `fc_thermal_ps` / `fc_pn_th_ps`) is the
+    /// family; LEVEL selects the electrical sophistication. LEVEL 1 (or absent)
+    /// is the plain device, so a bare `.model` card is always valid.
+    ///
+    /// | base type | LEVEL | device |
+    /// |---|---|---|
+    /// | `fc_pn_ps` | 1 / 2 / 3 / 4 | linear / +Cj / injection / full |
+    /// | `fc_thermal_ps` | 1 / 2 | instantaneous / thermal-RC |
+    /// | `fc_pn_th_ps` | 1 / 2 / 3 / 4 | +heater on each PN level |
+    ///
+    /// Cards whose kind is not a photonic family are ignored (handled by the
+    /// diode/MOSFET/BJT registrars).
+    pub fn register_photonic_models(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let kind = card.kind.to_lowercase();
+            let level = card
+                .params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("level"))
+                .map(|(_, v)| v.round() as i64)
+                .unwrap_or(1);
+            let ctor: fn() -> ActiveOpticalDevice = match (kind.as_str(), level) {
+                ("fc_pn_ps", 1) => pn_phase_shifter,
+                ("fc_pn_ps", 2) => pn_phase_shifter_cap,
+                ("fc_pn_ps", 3) => pn_phase_shifter_inj,
+                ("fc_pn_ps", 4) => pn_phase_shifter_full,
+                ("fc_thermal_ps", 1) => thermal_phase_shifter,
+                ("fc_thermal_ps", 2) => thermal_rc_phase_shifter,
+                ("fc_pn_th_ps", 1) => pn_thermal_phase_shifter,
+                ("fc_pn_th_ps", 2) => pn_thermal_phase_shifter_cap,
+                ("fc_pn_th_ps", 3) => pn_thermal_phase_shifter_inj,
+                ("fc_pn_th_ps", 4) => pn_thermal_phase_shifter_full,
+                // Not a photonic family (or unknown LEVEL) — leave for others;
+                // warn on a recognised family with a bad LEVEL.
+                (k @ ("fc_pn_ps" | "fc_thermal_ps" | "fc_pn_th_ps"), bad) => {
+                    eprintln!(
+                        "warning: photonic model '{}' has unsupported {k} LEVEL={bad}; \
+                         using LEVEL=1",
+                        card.name
+                    );
+                    match k {
+                        "fc_thermal_ps" => thermal_phase_shifter,
+                        "fc_pn_th_ps" => pn_thermal_phase_shifter,
+                        _ => pn_phase_shifter,
+                    }
+                }
+                _ => continue,
+            };
+            // Model-card params (minus LEVEL) are applied after construction;
+            // instance params on the X-line are applied later by build_devices.
+            let params: Vec<(String, f64)> = card
+                .params
+                .iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
+                .cloned()
+                .collect();
+            self.register(card.name.clone(), move |terminals, ctx| {
+                let mut d = ctor();
+                d.setup_model(ctx);
+                d.setup_instance(terminals, ctx);
+                for (k, v) in &params {
+                    d.set_real_param(k, *v);
+                }
+                Box::new(d) as Box<dyn Device>
+            });
+        }
+    }
+
+    /// Register every `.model`-card-derived built-in family from a netlist's
+    /// cards in one call: diodes, MOSFETs, BJTs, and active-photonic LEVEL
+    /// models. The single entry point every analysis uses, so a model card is
+    /// honoured uniformly regardless of which analysis builds the registry.
+    pub fn register_builtin_models(&mut self, cards: &[ModelCard]) {
+        self.register_builtin_diodes(cards);
+        self.register_builtin_mosfets(cards);
+        self.register_builtin_bjts(cards);
+        self.register_photonic_models(cards);
     }
 
     /// Build a `GummelPoonBjt` instance for a `Q` element, injecting the

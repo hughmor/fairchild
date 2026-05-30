@@ -193,6 +193,34 @@ Q-switching). It is shown in the tier table below as the roadmap target.
 
 ---
 
+## Selecting a tier with `LEVEL` (MOSFET-style)
+
+Besides the dedicated device names above, the tiers can be selected through a
+`.model` card with a `LEVEL` selector — the same idiom as MOSFET `.model … LEVEL`.
+The base type is the *family*; `LEVEL` picks the electrical sophistication, and
+model-card params bake in while per-instance `X…` params still apply on top:
+
+```spice
+.model myps  fc_pn_ps     LEVEL=2  L_um=480 v_pi_l=0.012   ; ≡ fc_pn_ps_cap
+.model myth  fc_thermal_ps LEVEL=2 tau_th=20u             ; ≡ fc_thermal_ps_rc
+.model mymod fc_pn_th_ps  LEVEL=4                          ; ≡ fc_pn_th_ps_full
+Xps  in out  a 0      myps
+```
+
+| Family `LEVEL=` | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| `fc_pn_ps` | linear (`fc_pn_ps`) | +Cj (`_cap`) | injection (`_inj`) | full (`_full`) |
+| `fc_thermal_ps` | instantaneous (`fc_thermal_ps`) | thermal-RC (`_rc`) | — | — |
+| `fc_pn_th_ps` | `fc_pn_th_ps` | `_cap` | `_inj` | `_full` |
+
+`LEVEL` absent ⇒ 1. The dedicated `fc_*` names remain valid and identical; the
+LEVEL form is the SPICE-idiomatic way to keep one model name while changing the
+modelled physics. (Internally, every tier is one `OpticalSegment` driven by a
+`PhotonicActiveModel`; `LEVEL` selects which drive — see the user guide's
+"authoring a custom active photonic device".)
+
+---
+
 ## What the script actually computes vs what's left in the model
 
 `pn_modulator.py` already does:

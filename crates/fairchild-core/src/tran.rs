@@ -767,8 +767,7 @@ pub fn tran_nr_with_registry_opts(
 /// Fixed-step Backward Euler transient using only built-in models from `.model` cards.
 pub fn tran_nr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
     tran_nr_with_registry(netlist, step, stop, &registry)
 }
 
@@ -789,8 +788,7 @@ pub fn tran_nr_with_registry_tr(
 /// Fixed-step Trapezoidal Rule transient using only built-in models from `.model` cards.
 pub fn tran_nr_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
     tran_nr_with_registry_tr(netlist, step, stop, &registry)
 }
 
@@ -1225,8 +1223,7 @@ pub fn tran_nr_with_registry_var_opts(
 /// Variable-step BE + LTE transient using only built-in models from `.model` cards.
 pub fn tran_nr_var(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
     tran_nr_with_registry_var(netlist, step, stop, &registry)
 }
 
@@ -1433,7 +1430,7 @@ mod tests {
                    R1 in out 1k\nC1 out 0 1u\n.tran 200u 4m\n.end\n";
         let net = parse_spice(src).unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
-        registry.register_builtin_diodes(&net.models);
+        registry.register_builtin_models(&net.models);
 
         let opts_be = crate::options::SimOptions {
             method: IntegratorMode::BackwardEuler,
@@ -1534,7 +1531,7 @@ mod tests {
         .unwrap();
         let registry = {
             let mut r = DeviceRegistry::new();
-            r.register_builtin_diodes(&netlist.models);
+            r.register_builtin_models(&netlist.models);
             r
         };
         // itl4=1 + reltol=0 is enough to guarantee NR never converges.

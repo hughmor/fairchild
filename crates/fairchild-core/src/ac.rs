@@ -483,7 +483,7 @@ mod tests {
         )
         .unwrap();
         let mut registry = DeviceRegistry::new();
-        registry.register_builtin_diodes(&net.models);
+        registry.register_builtin_models(&net.models);
         let freqs = freq_decade(1e3, 1e9, 30);
         let result = ac_analysis(&net, &freqs, Some("Vac"), &registry).unwrap();
 

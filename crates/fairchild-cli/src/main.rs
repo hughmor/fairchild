@@ -366,9 +366,7 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
 /// Relative `.osdi` paths are resolved against `netlist_dir`.
 fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool) -> DeviceRegistry {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
-    registry.register_builtin_bjts(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
 
     #[cfg(feature = "osdi")]
     {

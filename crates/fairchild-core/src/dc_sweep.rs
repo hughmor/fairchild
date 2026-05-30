@@ -330,7 +330,7 @@ mod tests {
         .unwrap();
         let reg = {
             let mut r = DeviceRegistry::new();
-            r.register_builtin_diodes(&net.models);
+            r.register_builtin_models(&net.models);
             r
         };
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 1.0, 0.1, None, &reg).unwrap();

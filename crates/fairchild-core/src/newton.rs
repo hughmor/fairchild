@@ -1263,9 +1263,7 @@ pub fn dc_op_nr(netlist: &Netlist) -> Result<NrResult, SimError> {
 /// DC operating-point using only built-in models, with explicit options.
 pub fn dc_op_nr_opts(netlist: &Netlist, opts: &SimOptions) -> Result<NrResult, SimError> {
     let mut registry = DeviceRegistry::new();
-    registry.register_builtin_diodes(&netlist.models);
-    registry.register_builtin_mosfets(&netlist.models);
-    registry.register_builtin_bjts(&netlist.models);
+    registry.register_builtin_models(&netlist.models);
     dc_op_nr_with_registry_opts(netlist, &registry, opts)
 }
 
