@@ -1,4 +1,5 @@
 use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
+use crate::delay::DelayLine;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
@@ -45,23 +46,15 @@ pub struct NativeWaveguide {
     c_cached: Vec<f64>,
     s_cached: Vec<f64>,
 
-    // ── Group-delay line state (active only when ctx.waveguide_delay) ────────
-    /// True for the current eval iff the delay model is engaged (transient +
-    /// `waveguide_delay` option + τ_g > 0).  Governs whether the output port
-    /// equations couple to the live input nodes (instantaneous) or to a
-    /// history-reconstructed delayed source (delay line).
-    delay_active: bool,
-    /// Absolute time of the current eval; stamped into the history at commit.
-    last_time_s: f64,
-    /// Committed timestamps (monotonic increasing).
-    hist_t: Vec<f64>,
-    /// Committed source amplitudes per timestep.  Each entry is a flat vector
-    /// laid out per channel as `[in_re_fw, in_im_fw]` (unidir) or
-    /// `[in_re_fw, in_im_fw, out_re_bw, out_im_bw]` (bidir) — the amplitudes
-    /// that, delayed by τ_g, drive the opposite port.
-    hist_vals: Vec<Vec<f64>>,
-    /// Delayed source amplitudes for the current step (same layout as a
-    /// `hist_vals` entry), reconstructed at `t − τ_g` in `eval`.
+    // ── Group-delay line (engaged only when ctx.waveguide_delay) ────────────
+    /// Generic history buffer + interpolation shared with other delayed
+    /// devices (T-line, PN phase shifters).  Records the per-channel source
+    /// amplitudes (see `gather_sources`) at each accepted timestep so the
+    /// output envelope can be reconstructed at `t − τ_g`.
+    delay: DelayLine,
+    /// Delayed source amplitudes for the current step, reconstructed at
+    /// `t − τ_g` in `eval`.  Per channel: `[in_re_fw, in_im_fw]` (unidir) or
+    /// `[in_re_fw, in_im_fw, out_re_bw, out_im_bw]` (bidir).
     delayed: Vec<f64>,
 }
 
@@ -94,10 +87,7 @@ impl NativeWaveguide {
             branches: Vec::new(),
             c_cached: Vec::new(),
             s_cached: Vec::new(),
-            delay_active: false,
-            last_time_s: 0.0,
-            hist_t: Vec::new(),
-            hist_vals: Vec::new(),
+            delay: DelayLine::new(),
             delayed: Vec::new(),
         }
     }
@@ -135,37 +125,6 @@ impl NativeWaveguide {
             }
         }
         v
-    }
-
-    /// Reconstruct the source amplitudes at time `tq` by linear interpolation of
-    /// the committed history.  Clamps to the endpoints: before the first sample
-    /// the input envelope is taken as the initial (DC) value; after the last it
-    /// holds the most recent value (delays shorter than the timestep degrade
-    /// gracefully to "no delay").
-    fn interp_history(&self, tq: f64) -> Vec<f64> {
-        let width = self.n_channels * self.vals_per_channel();
-        if self.hist_t.is_empty() {
-            return vec![0.0; width];
-        }
-        if tq <= self.hist_t[0] {
-            return self.hist_vals[0].clone();
-        }
-        let last = self.hist_t.len() - 1;
-        if tq >= self.hist_t[last] {
-            return self.hist_vals[last].clone();
-        }
-        // Binary search for the bracketing interval [i, i+1].
-        let i = match self
-            .hist_t
-            .binary_search_by(|t| t.partial_cmp(&tq).unwrap_or(std::cmp::Ordering::Less))
-        {
-            Ok(j) => return self.hist_vals[j].clone(),
-            Err(j) => j - 1,
-        };
-        let (t0, t1) = (self.hist_t[i], self.hist_t[i + 1]);
-        let f = if t1 > t0 { (tq - t0) / (t1 - t0) } else { 0.0 };
-        let (a, b) = (&self.hist_vals[i], &self.hist_vals[i + 1]);
-        (0..width).map(|j| a[j] + f * (b[j] - a[j])).collect()
     }
 }
 
@@ -253,10 +212,11 @@ impl Device for NativeWaveguide {
         // Engage the delay line only in transient runs, when the option is on,
         // and when there is a finite group delay to model.  DC/AC and the
         // default (instantaneous) path are unaffected.
-        self.last_time_s = ctx.time_s;
-        self.delay_active = flags.transient && ctx.waveguide_delay && self.tau_g_s > 0.0;
-        if self.delay_active {
-            self.delayed = self.interp_history(ctx.time_s - self.tau_g_s);
+        let active = flags.transient && ctx.waveguide_delay && self.tau_g_s > 0.0;
+        self.delay.set_state(active, ctx.time_s);
+        if active {
+            let width = self.n_channels * self.vals_per_channel();
+            self.delayed = self.delay.sample(self.tau_g_s, width);
         }
 
         let n = self.n_channels;
@@ -291,7 +251,7 @@ impl Device for NativeWaveguide {
         // equation becomes `V_out = (transmission)·(delayed input)`, a known
         // constant reconstructed from history.  The instantaneous path is fully
         // homogeneous (handled entirely in the Jacobian), so nothing to stamp.
-        if !self.delay_active {
+        if !self.delay.is_active() {
             return;
         }
         let n = self.n_channels;
@@ -329,7 +289,7 @@ impl Device for NativeWaveguide {
         // In delay mode the output ports are driven by a history-reconstructed
         // source (stamped into the residual), so their branch equations carry
         // no coupling to the live input nodes — only the identity `V_out = b`.
-        let delay = self.delay_active;
+        let delay = self.delay.is_active();
         for k in 0..n {
             let c = self.c_cached[k];
             let s = self.s_cached[k];
@@ -389,26 +349,13 @@ impl Device for NativeWaveguide {
         self.load_jacobian(mat);
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn commit_timestep(&mut self, x: &[f64]) {
         // Record the port amplitudes for this accepted step so future steps can
         // read them back delayed by τ_g.  Only maintained when the delay line
         // is engaged; otherwise this is a no-op (no memory, no cost).
-        if !self.delay_active {
-            return;
-        }
-        self.hist_t.push(self.last_time_s);
-        self.hist_vals.push(self.gather_sources(x));
-        // Trim history older than one full delay window (keep one sample before
-        // the window so interpolation still brackets `t − τ_g`).
-        let cutoff = self.last_time_s - self.tau_g_s;
-        let mut drop = 0;
-        while drop + 1 < self.hist_t.len() && self.hist_t[drop + 1] <= cutoff {
-            drop += 1;
-        }
-        if drop > 0 {
-            self.hist_t.drain(0..drop);
-            self.hist_vals.drain(0..drop);
+        if self.delay.is_active() {
+            let snapshot = self.gather_sources(x);
+            self.delay.record(snapshot, self.tau_g_s);
         }
     }
 }
@@ -447,12 +394,12 @@ mod tests {
         let x = vec![0.7, 0.0, 0.0, 0.0, 0.0, 0.0];
         // Default ctx has waveguide_delay = false → instantaneous path.
         wg.eval(&x, EvalFlags::tran(), &SimContext::default());
-        assert!(!wg.delay_active, "delay must be off without the option");
-        wg.commit_timestep(&x);
         assert!(
-            wg.hist_t.is_empty(),
-            "no history should accumulate when off"
+            !wg.delay.is_active(),
+            "delay must be off without the option"
         );
+        wg.commit_timestep(&x);
+        assert!(wg.delay.is_empty(), "no history should accumulate when off");
         // Residual is homogeneous in the instantaneous path.
         let mut b = vec![0.0; 9];
         wg.load_residual(&mut b);
@@ -467,7 +414,7 @@ mod tests {
             let t = step as f64;
             let x = vec![t, 0.0, 0.0, 0.0, 0.0, 0.0]; // in_re = t
             wg.eval(&x, EvalFlags::tran(), &ctx_delay(t));
-            assert!(wg.delay_active);
+            assert!(wg.delay.is_active());
             wg.commit_timestep(&x);
         }
         // Query at t = 3 ⇒ delayed source is the input at t − τ = 1 ⇒ in_re = 1.
