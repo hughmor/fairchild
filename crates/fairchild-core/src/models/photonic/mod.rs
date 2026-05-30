@@ -22,6 +22,7 @@ pub mod grating;
 pub mod laser;
 pub mod mzm;
 pub mod phase_shifters;
+pub mod segment;
 pub mod splitter;
 pub mod waveguide;
 pub mod wdm;
@@ -32,6 +33,7 @@ pub use detector::NativePhotodetector;
 pub use grating::NativeGratingCoupler;
 pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
+pub use segment::OpticalSegment;
 pub use phase_shifters::{
     NativePnPhaseShifter, NativePnPhaseShifterCap, NativePnPhaseShifterFull,
     NativePnPhaseShifterInj, NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap,
