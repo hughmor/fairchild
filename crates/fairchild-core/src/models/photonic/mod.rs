@@ -29,7 +29,8 @@ pub mod waveguide;
 pub mod wdm;
 
 pub use active::{
-    pn_phase_shifter, ActiveOpticalDevice, OpticalPerturbation, PhotonicActiveModel, PnDrive,
+    pn_phase_shifter, pn_phase_shifter_cap, ActiveOpticalDevice, OpticalPerturbation,
+    PhotonicActiveModel, PnDrive,
 };
 pub use circulator::NativeCirculator;
 pub use coupler::NativeDirectionalCoupler;
@@ -39,9 +40,9 @@ pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
 pub use segment::OpticalSegment;
 pub use phase_shifters::{
-    NativePnPhaseShifterCap, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
-    NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
-    NativePnThermalPhaseShifterInj, NativeThermalPhaseShifter, NativeThermalPhaseShifterRc,
+    NativePnPhaseShifterFull, NativePnPhaseShifterInj, NativePnThermalPhaseShifter,
+    NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj,
+    NativeThermalPhaseShifter, NativeThermalPhaseShifterRc,
 };
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;

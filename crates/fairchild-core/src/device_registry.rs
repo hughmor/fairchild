@@ -6,9 +6,9 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    pn_phase_shifter, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux,
-    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
-    NativePnPhaseShifterCap, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
+    pn_phase_shifter, pn_phase_shifter_cap, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser,
+    NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm,
+    NativePhotodetector, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
     NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
     NativePnThermalPhaseShifterInj, NativeSplitter, NativeThermalPhaseShifter,
     NativeThermalPhaseShifterRc, NativeWaveguide, ShockleyDiode,
@@ -252,7 +252,7 @@ impl DeviceRegistry {
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_ps_cap", |terminals, ctx| {
-            let mut d = NativePnPhaseShifterCap::new();
+            let mut d = pn_phase_shifter_cap();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

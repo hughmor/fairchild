@@ -14,7 +14,7 @@
 
 use super::segment::OpticalSegment;
 use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
-use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
 
 /// Per-segment optical perturbation produced by a [`PhotonicActiveModel`] at the
@@ -187,14 +187,30 @@ pub fn pn_phase_shifter() -> ActiveOpticalDevice {
     ActiveOpticalDevice::new(seg, Box::new(PnDrive::new()))
 }
 
+/// Build the `fc_pn_ps_cap` device — the PN phase shifter plus a bias-dependent
+/// depletion junction capacitance (and optional `da/dV` reverse-bias loss).
+/// Same SOI-rib optics as `fc_pn_ps`.
+pub fn pn_phase_shifter_cap() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
+    ActiveOpticalDevice::new(seg, Box::new(PnDrive::with_depletion_cap()))
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Drive models
 // ────────────────────────────────────────────────────────────────────────
 
-/// Linear free-carrier PN-junction drive (the `fc_pn_ps` physics): a single
-/// shared junction conductance `g_pn` between anode and cathode, and a linear
-/// electro-optic index change `Δn_eff = (dn/dV)·V_pn`. No loss change, no
-/// junction capacitance (those are added by richer drive models / flags).
+/// Free-carrier PN-junction drive (the `fc_pn_ps` / `fc_pn_ps_cap` physics):
+/// a single shared junction conductance `g_pn` between anode and cathode, a
+/// linear electro-optic index change `Δn_eff = (dn/dV)·V_pn`, an optional
+/// bias-dependent depletion capacitance `C_j(V_pn)` (active only when
+/// `c_j0 > 0`), and an optional linear reverse-bias free-carrier loss
+/// `Δα = (dα/dV)·max(0, −V_pn)`.
+///
+/// `c_j0 = 0` / `da_dv = 0` reproduce `fc_pn_ps` exactly (no cap, no loss
+/// change); a non-zero `c_j0` makes it `fc_pn_ps_cap`. This is the LEVEL
+/// collapse in miniature — one drive model, parameters select the electrical
+/// sophistication. Forward-injection and full (TPA/self-heat) regimes are
+/// separate models, not flags here (they are alternative / superset physics).
 pub struct PnDrive {
     dn_dv: f64,
     g_pn: f64,
@@ -202,18 +218,41 @@ pub struct PnDrive {
     /// segment's `wl_ref_m` (both default to the band centre and both update on
     /// a `wl_ref` param), kept here so the conversion needs no segment handle.
     wl_ref_m: f64,
+    // Optional depletion junction cap (inactive when c_j0 == 0).
+    c_j0: f64,
+    v_bi: f64,
+    m_j: f64,
+    // Optional linear reverse-bias FCA loss (Np/m per volt of reverse bias).
+    da_dv: f64,
+    // Per-eval cache: C_j(V_pn) at the current iterate.
+    c_j_cached: f64,
     anode: NodeId,
     cathode: NodeId,
 }
 
 impl PnDrive {
+    /// The `fc_pn_ps` drive: linear EO only (no junction cap, no loss change).
     pub fn new() -> Self {
         PnDrive {
             dn_dv: 1.55e-6 / (2.0 * 0.015),
             g_pn: 1e-3,
             wl_ref_m: 1.55e-6,
+            c_j0: 0.0,
+            v_bi: 0.7,
+            m_j: 0.5,
+            da_dv: 0.0,
+            c_j_cached: 0.0,
             anode: None,
             cathode: None,
+        }
+    }
+
+    /// The `fc_pn_ps_cap` drive: adds the depletion junction capacitance.
+    pub fn with_depletion_cap() -> Self {
+        PnDrive {
+            c_j0: 20e-15,
+            c_j_cached: 20e-15,
+            ..Self::new()
         }
     }
 }
@@ -242,14 +281,42 @@ impl PhotonicActiveModel for PnDrive {
         let v_a = self.anode.map_or(0.0, |i| x[i]);
         let v_c = self.cathode.map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
+
+        // Depletion C_j(V_pn) with a linear tangent past V_bi/2 to stay finite
+        // and keep the NR Jacobian smooth (only meaningful when c_j0 > 0).
+        if self.c_j0 > 0.0 {
+            let v_knee = 0.5 * self.v_bi;
+            self.c_j_cached = if v_pn < v_knee {
+                self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
+            } else {
+                let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
+                let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
+                c_knee + dc_dv * (v_pn - v_knee)
+            };
+        }
+
+        // Reverse-bias FCA loss: Δα = (dα/dV)·max(0, −V_pn).
+        let v_rev = (-v_pn).max(0.0);
         OpticalPerturbation {
             dn_eff: self.dn_dv * v_pn,
-            dalpha_neper_m: 0.0,
+            dalpha_neper_m: self.da_dv * v_rev,
         }
     }
 
     fn stamp(&self, mat: &mut MnaMatrix) {
         stamp_resistor(mat, self.anode, self.cathode, self.g_pn);
+    }
+
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        if self.c_j0 <= 0.0 {
+            return Vec::new();
+        }
+        vec![ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos: self.anode,
+            neg: self.cathode,
+            value: self.c_j_cached,
+        }]
     }
 
     fn set_param(&mut self, name: &str, value: f64) -> bool {
@@ -264,11 +331,26 @@ impl PhotonicActiveModel for PnDrive {
             }
             "v_pi_l" => {
                 // dn_dv such that 2π·L·dn_dv·Vπ/λ = π at V = Vπ ⇒
-                // dn_dv = λ_ref / (2·Vπ·L) — but Vπ·L is the product, so
                 // dn_dv = λ_ref / (2·V_pi_L).
                 if value > 0.0 {
                     self.dn_dv = self.wl_ref_m / (2.0 * value);
                 }
+                true
+            }
+            "c_j0" => {
+                self.c_j0 = value.max(0.0);
+                true
+            }
+            "v_bi" => {
+                self.v_bi = value.max(1e-3);
+                true
+            }
+            "m_j" => {
+                self.m_j = value.clamp(0.0, 0.99);
+                true
+            }
+            "da_dv" => {
+                self.da_dv = value;
                 true
             }
             // wl_ref is also consumed by the segment; cache it for v_pi_l.
