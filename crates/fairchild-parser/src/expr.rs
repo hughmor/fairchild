@@ -59,6 +59,11 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// Named function call: `sin(x)`, `pow(a, b)`, `if(c, a, b)`, etc.
     Call(String, Vec<Expr>),
+    /// Bare scalar variable, resolved via [`EvalContext::variable`]. Used by
+    /// device-internal constitutive maps (e.g. a `.model` expression
+    /// `dneff_dV = "-3.1e-5*V"` where `V` is the device's bias) — not by
+    /// B-source expressions, which reference nodes via `V(...)`.
+    Var(String),
 }
 
 /// Things the evaluator needs from the surrounding circuit.
@@ -66,6 +71,12 @@ pub trait EvalContext {
     fn node_voltage(&self, node: &str) -> f64;
     fn branch_current(&self, vsrc: &str) -> f64;
     fn time(&self) -> f64;
+    /// Resolve a bare scalar variable ([`Expr::Var`]). Default 0.0 — only
+    /// contexts that evaluate device constitutive maps (over `V`, `T`, `lambda`,
+    /// …) need to override it; B-source contexts never produce `Var`.
+    fn variable(&self, _name: &str) -> f64 {
+        0.0
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +121,7 @@ impl Expr {
             Expr::NodeV(n) => ctx.node_voltage(n),
             Expr::NodeDiffV(a, b) => ctx.node_voltage(a) - ctx.node_voltage(b),
             Expr::BranchI(n) => ctx.branch_current(n),
+            Expr::Var(n) => ctx.variable(n),
             Expr::Time => ctx.time(),
             Expr::Neg(e) => -e.eval(ctx),
             Expr::Not(e) => {
@@ -174,7 +186,7 @@ impl Expr {
                 v_nodes.push(b.clone());
             }
             Expr::BranchI(s) => i_srcs.push(s.clone()),
-            Expr::Num(_) | Expr::Time => {}
+            Expr::Num(_) | Expr::Time | Expr::Var(_) => {}
             Expr::Neg(e) | Expr::Not(e) => e.collect_refs(v_nodes, i_srcs),
             Expr::Bin(_, a, b) => {
                 a.collect_refs(v_nodes, i_srcs);
@@ -619,11 +631,13 @@ impl Parser {
                 } else if name_lc == "time" {
                     Ok(Expr::Time)
                 } else {
-                    // Bare identifier — currently no `.param` symbol table at
-                    // this layer, so we treat it as a literal zero with a
-                    // descriptive error path.  Users should always write
-                    // V(node) / I(vsrc) / TIME explicitly.
-                    Err(ExprError::UnexpectedToken(name, self.pos))
+                    // Bare identifier → a scalar variable resolved by the
+                    // EvalContext (e.g. `V`, `T`, `lambda` in a device
+                    // constitutive map). B-source contexts leave
+                    // `EvalContext::variable` at its 0.0 default, so a stray
+                    // bare ident there reads as zero rather than failing — node
+                    // references must still use the explicit `V(...)` form.
+                    Ok(Expr::Var(name_lc))
                 }
             }
             Some(t) => Err(ExprError::UnexpectedToken(format!("{t:?}"), self.pos)),
@@ -678,6 +692,39 @@ mod tests {
         assert_eq!(e.eval(&ctx()), 20.0);
         let e = Expr::parse("2 ^ 3 ^ 2").unwrap(); // right-assoc
         assert_eq!(e.eval(&ctx()), 512.0);
+    }
+
+    /// Bare scalar variables resolve via `EvalContext::variable` — the path a
+    /// device constitutive map (`dneff_dV = "-3.1e-5*V - 1.2e-5*V*V"`) uses.
+    #[test]
+    fn bare_variables_resolve_via_context() {
+        struct VarCtx {
+            vars: std::collections::HashMap<&'static str, f64>,
+        }
+        impl EvalContext for VarCtx {
+            fn node_voltage(&self, _: &str) -> f64 {
+                0.0
+            }
+            fn branch_current(&self, _: &str) -> f64 {
+                0.0
+            }
+            fn time(&self) -> f64 {
+                0.0
+            }
+            fn variable(&self, name: &str) -> f64 {
+                *self.vars.get(name).unwrap_or(&0.0)
+            }
+        }
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("v", 2.0);
+        let ctx = VarCtx { vars };
+        // SPICE suffix (0.1m) + bare variable V, both in one constitutive map.
+        let e = Expr::parse("-3.1e-5*V - 1.2e-5*V*V").unwrap();
+        let expected = -3.1e-5 * 2.0 - 1.2e-5 * 2.0 * 2.0;
+        assert!((e.eval(&ctx) - expected).abs() < 1e-18, "got {}", e.eval(&ctx));
+        // Unknown variable → 0 via the default-backed map.
+        let e2 = Expr::parse("foo + 1").unwrap();
+        assert_eq!(e2.eval(&ctx), 1.0);
     }
 
     #[test]
