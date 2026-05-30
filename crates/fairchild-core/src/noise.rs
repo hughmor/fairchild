@@ -109,13 +109,7 @@ pub fn noise_analysis(
             }
         }
     }
-    for (i, row) in g_mat.iter_mut().enumerate().take(n_nodes) {
-        row[i] += opts.gmin;
-    }
-    let vsrc_end = n_nodes + topo.vsrc_index.len();
-    for (i, row) in g_mat.iter_mut().enumerate().skip(vsrc_end) {
-        row[i] += opts.gmin;
-    }
+    topo.stamp_gmin(&mut g_mat, opts.gmin);
     let mut c_mat = vec![vec![0.0f64; size]; size];
     let mut l_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {
@@ -324,13 +318,7 @@ fn run_dc_op(
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
-        for i in 0..n_nodes {
-            mat.a[i][i] += opts.gmin;
-        }
-        let vsrc_end = n_nodes + topo.vsrc_index.len();
-        for i in vsrc_end..topo.size {
-            mat.a[i][i] += opts.gmin;
-        }
+        topo.stamp_gmin(&mut mat.a, opts.gmin);
         let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new
             .iter()

@@ -53,6 +53,32 @@ impl CircuitTopology {
         start
     }
 
+    /// Add a uniform conductance `g` to the diagonal of every node row
+    /// `[0, n_nodes)` and every device-internal row `[vsrc_end, size)`, skipping
+    /// the voltage-source branch rows `[n_nodes, vsrc_end)` — those carry their
+    /// own KCL equation and must keep a clean diagonal.
+    ///
+    /// This is the single source of truth for the gmin floor applied identically
+    /// by DC/Newton, transient, AC, and noise assembly. Callers pass the value
+    /// they want stamped: `opts.gmin` for the steady floor, or
+    /// `opts.gmin + gmin_extra` during gmin-stepping homotopy. The internal-row
+    /// floor is what keeps degenerate OSDI/optical potential rows non-singular;
+    /// the deliberate divergence from ngspice (which applies gmin across
+    /// junctions only) is discussed in `_notes/sotu.md §E`.
+    ///
+    /// Operates on any row-major dense matrix (`mat.a`, the AC/noise real
+    /// `g_mat`, or a condition-estimate copy).
+    pub fn stamp_gmin(&self, a: &mut [Vec<f64>], g: f64) {
+        let n_nodes = self.n_nodes();
+        for (i, row) in a.iter_mut().enumerate().take(n_nodes) {
+            row[i] += g;
+        }
+        let vsrc_end = n_nodes + self.vsrc_index.len();
+        for (i, row) in a.iter_mut().enumerate().skip(vsrc_end) {
+            row[i] += g;
+        }
+    }
+
     /// Retrieve a node voltage from a solution vector.
     pub fn node_voltage(&self, node: &str, x: &[f64]) -> Result<f64, SimError> {
         if node == "0" || node == "gnd" {
@@ -752,5 +778,30 @@ mod tests {
         let topo = CircuitTopology::build(&net);
         // nodes: in, out (2) + 1 vsource = 3
         assert_eq!(topo.size, 3);
+    }
+
+    #[test]
+    fn stamp_gmin_floors_node_and_internal_rows_but_skips_vsource() {
+        // 2 nodes (in, mid) + 1 vsource (rows: [0,1]=nodes, [2]=vsrc aux) and
+        // then a device-internal row appended at index 3.
+        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n")
+            .unwrap();
+        let mut topo = CircuitTopology::build(&net);
+        assert_eq!(topo.size, 3);
+        let internal = topo.allocate_extra_rows(1); // index 3, a device-internal row
+        assert_eq!(internal, 3);
+        assert_eq!(topo.size, 4);
+
+        let mut a = vec![vec![0.0; 4]; 4];
+        topo.stamp_gmin(&mut a, 1e-12);
+
+        // Node rows 0,1 get the floor; the vsource aux row 2 is skipped (clean
+        // KCL diagonal); the device-internal row 3 gets the floor.
+        assert_eq!(a[0][0], 1e-12);
+        assert_eq!(a[1][1], 1e-12);
+        assert_eq!(a[2][2], 0.0, "vsource branch row must NOT receive gmin");
+        assert_eq!(a[3][3], 1e-12, "device-internal row must receive gmin");
+        // Off-diagonals untouched.
+        assert_eq!(a[0][1], 0.0);
     }
 }

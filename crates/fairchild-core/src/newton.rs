@@ -361,13 +361,7 @@ fn report_matrix_stats(
         // gmin floor on node / internal rows), so floating nodes don't show as
         // spuriously singular.  Work on a copy to leave `mat` untouched.
         let mut a_est = mat.a.clone();
-        for (i, row) in a_est.iter_mut().enumerate().take(topo.n_nodes()) {
-            row[i] += opts.gmin;
-        }
-        let vsrc_end = topo.n_nodes() + topo.vsrc_index.len();
-        for (i, row) in a_est.iter_mut().enumerate().skip(vsrc_end) {
-            row[i] += opts.gmin;
-        }
+        topo.stamp_gmin(&mut a_est, opts.gmin);
         match crate::solver::estimate_condition_2norm(&a_est) {
             Some(k) => eprintln!(
                 "info: estimated 2-norm condition number κ(A) ≈ {k:.3e} \
@@ -744,14 +738,7 @@ fn residual_l2(
         dev.load_residual(&mut mat.b);
         dev.load_jacobian(&mut mat);
     }
-    let n_nodes = topo.n_nodes();
-    for i in 0..n_nodes {
-        mat.a[i][i] += opts.gmin + gmin_extra;
-    }
-    let vsrc_end = n_nodes + topo.vsrc_index.len();
-    for i in vsrc_end..topo.size {
-        mat.a[i][i] += opts.gmin + gmin_extra;
-    }
+    topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra);
     let n = topo.size;
     let mut sumsq = 0.0_f64;
     for i in 0..n {
@@ -814,19 +801,9 @@ fn nr_inner(
             dev.load_jacobian(&mut mat);
         }
 
-        for i in 0..n_nodes {
-            mat.a[i][i] += opts.gmin + gmin_extra;
-        }
-        // Stamp gmin on OSDI internal-node rows too.  Their default state
-        // when the device emits a degenerate contribution (e.g.
-        // `OWL(out_lambda) <+ OWL(in_lambda)` where both ports map to the
-        // same circuit net) is a zero row — singular without gmin.  Skip
-        // voltage-source aux rows, which need a clean diagonal for their
-        // own KCL equation.
-        let vsrc_end = n_nodes + topo.vsrc_index.len();
-        for i in vsrc_end..topo.size {
-            mat.a[i][i] += opts.gmin + gmin_extra;
-        }
+        // gmin floor on node + device-internal rows (skips vsource aux rows);
+        // `gmin_extra` is the homotopy step. See CircuitTopology::stamp_gmin.
+        topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra);
 
         let solve_result = if let Some(f) = fact.as_mut() {
             f.refactor_and_solve(&mat.a, &mat.b)

@@ -693,14 +693,7 @@ pub fn tran_nr_with_registry_opts(
             // previous accepted timestep).
             stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, step);
 
-            for i in 0..topo.n_nodes() {
-                mat.a[i][i] += opts.gmin;
-            }
-            // gmin on OSDI internal-node rows (see newton.rs for rationale).
-            let vsrc_end = topo.n_nodes() + topo.vsrc_index.len();
-            for i in vsrc_end..topo.size {
-                mat.a[i][i] += opts.gmin;
-            }
+            topo.stamp_gmin(&mut mat.a, opts.gmin);
 
             let x_new = if let Some(f) = fact.as_mut() {
                 f.refactor_and_solve(&mat.a, &mat.b)?
@@ -1081,14 +1074,7 @@ pub fn tran_nr_with_registry_var_opts(
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
 
-            for i in 0..n_nodes {
-                mat.a[i][i] += opts.gmin;
-            }
-            // gmin on OSDI internal-node rows (see newton.rs for rationale).
-            let vsrc_end = n_nodes + topo.vsrc_index.len();
-            for i in vsrc_end..topo.size {
-                mat.a[i][i] += opts.gmin;
-            }
+            topo.stamp_gmin(&mut mat.a, opts.gmin);
 
             let x_new = if let Some(f) = fact.as_mut() {
                 f.refactor_and_solve(&mat.a, &mat.b)?
