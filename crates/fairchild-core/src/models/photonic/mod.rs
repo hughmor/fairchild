@@ -22,16 +22,16 @@ pub mod detector;
 pub mod grating;
 pub mod laser;
 pub mod mzm;
-pub mod phase_shifters;
 pub mod segment;
 pub mod splitter;
 pub mod waveguide;
 pub mod wdm;
 
 pub use active::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_inj, pn_thermal_phase_shifter,
-    pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
-    thermal_rc_phase_shifter, ActiveOpticalDevice, Heater, HeaterRc, Injection, OpticalPerturbation,
+    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full, pn_phase_shifter_inj,
+    pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_full,
+    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter,
+    ActiveOpticalDevice, FullPnDrive, Heater, HeaterRc, Injection, OpticalPerturbation,
     PhotonicActiveModel, PnDrive, WithHeater,
 };
 pub use circulator::NativeCirculator;
@@ -41,7 +41,6 @@ pub use grating::NativeGratingCoupler;
 pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
 pub use segment::OpticalSegment;
-pub use phase_shifters::{NativePnPhaseShifterFull, NativePnThermalPhaseShifterFull};
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;
 pub use wdm::{NativeDemux, NativeMux};
@@ -104,67 +103,6 @@ pub(super) fn stamp_resistor(mat: &mut MnaMatrix, a: NodeId, b: NodeId, g: f64) 
         }
     }
 }
-
-/// Stamp per-channel optical-branch equations for a PN-style phase shifter.
-pub(super) fn stamp_pn_optical(
-    mat: &mut MnaMatrix,
-    nodes: &[NodeId],
-    branches: &[Option<usize>],
-    n: usize,
-    wpc: usize,
-    c_cached: &[f64],
-    s_cached: &[f64],
-) {
-    let bpc = if wpc == 5 { 5 } else { 3 };
-    let lam = wpc - 1;
-    let out_base = wpc * n;
-    for k in 0..n {
-        let in_re_fw = nodes[wpc * k];
-        let in_im_fw = nodes[wpc * k + 1];
-        let in_l = nodes[wpc * k + lam];
-        let out_re_fw = nodes[out_base + wpc * k];
-        let out_im_fw = nodes[out_base + wpc * k + 1];
-        let out_l = nodes[out_base + wpc * k + lam];
-        let c = c_cached[k];
-        let s = s_cached[k];
-        stamp_potential_eq(
-            mat,
-            branches,
-            bpc * k,
-            out_re_fw,
-            &[(in_re_fw, -c), (in_im_fw, -s)],
-        );
-        stamp_potential_eq(
-            mat,
-            branches,
-            bpc * k + 1,
-            out_im_fw,
-            &[(in_re_fw, s), (in_im_fw, -c)],
-        );
-        stamp_potential_eq(mat, branches, bpc * k + (bpc - 1), out_l, &[(in_l, -1.0)]);
-        if wpc == 5 {
-            let in_re_bw = nodes[wpc * k + 2];
-            let in_im_bw = nodes[wpc * k + 3];
-            let out_re_bw = nodes[out_base + wpc * k + 2];
-            let out_im_bw = nodes[out_base + wpc * k + 3];
-            stamp_potential_eq(
-                mat,
-                branches,
-                bpc * k + 2,
-                in_re_bw,
-                &[(out_re_bw, -c), (out_im_bw, -s)],
-            );
-            stamp_potential_eq(
-                mat,
-                branches,
-                bpc * k + 3,
-                in_im_bw,
-                &[(out_re_bw, s), (out_im_bw, -c)],
-            );
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {

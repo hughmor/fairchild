@@ -763,7 +763,12 @@ fn stamp_mutual_conductance(
 /// matrix. Ground (`None`) terminals are skipped. This is the shared kernel for
 /// both the netlist-element AC/noise stamps and the device small-signal
 /// reactance stamps.
-pub fn stamp_2port_by_id(mat: &mut [Vec<f64>], pos: crate::device::NodeId, neg: crate::device::NodeId, val: f64) {
+pub fn stamp_2port_by_id(
+    mat: &mut [Vec<f64>],
+    pos: crate::device::NodeId,
+    neg: crate::device::NodeId,
+    val: f64,
+) {
     if let Some(p) = pos {
         mat[p][p] += val;
         if let Some(n) = neg {
@@ -815,8 +820,8 @@ mod tests {
     fn stamp_gmin_floors_node_and_internal_rows_but_skips_vsource() {
         // 2 nodes (in, mid) + 1 vsource (rows: [0,1]=nodes, [2]=vsrc aux) and
         // then a device-internal row appended at index 3.
-        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n").unwrap();
         let mut topo = CircuitTopology::build(&net);
         assert_eq!(topo.size, 3);
         let internal = topo.allocate_extra_rows(1); // index 3, a device-internal row

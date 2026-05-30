@@ -6,12 +6,12 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_inj, pn_thermal_phase_shifter,
-    pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
-    thermal_rc_phase_shifter, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux,
-    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
-    NativePnPhaseShifterFull, NativePnThermalPhaseShifterFull, NativeSplitter, NativeWaveguide,
-    ShockleyDiode,
+    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full, pn_phase_shifter_inj,
+    pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_full,
+    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter, GummelPoonBjt,
+    Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
+    NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativeSplitter,
+    NativeWaveguide, ShockleyDiode,
 };
 
 // Factory closures are `Arc` so the alias mechanism (B6) can clone a target
@@ -282,13 +282,13 @@ impl DeviceRegistry {
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_ps_full", |terminals, ctx| {
-            let mut d = NativePnPhaseShifterFull::new();
+            let mut d = pn_phase_shifter_full();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_th_ps_full", |terminals, ctx| {
-            let mut d = NativePnThermalPhaseShifterFull::new();
+            let mut d = pn_thermal_phase_shifter_full();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

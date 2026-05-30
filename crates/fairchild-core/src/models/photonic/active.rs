@@ -242,6 +242,20 @@ pub fn thermal_phase_shifter() -> ActiveOpticalDevice {
     ActiveOpticalDevice::new(seg, Box::new(Heater::new()))
 }
 
+/// Build the `fc_pn_ps_full` device — the L3 PN modulator (depletion +
+/// injection + TPA + static self-heating + series resistance).
+pub fn pn_phase_shifter_full() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
+    ActiveOpticalDevice::new(seg, Box::new(FullPnDrive::new()))
+}
+
+/// Build the `fc_pn_th_ps_full` device — the L3 PN modulator with a metal
+/// heater bolted on.
+pub fn pn_thermal_phase_shifter_full() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
+    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(FullPnDrive::new()))))
+}
+
 /// Build the `fc_thermal_ps_rc` device — a metal-heater phase shifter with a
 /// first-order thermal RC (filtered heater power). Zero-length segment.
 pub fn thermal_rc_phase_shifter() -> ActiveOpticalDevice {
@@ -562,6 +576,267 @@ impl PhotonicActiveModel for Injection {
             "da_dv_inj" | "da_dv" => {
                 self.da_dv_inj = value;
                 true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// "Full" L3 PN drive (the `fc_pn_ps_full` physics): both bias regimes
+/// (reverse depletion + forward injection), depletion + diffusion capacitance,
+/// reverse/forward free-carrier absorption, two-photon absorption (TPA), static
+/// thermal self-heating from absorbed optical power, and an optional ohmic
+/// series resistance (the junction voltage is solved implicitly each iterate).
+///
+/// This is the model that exercises the optical→thermal/carrier **back-action**:
+/// `eval` reads the segment's optical `intensity_w` to compute TPA loss and
+/// self-heating Δn — the in-tree proof that the abstraction admits back-action
+/// (no new stub device needed). It caches `length_m`/`alpha_neper_m` (the
+/// segment geometry its self-heating needs) the way [`PnDrive`] caches `wl_ref`.
+pub struct FullPnDrive {
+    // Reverse / depletion.
+    dn_dv_rev: f64,
+    da_dv_rev: f64,
+    c_j0: f64,
+    v_bi: f64,
+    m_j: f64,
+    // Forward / injection.
+    i_sat: f64,
+    n_diode: f64,
+    tau_carrier: f64,
+    dn_dv_inj: f64,
+    da_dv_inj: f64,
+    // Series resistance.
+    r_series: f64,
+    // TPA + thermal.
+    beta_tpa_m_per_w: f64,
+    a_eff_m2: f64,
+    r_th_k_per_w: f64,
+    dn_dt: f64,
+    // Cached segment geometry needed for the self-heating power budget.
+    length_m: f64,
+    alpha_neper_m: f64,
+    anode: NodeId,
+    cathode: NodeId,
+    g_pn_cached: f64,
+    i_eq_cached: f64,
+    c_eff_cached: f64,
+}
+
+impl FullPnDrive {
+    pub fn new() -> Self {
+        FullPnDrive {
+            dn_dv_rev: 5.024e-5,
+            da_dv_rev: 7.83,
+            c_j0: 1.375e-13,
+            v_bi: 0.917,
+            m_j: 0.5,
+            i_sat: 1e-12,
+            n_diode: 1.05,
+            tau_carrier: 10e-9,
+            dn_dv_inj: 1.311e-4,
+            da_dv_inj: 150.0,
+            r_series: 0.0,
+            beta_tpa_m_per_w: 7.9e-12,
+            a_eff_m2: 1.257e-13,
+            r_th_k_per_w: 0.0,
+            dn_dt: 1.86e-4,
+            length_m: 1e-3,
+            alpha_neper_m: dB_per_cm_to_neper_per_m(1.0),
+            anode: None,
+            cathode: None,
+            g_pn_cached: 1e-9,
+            i_eq_cached: 0.0,
+            c_eff_cached: 1.375e-13,
+        }
+    }
+}
+
+impl Default for FullPnDrive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhotonicActiveModel for FullPnDrive {
+    fn num_electrical_terminals(&self) -> usize {
+        2 // anode, cathode
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        self.anode = electrical[0];
+        self.cathode = electrical[1];
+    }
+
+    fn eval(&mut self, x: &[f64], intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
+        let v_a = self.anode.map_or(0.0, |i| x[i]);
+        let v_c = self.cathode.map_or(0.0, |i| x[i]);
+        let v_pn = v_a - v_c;
+        let vt = ctx.vt() * self.n_diode;
+
+        // Junction voltage: implicit when R_s > 0 (solve V_j + R_s·I_d = V_pn).
+        let v_junc = if self.r_series <= 0.0 {
+            v_pn
+        } else {
+            let mut vj = v_pn;
+            for _ in 0..50 {
+                let arg = (vj / vt).clamp(-40.0, 40.0);
+                let e = arg.exp();
+                let id = self.i_sat * (e - 1.0);
+                let f = vj + self.r_series * id - v_pn;
+                let gd = self.i_sat * e / vt;
+                let delta = f / (1.0 + self.r_series * gd);
+                vj -= delta;
+                if delta.abs() < 1e-12 {
+                    break;
+                }
+            }
+            vj
+        };
+
+        let arg = (v_junc / vt).clamp(-40.0, 40.0);
+        let e = arg.exp();
+        let i_diode = self.i_sat * (e - 1.0);
+        let g_d = self.i_sat * e / vt;
+        // Norton stamp accounting for series resistance.
+        let g_eff = g_d / (1.0 + g_d * self.r_series);
+        self.g_pn_cached = g_eff.max(1e-15);
+        self.i_eq_cached = i_diode - g_eff * v_pn;
+
+        // Depletion C_j(V_j) (linear past the V_bi/2 knee) + diffusion C_d.
+        let c_j_v = {
+            let v_knee = 0.5 * self.v_bi;
+            if v_junc < v_knee {
+                self.c_j0 / (1.0 - v_junc / self.v_bi).powf(self.m_j)
+            } else {
+                let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
+                let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
+                c_knee + dc_dv * (v_junc - v_knee)
+            }
+        };
+        self.c_eff_cached = c_j_v + self.tau_carrier * g_d;
+
+        // Optical intensity (channel 0) drives TPA + self-heating back-action.
+        let intensity = intensity_w.first().copied().unwrap_or(0.0).max(0.0);
+        let inj = (e - 1.0).max(0.0);
+        let v_rev = (-v_junc).max(0.0);
+        let alpha_tpa = self.beta_tpa_m_per_w * intensity / self.a_eff_m2;
+        // Extra loss beyond the segment's base α: reverse + forward FCA + TPA.
+        let dalpha = self.da_dv_rev * v_rev + self.da_dv_inj * inj + alpha_tpa;
+        // Absorbed power uses the TOTAL loss (segment base α + dalpha).
+        let alpha_total = self.alpha_neper_m + dalpha;
+        let p_abs = alpha_total * self.length_m * intensity;
+        let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
+        // All three index changes are λ-dependent ⇒ fold into dn_eff.
+        let dn_eff = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj + dn_self;
+
+        OpticalPerturbation {
+            dn_eff,
+            dphi: 0.0,
+            dalpha_neper_m: dalpha,
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.anode, self.cathode, self.g_pn_cached);
+    }
+
+    fn stamp_residual(&self, b: &mut [f64]) {
+        if let Some(a) = self.anode {
+            b[a] -= self.i_eq_cached;
+        }
+        if let Some(c) = self.cathode {
+            b[c] += self.i_eq_cached;
+        }
+    }
+
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        vec![ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos: self.anode,
+            neg: self.cathode,
+            value: self.c_eff_cached,
+        }]
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        match name {
+            "dn_dv_rev" | "dn_dv" => {
+                self.dn_dv_rev = value;
+                true
+            }
+            "da_dv_rev" | "da_dv" => {
+                self.da_dv_rev = value;
+                true
+            }
+            "c_j0" => {
+                self.c_j0 = value.max(0.0);
+                true
+            }
+            "v_bi" => {
+                self.v_bi = value.max(1e-3);
+                true
+            }
+            "m_j" => {
+                self.m_j = value.clamp(0.0, 0.99);
+                true
+            }
+            "i_sat" | "is" => {
+                self.i_sat = value;
+                true
+            }
+            "n_diode" | "n" => {
+                self.n_diode = value;
+                true
+            }
+            "tau_carrier" | "tau" => {
+                self.tau_carrier = value;
+                true
+            }
+            "dn_dv_inj" => {
+                self.dn_dv_inj = value;
+                true
+            }
+            "da_dv_inj" => {
+                self.da_dv_inj = value;
+                true
+            }
+            "beta_tpa" | "beta_tpa_m_per_w" => {
+                self.beta_tpa_m_per_w = value;
+                true
+            }
+            "a_eff_m2" => {
+                self.a_eff_m2 = value.max(1e-20);
+                true
+            }
+            "a_eff_um2" => {
+                self.a_eff_m2 = value.max(1e-8) * 1e-12;
+                true
+            }
+            "r_th" | "r_th_k_per_w" => {
+                self.r_th_k_per_w = value.max(0.0);
+                true
+            }
+            "dn_dt" => {
+                self.dn_dt = value;
+                true
+            }
+            "r_series" => {
+                self.r_series = value.max(0.0);
+                true
+            }
+            // Geometry the self-heating needs; segment stays authoritative.
+            "l_um" => {
+                self.length_m = value * 1e-6;
+                false
+            }
+            "l_m" | "length" => {
+                self.length_m = value;
+                false
+            }
+            "alpha_db_cm" => {
+                self.alpha_neper_m = dB_per_cm_to_neper_per_m(value);
+                false
             }
             _ => false,
         }

@@ -1136,23 +1136,35 @@ the device allocates via `num_extra_nodes` and stamps a discretised
 state equation in `load_jacobian_tran`.  The previous-timestep T_old
 is captured via `commit_timestep`.
 
-### Device-internal reactive state (for custom-device authors)
+### Authoring a custom active photonic device
 
-`fc_pn_ps_cap` is the first device to use the new integrator-managed
-reactive-branch path.  If you're writing a custom photonic device that
-needs a linear (or bias-dependent linear) capacitance / inductance with
-proper BE / TR / BDF-2 companion handling, override
-`Device::reactive_branches` to return a `Vec<ReactiveBranchSpec>` — the
-transient solver in `tran.rs` does the rest (companion stamping each NR
-iteration AND state advance after each successful timestep).  See
-`NativePnPhaseShifterCap` for the canonical pattern.
+All the active phase-shifter / modulator classes above share one
+architecture (see `crates/fairchild-core/src/models/photonic/`): an
+**`OpticalSegment`** (the optical core — per-channel re/im/λ propagation,
+bundle stamping, group delay, λ bootstrap) driven by a swappable
+**`PhotonicActiveModel`** (the electrical/thermal physics). A device is
+`ActiveOpticalDevice { segment, model }`; new physics is a new
+`PhotonicActiveModel`, not a new `Device` impl. Its `eval` receives the
+node voltages **and the per-channel optical intensity** (so optical→
+electrical back-action — photoconductive guides, detectors, TPA self-
+heating — is expressible), and returns an `OpticalPerturbation`
+(`dn_eff`, `dphi`, `dalpha`) the segment applies.
 
-For nonlinear state coupled to the rest of the system (carrier density
-N(t), waveguide temperature T(t) with self-heating from optical
-absorption — i.e., the planned `fc_pn_ps_carrier` class), the device
-owns its own state through the existing `commit_timestep` hook and
-stamps the discretised state equation in `load_jacobian_tran` directly.
-That path is documented but not yet exercised by an upstream device.
+- **Bias-dependent reactance** (junction `C_j(V)`, electrode cap): return
+  it from `PhotonicActiveModel::reactive_branches`; the integrator does
+  the BE / TR / BDF-2 companion handling and state advance. `PnDrive`
+  (`fc_pn_ps_cap`) is the canonical example, and the same caps now also
+  appear in `.ac` / `.noise`.
+- **Device-owned discretised state** (a thermal-RC node, carrier density):
+  allocate it via `num_internal_nodes`, bind it in `bind_internal`, and
+  override `stamp_tran` / `stamp_residual_tran` for the BE state equation.
+  `HeaterRc` (`fc_thermal_ps_rc`) is the canonical example.
+- **Bolt a heater onto any drive**: wrap it in `WithHeater` (the
+  `fc_pn_th_ps*` family) — no new struct needed.
+
+The L3 `FullPnDrive` (`fc_pn_ps_full`) exercises the full surface at once:
+implicit junction-voltage solve (series resistance), TPA + self-heating
+read from the optical intensity, and depletion + injection regimes.
 
 ### `fc_circulator` — 3-port bidirectional circulator
 

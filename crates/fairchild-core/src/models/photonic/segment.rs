@@ -414,7 +414,10 @@ mod tests {
     fn lossless_segment(tau_s: f64) -> OpticalSegment {
         let ctx = SimContext::default();
         let mut seg = OpticalSegment::new(100e-6, 2.445, 4.19, 0.0); // α=0 ⇒ |t|=1
-        seg.setup_instance(&[Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)], &ctx);
+        seg.setup_instance(
+            &[Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)],
+            &ctx,
+        );
         seg.bind_branches(6);
         seg.set_tau_g_s(tau_s);
         seg
@@ -455,10 +458,18 @@ mod tests {
         // Query at t = 3 ⇒ delayed source is the input at t − τ = 1.
         let xq = vec![3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.0));
-        assert!((seg.delayed()[0] - 1.0).abs() < 1e-12, "got {}", seg.delayed()[0]);
+        assert!(
+            (seg.delayed()[0] - 1.0).abs() < 1e-12,
+            "got {}",
+            seg.delayed()[0]
+        );
         // Linear interpolation between samples: t − τ = 1.5 ⇒ 1.5.
         seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.5));
-        assert!((seg.delayed()[0] - 1.5).abs() < 1e-12, "got {}", seg.delayed()[0]);
+        assert!(
+            (seg.delayed()[0] - 1.5).abs() < 1e-12,
+            "got {}",
+            seg.delayed()[0]
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-use super::segment::OpticalSegment;
 use super::dB_per_cm_to_neper_per_m;
+use super::segment::OpticalSegment;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
