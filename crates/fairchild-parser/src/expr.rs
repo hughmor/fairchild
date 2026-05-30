@@ -721,7 +721,11 @@ mod tests {
         // SPICE suffix (0.1m) + bare variable V, both in one constitutive map.
         let e = Expr::parse("-3.1e-5*V - 1.2e-5*V*V").unwrap();
         let expected = -3.1e-5 * 2.0 - 1.2e-5 * 2.0 * 2.0;
-        assert!((e.eval(&ctx) - expected).abs() < 1e-18, "got {}", e.eval(&ctx));
+        assert!(
+            (e.eval(&ctx) - expected).abs() < 1e-18,
+            "got {}",
+            e.eval(&ctx)
+        );
         // Unknown variable → 0 via the default-backed map.
         let e2 = Expr::parse("foo + 1").unwrap();
         assert_eq!(e2.eval(&ctx), 1.0);

@@ -1166,6 +1166,31 @@ The L3 `FullPnDrive` (`fc_pn_ps_full`) exercises the full surface at once:
 implicit junction-voltage solve (series resistance), TPA + self-heating
 read from the optical intensity, and depletion + injection regimes.
 
+### Declarative models, no recompile — `fc_phase_shifter_expr`
+
+For the common case — a phase shifter whose constitutive map is a closed-form
+function of bias — you can define the physics **on the `.model` card**, no Rust
+and no rebuild. The base type `fc_phase_shifter_expr` reads expression-valued
+params over the variables `V` (anode−cathode bias), `T` (temperature, K) and
+`lambda` (centre wavelength, m), using the same grammar as B-sources (with SPICE
+suffixes):
+
+```spice
+.model myps fc_phase_shifter_expr
++   dneff  = "-3.1e-5*V - 1.2e-5*V*V"    ; Δn_eff(V)  (free-carrier dispersion)
++   dalpha = "8.0*exp(V/0.7)"            ; excess loss Δα(V)  (Np/m)
++   g_pn   = 1m                          ; junction conductance (numeric)
++   L_um   = 480  n_eff = 2.76           ; optics (numeric, as usual)
+Xps in0 out0 a 0 myps pin_at_ref=1
+```
+
+`dneff`/`dalpha` are parsed once and evaluated per Newton iterate. Quote the
+expression (`"…"` or `{…}`) so spaces and parentheses survive parsing. This is
+"Tier 1" of the runtime-loadable-models plan; stateful physics (carrier ODEs,
+lookup tables) is future work (scripting / a plugin ABI). Internally it is just
+another `PhotonicActiveModel` (`ExprDrive`) on the shared `OpticalSegment`, so it
+composes with the rest (e.g. WDM bundles, the `pin_at_ref` convention).
+
 ### `fc_circulator` — 3-port bidirectional circulator
 
 ```

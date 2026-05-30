@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fairchild_parser::ModelCard;
+use fairchild_parser::{Expr, ModelCard};
 
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full, pn_phase_shifter_inj,
-    pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_full,
-    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter,
-    ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux,
-    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
-    NativeSplitter, NativeWaveguide, ShockleyDiode,
+    expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
+    pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
+    pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
+    thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeCirculator,
+    NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler, NativeMux,
+    NativeMzm, NativePhotodetector, NativeSplitter, NativeWaveguide, ShockleyDiode,
 };
 
 // Factory closures are `Arc` so the alias mechanism (B6) can clone a target
@@ -193,6 +193,53 @@ impl DeviceRegistry {
     pub fn register_photonic_models(&mut self, cards: &[ModelCard]) {
         for card in cards {
             let kind = card.kind.to_lowercase();
+
+            // Tier-1: a declarative expression-driven phase shifter. The
+            // constitutive maps live in the card's expr_params; numeric params
+            // (geometry, g_pn) apply on top.
+            if kind == "fc_phase_shifter_expr" {
+                let parse_map = |name: &str| -> Option<Expr> {
+                    card.expr_params
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .and_then(|(_, src)| match Expr::parse(src) {
+                            Ok(e) => Some(e),
+                            Err(err) => {
+                                eprintln!(
+                                    "warning: photonic model '{}' {name} expression \
+                                     failed to parse ({err:?}); treating as 0",
+                                    card.name
+                                );
+                                None
+                            }
+                        })
+                };
+                let dneff = parse_map("dneff");
+                let dalpha = parse_map("dalpha");
+                let g_pn = card
+                    .params
+                    .iter()
+                    .find(|(k, _)| k == "g_pn")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(1e-3);
+                let numeric: Vec<(String, f64)> = card
+                    .params
+                    .iter()
+                    .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
+                    .cloned()
+                    .collect();
+                self.register(card.name.clone(), move |terminals, ctx| {
+                    let mut d = expr_phase_shifter(dneff.clone(), dalpha.clone(), g_pn);
+                    d.setup_model(ctx);
+                    d.setup_instance(terminals, ctx);
+                    for (k, v) in &numeric {
+                        d.set_real_param(k, *v);
+                    }
+                    Box::new(d) as Box<dyn Device>
+                });
+                continue;
+            }
+
             let level = card
                 .params
                 .iter()

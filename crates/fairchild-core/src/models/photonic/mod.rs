@@ -28,11 +28,11 @@ pub mod waveguide;
 pub mod wdm;
 
 pub use active::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full, pn_phase_shifter_inj,
-    pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_full,
-    pn_thermal_phase_shifter_inj, thermal_phase_shifter, thermal_rc_phase_shifter,
-    ActiveOpticalDevice, FullPnDrive, Heater, HeaterRc, Injection, OpticalPerturbation,
-    PhotonicActiveModel, PnDrive, WithHeater,
+    expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
+    pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
+    pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
+    thermal_rc_phase_shifter, ActiveOpticalDevice, ExprDrive, FullPnDrive, Heater, HeaterRc,
+    Injection, OpticalPerturbation, PhotonicActiveModel, PnDrive, WithHeater,
 };
 pub use circulator::NativeCirculator;
 pub use coupler::NativeDirectionalCoupler;

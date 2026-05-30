@@ -16,6 +16,7 @@ use super::segment::OpticalSegment;
 use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
+use fairchild_parser::{EvalContext, Expr};
 
 /// Per-segment optical perturbation produced by a [`PhotonicActiveModel`] at the
 /// current operating point:
@@ -1146,6 +1147,127 @@ impl PhotonicActiveModel for WithHeater {
         let h = self.heater.set_param(name, value);
         i || h
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Tier-1: declarative expression-driven model (no recompile)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Variable environment for a device constitutive map: `V` = junction/terminal
+/// bias, `T` = temperature (K), `lambda` = centre wavelength (m). Node/branch
+/// references are not meaningful here and read 0.
+struct VarCtx {
+    v: f64,
+    t: f64,
+    lambda: f64,
+}
+
+impl EvalContext for VarCtx {
+    fn node_voltage(&self, _: &str) -> f64 {
+        0.0
+    }
+    fn branch_current(&self, _: &str) -> f64 {
+        0.0
+    }
+    fn time(&self) -> f64 {
+        0.0
+    }
+    fn variable(&self, name: &str) -> f64 {
+        match name {
+            "v" | "vpn" => self.v,
+            "t" | "temp" | "temperature" => self.t,
+            "lambda" | "wl" | "lam" => self.lambda,
+            _ => 0.0,
+        }
+    }
+}
+
+/// A drive whose constitutive map is **declarative** — parsed expressions over
+/// `(V, T, lambda)` rather than hard-coded Rust. This is the Tier-1
+/// runtime-loadable model: a designer writes
+/// `.model myps fc_phase_shifter_expr dneff="-3.1e-5*V - 1.2e-5*V*V"
+/// dalpha="8.0" g_pn=1m`, re-runs, and gets new physics with no recompile. The
+/// expressions are parsed once at setup and evaluated per NR-iterate.
+///
+/// Covers the closed-form-map 80% case (PN/thermal/EO maps); stateful physics
+/// (carrier ODEs, lookup tables) is the future Tier-2 (Rhai) / Tier-3 (plugin
+/// ABI) work. See `_notes/sotu.md §C3`.
+pub struct ExprDrive {
+    dneff: Option<Expr>,
+    dalpha: Option<Expr>,
+    g_pn: f64,
+    anode: NodeId,
+    cathode: NodeId,
+    lambda_center_m: f64,
+}
+
+impl ExprDrive {
+    /// Build from already-parsed constitutive expressions.
+    pub fn new(dneff: Option<Expr>, dalpha: Option<Expr>, g_pn: f64) -> Self {
+        ExprDrive {
+            dneff,
+            dalpha,
+            g_pn,
+            anode: None,
+            cathode: None,
+            lambda_center_m: 1.55e-6,
+        }
+    }
+}
+
+impl PhotonicActiveModel for ExprDrive {
+    fn num_electrical_terminals(&self) -> usize {
+        2 // anode, cathode
+    }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.lambda_center_m = ctx.lambda_center_m;
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        self.anode = electrical[0];
+        self.cathode = electrical[1];
+    }
+
+    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
+        let v = self.anode.map_or(0.0, |i| x[i]) - self.cathode.map_or(0.0, |i| x[i]);
+        let env = VarCtx {
+            v,
+            t: ctx.temperature,
+            lambda: self.lambda_center_m,
+        };
+        OpticalPerturbation {
+            dn_eff: self.dneff.as_ref().map_or(0.0, |e| e.eval(&env)),
+            dphi: 0.0,
+            dalpha_neper_m: self.dalpha.as_ref().map_or(0.0, |e| e.eval(&env)),
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.anode, self.cathode, self.g_pn);
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        match name {
+            "g_pn" => {
+                self.g_pn = value;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Build an `fc_phase_shifter_expr` device from parsed constitutive expressions
+/// (`dneff`, `dalpha`) and a junction conductance. Optics default to the SOI-rib
+/// PN baseline and are overridden by the card's numeric params.
+pub fn expr_phase_shifter(
+    dneff: Option<Expr>,
+    dalpha: Option<Expr>,
+    g_pn: f64,
+) -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
+    ActiveOpticalDevice::new(seg, Box::new(ExprDrive::new(dneff, dalpha, g_pn)))
 }
 
 #[cfg(test)]

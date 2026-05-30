@@ -487,14 +487,75 @@ pub(super) fn parse_model(line: &str, lineno: usize) -> Result<Option<ModelCard>
     let name = tokens[1].to_string();
     let kind = tokens[2].to_lowercase();
     let rest = tokens[3..].join(" ");
-    let rest = rest.replace(['(', ')'], " ");
+
     let mut params = Vec::new();
-    for tok in rest.split_whitespace() {
-        if let Some((k, v)) = tok.split_once('=') {
-            if let Ok(val) = parse_value(v, lineno) {
-                params.push((k.to_lowercase(), val));
-            }
+    let mut expr_params = Vec::new();
+    for tok in split_model_assignments(&rest) {
+        let Some((k, v)) = tok.split_once('=') else {
+            continue;
+        };
+        let key = k.to_lowercase();
+        // A quoted value (`"…"` or `{…}`) is always an expression; an unquoted
+        // value is numeric if it parses as one, otherwise a bare expression.
+        if let Some(inner) = strip_expr_quotes(v) {
+            expr_params.push((key, inner.to_string()));
+        } else if let Ok(val) = parse_value(v, lineno) {
+            params.push((key, val));
+        } else {
+            expr_params.push((key, v.to_string()));
         }
     }
-    Ok(Some(ModelCard { name, kind, params }))
+    Ok(Some(ModelCard {
+        name,
+        kind,
+        params,
+        expr_params,
+    }))
+}
+
+/// Split a `.model` parameter list into `key=value` tokens, keeping quoted
+/// expression spans (`"…"` / `{…}`) intact and treating SPICE list parentheses
+/// (outside quotes) as separators. Whitespace inside a quote is preserved.
+fn split_model_assignments(rest: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None; // the opening delimiter
+    for c in rest.chars() {
+        match quote {
+            Some(open) => {
+                cur.push(c);
+                if (open == '"' && c == '"') || (open == '{' && c == '}') {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '{' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                '(' | ')' | ' ' | '\t' => {
+                    if !cur.is_empty() {
+                        toks.push(std::mem::take(&mut cur));
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    toks
+}
+
+/// If `v` is a quoted/braced expression value, return its inner text; else None.
+fn strip_expr_quotes(v: &str) -> Option<&str> {
+    let b = v.as_bytes();
+    if b.len() >= 2
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'{' && b[b.len() - 1] == b'}'))
+    {
+        Some(&v[1..v.len() - 1])
+    } else {
+        None
+    }
 }

@@ -579,11 +579,18 @@ pub enum MeasOp {
 }
 
 /// A model card parsed from `.model <name> <kind> [param=value ...]`.
+///
+/// Numeric `param=value` pairs land in `params`. Expression-valued params —
+/// quoted (`map="…"` / `map={…}`) or otherwise non-numeric — land in
+/// `expr_params` as raw strings, for device constitutive maps evaluated via the
+/// behavioural-expression grammar (e.g. `dneff_dV = "-3.1e-5*V"`). Most cards
+/// (diodes, MOSFETs, …) have an empty `expr_params`.
 #[derive(Debug, Clone)]
 pub struct ModelCard {
     pub name: String,
     pub kind: String,
     pub params: Vec<(String, f64)>,
+    pub expr_params: Vec<(String, String)>,
 }
 
 /// Frequency spacing for AC sweep.
