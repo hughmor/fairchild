@@ -256,6 +256,28 @@ pub fn build_devices(
                 }
                 devices.push(dev);
             }
+            Element::TransmissionLine {
+                a_pos,
+                a_neg,
+                b_pos,
+                b_neg,
+                z0,
+                td,
+                ..
+            } => {
+                let term = |n: &fairchild_parser::NodeName| topo.node_index.get(n).copied();
+                let mut dev: Box<dyn Device> =
+                    Box::new(crate::models::tline::NativeTLine::new(*z0, *td));
+                dev.setup_model(ctx);
+                dev.setup_instance(&[term(a_pos), term(a_neg), term(b_pos), term(b_neg)], ctx);
+                // Two branch-current rows (i1, i2).
+                let extras = dev.num_extra_nodes();
+                if extras > 0 {
+                    let first = topo.allocate_extra_rows(extras);
+                    dev.bind_extra_nodes(first);
+                }
+                devices.push(dev);
+            }
             _ => {}
         }
     }
@@ -570,6 +592,18 @@ fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>)
             // K elements reference inductor names, not net names directly.
             (name.clone(), false, None)
         }
+        Element::TransmissionLine {
+            name,
+            a_pos,
+            a_neg,
+            b_pos,
+            b_neg,
+            ..
+        } => (
+            name.clone(),
+            net_match(a_pos) || net_match(a_neg) || net_match(b_pos) || net_match(b_neg),
+            None,
+        ),
     }
 }
 

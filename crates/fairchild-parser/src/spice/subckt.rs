@@ -345,6 +345,23 @@ pub(super) fn remap_element_nodes(
             l2: format!("{prefix}.{l2}"),
             coupling,
         },
+        Element::TransmissionLine {
+            name,
+            a_pos,
+            a_neg,
+            b_pos,
+            b_neg,
+            z0,
+            td,
+        } => Element::TransmissionLine {
+            name: format!("{prefix}.{name}"),
+            a_pos: rn(&a_pos),
+            a_neg: rn(&a_neg),
+            b_pos: rn(&b_pos),
+            b_neg: rn(&b_neg),
+            z0,
+            td,
+        },
     }
 }
 

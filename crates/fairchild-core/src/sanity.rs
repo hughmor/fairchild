@@ -306,6 +306,7 @@ fn element_name(el: &Element) -> &str {
         Element::Bjt { name, .. } => name,
         Element::Behavioral { name, .. } => name,
         Element::XOsdi { name, .. } => name,
+        Element::TransmissionLine { name, .. } => name,
     }
 }
 

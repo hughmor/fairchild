@@ -235,6 +235,56 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 coupling,
             })
         }
+        't' => {
+            // T<name> A+ A- B+ B- Z0=<Ω> (TD=<s> | F=<Hz> [NL=<wavelengths>])
+            if tokens.len() < 6 {
+                return Err(ParseError::FieldCount {
+                    expected: "≥6 (Tname A+ A- B+ B- Z0=.. TD=..)",
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            let mut z0: Option<f64> = None;
+            let mut td: Option<f64> = None;
+            let mut freq: Option<f64> = None;
+            let mut nl: f64 = 0.25; // default quarter-wave per ngspice
+            for tok in &tokens[5..] {
+                if let Some((k, v)) = tok.split_once('=') {
+                    let val = parse_value(v, lineno)?;
+                    match k.to_lowercase().as_str() {
+                        "z0" | "zo" => z0 = Some(val),
+                        "td" => td = Some(val),
+                        "f" => freq = Some(val),
+                        "nl" => nl = val,
+                        _ => {}
+                    }
+                }
+            }
+            let z0 = z0.ok_or_else(|| ParseError::Syntax {
+                line: lineno,
+                msg: "transmission line requires Z0=<ohms>".to_string(),
+            })?;
+            // Delay: explicit TD wins; else derive from F (and NL): TD = NL / F.
+            let td = match (td, freq) {
+                (Some(td), _) => td,
+                (None, Some(f)) if f > 0.0 => nl / f,
+                _ => {
+                    return Err(ParseError::Syntax {
+                        line: lineno,
+                        msg: "transmission line requires TD=<s> or F=<Hz>".to_string(),
+                    })
+                }
+            };
+            Ok(Element::TransmissionLine {
+                name,
+                a_pos: canon_node(tokens[1]),
+                a_neg: canon_node(tokens[2]),
+                b_pos: canon_node(tokens[3]),
+                b_neg: canon_node(tokens[4]),
+                z0,
+                td,
+            })
+        }
         'x' => {
             if tokens.len() < 3 {
                 return Err(ParseError::FieldCount {

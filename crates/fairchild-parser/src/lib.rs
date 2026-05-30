@@ -155,7 +155,8 @@ fn element_name(el: &Element) -> String {
         | Element::Mosfet { name, .. }
         | Element::Bjt { name, .. }
         | Element::XOsdi { name, .. }
-        | Element::Behavioral { name, .. } => name.to_lowercase(),
+        | Element::Behavioral { name, .. }
+        | Element::TransmissionLine { name, .. } => name.to_lowercase(),
     }
 }
 
@@ -436,6 +437,21 @@ pub enum Element {
         l2: String,
         coupling: f64,
     },
+    /// Lossless transmission line: `T<name> A+ A- B+ B- Z0=<Ω> TD=<s>`
+    ///
+    /// Ideal (lossless) two-port delay line modelled by Branin's method: each
+    /// port is a series-Z0 source whose value is the far port's travelling wave
+    /// delayed by `td`.  `F=<Hz>` with optional `NL=<wavelengths>` is accepted
+    /// as an alternative to `TD` (`TD = NL / F`, default `NL = 0.25`).
+    TransmissionLine {
+        name: String,
+        a_pos: NodeName,
+        a_neg: NodeName,
+        b_pos: NodeName,
+        b_neg: NodeName,
+        z0: f64,
+        td: f64,
+    },
     VoltageSource {
         name: String,
         pos: NodeName,
@@ -672,6 +688,19 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
             Element::Behavioral { name, pos, neg, .. } => {
                 check(name, pos)?;
                 check(name, neg)?;
+            }
+            Element::TransmissionLine {
+                name,
+                a_pos,
+                a_neg,
+                b_pos,
+                b_neg,
+                ..
+            } => {
+                check(name, a_pos)?;
+                check(name, a_neg)?;
+                check(name, b_pos)?;
+                check(name, b_neg)?;
             }
         }
     }

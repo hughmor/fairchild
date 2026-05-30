@@ -132,6 +132,22 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                 // K element only affects transient; L1/L2 terminals are
                 // already handled by their Inductor elements.
             }
+            Element::TransmissionLine {
+                a_pos,
+                a_neg,
+                b_pos,
+                b_neg,
+                ..
+            } => {
+                // At DC a lossless line is an ideal through-connection
+                // (A+↔B+, A−↔B−), so treat the matching conductors as joined
+                // for the orphan-island check.
+                for n in &[a_pos, a_neg, b_pos, b_neg] {
+                    record(n, &mut nodes);
+                }
+                add_edge(a_pos, b_pos, &mut adj);
+                add_edge(a_neg, b_neg, &mut adj);
+            }
         }
     }
 

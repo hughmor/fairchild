@@ -34,8 +34,9 @@ state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
 | Directives | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`/`.endl`, `.include`, `.param`, `.subckt`/`.ends`, `.temp` (sweep), `.alter`, `.model`, `.osdi` |
 | Output | CSV (stdout / file), Nutmeg rawfile (ngspice-compatible) |
 
-What's not yet supported: switches `S`/`W`, transmission lines,
-`.disto`, `.pz`, native `.mc` Monte Carlo, PSF/FSDB binary output. See
+What's not yet supported: switches `S`/`W`, lossy transmission lines
+(lossless `T` is supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
+PSF/FSDB binary output. See
 [`sotu.md`](sotu.md) §3 for the live status list.
 
 ### Electro-optic co-simulation
@@ -241,7 +242,8 @@ The major work ahead, in rough order:
 2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.
-3. **Remaining analog elements** — switches `S`/`W`, transmission lines.
+3. **Remaining analog elements** — switches `S`/`W`, lossy transmission
+   lines (LTRA; lossless `T` already supported).
 4. **Adjoint sensitivity** (the original Phase 4 differentiator).
 5. **Tier-2 moats**: envelope-following, S-parameter Touchstone blocks with
    time-domain convolution, harmonic balance / PSS, WDM cross-channel

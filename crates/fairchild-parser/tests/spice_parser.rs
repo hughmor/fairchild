@@ -578,3 +578,42 @@ fn gnd_aliases_normalised() {
         }
     }
 }
+
+// ── Transmission line (T) ──────────────────────────────────────────────────
+
+#[test]
+fn parses_transmission_line_z0_td() {
+    let nl = parse_ok("T1 in 0 out 0 Z0=50 TD=2n\n.op\n.end\n");
+    if let Element::TransmissionLine {
+        name,
+        a_pos,
+        a_neg,
+        b_pos,
+        b_neg,
+        z0,
+        td,
+    } = &nl.elements[0]
+    {
+        assert_eq!(name, "t1");
+        assert_eq!(a_pos, "in");
+        assert_eq!(a_neg, "0");
+        assert_eq!(b_pos, "out");
+        assert_eq!(b_neg, "0");
+        assert!((z0 - 50.0).abs() < 1e-9);
+        assert!((td - 2e-9).abs() < 1e-18);
+    } else {
+        panic!("expected TransmissionLine, got {:?}", nl.elements[0]);
+    }
+}
+
+#[test]
+fn transmission_line_delay_from_freq_and_nl() {
+    // TD = NL / F = 0.25 / 1e9 = 250 ps (default NL is a quarter wavelength).
+    let nl = parse_ok("T1 a 0 b 0 Z0=75 F=1g\n.op\n.end\n");
+    if let Element::TransmissionLine { z0, td, .. } = &nl.elements[0] {
+        assert!((z0 - 75.0).abs() < 1e-9);
+        assert!((td - 0.25e-9).abs() < 1e-18, "td={td}");
+    } else {
+        panic!("expected TransmissionLine");
+    }
+}

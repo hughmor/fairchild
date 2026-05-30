@@ -374,8 +374,10 @@ fn stamp_netlist_into(
             | Element::Mosfet { .. }
             | Element::Bjt { .. }
             | Element::XOsdi { .. }
-            | Element::Behavioral { .. } => {
-                // Nonlinear; stamped by the Device trait inside the Newton-Raphson loop.
+            | Element::Behavioral { .. }
+            | Element::TransmissionLine { .. } => {
+                // Stamped by the Device trait inside the Newton-Raphson loop
+                // (the T-line carries time-dependent history sources).
             }
         }
     }
@@ -517,6 +519,20 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
             Element::CoupledInductors { .. } => {
                 // No new nodes — L1 and L2 terminals already registered by their
                 // Inductor elements.
+            }
+            Element::TransmissionLine {
+                a_pos,
+                a_neg,
+                b_pos,
+                b_neg,
+                ..
+            } => {
+                add_node(&mut node_index, a_pos);
+                add_node(&mut node_index, a_neg);
+                add_node(&mut node_index, b_pos);
+                add_node(&mut node_index, b_neg);
+                // The two branch-current rows are device extra nodes, allocated
+                // by build_devices via num_extra_nodes/bind_extra_nodes.
             }
         }
     }
