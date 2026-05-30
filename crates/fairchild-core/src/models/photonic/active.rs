@@ -69,9 +69,25 @@ pub trait PhotonicActiveModel: Send + Sync {
     /// resistor, electrode cap, photocurrent, heat source) into the Jacobian.
     fn stamp(&self, mat: &mut MnaMatrix);
 
+    /// Transient Jacobian stamp (`alpha` = BE/GEAR coefficient). Default falls
+    /// back to the DC stamp — correct for models whose electrical contributions
+    /// are bias-only (PN, injection) and whose reactances flow through
+    /// `reactive_branches`. Override for device-owned discretised state (e.g. a
+    /// thermal-RC node whose BE state equation differs from its DC form).
+    fn stamp_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.stamp(mat);
+    }
+
     /// Stamp electrical RHS contributions (history sources, fixed currents).
     /// Default no-op.
     fn stamp_residual(&self, _b: &mut [f64]) {}
+
+    /// Transient RHS stamp (`alpha` = BE/GEAR coefficient). Default falls back
+    /// to the DC residual. Override alongside `stamp_tran` for device-owned
+    /// state.
+    fn stamp_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.stamp_residual(b);
+    }
 
     /// Linear/bias-dependent reactive branches (junction C_j, electrode cap)
     /// for the transient integrator and frequency-domain analyses.
@@ -162,12 +178,14 @@ impl Device for ActiveOpticalDevice {
         self.model.stamp(mat);
     }
 
-    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
-        self.load_residual(b);
+    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        self.seg.stamp_residual(b);
+        self.model.stamp_residual_tran(b, alpha);
     }
 
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
-        self.load_jacobian(mat);
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        self.seg.stamp(mat);
+        self.model.stamp_tran(mat, alpha);
     }
 
     fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
@@ -202,6 +220,20 @@ pub fn pn_phase_shifter_cap() -> ActiveOpticalDevice {
     ActiveOpticalDevice::new(seg, Box::new(PnDrive::with_depletion_cap()))
 }
 
+/// Build the `fc_pn_ps_inj` device — a forward-bias carrier-injection PN phase
+/// shifter (Shockley diode + diffusion cap + exponential injection Δn/Δα).
+pub fn pn_phase_shifter_inj() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
+    ActiveOpticalDevice::new(seg, Box::new(Injection::new()))
+}
+
+/// Build the `fc_pn_th_ps_inj` device — the injection PN phase shifter with a
+/// metal heater bolted on.
+pub fn pn_thermal_phase_shifter_inj() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
+    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(Injection::new()))))
+}
+
 /// Build the `fc_thermal_ps` device — a metal-heater thermo-optic phase shifter
 /// (no PN junction). A pure phase rotation `φ = π·P/P_π`, modelled on a
 /// zero-length segment (no propagation phase, no loss).
@@ -210,12 +242,34 @@ pub fn thermal_phase_shifter() -> ActiveOpticalDevice {
     ActiveOpticalDevice::new(seg, Box::new(Heater::new()))
 }
 
+/// Build the `fc_thermal_ps_rc` device — a metal-heater phase shifter with a
+/// first-order thermal RC (filtered heater power). Zero-length segment.
+pub fn thermal_rc_phase_shifter() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(0.0, 2.445, 4.19, 0.0);
+    ActiveOpticalDevice::new(seg, Box::new(HeaterRc::new()))
+}
+
 /// Build the `fc_pn_th_ps` device — a PN phase shifter with a metal heater
 /// bolted on (Δn_eff from V_pn and φ_th from Joule power sum). Terminal order:
 /// optical bundle, then anode, cathode, heat_p, heat_n.
 pub fn pn_thermal_phase_shifter() -> ActiveOpticalDevice {
     let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
     ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(PnDrive::new()))))
+}
+
+/// Build the `fc_pn_th_ps_cap` device — depletion-mode PN (C_j(V) + reverse-bias
+/// FCA) plus a metal heater. Calibrated defaults from a lateral-PN modulator
+/// extraction (5e17/5e17, 300 K): distinct dn_dv, loss, and C_j from the plain
+/// `fc_pn_ps_cap`.
+pub fn pn_thermal_phase_shifter_cap() -> ActiveOpticalDevice {
+    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, 29.78); // 2.59 dB/cm in Np/m
+    let mut pn = PnDrive::with_depletion_cap();
+    pn.set_param("dn_dv", 5.024e-5);
+    pn.set_param("c_j0", 1.375e-13);
+    pn.set_param("v_bi", 0.917);
+    pn.set_param("da_dv", 7.83);
+    // g_pn (1e-3) and m_j (0.5) already match the PnDrive defaults.
+    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(pn))))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -391,6 +445,129 @@ impl PhotonicActiveModel for PnDrive {
     }
 }
 
+/// Forward-bias carrier-injection PN drive (the `fc_pn_ps_inj` physics).
+/// Forward bias only (V_pn ∈ [0, ~0.8 V]); does not model depletion. Differs
+/// from [`PnDrive`]:
+///   - nonlinear Shockley diode `I = I_s·(exp(V/(n·V_T)) − 1)`, Norton-stamped
+///     at the operating point (`g_d` Jacobian + `i_eq` residual);
+///   - diffusion capacitance `C_d = τ_carrier·g_d` (replaces depletion C_j);
+///   - exponential injection `Δn_eff = −K_inj·(e−1)` and `Δα = K_α·(e−1)`,
+///     where `e = exp(V/(n·V_T))` (Soref–Bennett carrier-density form).
+pub struct Injection {
+    i_sat: f64,
+    n_diode: f64,
+    tau_carrier: f64,
+    dn_dv_inj: f64,
+    da_dv_inj: f64,
+    anode: NodeId,
+    cathode: NodeId,
+    g_d_cached: f64,
+    i_eq_cached: f64,
+    c_d_cached: f64,
+}
+
+impl Injection {
+    pub fn new() -> Self {
+        Injection {
+            i_sat: 1e-12,
+            n_diode: 1.05,
+            tau_carrier: 10e-9,
+            dn_dv_inj: 1.311e-4,
+            da_dv_inj: 150.0,
+            anode: None,
+            cathode: None,
+            g_d_cached: 1e-9,
+            i_eq_cached: 0.0,
+            c_d_cached: 0.0,
+        }
+    }
+}
+
+impl Default for Injection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhotonicActiveModel for Injection {
+    fn num_electrical_terminals(&self) -> usize {
+        2 // anode, cathode
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        self.anode = electrical[0];
+        self.cathode = electrical[1];
+    }
+
+    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
+        let v_a = self.anode.map_or(0.0, |i| x[i]);
+        let v_c = self.cathode.map_or(0.0, |i| x[i]);
+        let v_pn = v_a - v_c;
+        let vt = ctx.vt() * self.n_diode;
+        let arg = (v_pn / vt).clamp(-40.0, 40.0);
+        let e = arg.exp();
+        let i_diode = self.i_sat * (e - 1.0);
+        self.g_d_cached = self.i_sat * e / vt;
+        self.i_eq_cached = i_diode - self.g_d_cached * v_pn;
+        self.c_d_cached = self.tau_carrier * self.g_d_cached;
+        // Normalised injected carrier density (≥ 0; reverse bias contributes 0).
+        let inj = (e - 1.0).max(0.0);
+        OpticalPerturbation {
+            dn_eff: -self.dn_dv_inj * inj, // more carriers → lower index
+            dphi: 0.0,
+            dalpha_neper_m: self.da_dv_inj * inj,
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.anode, self.cathode, self.g_d_cached);
+    }
+
+    fn stamp_residual(&self, b: &mut [f64]) {
+        if let Some(a) = self.anode {
+            b[a] -= self.i_eq_cached;
+        }
+        if let Some(c) = self.cathode {
+            b[c] += self.i_eq_cached;
+        }
+    }
+
+    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        vec![ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos: self.anode,
+            neg: self.cathode,
+            value: self.c_d_cached,
+        }]
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        match name {
+            "i_sat" | "is" => {
+                self.i_sat = value;
+                true
+            }
+            "n_diode" | "n" => {
+                self.n_diode = value;
+                true
+            }
+            "tau_carrier" | "tau" => {
+                self.tau_carrier = value;
+                true
+            }
+            "dn_dv_inj" | "dn_dv" => {
+                self.dn_dv_inj = value;
+                true
+            }
+            "da_dv_inj" | "da_dv" => {
+                self.da_dv_inj = value;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Resistive metal-heater drive (thermo-optic). A heater resistor `1/R_heater`
 /// between `heat_p`/`heat_n`; Joule power `P = V²/R` produces a calibrated,
 /// wavelength-independent phase `φ_th = π·P/P_π` applied to every channel — the
@@ -460,6 +637,148 @@ impl PhotonicActiveModel for Heater {
     }
 }
 
+/// Metal-heater drive with a first-order thermal RC (the `fc_thermal_ps_rc`
+/// physics). The optical phase tracks the *filtered* heater power `T(t)` rather
+/// than the instantaneous Joule dissipation: `dT/dt = (P − T)/τ_th`, with `T` a
+/// device-owned state on one internal MNA row. At steady state `T = P`, so the
+/// phase reduces to the L1 `φ = π·P/P_π`. This is the "path B" pattern (device
+/// stamps its own discretised state equation), so it overrides `stamp_tran` /
+/// `stamp_residual_tran` for the BE form.
+pub struct HeaterRc {
+    r_heater: f64,
+    p_pi: f64,
+    tau_th: f64,
+    heat_p: NodeId,
+    heat_n: NodeId,
+    t_state_idx: Option<usize>,
+    t_old: f64,
+    v_h_op: f64,
+}
+
+impl HeaterRc {
+    pub fn new() -> Self {
+        HeaterRc {
+            r_heater: 1000.0,
+            p_pi: 10e-3,
+            tau_th: 10e-6,
+            heat_p: None,
+            heat_n: None,
+            t_state_idx: None,
+            t_old: 0.0,
+            v_h_op: 0.0,
+        }
+    }
+
+    fn stamp_heater_resistor(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.heat_p, self.heat_n, 1.0 / self.r_heater);
+    }
+}
+
+impl Default for HeaterRc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhotonicActiveModel for HeaterRc {
+    fn num_electrical_terminals(&self) -> usize {
+        2 // heat_p, heat_n
+    }
+
+    fn num_internal_nodes(&self) -> usize {
+        1 // the T(t) state row
+    }
+
+    fn set_terminals(&mut self, electrical: &[NodeId]) {
+        self.heat_p = electrical[0];
+        self.heat_n = electrical[1];
+    }
+
+    fn bind_internal(&mut self, first_idx: usize) {
+        self.t_state_idx = Some(first_idx);
+    }
+
+    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], _ctx: &SimContext) -> OpticalPerturbation {
+        self.v_h_op = self.heat_p.map_or(0.0, |i| x[i]) - self.heat_n.map_or(0.0, |i| x[i]);
+        // Phase driven by the filtered heater power state T (power-equivalent W).
+        let t = self.t_state_idx.map_or(0.0, |i| x[i]);
+        OpticalPerturbation {
+            dn_eff: 0.0,
+            dphi: std::f64::consts::PI * t / self.p_pi,
+            dalpha_neper_m: 0.0,
+        }
+    }
+
+    fn stamp(&self, mat: &mut MnaMatrix) {
+        self.stamp_heater_resistor(mat);
+        // DC state row: T − P_lin(V_h) = 0  (T = P at steady state).
+        if let Some(t) = self.t_state_idx {
+            mat.a[t][t] += 1.0;
+            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            if let Some(hp) = self.heat_p {
+                mat.a[t][hp] -= two_vop_over_r;
+            }
+            if let Some(hn) = self.heat_n {
+                mat.a[t][hn] += two_vop_over_r;
+            }
+        }
+    }
+
+    fn stamp_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        self.stamp_heater_resistor(mat);
+        // BE state row: T·(α + 1/τ) − 2·V_h_op·V_h/(R·τ) = …
+        if let Some(t) = self.t_state_idx {
+            let inv_tau = 1.0 / self.tau_th;
+            mat.a[t][t] += alpha + inv_tau;
+            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            if let Some(hp) = self.heat_p {
+                mat.a[t][hp] -= two_vop_over_r * inv_tau;
+            }
+            if let Some(hn) = self.heat_n {
+                mat.a[t][hn] += two_vop_over_r * inv_tau;
+            }
+        }
+    }
+
+    fn stamp_residual(&self, b: &mut [f64]) {
+        if let Some(t) = self.t_state_idx {
+            b[t] -= self.v_h_op * self.v_h_op / self.r_heater;
+        }
+    }
+
+    fn stamp_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        if let Some(t) = self.t_state_idx {
+            let inv_tau = 1.0 / self.tau_th;
+            let p_op = self.v_h_op * self.v_h_op / self.r_heater;
+            b[t] += self.t_old * alpha - p_op * inv_tau;
+        }
+    }
+
+    fn commit(&mut self, x: &[f64]) {
+        if let Some(t) = self.t_state_idx {
+            self.t_old = x[t];
+        }
+    }
+
+    fn set_param(&mut self, name: &str, value: f64) -> bool {
+        match name {
+            "r_heater" | "r" => {
+                self.r_heater = value;
+                true
+            }
+            "p_pi" | "p_pi_w" => {
+                self.p_pi = value;
+                true
+            }
+            "tau_th" | "tau" => {
+                self.tau_th = value.max(1e-30);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Compose any drive model with a metal heater bolted on. The heater's
 /// `heat_p`/`heat_n` terminals follow the inner model's electrical terminals;
 /// Δn/Δφ/Δα sum, electrical stamps and reactive branches concatenate. This is
@@ -521,9 +840,19 @@ impl PhotonicActiveModel for WithHeater {
         self.heater.stamp(mat);
     }
 
+    fn stamp_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
+        self.inner.stamp_tran(mat, alpha);
+        self.heater.stamp_tran(mat, alpha);
+    }
+
     fn stamp_residual(&self, b: &mut [f64]) {
         self.inner.stamp_residual(b);
         self.heater.stamp_residual(b);
+    }
+
+    fn stamp_residual_tran(&self, b: &mut [f64], alpha: f64) {
+        self.inner.stamp_residual_tran(b, alpha);
+        self.heater.stamp_residual_tran(b, alpha);
     }
 
     fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {

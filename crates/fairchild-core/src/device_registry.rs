@@ -6,11 +6,11 @@ use fairchild_parser::ModelCard;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_thermal_phase_shifter, thermal_phase_shifter,
-    GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler,
-    NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifterFull,
-    NativePnPhaseShifterInj, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
-    NativePnThermalPhaseShifterInj, NativeSplitter, NativeThermalPhaseShifterRc, NativeWaveguide,
+    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_inj, pn_thermal_phase_shifter,
+    pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
+    thermal_rc_phase_shifter, GummelPoonBjt, Mosfet1, NativeCirculator, NativeCwLaser, NativeDemux,
+    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
+    NativePnPhaseShifterFull, NativePnThermalPhaseShifterFull, NativeSplitter, NativeWaveguide,
     ShockleyDiode,
 };
 
@@ -239,7 +239,7 @@ impl DeviceRegistry {
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_thermal_ps_rc", |terminals, ctx| {
-            let mut d = NativeThermalPhaseShifterRc::new();
+            let mut d = thermal_rc_phase_shifter();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>
@@ -264,19 +264,19 @@ impl DeviceRegistry {
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_th_ps_cap", |terminals, ctx| {
-            let mut d = NativePnThermalPhaseShifterCap::new();
+            let mut d = pn_thermal_phase_shifter_cap();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_ps_inj", |terminals, ctx| {
-            let mut d = NativePnPhaseShifterInj::new();
+            let mut d = pn_phase_shifter_inj();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>
         });
         self.register("fc_pn_th_ps_inj", |terminals, ctx| {
-            let mut d = NativePnThermalPhaseShifterInj::new();
+            let mut d = pn_thermal_phase_shifter_inj();
             d.setup_model(ctx);
             d.setup_instance(terminals, ctx);
             Box::new(d) as Box<dyn Device>

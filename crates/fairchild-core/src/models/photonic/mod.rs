@@ -29,8 +29,10 @@ pub mod waveguide;
 pub mod wdm;
 
 pub use active::{
-    pn_phase_shifter, pn_phase_shifter_cap, pn_thermal_phase_shifter, thermal_phase_shifter,
-    ActiveOpticalDevice, Heater, OpticalPerturbation, PhotonicActiveModel, PnDrive, WithHeater,
+    pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_inj, pn_thermal_phase_shifter,
+    pn_thermal_phase_shifter_cap, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
+    thermal_rc_phase_shifter, ActiveOpticalDevice, Heater, HeaterRc, Injection, OpticalPerturbation,
+    PhotonicActiveModel, PnDrive, WithHeater,
 };
 pub use circulator::NativeCirculator;
 pub use coupler::NativeDirectionalCoupler;
@@ -39,10 +41,7 @@ pub use grating::NativeGratingCoupler;
 pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
 pub use segment::OpticalSegment;
-pub use phase_shifters::{
-    NativePnPhaseShifterFull, NativePnPhaseShifterInj, NativePnThermalPhaseShifterCap,
-    NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj, NativeThermalPhaseShifterRc,
-};
+pub use phase_shifters::{NativePnPhaseShifterFull, NativePnThermalPhaseShifterFull};
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;
 pub use wdm::{NativeDemux, NativeMux};
@@ -166,23 +165,6 @@ pub(super) fn stamp_pn_optical(
     }
 }
 
-/// Full Jacobian stamp for a PN+heater device with per-channel optics.
-pub(super) fn stamp_pn_ths_jacobian(
-    mat: &mut MnaMatrix,
-    nodes: &[NodeId],
-    branches: &[Option<usize>],
-    n: usize,
-    wpc: usize,
-    g_pn: f64,
-    r_heater: f64,
-    c_cached: &[f64],
-    s_cached: &[f64],
-) {
-    let elec = 2 * wpc * n;
-    stamp_resistor(mat, nodes[elec], nodes[elec + 1], g_pn);
-    stamp_resistor(mat, nodes[elec + 2], nodes[elec + 3], 1.0 / r_heater);
-    stamp_pn_optical(mat, nodes, branches, n, wpc, c_cached, s_cached);
-}
 
 #[cfg(test)]
 mod tests {
