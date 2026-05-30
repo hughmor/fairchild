@@ -765,9 +765,9 @@ impl Device for NativePnPhaseShifter {
         // α is in Neper/m; divide by 2 because intensity ~ |E|².
         let t_amp = (-self.alpha_neper_m * self.length_m / 2.0).exp();
         let lam = wpc - 1; // wavelength wire index within each bundle
-        // Optional absolute-phase subtraction at λ_ref (see pin_at_ref docs).
-        // When enabled: device is "transparent" at λ_ref — useful for single-ring
-        // testbenches; disable for multi-ring designs with different L values.
+                           // Optional absolute-phase subtraction at λ_ref (see pin_at_ref docs).
+                           // When enabled: device is "transparent" at λ_ref — useful for single-ring
+                           // testbenches; disable for multi-ring designs with different L values.
         let phi_ref = if self.pin_at_ref {
             two_pi * self.n_eff * self.length_m / self.wl_ref_m
         } else {
@@ -1426,8 +1426,8 @@ impl Device for NativePnThermalPhaseShifter {
         // Two independent electrical interfaces: PN junction (anode/cathode)
         // and resistive heater (heat_p/heat_n).  Four electrical terminals follow
         // the optical bundles in the terminal vector.
-        let v_a  = self.nodes[elec].map_or(0.0, |i| x[i]);
-        let v_c  = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_hp = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
         let v_hn = self.nodes[elec + 3].map_or(0.0, |i| x[i]);
         // PN voltage drives the small-signal EO phase shift.
@@ -1768,8 +1768,8 @@ impl Device for NativePnThermalPhaseShifterCap {
         let wpc = self.wpc;
         let elec = 2 * wpc * n;
         // Four electrical terminals (PN anode/cathode + heater +/−).
-        let v_a  = self.nodes[elec].map_or(0.0, |i| x[i]);
-        let v_c  = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
+        let v_a = self.nodes[elec].map_or(0.0, |i| x[i]);
+        let v_c = self.nodes[elec + 1].map_or(0.0, |i| x[i]);
         let v_hp = self.nodes[elec + 2].map_or(0.0, |i| x[i]);
         let v_hn = self.nodes[elec + 3].map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
@@ -2625,9 +2625,9 @@ impl Device for NativePnPhaseShifterFull {
         // ── 8. Per-channel optical phase (WDM-aware) ─────────────────────
         let two_pi = 2.0 * std::f64::consts::PI;
         let lam = wpc - 1; // index of the wavelength wire within each bundle
-        // Optional absolute-phase pinning: subtract φ_0 = 2π n_eff L / λ_ref
-        // so the device is "transparent" at λ = λ_ref (useful for testbench
-        // rings designed to be on-resonance at the laser wavelength).
+                           // Optional absolute-phase pinning: subtract φ_0 = 2π n_eff L / λ_ref
+                           // so the device is "transparent" at λ = λ_ref (useful for testbench
+                           // rings designed to be on-resonance at the laser wavelength).
         let phi_ref = if self.pin_at_ref {
             two_pi * self.n_eff * self.length_m / self.wl_ref_m
         } else {
@@ -2638,7 +2638,11 @@ impl Device for NativePnPhaseShifterFull {
             let lambda = match self.nodes[wpc * k + lam] {
                 Some(i) => {
                     let v = x[i];
-                    if v.abs() > 1e-9 { v } else { self.wl_ref_m }
+                    if v.abs() > 1e-9 {
+                        v
+                    } else {
+                        self.wl_ref_m
+                    }
                 }
                 None => self.wl_ref_m,
             };

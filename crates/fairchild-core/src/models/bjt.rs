@@ -748,11 +748,19 @@ mod tests {
         q.setup_model(&ctx());
         // External: C=0, B=1, E=2.
         q.setup_instance(&[Some(0), Some(1), Some(2), None], &ctx());
-        assert_eq!(q.num_extra_nodes(), 2, "RB and RC each need an internal node");
+        assert_eq!(
+            q.num_extra_nodes(),
+            2,
+            "RB and RC each need an internal node"
+        );
         // Allocate internal nodes starting at index 3.
         q.bind_extra_nodes(3);
         assert_eq!(q.base, Some(3), "internal base = first extra node");
-        assert_eq!(q.collector, Some(4), "internal collector = second extra node");
+        assert_eq!(
+            q.collector,
+            Some(4),
+            "internal collector = second extra node"
+        );
         assert_eq!(q.emitter, Some(2), "emitter aliases external (RE = 0)");
 
         q.vbe_prev = 0.7;

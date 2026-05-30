@@ -2,6 +2,10 @@ use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
+/// Input couplings for a `stamp_potential_eq` row: `(node, coefficient)` pairs.
+/// Empty in delay mode (the output is driven by a history source on the RHS).
+type Couplings<'a> = &'a [(NodeId, f64)];
+
 // ────────────────────────────────────────────────────────────────────────
 // Native straight waveguide
 // ────────────────────────────────────────────────────────────────────────
@@ -337,10 +341,13 @@ impl Device for NativeWaveguide {
             let out_im_fw = self.nodes[out_block_base + wpc * k + 1];
             let out_l = self.nodes[out_block_base + wpc * k + (wpc - 1)];
             // Forward path: out.re_fw = c·in.re_fw + s·in.im_fw etc.
-            let (re_ins, im_ins): (&[(NodeId, f64)], &[(NodeId, f64)]) = if delay {
+            let (re_ins, im_ins): (Couplings, Couplings) = if delay {
                 (&[], &[])
             } else {
-                (&[(in_re_fw, -c), (in_im_fw, -s)], &[(in_re_fw, s), (in_im_fw, -c)])
+                (
+                    &[(in_re_fw, -c), (in_im_fw, -s)],
+                    &[(in_re_fw, s), (in_im_fw, -c)],
+                )
             };
             stamp_potential_eq(mat, &self.branches, wpc * k, out_re_fw, re_ins);
             stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw, im_ins);
@@ -361,7 +368,7 @@ impl Device for NativeWaveguide {
                 let in_im_bw = self.nodes[in_block_base + wpc * k + 3];
                 let out_re_bw = self.nodes[out_block_base + wpc * k + 2];
                 let out_im_bw = self.nodes[out_block_base + wpc * k + 3];
-                let (bw_re_ins, bw_im_ins): (&[(NodeId, f64)], &[(NodeId, f64)]) = if delay {
+                let (bw_re_ins, bw_im_ins): (Couplings, Couplings) = if delay {
                     (&[], &[])
                 } else {
                     (
@@ -417,7 +424,10 @@ mod tests {
         let ctx = SimContext::default();
         let mut wg = NativeWaveguide::new();
         wg.alpha_neper_m = 0.0; // lossless ⇒ |transmission| = 1
-        wg.setup_instance(&[Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)], &ctx);
+        wg.setup_instance(
+            &[Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)],
+            &ctx,
+        );
         wg.bind_extra_nodes(6);
         wg.tau_g_s = tau_s; // override the geometry-derived value for a clean test
         wg
@@ -439,7 +449,10 @@ mod tests {
         wg.eval(&x, EvalFlags::tran(), &SimContext::default());
         assert!(!wg.delay_active, "delay must be off without the option");
         wg.commit_timestep(&x);
-        assert!(wg.hist_t.is_empty(), "no history should accumulate when off");
+        assert!(
+            wg.hist_t.is_empty(),
+            "no history should accumulate when off"
+        );
         // Residual is homogeneous in the instantaneous path.
         let mut b = vec![0.0; 9];
         wg.load_residual(&mut b);
