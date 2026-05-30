@@ -16,8 +16,9 @@ sparse LU, junction limiting, Armijo-damped Newton, verbose diagnostics).
 Photonic discipline rebuilt around 14 native Rust devices, bundle-port
 syntax with WDM as the default, and optional bidirectional propagation.
 KiCad schematic capture wired up around native devices. Python bindings
-cover every analysis the CLI does. See [`sotu.md`](sotu.md) for the project
-state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
+cover every analysis the CLI does. See [`docs/user-guide.md`](docs/user-guide.md)
+for the full feature reference and [`docs/benchmarks.md`](docs/benchmarks.md)
+for accuracy and performance vs ngspice.
 
 ---
 
@@ -36,8 +37,7 @@ state-of-the-union and [`PLAN.md`](PLAN.md) for the architectural plan.
 
 What's not yet supported: switches `S`/`W`, lossy transmission lines
 (lossless `T` is supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
-PSF/FSDB binary output. See
-[`sotu.md`](sotu.md) §3 for the live status list.
+PSF/FSDB binary output.
 
 ### Electro-optic co-simulation
 
@@ -221,7 +221,7 @@ crates/
 examples/             Ready-to-run SPICE netlists per discipline (electronic, photonic).
 benchmarks/           Head-to-head comparison circuits + scripts vs ngspice.
                       `run_all.py` → JSON, `plot.py` → docs/plots/*.png.
-docs/                 user-guide.md, benchmarks.md, photonic_models.md (legacy),
+docs/                 user-guide.md, benchmarks.md, pn_phase_shifter_tiers.md,
                       docs/plots/ (generated accuracy + scaling figures).
 scripts/              kicad_to_fairchild.py (KiCad netlist post-processor;
                       native fc_* devices).
@@ -231,8 +231,6 @@ legacy/               Archived Verilog-A photonic models + OSDI examples.
 ---
 
 ## Roadmap
-
-See [`sotu.md`](sotu.md) for the live status list.
 
 The major work ahead, in rough order:
 

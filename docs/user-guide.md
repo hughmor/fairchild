@@ -106,6 +106,25 @@ the Jacobian; supports static and dynamic cases.
 B1  out 0  V=V(in)*V(in) + 0.5*sin(2*3.14159*1k*time)
 ```
 
+### Transmission line (lossless)
+
+```
+T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  TD=<seconds>
+T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  F=<hz> [NL=<wavelengths>]
+```
+
+Ideal lossless two-port delay line (Branin's method), characteristic impedance
+`Z0` and one-way delay `TD`. Instead of `TD` you may give a frequency `F` with
+optional normalised length `NL` (default `0.25`); then `TD = NL / F`. The delay
+is intrinsic and always modelled in transient analysis; at DC the line is an
+ideal through-connection. No `.model` card — parameters are on the element line.
+
+```spice
+T1  in 0 out 0  Z0=50 TD=1n        ; 50 Ω, 1 ns one-way delay
+```
+
+(Lossy lines with LTRA-style loss/dispersion are not yet supported.)
+
 ### Subcircuit instantiation
 
 ```
@@ -166,9 +185,16 @@ The DC operating point uses `v0` (or the value at `t = t0` for PWL).
 | `VJC` | B-C built-in junction potential (V) | 0.75 |
 | `MJC` | B-C grading coefficient | 0.33 |
 | `FC` | Forward-bias depletion cap linearisation coefficient | 0.5 |
+| `RB` | Base ohmic series resistance (Ω) | 0 |
+| `RC` | Collector ohmic series resistance (Ω) | 0 |
+| `RE` | Emitter ohmic series resistance (Ω) | 0 |
 
 Both transit-time diffusion charges (TF·IF, TR·IR) and depletion junction
 capacitances (CJE, CJC) are stamped as companion models in transient analysis.
+Non-zero `RB`/`RC`/`RE` add internal collector/base/emitter nodes with the
+series resistance to the external terminal (the intrinsic transistor operates on
+the internal nodes); the operating point matches ngspice to 6 significant
+figures. Only constant `RB` is modelled (no current-dependent `RBM`/`IRB`).
 Series resistances RB/RC/RE are accepted and silently ignored (Tier-2 gap).
 
 ### MOSFET Level 1 (`NMOS` / `PMOS`)
@@ -377,8 +403,11 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `temp_k` | 300.15 | Operating temperature (K) |
 | `uic` | false | Use `.ic` / element `IC=` instead of DC |
 | `pnjlim` | true | Diode / MOSFET junction limiting in NR |
-| `solver` | `auto` | `auto` / `dense` / `sparse` linear backend |
+| `solver` | `auto` | `auto` / `dense` / `sparse` / `klu` linear backend (`klu` needs the `klu` build feature) |
+| `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
+| `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
+| `waveguide_delay` | false | Model the optical waveguide group delay τ_g = L·n_g/c as a true delay line (default: instantaneous transmission). See §12 `fc_waveguide`. |
 
 Setting any of these from the netlist:
 
@@ -712,6 +741,14 @@ The `λ` wire is read at evaluation time, so wavelength-dependent
 propagation phase is captured automatically — this is what makes the
 ring resonator example see a true resonance dip when you sweep the
 laser wavelength.
+
+**Group delay (optional).** By default the transmission is instantaneous —
+correct for DC and steady-state spectra. With `.options waveguide_delay=1` the
+waveguide instead delays its output envelope by the group delay
+`τ_g = L · n_g / c`, reconstructed from a per-channel history buffer. Enable it
+when the optical modulation bandwidth approaches `1/τ_g` (high-speed links, long
+delay lines); leave it off otherwise (cheaper, and the delay is negligible at
+low modulation rates). See `examples/photonic/waveguide_delay_demo.sp`.
 
 The corresponding group delay `τ_g = L · n_g / c` is computed at setup
 time and stored on the device. It is informational at this tier — the
@@ -1244,13 +1281,13 @@ electrical device models distributed as Verilog-A** — foundry transistor model
 `.osdi <path>` and instantiate with an `X` element. The loader is verified in CI
 by the `osdi-mock` fixture.
 
-For *photonics*, prefer the native Rust devices: OSDI/Verilog-A cannot express
-the optical bundle/complex-envelope abstractions. The pre-Phase-B photonic
-Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector) remain loadable via
-`.osdi` for back-compat (Norton-equivalent flow discipline, 12-pin underlying-
-wire syntax), but new photonic work should use the native devices — the CLI
-prints a one-shot hint pointing at them when a photonic `.osdi` is loaded. See
-`docs/photonic_models.md`.
+For *photonics*, prefer the native Rust devices documented in §12 — OSDI/
+Verilog-A cannot express the optical bundle / complex-envelope abstractions. The
+pre-Phase-B photonic Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector)
+remain loadable via `.osdi` for back-compatibility (Norton-equivalent flow
+discipline, 12-pin underlying-wire syntax), but new photonic work should use the
+native devices; the CLI prints a one-shot hint pointing at them when a photonic
+`.osdi` is loaded.
 
 ---
 

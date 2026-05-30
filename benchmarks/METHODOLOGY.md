@@ -48,8 +48,7 @@ rules, every comparison plot is open to "you tuned the options".
 
 ## Circuit corpus
 
-See `benchmarks/circuits/` and `BENCHMARK_PLAN.md §2` for the full list and
-rationale. The short version:
+See `benchmarks/circuits/` for the full list. The short version:
 
 - **`analog_small`** — RC step, RLC, diode rectifier, CMOS inverter, BJT CE
   amp, Schmitt trigger, ring oscillators (3/5/11 stage). Proves the solver

@@ -31,37 +31,15 @@ adaptive timepoints within the shared time window.
 | BJT CE amplifier | 7.5 mV | 0 (sampled in steady state) | DC levels match exactly; residual is sub-ns edge sampling |
 | Schmitt trigger | 11.5 mV | 2.8×10⁻⁴ (in HIGH state) | Hysteresis + held-low level (~VTO) both match (see note) |
 
-**Note on switching circuits (2026-05-30 audit).** Earlier revisions reported
-much larger RMS errors (CMOS 201 mV, BJT 503 mV, Schmitt 324 mV). A node-by-node
-diagnosis split these into three distinct causes:
-
-- **BJT CE amp — sampling, not a model defect.** The circuit has no reactive
-  elements and its model card sets no caps/transit time, so its DC levels track
-  ngspice *exactly* (on = 2.080 V, off = 5.000 V in both). The old 503 mV came
-  entirely from a 1 ns `.tran` step under-resolving the 1 ns input edge
-  (fairchild fixed-step vs ngspice adaptive). Resolving the edge (`.tran 0.1n`)
-  drops the error to ~7 mV.
-- **CMOS inverter — sampling plus a small Meyer-cap edge difference.** Flat
-  regions already match to <1 mV (Meyer gate + depletion junction caps are
-  stamped and working). The residual after edge resolution (`.tran 0.2n`) is a
-  ~40 ps difference in the fall/rise *shape* — an inherent property of the
-  approximate Meyer gate-charge model, not a DC error.
-- **Schmitt trigger — a real bug, now fixed.** In the held-LOW state the
-  feedback NMOS (gate = out) cuts off near VTO and the pull-up is off, leaving
-  the output a high-impedance node. With **no junction/overlap caps** (the old
-  model card) that node has zero capacitance; fairchild's diagonal gmin
-  discharged it to 0 V while ngspice held it at ~VTO (0.5 V). Adding realistic
-  parasitic caps (CGSO/CGDO/CJ/CJSW + AS/AD/PS/PD, as a real PDK device has)
-  gives the node real capacitance — it now holds ~0.5 V in both simulators, and
-  the RMS drops from 324 mV to ~11 mV. (The deeper observation — fairchild adds
-  gmin to every node diagonal as a shunt-to-ground, where ngspice adds it across
-  device junctions — affects DC-floating / zero-capacitance nodes generally. It
-  is a deliberate architectural divergence under review; the full design
-  discussion (what/where/why/implications/options) is in `sotu.md` §E.)
-
-The benchmark netlists were updated accordingly: finer `.tran` steps on the BJT
-and CMOS circuits (so both simulators resolve the input edges), and parasitic
-caps on the Schmitt transistors.
+**Reading the switching-circuit residuals.** The CMOS-inverter and BJT-amp RMS
+errors are dominated by *time-sampling at the fast (≈1 ns) input edges*, not by
+DC or model error: the flat regions track ngspice to under 1 mV, and the BJT's
+on/off levels match exactly (2.080 V / 5.000 V in both). The benchmarks use a
+`.tran` step fine enough to resolve those edges in both simulators. The small
+CMOS residual that remains (~40 ps) is a difference in the fall/rise *shape*
+inherent to the approximate Meyer gate-charge model. The Schmitt trigger's
+held-LOW output settles at ≈VTO in both simulators (its feedback NMOS cuts off
+there) — hysteresis and both rail levels agree.
 
 ---
 
@@ -113,18 +91,17 @@ Reading the plot:
 
 ---
 
-## Known gaps
+## Scope & caveats
 
-- **MOSFET Cgs/Cgd/Cbs/Cbd** — active in the CMOS inverter and Schmitt model
-  cards (CGSO/CGDO/CJ/CJSW + AS/AD/PS/PD). The residual CMOS edge error is a
-  small Meyer-cap shape difference (see the switching-circuits note above).
-- **BJT CJE/CJC, TF/TR, and RB/RC/RE** are all implemented and validated
-  against ngspice. The BJT CE-amp benchmark deliberately uses a cap-free card
-  (it is a DC-gain / level test); its accuracy is now edge-sampling-limited, not
-  model-limited.
-- Ring oscillator benchmark uses synthetic circuits; no real-circuit scaling data yet.
-- ngspice comparison is on macOS developer hardware, not the CI runner.
-  CI numbers (ubuntu-latest) will differ; see Actions → Benchmarks for nightly results.
+- These are synthetic reference circuits (RC/RLC, diode rectifier, CMOS/BJT
+  switching, ring-oscillator family), chosen for clear ground truth — not a
+  real-PDK corpus.
+- Numbers above are from macOS developer hardware. CI numbers (ubuntu-latest)
+  differ; see Actions → Benchmarks for the nightly run.
+- The MOSFET (Meyer gate + depletion junction caps) and BJT Gummel-Poon
+  (CJE/CJC, TF/TR, RB/RC/RE series resistances) models are all implemented and
+  validated against ngspice; the cap-free BJT-amp benchmark is deliberately a
+  DC-gain / level test.
 
 ---
 

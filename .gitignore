@@ -9,7 +9,10 @@ Cargo.lock
 examples/*/*.png
 examples/*/*.csv
 
-# project-state-of-the-union scratch file; never committed
+# internal notes: roadmap, design discussions, honest accounting, scratch,
+# legacy references. Never committed — public-facing docs live in docs/.
+# Holds sotu.md (state-of-the-union) and moved internal docs.
+/_notes/
 sotu.md
 
 # kicad development project

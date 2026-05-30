@@ -96,7 +96,7 @@ isn't modelled).
 
 ---
 
-## L2b — `fc_pn_ps_inj` (carrier-injection, forward-bias only) [NEW]
+## L2b — `fc_pn_ps_inj` (carrier-injection, forward-bias only)
 
 **Use when:** designing a forward-biased carrier-injection modulator
 (used in low-V, lower-speed applications: variable optical attenuators,
@@ -130,7 +130,7 @@ slow ring tuners, biomedical).  Operates in V_pn ∈ [0, ~0.8 V].
 
 ---
 
-## L3 — `fc_pn_ps_full` (combined depletion + injection + TPA, steady-state) [NEW]
+## L3 — `fc_pn_ps_full` (combined depletion + injection + TPA, steady-state)
 
 **Use when:** the modulator may visit either bias regime in normal
 operation, OR the optical power is high enough that TPA matters.  Most
@@ -162,18 +162,12 @@ transient), pulsed self-heating.  Those belong in L4.
 
 ---
 
-## L4 (planned) — `fc_pn_ps_carrier` (dynamic carriers + thermal RC)
+## L4 — `fc_pn_ps_carrier` (dynamic carriers + thermal RC) — *planned*
 
-**Use when:** doing transient analysis at high power where carrier
-relaxation (τ ≈ 1 ns) and thermal time constants (τ_th ≈ 1 µs) matter.
-
-**Physics in addition to L3:**
-- dN/dt = G − N/τ_carrier rate equation, integrator-managed state row.
-- Thermal RC (separately modelled via `fc_thermal_ps_rc`'s pattern).
-- Self-pulsing / Q-switching regime accessible.
-
-**Out of scope (everything is in L4):** quantum noise, RIN, ASE.  Those
-belong to laser models, not modulators.
+Not yet implemented. Would add a `dN/dt = G − N/τ_carrier` rate equation and a
+thermal RC to L3, for transient analysis at high power where carrier relaxation
+(τ ≈ 1 ns) and thermal time constants (τ_th ≈ 1 µs) matter (self-pulsing /
+Q-switching). It is shown in the tier table below as the roadmap target.
 
 ---
 
@@ -195,7 +189,7 @@ belong to laser models, not modulators.
 | Self-heating Δn                   |   |   |   | ✓ (static) | ✓ (dynamic) |
 | Dynamic carrier rate equation     |   |   |   |   | ✓ |
 | Junction-offset assumed            | symmetric | 100 nm | 100 nm | 100 nm | 100 nm |
-| Implemented today                 | ✓ | ✓ | ✗ | ✗ | ✗ |
+| Implemented today                 | ✓ | ✓ | ✓ | ✓ | ✗ (planned) |
 
 ---
 
