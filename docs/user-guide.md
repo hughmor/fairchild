@@ -1236,14 +1236,21 @@ conventions live downstream without leaking into the upstream master
 branch. See `crates/fairchild-core/src/device_registry.rs:300` for an
 example.
 
-### Legacy OSDI Verilog-A models
+### OSDI Verilog-A models
 
-Pre-Phase-B Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector) are
-still loadable via `.osdi`. They use a different discipline (Norton-equivalent
-flow contributions) and the 12-pin underlying-wire syntax. The CLI prints a
-one-shot hint pointing at the native devices when a photonic `.osdi` library
-is loaded. New work should use native devices; legacy models survive for
-back-compat and third-party clear-text Verilog-A. See `docs/photonic_models.md`.
+OSDI (`.osdi` shared objects compiled by OpenVAF) is the **supported path for
+electrical device models distributed as Verilog-A** — foundry transistor models
+(BSIM, PSP, HiCUM, …). fairchild does not hand-write BSIM in Rust; load it via
+`.osdi <path>` and instantiate with an `X` element. The loader is verified in CI
+by the `osdi-mock` fixture.
+
+For *photonics*, prefer the native Rust devices: OSDI/Verilog-A cannot express
+the optical bundle/complex-envelope abstractions. The pre-Phase-B photonic
+Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector) remain loadable via
+`.osdi` for back-compat (Norton-equivalent flow discipline, 12-pin underlying-
+wire syntax), but new photonic work should use the native devices — the CLI
+prints a one-shot hint pointing at them when a photonic `.osdi` is loaded. See
+`docs/photonic_models.md`.
 
 ---
 
