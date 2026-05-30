@@ -19,10 +19,10 @@ use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags};
+use crate::device::{Device, EvalFlags, ReactiveKind};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist_scaled, CircuitTopology};
+use crate::mna::{stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
@@ -97,7 +97,8 @@ pub fn noise_analysis(
     // Real (G) and imaginary-coefficient (C, L⁻¹) parts of Y(jω) = G + j(ωC − L⁻¹/ω).
     let mut g_mat = stamp_netlist_scaled(&topo, netlist, 1.0, &empty, &empty).a;
     for dev in devices.iter_mut() {
-        dev.eval(&x0, EvalFlags::dc(), &ctx);
+        // tran() flags so device small-signal cap caches populate (see ac.rs).
+        dev.eval(&x0, EvalFlags::tran(), &ctx);
         let mut tmp = crate::mna::MnaMatrix {
             a: vec![vec![0.0; size]; size],
             b: vec![0.0; size],
@@ -127,6 +128,19 @@ pub fn noise_analysis(
                 ..
             } => stamp_passive_2port(&mut l_mat, &topo.node_index, pos, neg, 1.0 / *inductance),
             _ => {}
+        }
+    }
+    // Device-internal small-signal reactances (diode Cj, MOSFET caps, photonic
+    // parasitics) — previously absent from noise; see ac.rs for the rationale.
+    for dev in devices.iter() {
+        for r in dev.small_signal_reactances() {
+            match r.kind {
+                ReactiveKind::Capacitor => stamp_2port_by_id(&mut c_mat, r.pos, r.neg, r.value),
+                ReactiveKind::Inductor if r.value != 0.0 => {
+                    stamp_2port_by_id(&mut l_mat, r.pos, r.neg, 1.0 / r.value)
+                }
+                ReactiveKind::Inductor => {}
+            }
         }
     }
 
@@ -275,26 +289,6 @@ fn pick(v: &[f64], idx: Option<usize>) -> f64 {
     match idx {
         Some(i) => v[i],
         None => 0.0,
-    }
-}
-
-/// Stamp a passive 2-terminal element value (G or C) into a raw matrix.
-fn stamp_passive_2port(
-    mat: &mut [Vec<f64>],
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    val: f64,
-) {
-    if let Some(&p) = idx.get(pos) {
-        mat[p][p] += val;
-        if let Some(&n) = idx.get(neg) {
-            mat[p][n] -= val;
-            mat[n][p] -= val;
-        }
-    }
-    if let Some(&n) = idx.get(neg) {
-        mat[n][n] += val;
     }
 }
 

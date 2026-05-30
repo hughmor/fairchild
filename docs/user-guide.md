@@ -250,7 +250,13 @@ where ringing on TR is unacceptable).
 .ac  DEC|OCT|LIN  <points>  <fstart>  <fstop>
 ```
 
-Small-signal sweep around the DC operating point.
+Small-signal sweep around the DC operating point. The reactance matrix includes
+both netlist capacitors/inductors **and** device-internal small-signal
+reactances at the operating point — diode junction capacitance `Cj(V)`, MOSFET
+Meyer gate caps and depletion junction caps, and photonic parasitics — so a
+reverse-biased varactor or a transistor's high-frequency rolloff is modelled
+correctly. (Through 2026-05-30 these device caps were applied in transient but
+omitted from `.ac`/`.noise`; they are now consistent across all analyses.)
 
 ### Noise
 
@@ -268,7 +274,9 @@ Adjoint-method noise analysis. Device noise sources:
 
 Output is `onoise` (V²/Hz at the output port) and `inoise` (equivalent input
 PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
-`noise_sources()` hook.
+`noise_sources()` hook. Like `.ac`, the noise small-signal network now includes
+device-internal capacitances, so high-frequency noise shaping from device caps
+is captured.
 
 ---
 

@@ -273,6 +273,23 @@ impl Device for ShockleyDiode {
         self.stamp_g(mat, alpha * self.cj_total);
     }
 
+    /// Small-signal junction capacitance for `.ac`/`.noise`: the depletion +
+    /// transit-time charge derivative `Cj_depl(Vd_j) + TT·gd`, between anode and
+    /// cathode — identical to the value `load_jacobian_tran` stamps. Requires a
+    /// preceding `eval(EvalFlags::tran())` to populate `cj_total`.
+    fn small_signal_reactances(&self) -> Vec<crate::device::ReactiveBranchSpec> {
+        use crate::device::{ReactiveBranchSpec, ReactiveKind};
+        if self.cj_total == 0.0 {
+            return Vec::new();
+        }
+        vec![ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos: self.anode,
+            neg: self.cathode,
+            value: self.cj_total,
+        }]
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         let va = self.anode.map_or(0.0, |i| x[i]);
         let vk = self.cathode.map_or(0.0, |i| x[i]);
@@ -448,5 +465,44 @@ mod tests {
         let q0 = d.q_depl(0.0);
         let q1 = d.q_depl(0.3);
         assert!(q1 > q0, "Q should increase with forward bias");
+    }
+
+    /// `small_signal_reactances` (consumed by .ac/.noise) reports the depletion
+    /// capacitance at the operating point, between anode and cathode, matching
+    /// the closed-form Cj = CJO·(1 − Vd/VJ)^(−M). Reverse bias Vd_j = −1 V.
+    #[test]
+    fn small_signal_cap_matches_depletion_formula_at_reverse_bias() {
+        use crate::device::ReactiveKind;
+        let (mut d, _) = ShockleyDiode::from_params(&[
+            ("is".into(), 1e-14),
+            ("cjo".into(), 2e-12),
+            ("vj".into(), 0.8),
+            ("m".into(), 0.5),
+        ]);
+        d.setup_model(&ctx());
+        d.setup_instance(&[Some(0), Some(1)], &ctx()); // anode=node0, cathode=node1
+        d.vd_prev = -1.0; // seed pnjlim so the reverse step is not limited
+                          // anode=0 V, cathode=+1 V → Vd_terminal = −1 V (reverse).
+        let x = [0.0, 1.0];
+        d.eval(&x, EvalFlags::tran(), &ctx());
+
+        let r = d.small_signal_reactances();
+        assert_eq!(r.len(), 1, "one junction cap expected");
+        assert_eq!(r[0].kind, ReactiveKind::Capacitor);
+        assert_eq!(r[0].pos, Some(0));
+        assert_eq!(r[0].neg, Some(1));
+        // RS=0 and TT=0 here, so Cj = cj_depl(−1) exactly.
+        let expected = 2e-12_f64 * (1.0 - (-1.0) / 0.8_f64).powf(-0.5); // 2pF/1.5 = 1.333 pF
+        assert!(
+            (r[0].value - expected).abs() / expected < 1e-9,
+            "Cj={:.6e} expected={:.6e}",
+            r[0].value,
+            expected
+        );
+
+        // Under DC flags the cache is cleared → no small-signal cap reported
+        // (so a pure .op stamps no spurious reactance).
+        d.eval(&x, EvalFlags::dc(), &ctx());
+        assert!(d.small_signal_reactances().is_empty());
     }
 }

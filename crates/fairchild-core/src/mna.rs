@@ -758,6 +758,37 @@ fn stamp_mutual_conductance(
     }
 }
 
+/// Stamp a 2-terminal value (conductance, capacitance, or 1/L) between two MNA
+/// rows identified by [`crate::device::NodeId`], into a raw row-major dense
+/// matrix. Ground (`None`) terminals are skipped. This is the shared kernel for
+/// both the netlist-element AC/noise stamps and the device small-signal
+/// reactance stamps.
+pub fn stamp_2port_by_id(mat: &mut [Vec<f64>], pos: crate::device::NodeId, neg: crate::device::NodeId, val: f64) {
+    if let Some(p) = pos {
+        mat[p][p] += val;
+        if let Some(n) = neg {
+            mat[p][n] -= val;
+            mat[n][p] -= val;
+        }
+    }
+    if let Some(n) = neg {
+        mat[n][n] += val;
+    }
+}
+
+/// Stamp a 2-terminal passive value (G or C) into a raw matrix, looking node
+/// names up in `idx` (ground / unknown names resolve to `None` and are skipped).
+/// Thin wrapper over [`stamp_2port_by_id`]; shared by `ac.rs` and `noise.rs`.
+pub fn stamp_passive_2port(
+    mat: &mut [Vec<f64>],
+    idx: &IndexMap<String, usize>,
+    pos: &str,
+    neg: &str,
+    val: f64,
+) {
+    stamp_2port_by_id(mat, idx.get(pos).copied(), idx.get(neg).copied(), val);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

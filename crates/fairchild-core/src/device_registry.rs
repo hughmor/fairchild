@@ -407,6 +407,9 @@ impl Device for AliasedDevice {
     fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
         self.inner.noise_sources(ctx)
     }
+    fn small_signal_reactances(&self) -> Vec<crate::device::ReactiveBranchSpec> {
+        self.inner.small_signal_reactances()
+    }
 }
 
 #[cfg(test)]

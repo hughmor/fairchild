@@ -189,6 +189,28 @@ pub trait Device: Send + Sync {
         Vec::new()
     }
 
+    /// Small-signal reactive contributions at the current operating point, for
+    /// frequency-domain analyses (`.ac`, `.noise`).
+    ///
+    /// Reported as capacitances (∂Q/∂V, farads) and inductances (∂Φ/∂I, henries)
+    /// between node pairs — the *same* physical reactances the device stamps in
+    /// transient, whether through [`Device::reactive_branches`] (the integrator-
+    /// companion path) or through its own [`Device::load_jacobian_tran`]
+    /// companion stamping. AC and noise build their jωC / 1/(jωL) blocks from
+    /// these, so device-internal caps (diode C_j, MOSFET Meyer/junction caps,
+    /// photonic parasitics) are included rather than silently dropped.
+    ///
+    /// **Query after an [`Device::eval`] with [`EvalFlags::tran`] at the
+    /// operating point**, so devices whose cap evaluation is transient-gated
+    /// have populated their cached values. The default returns
+    /// [`Device::reactive_branches`] — correct for devices that already expose
+    /// their reactance through the integrator-companion path (e.g. photonic
+    /// phase-shifter junction caps); devices that stamp companions themselves
+    /// (diode, MOSFET) override this.
+    fn small_signal_reactances(&self) -> Vec<ReactiveBranchSpec> {
+        self.reactive_branches()
+    }
+
     /// Set a named real-valued parameter on this device instance.
     ///
     /// Returns `true` if the parameter was found and set; `false` if not supported

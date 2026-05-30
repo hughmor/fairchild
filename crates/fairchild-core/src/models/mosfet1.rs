@@ -496,6 +496,37 @@ impl Device for Mosfet1 {
         }
     }
 
+    /// Small-signal caps for `.ac`/`.noise`: the Meyer gate caps (Cgs/Cgd/Cgb)
+    /// and depletion junction caps (Cbs/Cbd) at the operating point — the same
+    /// five caps `load_jacobian_tran` stamps. Requires a preceding
+    /// `eval(EvalFlags::tran())` to populate the `*_eval` caches.
+    fn small_signal_reactances(&self) -> Vec<crate::device::ReactiveBranchSpec> {
+        use crate::device::{ReactiveBranchSpec, ReactiveKind};
+        let cap = |pos, neg, value| ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos,
+            neg,
+            value,
+        };
+        let mut v = Vec::new();
+        if self.cgs_eval != 0.0 {
+            v.push(cap(self.gate, self.source, self.cgs_eval));
+        }
+        if self.cgd_eval != 0.0 {
+            v.push(cap(self.gate, self.drain, self.cgd_eval));
+        }
+        if self.cgb_eval != 0.0 {
+            v.push(cap(self.gate, self.bulk, self.cgb_eval));
+        }
+        if self.cbs_eval != 0.0 {
+            v.push(cap(self.bulk, self.source, self.cbs_eval));
+        }
+        if self.cbd_eval != 0.0 {
+            v.push(cap(self.bulk, self.drain, self.cbd_eval));
+        }
+        v
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         let vd = self.drain.map_or(0.0, |i| x[i]);
         let vg = self.gate.map_or(0.0, |i| x[i]);

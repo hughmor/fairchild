@@ -20,10 +20,10 @@ use rayon::prelude::*;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, SimContext};
+use crate::device::{Device, EvalFlags, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist_scaled, CircuitTopology};
+use crate::mna::{stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
@@ -185,8 +185,13 @@ pub fn ac_analysis_opts(
     // Add device linearization (Jacobian at x0).
     let mut g_mat = mat0.a;
     for dev in devices.iter_mut() {
-        dev.eval(&x0, EvalFlags::dc(), &ctx);
-        // Use a temporary MnaMatrix to collect Jacobian entries.
+        // Evaluate with transient flags so devices populate their small-signal
+        // capacitance caches at the operating point. The resistive Jacobian
+        // (`load_jacobian`) is identical under dc()/tran() flags; only the
+        // cached reactances differ, and those are read below via
+        // `small_signal_reactances()`.
+        dev.eval(&x0, EvalFlags::tran(), &ctx);
+        // Use a temporary MnaMatrix to collect resistive Jacobian entries.
         let mut tmp = crate::mna::MnaMatrix {
             a: vec![vec![0.0; size]; size],
             b: vec![0.0; size],
@@ -228,6 +233,26 @@ pub fn ac_analysis_opts(
         } = el
         {
             stamp_passive_2port(&mut l_mat, &topo.node_index, pos, neg, 1.0 / inductance);
+        }
+    }
+
+    // --- Device-internal small-signal reactances (diode Cj, MOSFET
+    // Meyer/junction caps, photonic parasitics) ---
+    // These are stamped by transient (load_jacobian_tran / reactive_branches)
+    // but were historically absent from AC, so device caps were ignored.
+    // `small_signal_reactances()` reports the same physical reactances; the
+    // transient eval above populated their cached values.
+    for dev in devices.iter() {
+        for r in dev.small_signal_reactances() {
+            match r.kind {
+                ReactiveKind::Capacitor => {
+                    stamp_2port_by_id(&mut c_mat, r.pos, r.neg, r.value);
+                }
+                ReactiveKind::Inductor if r.value != 0.0 => {
+                    stamp_2port_by_id(&mut l_mat, r.pos, r.neg, 1.0 / r.value);
+                }
+                ReactiveKind::Inductor => {}
+            }
         }
     }
 
@@ -361,27 +386,6 @@ fn dc_op(
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }
 
-/// Stamp a 2-terminal passive element value into a matrix (G or C).
-/// Same pattern as stamp_conductance but directly into a raw matrix.
-fn stamp_passive_2port(
-    mat: &mut [Vec<f64>],
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    val: f64,
-) {
-    if let Some(&p) = idx.get(pos) {
-        mat[p][p] += val;
-        if let Some(&n) = idx.get(neg) {
-            mat[p][n] -= val;
-            mat[n][p] -= val;
-        }
-    }
-    if let Some(&n) = idx.get(neg) {
-        mat[n][n] += val;
-    }
-}
-
 /// Build the AC RHS vector.
 ///
 /// For the selected source (or all sources if ac_source=None), stamp the AC voltage/current.
@@ -458,6 +462,55 @@ mod tests {
             freqs[fi] / 1e3,
             mag / mag_at_dc,
             std::f64::consts::FRAC_1_SQRT_2
+        );
+    }
+
+    /// A reverse-biased diode's junction capacitance must appear in `.ac` — it
+    /// was historically dropped (AC built its C matrix from netlist capacitors
+    /// only). `Vac` DC-biases the cathode to +1 V (reverse) and is the AC
+    /// source; `Rs` + `Cj` form a lowpass. With the cap included there is a
+    /// −3 dB rolloff at f_c = 1/(2π·Rs·Cj); without it the response is flat, so
+    /// this test fails on the pre-fix code.
+    #[test]
+    fn diode_junction_cap_appears_in_ac() {
+        let net = parse_spice(
+            "* reverse-biased diode Cj lowpass\n\
+             Vac c 0 DC 1\n\
+             Rs c out 10k\n\
+             D1 0 out DMOD\n\
+             .model DMOD D IS=1e-14 CJO=2p VJ=0.8 M=0.5\n\
+             .end\n",
+        )
+        .unwrap();
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_diodes(&net.models);
+        let freqs = freq_decade(1e3, 1e9, 30);
+        let result = ac_analysis(&net, &freqs, Some("Vac"), &registry).unwrap();
+
+        let mag_dc = result.magnitude("out", 0).unwrap();
+        let mag_hi = result.magnitude("out", freqs.len() - 1).unwrap();
+        // Clear rolloff: at 1 GHz the cap shorts `out` toward ground.
+        assert!(
+            mag_hi < 0.2 * mag_dc,
+            "expected high-frequency rolloff: mag_hi={mag_hi:.4} mag_dc={mag_dc:.4}"
+        );
+
+        // -3 dB near f_c. At Vd_j ≈ −1 V: Cj = CJO/(1+1/0.8)^0.5 = 2pF/1.5.
+        let cj = 2e-12_f64 / (1.0 + 1.0 / 0.8_f64).powf(0.5);
+        let f_c = 1.0 / (2.0 * std::f64::consts::PI * 1e4 * cj); // ≈ 11.9 MHz
+        let fi = freqs
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &f)| ((f - f_c).abs()) as u64)
+            .map(|(i, _)| i)
+            .unwrap();
+        let ratio = result.magnitude("out", fi).unwrap() / mag_dc;
+        assert!(
+            (ratio - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.08,
+            "at f={:.2} MHz |V(out)|/|V_dc|={:.4} (expected 1/√2 ≈ 0.707); \
+             a flat response (cap dropped) would read ~1.0",
+            freqs[fi] / 1e6,
+            ratio
         );
     }
 
