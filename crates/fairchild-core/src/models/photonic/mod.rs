@@ -15,6 +15,7 @@
 //! public textbook formulas (Saleh-Teich, Heuck-Englund, Pozar) and carry
 //! no PDK-specific calibration.
 
+pub mod active;
 pub mod circulator;
 pub mod coupler;
 pub mod detector;
@@ -27,6 +28,9 @@ pub mod splitter;
 pub mod waveguide;
 pub mod wdm;
 
+pub use active::{
+    pn_phase_shifter, ActiveOpticalDevice, OpticalPerturbation, PhotonicActiveModel, PnDrive,
+};
 pub use circulator::NativeCirculator;
 pub use coupler::NativeDirectionalCoupler;
 pub use detector::NativePhotodetector;
@@ -35,10 +39,9 @@ pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
 pub use segment::OpticalSegment;
 pub use phase_shifters::{
-    NativePnPhaseShifter, NativePnPhaseShifterCap, NativePnPhaseShifterFull,
-    NativePnPhaseShifterInj, NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap,
-    NativePnThermalPhaseShifterFull, NativePnThermalPhaseShifterInj, NativeThermalPhaseShifter,
-    NativeThermalPhaseShifterRc,
+    NativePnPhaseShifterCap, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
+    NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
+    NativePnThermalPhaseShifterInj, NativeThermalPhaseShifter, NativeThermalPhaseShifterRc,
 };
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;

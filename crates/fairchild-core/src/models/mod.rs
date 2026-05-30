@@ -7,10 +7,10 @@ pub use bjt::GummelPoonBjt;
 pub use diode::ShockleyDiode;
 pub use mosfet1::Mosfet1;
 pub use photonic::{
-    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
-    NativeMux, NativeMzm, NativePhotodetector, NativePnPhaseShifter, NativePnPhaseShifterCap,
-    NativePnPhaseShifterFull, NativePnPhaseShifterInj, NativePnThermalPhaseShifter,
-    NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
+    pn_phase_shifter, ActiveOpticalDevice, NativeCirculator, NativeCwLaser, NativeDemux,
+    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
+    NativePnPhaseShifterCap, NativePnPhaseShifterFull, NativePnPhaseShifterInj,
+    NativePnThermalPhaseShifter, NativePnThermalPhaseShifterCap, NativePnThermalPhaseShifterFull,
     NativePnThermalPhaseShifterInj, NativeSplitter, NativeThermalPhaseShifter,
     NativeThermalPhaseShifterRc, NativeWaveguide,
 };
