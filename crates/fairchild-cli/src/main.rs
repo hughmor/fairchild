@@ -80,9 +80,9 @@ struct Cli {
     ///
     /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
     /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
-    /// variable_step.
+    /// variable_step, waveguide_delay, cond_estimate, equilibrate.
     ///
-    /// Example: --opt reltol=1e-5 --opt method=gear --opt variable_step=1
+    /// Example: --opt reltol=1e-5 --opt method=gear --opt equilibrate=1
     #[arg(long = "opt", value_name = "KEY=VALUE")]
     options: Vec<String>,
 

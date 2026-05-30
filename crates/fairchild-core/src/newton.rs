@@ -299,7 +299,7 @@ fn report_matrix_stats(
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
 ) -> bool {
-    if !opts.verbose {
+    if !opts.verbose && !opts.cond_estimate {
         return false;
     }
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
@@ -355,6 +355,28 @@ fn report_matrix_stats(
             diag_max,
             diag_max / diag_min.max(1e-300)
         );
+    }
+    if opts.cond_estimate {
+        // Estimate κ on the matrix the solver actually factorises (with the
+        // gmin floor on node / internal rows), so floating nodes don't show as
+        // spuriously singular.  Work on a copy to leave `mat` untouched.
+        let mut a_est = mat.a.clone();
+        for (i, row) in a_est.iter_mut().enumerate().take(topo.n_nodes()) {
+            row[i] += opts.gmin;
+        }
+        let vsrc_end = topo.n_nodes() + topo.vsrc_index.len();
+        for (i, row) in a_est.iter_mut().enumerate().skip(vsrc_end) {
+            row[i] += opts.gmin;
+        }
+        match crate::solver::estimate_condition_2norm(&a_est) {
+            Some(k) => eprintln!(
+                "info: estimated 2-norm condition number κ(A) ≈ {k:.3e} \
+                       (κ ≫ 1e8 indicates ill-conditioning — try .options equilibrate=1)"
+            ),
+            None => {
+                eprintln!("info: condition-number estimate unavailable (matrix singular at x=0)")
+            }
+        }
     }
     if nonfinite {
         eprintln!(

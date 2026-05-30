@@ -504,6 +504,183 @@ pub fn lu_solve(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
     DenseSolver.solve(a, b)
 }
 
+// ---------------------------------------------------------------------------
+// Matrix equilibration (two-sided Ruiz scaling)
+// ---------------------------------------------------------------------------
+
+/// Two-sided ∞-norm (Ruiz) scaling factors `(D_r, D_c)` such that the rows and
+/// columns of `diag(D_r)·A·diag(D_c)` have ∞-norm ≈ 1.  A few iterations is
+/// enough in practice; empty rows/columns are left unscaled (factor 1).
+fn equilibration_factors(a: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
+    let n = a.len();
+    let mut dr = vec![1.0_f64; n];
+    let mut dc = vec![1.0_f64; n];
+    for _ in 0..3 {
+        for i in 0..n {
+            let mut m = 0.0_f64;
+            for j in 0..n {
+                m = m.max((dr[i] * a[i][j] * dc[j]).abs());
+            }
+            if m > 0.0 {
+                dr[i] /= m.sqrt();
+            }
+        }
+        for j in 0..n {
+            let mut m = 0.0_f64;
+            for (i, row) in a.iter().enumerate() {
+                m = m.max((dr[i] * row[j] * dc[j]).abs());
+            }
+            if m > 0.0 {
+                dc[j] /= m.sqrt();
+            }
+        }
+    }
+    (dr, dc)
+}
+
+/// `A' = diag(D_r)·A·diag(D_c)`, `b' = D_r·b`.  Returns the scaled system.
+fn apply_equilibration(
+    a: &[Vec<f64>],
+    b: &[f64],
+    dr: &[f64],
+    dc: &[f64],
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let n = a.len();
+    let mut a_s = vec![vec![0.0_f64; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            a_s[i][j] = dr[i] * a[i][j] * dc[j];
+        }
+    }
+    let b_s: Vec<f64> = (0..n).map(|i| dr[i] * b[i]).collect();
+    (a_s, b_s)
+}
+
+/// LinearSolver decorator that equilibrates the system before delegating to an
+/// inner backend, then unscales the solution.  Equilibration is applied to the
+/// forward `solve` / `refactor_and_solve` path only; the transpose/adjoint path
+/// (`.noise`) is delegated unscaled to keep the scaling unambiguous.
+pub struct EquilibratedSolver {
+    inner: Box<dyn LinearSolver>,
+}
+
+impl EquilibratedSolver {
+    pub fn new(inner: Box<dyn LinearSolver>) -> Self {
+        Self { inner }
+    }
+}
+
+impl LinearSolver for EquilibratedSolver {
+    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let (dr, dc) = equilibration_factors(a);
+        let (a_s, b_s) = apply_equilibration(a, b, &dr, &dc);
+        let x_s = self.inner.solve(&a_s, &b_s)?;
+        Ok((0..x_s.len()).map(|j| dc[j] * x_s[j]).collect())
+    }
+
+    fn solve_transpose(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        // Adjoint path left unscaled (forward-only equilibration).
+        self.inner.solve_transpose(a, b)
+    }
+
+    fn factorise(&self, a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+        // Scaling preserves sparsity, so the inner symbolic factorisation built
+        // on the unscaled `a` stays valid across refactors.
+        Ok(Box::new(EquilibratedFactorisation {
+            inner: self.inner.factorise(a)?,
+        }))
+    }
+}
+
+struct EquilibratedFactorisation {
+    inner: Box<dyn Factorisation>,
+}
+
+impl Factorisation for EquilibratedFactorisation {
+    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let (dr, dc) = equilibration_factors(a);
+        let (a_s, b_s) = apply_equilibration(a, b, &dr, &dc);
+        let x_s = self.inner.refactor_and_solve(&a_s, &b_s)?;
+        Ok((0..x_s.len()).map(|j| dc[j] * x_s[j]).collect())
+    }
+
+    fn refactor_and_solve_transpose(
+        &mut self,
+        a: &[Vec<f64>],
+        b: &[f64],
+    ) -> Result<Vec<f64>, SimError> {
+        self.inner.refactor_and_solve_transpose(a, b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Condition-number estimate (2-norm, power iteration)
+// ---------------------------------------------------------------------------
+
+/// Estimate the 2-norm condition number κ₂(A) = σ_max / σ_min.
+///
+/// `σ_max` comes from power iteration on `AᵀA`; `σ_min` from inverse power
+/// iteration `(AᵀA)⁻¹ = A⁻¹A⁻ᵀ` using a dense LU for the inner solves. Returns
+/// `None` if `A` is singular (the inverse iteration fails) or empty. This is a
+/// diagnostic — it builds dense LUs, so it is opt-in (`.options cond_estimate`).
+pub fn estimate_condition_2norm(a: &[Vec<f64>]) -> Option<f64> {
+    let n = a.len();
+    if n == 0 {
+        return Some(1.0);
+    }
+    let mat = |v: &[f64]| -> Vec<f64> {
+        (0..n)
+            .map(|i| (0..n).map(|j| a[i][j] * v[j]).sum())
+            .collect()
+    };
+    let mat_t = |v: &[f64]| -> Vec<f64> {
+        (0..n)
+            .map(|j| (0..n).map(|i| a[i][j] * v[i]).sum())
+            .collect()
+    };
+    let l2 = |v: &[f64]| -> f64 { v.iter().map(|x| x * x).sum::<f64>().sqrt() };
+    let normed = |v: Vec<f64>| -> Vec<f64> {
+        let nrm = l2(&v);
+        if nrm > 0.0 {
+            v.iter().map(|x| x / nrm).collect()
+        } else {
+            v
+        }
+    };
+    // Deterministic seed (no RNG): a simple non-uniform vector.
+    let seed: Vec<f64> = (0..n).map(|i| 1.0 + (i % 7) as f64 * 0.13).collect();
+
+    // σ_max² = λ_max(AᵀA): power iteration v ← AᵀA v / ‖·‖.
+    let mut v = normed(seed.clone());
+    let mut lam_max = 0.0;
+    for _ in 0..100 {
+        let av = mat(&v);
+        let atav = mat_t(&av);
+        lam_max = l2(&atav);
+        v = normed(atav);
+    }
+    let sigma_max = lam_max.sqrt();
+
+    // σ_min² = 1/λ_max((AᵀA)⁻¹): inverse power iteration w ← A⁻¹A⁻ᵀ w / ‖·‖.
+    let solver = DenseSolver;
+    let mut w = normed(seed);
+    let mut lam_inv_max = 0.0;
+    for _ in 0..100 {
+        let u = solver.solve_transpose(a, &w).ok()?;
+        let z = solver.solve(a, &u).ok()?;
+        lam_inv_max = l2(&z);
+        w = normed(z);
+    }
+    if lam_inv_max <= 0.0 {
+        return None;
+    }
+    let sigma_min = 1.0 / lam_inv_max.sqrt();
+    if sigma_min <= 0.0 || !sigma_max.is_finite() {
+        return None;
+    }
+    Some(sigma_max / sigma_min)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +756,41 @@ mod tests {
         // 6x+2y=10, 4y=8 → y=2, 6x=6 → x=1
         assert!((x2[0] - 1.0).abs() < 1e-12);
         assert!((x2[1] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn condition_estimate_diagonal_and_identity() {
+        // Identity → κ = 1.
+        let id = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let k = estimate_condition_2norm(&id).unwrap();
+        assert!((k - 1.0).abs() < 1e-6, "identity κ={k}");
+        // diag(1, 1000) → κ = 1000.
+        let d = vec![vec![1.0, 0.0], vec![0.0, 1000.0]];
+        let k = estimate_condition_2norm(&d).unwrap();
+        assert!((k - 1000.0).abs() / 1000.0 < 1e-3, "diag κ={k}");
+    }
+
+    #[test]
+    fn equilibration_solves_badly_scaled_system_correctly() {
+        // Badly-scaled system: row 0 ~1e6, row 1 ~1e-6. Exact solution x=[1,1].
+        let a = vec![vec![2.0e6, 1.0e6], vec![1.0e-6, 3.0e-6]];
+        let b = vec![3.0e6, 4.0e-6];
+        let eq = EquilibratedSolver::new(Box::new(DenseSolver));
+        let x = eq.solve(&a, &b).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-6, "x0={}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-6, "x1={}", x[1]);
+        // Equilibrated answer matches the plain dense solve (scaling is exact).
+        let x_plain = DenseSolver.solve(&a, &b).unwrap();
+        assert!((x[0] - x_plain[0]).abs() < 1e-9);
+        assert!((x[1] - x_plain[1]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn equilibrated_factorisation_matches_direct() {
+        let a = vec![vec![3.0, 1.0], vec![0.0, 4.0]];
+        let eq = EquilibratedSolver::new(Box::new(DenseSolver));
+        let mut fact = eq.factorise(&a).unwrap();
+        let x = fact.refactor_and_solve(&a, &[5.0, 8.0]).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12);
     }
 }

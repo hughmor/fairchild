@@ -579,6 +579,8 @@ impl Circuit {
     ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C),
     ///   `solver` (`"dense"` | `"sparse"` | `"auto"` | `"klu"`),
     ///   `variable_step` (bool, enables LTE-controlled variable-step transient),
+    ///   `waveguide_delay` (bool), `cond_estimate` (bool, prints κ(A)),
+    ///   `equilibrate` (bool, two-sided matrix scaling before LU),
     ///   `lambda_center_nm`, `enable_bidirectional`, `sanity_check`, and more.
     ///   These overlay any `.options` directives from the netlist.
     ///   Unrecognised kwargs raise `RuntimeError` immediately.

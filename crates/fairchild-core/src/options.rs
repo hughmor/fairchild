@@ -130,6 +130,22 @@ pub struct SimOptions {
     /// this flag governs only the photonic waveguide.  Set via `.options
     /// waveguide_delay=1` or `--opt waveguide_delay=1`.
     pub waveguide_delay: bool,
+
+    /// Estimate the 2-norm condition number κ(A) of the MNA matrix at the start
+    /// of the DC operating point and print it as a diagnostic.  Useful for
+    /// quantifying ill-conditioning (κ ≫ 1e8 is a red flag) before deciding
+    /// whether to enable equilibration.  Costs one extra factorisation + a few
+    /// power-iteration solves, so it is opt-in.  Set via `.options
+    /// cond_estimate=1` or `--opt cond_estimate=1`.
+    pub cond_estimate: bool,
+
+    /// Apply two-sided (row/column) equilibration to the MNA matrix before LU
+    /// factorisation and unscale the solution afterwards — a readability-neutral
+    /// way to improve numerical conditioning of badly-scaled systems (it is
+    /// transparent to device code).  Applies to the forward solve only (DC /
+    /// transient); the adjoint/transpose path used by `.noise` is left
+    /// unscaled.  Set via `.options equilibrate=1` or `--opt equilibrate=1`.
+    pub equilibrate: bool,
 }
 
 impl Default for SimOptions {
@@ -157,6 +173,8 @@ impl Default for SimOptions {
             sanity_check: true,
             variable_step: false,
             waveguide_delay: false,
+            cond_estimate: false,
+            equilibrate: false,
         }
     }
 }
@@ -197,9 +215,16 @@ impl SimOptions {
     }
 
     /// Build the linear solver matching this options' `solver` choice, sized
-    /// for an `n`-row system.  Used by every analysis entry point.
+    /// for an `n`-row system.  Used by every analysis entry point.  When
+    /// `equilibrate` is set, the chosen backend is wrapped in an
+    /// [`EquilibratedSolver`] that two-sided-scales the system before LU.
     pub fn linear_solver(&self, n: usize) -> Box<dyn LinearSolver> {
-        make_solver(self.solver, n)
+        let base = make_solver(self.solver, n);
+        if self.equilibrate {
+            Box::new(crate::solver::EquilibratedSolver::new(base))
+        } else {
+            base
+        }
     }
 
     /// Apply a single `.options KEY=VALUE` token, returning `true` if recognised.
@@ -263,6 +288,18 @@ impl SimOptions {
             }
             "waveguide_delay" | "wg_delay" | "optical_delay" => {
                 self.waveguide_delay = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
+            }
+            "cond_estimate" | "estimate_condition_number" | "condest" => {
+                self.cond_estimate = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
+            }
+            "equilibrate" | "equilibration" | "scale" => {
+                self.equilibrate = matches!(
                     value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on"
                 );
