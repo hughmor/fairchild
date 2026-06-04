@@ -205,10 +205,10 @@ def run_pipeline(args) -> int:
     transpile(cir, out, passthru, args.verbose)
     print(f"fairchild netlist → {out}")
 
-    if args.run:
+    if args.run or args.plot is not None:
         fc = find_fairchild()
         if fc is None:
-            print("warning: --run requested but fairchild binary not found "
+            print("warning: --run/--plot requested but fairchild binary not found "
                   "(build with `cargo build --release`).", file=sys.stderr)
             return 0
         cmd = [fc, "-f", str(out)]
@@ -218,8 +218,23 @@ def run_pipeline(args) -> int:
             cmd += ["--output", args.sim_output]
         if args.verbose:
             print(f"[kicad_fairchild] {' '.join(cmd)}", file=sys.stderr)
-        proc = subprocess.run(cmd)
-        return proc.returncode
+        if args.plot is None:
+            return subprocess.run(cmd).returncode
+        # Capture CSV and hand it to the matplotlib viewer (run + visualize).
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            return proc.returncode
+        plot_cmd = [sys.executable, str(HERE / "fairchild_plot.py"), "-",
+                    "--title", Path(args.input).stem]
+        if args.plot:  # a PNG path was given (empty string ⇒ interactive show)
+            plot_cmd += ["--save", args.plot]
+        if args.probe:
+            plot_cmd += ["--probe", args.probe]
+        if args.verbose:
+            print(f"[kicad_fairchild] {' '.join(plot_cmd)}", file=sys.stderr)
+        viz = subprocess.run(plot_cmd, input=proc.stdout, text=True)
+        return viz.returncode
     return 0
 
 
@@ -236,6 +251,9 @@ def main() -> None:
     ap.add_argument("--opt", action="append", metavar="KEY=VAL",
                     help="extra .options token (repeatable), e.g. --opt waveguide_delay=1")
     ap.add_argument("--run", action="store_true", help="run fairchild on the result")
+    ap.add_argument("--plot", nargs="?", const="", metavar="PNG",
+                    help="run fairchild and plot results with fairchild_plot.py "
+                         "(matplotlib). Bare --plot shows interactively; --plot out.png saves.")
     ap.add_argument("--probe", help="probe expression passed to fairchild --probe")
     ap.add_argument("--sim-output", help="fairchild --output path (CSV/rawfile)")
     ap.add_argument("--kicad-cli", help="path to kicad-cli (auto-detected if omitted)")

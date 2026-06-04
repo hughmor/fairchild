@@ -201,7 +201,23 @@ python3 scripts/kicad_to_fairchild.py my_circuit.net -o run_my_circuit.sp \
 
 # Stream wrapper to stdout (no file)
 python3 scripts/kicad_to_fairchild.py my_circuit.net --op
+
+# Run AND visualize in one shot (export → transpile → sim → matplotlib).
+# Bare --plot shows the figure; --plot out.png saves it.
+python3 scripts/kicad_fairchild.py my.kicad_sch --tran "50p 5n" --plot
+python3 scripts/kicad_fairchild.py my.kicad_sch --op --plot op.png
 ```
+
+### Visualizing results — `scripts/fairchild_plot.py`
+
+`fairchild_plot.py` reads a fairchild CSV (stdin or file) and auto-detects the
+analysis from the first column: `time` → transient (optical **power** |A|²,
+node voltages, branch currents on stacked panels), `freq` → AC Bode
+(magnitude dB + phase), `analysis` → operating-point bars. Photonic
+`_re_/_im_/_wl_` triplets are collapsed into optical power (mW) automatically —
+pass `--raw` to keep the quadratures. `kicad_fairchild.py --plot` pipes its
+simulation CSV straight into it, so one command goes schematic → picture. This
+is the foundation the optical-probe spectrogram viewer (roadmap) will build on.
 
 ### What the script detects
 
