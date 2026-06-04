@@ -21,7 +21,7 @@ pub use connectivity::check_connectivity;
 pub use dc_sweep::{dc_sweep_with_registry, dc_sweep_with_registry_opts, DcSweepResult, SweepAxis};
 pub use delay::DelayLine;
 pub use device::{Device, EvalFlags, NodeId, SimContext};
-pub use device_registry::DeviceRegistry;
+pub use device_registry::{DeviceRegistry, ModelFactory, ParamSet};
 pub use error::SimError;
 pub use measure::{evaluate_measurements, MeasureResult};
 pub use mna::CircuitTopology;

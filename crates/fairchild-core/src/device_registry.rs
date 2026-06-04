@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use fairchild_parser::{Expr, ModelCard};
 
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
-use crate::mna::MnaMatrix;
+use crate::device::{Device, NodeId, SimContext};
 use crate::models::{
     expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
     pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
@@ -14,9 +13,105 @@ use crate::models::{
     NativeMzm, NativePhotodetector, NativeSplitter, NativeWaveguide, ShockleyDiode,
 };
 
-// Factory closures are `Arc` so the alias mechanism (B6) can clone a target
-// factory into an outer wrapper that performs parameter-name translation.
-type Factory = Arc<dyn Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static>;
+/// The set of instance parameters from an `X…` element line, threaded into a
+/// [`ModelFactory::build`] call. Keys are case-insensitive; the set tracks which
+/// keys a device actually consumed so unrecognised (typo'd) params can be
+/// reported, and can rename keys for the PDK-alias path.
+///
+/// Created per device instantiation and passed by reference; it is *not* stored
+/// in the registry, so its interior mutability (consumed-tracking) needs no
+/// `Sync`.
+pub struct ParamSet {
+    /// Lower-cased (key, value) pairs in netlist order.
+    params: Vec<(String, f64)>,
+    consumed: std::cell::RefCell<Vec<bool>>,
+}
+
+impl ParamSet {
+    /// Build from raw instance params (keys are lower-cased).
+    pub fn new(params: &[(String, f64)]) -> Self {
+        let params: Vec<(String, f64)> =
+            params.iter().map(|(k, v)| (k.to_lowercase(), *v)).collect();
+        let n = params.len();
+        ParamSet {
+            params,
+            consumed: std::cell::RefCell::new(vec![false; n]),
+        }
+    }
+
+    /// An empty set (devices with no instance params, e.g. diodes/passives).
+    pub fn empty() -> Self {
+        ParamSet::new(&[])
+    }
+
+    /// Look up a single param by name (case-insensitive), marking it consumed.
+    pub fn get(&self, name: &str) -> Option<f64> {
+        let nl = name.to_lowercase();
+        for (i, (k, v)) in self.params.iter().enumerate() {
+            if *k == nl {
+                self.consumed.borrow_mut()[i] = true;
+                return Some(*v);
+            }
+        }
+        None
+    }
+
+    /// The `LEVEL` selector, if present (for construction-time dispatch).
+    pub fn level(&self) -> Option<i64> {
+        self.get("level").map(|v| v.round() as i64)
+    }
+
+    /// Apply every param to `dev` via `set_real_param`, marking each consumed
+    /// iff the device accepted it. The single, uniform instance-param
+    /// application path — preserves netlist order, so a later param overrides an
+    /// earlier model-card default exactly as before.
+    pub fn apply(&self, dev: &mut dyn Device) {
+        let mut consumed = self.consumed.borrow_mut();
+        for (i, (k, v)) in self.params.iter().enumerate() {
+            if dev.set_real_param(k, *v) {
+                consumed[i] = true;
+            }
+        }
+    }
+
+    /// Keys not consumed by `get`/`apply` — i.e. params the device did not
+    /// recognise (likely typos). Used to warn the user.
+    pub fn unconsumed(&self) -> Vec<String> {
+        let consumed = self.consumed.borrow();
+        self.params
+            .iter()
+            .zip(consumed.iter())
+            .filter(|(_, c)| !**c)
+            .map(|((k, _), _)| k.clone())
+            .collect()
+    }
+
+    /// A copy with keys renamed through `remap` (the PDK-alias path): the
+    /// translation happens on the `ParamSet` *before* the device sees the
+    /// params, so it covers construction-time params too, not just
+    /// `set_real_param`.
+    pub fn renamed(&self, remap: &HashMap<String, String>) -> ParamSet {
+        let renamed: Vec<(String, f64)> = self
+            .params
+            .iter()
+            .map(|(k, v)| (remap.get(k).cloned().unwrap_or_else(|| k.clone()), *v))
+            .collect();
+        ParamSet::new(&renamed)
+    }
+}
+
+/// A device factory: constructs a device from its terminal nodes, instance
+/// [`ParamSet`], and the [`SimContext`]. The returned device is fully set up
+/// (`setup_model` + `setup_instance` done) with the instance params applied; the
+/// caller (`build_devices`) handles extra-node allocation and unconsumed-param
+/// warnings. Stored behind `Arc` so the alias mechanism (B6) can clone a target
+/// factory into a wrapper that performs parameter-name translation. (A named
+/// `ModelFactory` trait could wrap this later for a dlopen plugin ABI; the
+/// closure form covers every in-tree need — OSDI captures `Arc<library>`, the
+/// LEVEL/expr factories capture their tables/expressions.)
+pub type ModelFactory =
+    dyn Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static;
+type Factory = Arc<ModelFactory>;
 
 /// Maps model names to device factory closures.
 ///
@@ -52,9 +147,35 @@ impl DeviceRegistry {
     pub fn register(
         &mut self,
         name: impl Into<String>,
-        factory: impl Fn(&[NodeId], &SimContext) -> Box<dyn Device> + Send + Sync + 'static,
+        factory: impl Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static,
     ) {
         self.factories.insert(name.into(), Arc::new(factory));
+    }
+
+    /// Register a default-constructible device: `T::default()` + the standard
+    /// setup + instance-param application. Collapses the boilerplate for every
+    /// passive/simple native device.
+    pub fn register_default<T: Device + Default + 'static>(&mut self, name: impl Into<String>) {
+        self.register(name, |terminals, params: &ParamSet, ctx| {
+            let mut d = T::default();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            params.apply(&mut d);
+            Box::new(d) as Box<dyn Device>
+        });
+    }
+
+    /// Register a device built by a constructor function (the active-photonic
+    /// `ActiveOpticalDevice` builders, which are not `Default`). Same setup +
+    /// instance-param flow as [`register_default`](Self::register_default).
+    fn register_ctor(&mut self, name: impl Into<String>, ctor: fn() -> ActiveOpticalDevice) {
+        self.register(name, move |terminals, params: &ParamSet, ctx| {
+            let mut d = ctor();
+            d.setup_model(ctx);
+            d.setup_instance(terminals, ctx);
+            params.apply(&mut d);
+            Box::new(d) as Box<dyn Device>
+        });
     }
 
     /// Register `new_name` as an alias of an existing factory, optionally
@@ -83,21 +204,21 @@ impl DeviceRegistry {
         target_name: &str,
         param_remap: HashMap<String, String>,
     ) -> Result<(), String> {
-        let target_factory = self.factories.get(target_name).cloned().ok_or_else(|| {
-            format!(
-                "register_alias: unknown target factory '{target_name}' \
+        let target_factory: Factory =
+            self.factories.get(target_name).cloned().ok_or_else(|| {
+                format!(
+                    "register_alias: unknown target factory '{target_name}' \
                  (register it before creating aliases)"
-            )
-        })?;
+                )
+            })?;
         let remap = Arc::new(param_remap);
-        let aliased_factory = Arc::new(move |terminals: &[NodeId], ctx: &SimContext| {
-            let inner = target_factory(terminals, ctx);
-            Box::new(AliasedDevice {
-                inner,
-                remap: Arc::clone(&remap),
-            }) as Box<dyn Device>
+        // Translate the ParamSet's keys BEFORE the target factory consumes them,
+        // so the remap covers construction-time params too — not just the
+        // post-construction set_real_param path (the old AliasedDevice limitation).
+        self.register(new_name, move |terminals, params: &ParamSet, ctx| {
+            let translated = params.renamed(&remap);
+            target_factory(terminals, &translated, ctx)
         });
-        self.factories.insert(new_name.into(), aliased_factory);
         Ok(())
     }
 
@@ -117,10 +238,11 @@ impl DeviceRegistry {
                     unknown.join(", ")
                 );
             }
-            self.register(card.name.clone(), move |terminals, ctx| {
+            self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                 let (mut dev, _) = ShockleyDiode::from_params(&params);
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
+                ps.apply(&mut dev);
                 Box::new(dev)
             });
         }
@@ -228,13 +350,15 @@ impl DeviceRegistry {
                     .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
                     .cloned()
                     .collect();
-                self.register(card.name.clone(), move |terminals, ctx| {
+                self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                     let mut d = expr_phase_shifter(dneff.clone(), dalpha.clone(), g_pn);
                     d.setup_model(ctx);
                     d.setup_instance(terminals, ctx);
+                    // Model-card numeric params first, then instance params on top.
                     for (k, v) in &numeric {
                         d.set_real_param(k, *v);
                     }
+                    ps.apply(&mut d);
                     Box::new(d) as Box<dyn Device>
                 });
                 continue;
@@ -273,21 +397,22 @@ impl DeviceRegistry {
                 }
                 _ => continue,
             };
-            // Model-card params (minus LEVEL) are applied after construction;
-            // instance params on the X-line are applied later by build_devices.
+            // Model-card params (minus LEVEL) bake in at construction; instance
+            // params on the X-line apply on top (via the ParamSet).
             let params: Vec<(String, f64)> = card
                 .params
                 .iter()
                 .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
                 .cloned()
                 .collect();
-            self.register(card.name.clone(), move |terminals, ctx| {
+            self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                 let mut d = ctor();
                 d.setup_model(ctx);
                 d.setup_instance(terminals, ctx);
                 for (k, v) in &params {
                     d.set_real_param(k, *v);
                 }
+                ps.apply(&mut d);
                 Box::new(d) as Box<dyn Device>
             });
         }
@@ -332,127 +457,29 @@ impl DeviceRegistry {
     /// - `fc_thermal_ps`    — thermal phase shifter (Joule heating → φ = π·P/P_pi).
     /// - `fc_pn_ps`         — PN-junction phase shifter (Δn_eff = dn_dv·V).
     pub fn register_native_photonics(&mut self) {
-        self.register("fc_waveguide", |terminals, ctx| {
-            let mut d = NativeWaveguide::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_dcoupler", |terminals, ctx| {
-            let mut d = NativeDirectionalCoupler::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_splitter", |terminals, ctx| {
-            let mut d = NativeSplitter::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_grating_coupler", |terminals, ctx| {
-            let mut d = NativeGratingCoupler::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_photodetector", |terminals, ctx| {
-            let mut d = NativePhotodetector::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_thermal_ps", |terminals, ctx| {
-            let mut d = thermal_phase_shifter();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_thermal_ps_rc", |terminals, ctx| {
-            let mut d = thermal_rc_phase_shifter();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_ps", |terminals, ctx| {
-            // Collapsed onto ActiveOpticalDevice (OpticalSegment + PnDrive).
-            let mut d = pn_phase_shifter();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_ps_cap", |terminals, ctx| {
-            let mut d = pn_phase_shifter_cap();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_th_ps", |terminals, ctx| {
-            let mut d = pn_thermal_phase_shifter();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_th_ps_cap", |terminals, ctx| {
-            let mut d = pn_thermal_phase_shifter_cap();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_ps_inj", |terminals, ctx| {
-            let mut d = pn_phase_shifter_inj();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_th_ps_inj", |terminals, ctx| {
-            let mut d = pn_thermal_phase_shifter_inj();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_ps_full", |terminals, ctx| {
-            let mut d = pn_phase_shifter_full();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_pn_th_ps_full", |terminals, ctx| {
-            let mut d = pn_thermal_phase_shifter_full();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_mzm", |terminals, ctx| {
-            let mut d = NativeMzm::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_circulator", |terminals, ctx| {
-            let mut d = NativeCirculator::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_cw_laser", |terminals, ctx| {
-            let mut d = NativeCwLaser::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_mux", |terminals, ctx| {
-            let mut d = NativeMux::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
-        self.register("fc_demux", |terminals, ctx| {
-            let mut d = NativeDemux::new();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            Box::new(d) as Box<dyn Device>
-        });
+        // Passive / simple natives (Default-constructible).
+        self.register_default::<NativeWaveguide>("fc_waveguide");
+        self.register_default::<NativeDirectionalCoupler>("fc_dcoupler");
+        self.register_default::<NativeSplitter>("fc_splitter");
+        self.register_default::<NativeGratingCoupler>("fc_grating_coupler");
+        self.register_default::<NativePhotodetector>("fc_photodetector");
+        self.register_default::<NativeMzm>("fc_mzm");
+        self.register_default::<NativeCirculator>("fc_circulator");
+        self.register_default::<NativeCwLaser>("fc_cw_laser");
+        self.register_default::<NativeMux>("fc_mux");
+        self.register_default::<NativeDemux>("fc_demux");
+
+        // Active phase shifters (built by constructors → ActiveOpticalDevice).
+        self.register_ctor("fc_thermal_ps", thermal_phase_shifter);
+        self.register_ctor("fc_thermal_ps_rc", thermal_rc_phase_shifter);
+        self.register_ctor("fc_pn_ps", pn_phase_shifter);
+        self.register_ctor("fc_pn_ps_cap", pn_phase_shifter_cap);
+        self.register_ctor("fc_pn_th_ps", pn_thermal_phase_shifter);
+        self.register_ctor("fc_pn_th_ps_cap", pn_thermal_phase_shifter_cap);
+        self.register_ctor("fc_pn_ps_inj", pn_phase_shifter_inj);
+        self.register_ctor("fc_pn_th_ps_inj", pn_thermal_phase_shifter_inj);
+        self.register_ctor("fc_pn_ps_full", pn_phase_shifter_full);
+        self.register_ctor("fc_pn_th_ps_full", pn_thermal_phase_shifter_full);
     }
 
     /// Build a `Mosfet1` for `model_name` with specific instance params (W, L).
@@ -484,64 +511,13 @@ impl Default for DeviceRegistry {
 }
 
 // ─── PDK adapter (B6) ────────────────────────────────────────────────────
-
-/// Wraps another `Device`, translating parameter names on `set_real_param`
-/// through a fixed remap table.  Used by `DeviceRegistry::register_alias`
-/// to surface foundry-specific device names with native fairchild devices
-/// underneath.  All other Device-trait methods forward verbatim.
-struct AliasedDevice {
-    inner: Box<dyn Device>,
-    remap: Arc<HashMap<String, String>>,
-}
-
-impl Device for AliasedDevice {
-    fn num_terminals(&self) -> usize {
-        self.inner.num_terminals()
-    }
-    fn setup_model(&mut self, ctx: &SimContext) {
-        self.inner.setup_model(ctx)
-    }
-    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
-        self.inner.setup_instance(terminals, ctx)
-    }
-    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
-        self.inner.eval(x, flags, ctx)
-    }
-    fn load_residual(&self, b: &mut [f64]) {
-        self.inner.load_residual(b)
-    }
-    fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        self.inner.load_jacobian(mat)
-    }
-    fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
-        self.inner.load_residual_tran(b, alpha)
-    }
-    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
-        self.inner.load_jacobian_tran(mat, alpha)
-    }
-    fn commit_timestep(&mut self, x: &[f64]) {
-        self.inner.commit_timestep(x)
-    }
-    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
-        // Look up the remap (case-insensitive); fall through unchanged if
-        // not found so users can mix PDK-named and native-named params.
-        let key = name.to_lowercase();
-        let translated = self.remap.get(&key).map(String::as_str).unwrap_or(name);
-        self.inner.set_real_param(translated, value)
-    }
-    fn num_extra_nodes(&self) -> usize {
-        self.inner.num_extra_nodes()
-    }
-    fn bind_extra_nodes(&mut self, first_idx: usize) {
-        self.inner.bind_extra_nodes(first_idx)
-    }
-    fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
-        self.inner.noise_sources(ctx)
-    }
-    fn small_signal_reactances(&self) -> Vec<crate::device::ReactiveBranchSpec> {
-        self.inner.small_signal_reactances()
-    }
-}
+//
+// PDK device-name aliasing with parameter-name translation is implemented in
+// `register_alias`: it wraps the target factory in one that renames the
+// `ParamSet` keys before `build`, so the translation covers construction-time
+// params as well as `set_real_param`. (The old `AliasedDevice` Device-wrapper —
+// which could only translate the post-construction `set_real_param` path — is
+// gone.)
 
 #[cfg(test)]
 mod tests {

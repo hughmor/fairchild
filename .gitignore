@@ -8,6 +8,7 @@ Cargo.lock
 /tmp/
 examples/*/*.png
 examples/*/*.csv
+*.code-workspace
 
 # internal notes: roadmap, design discussions, honest accounting, scratch,
 # legacy references. Never committed — public-facing docs live in docs/.

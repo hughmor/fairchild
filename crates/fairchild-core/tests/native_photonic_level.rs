@@ -154,3 +154,55 @@ Vh hp 0 DC 1.0
         "LEVEL=4 PN+thermal {leveled:?} should equal fc_pn_th_ps_full {direct:?}"
     );
 }
+
+/// Param precedence (the ModelFactory/ParamSet plumbing): a model-card param is
+/// overridden by the same param on the instance line.
+#[test]
+fn instance_param_overrides_model_card() {
+    // Card dn_dv=1e-5; instance dn_dv=9e-5 → result must match a direct device
+    // with dn_dv=9e-5 (instance wins), not 1e-5.
+    let leveled = out_re_im(
+        "\
+.optical_port ch0
+.optical_port out0
+.model myps fc_pn_ps dn_dv=1e-5
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xps ch0 out0 a 0 myps pin_at_ref=1 dn_dv=9e-5
+Vb a 0 DC -1.0
+.op
+.end
+",
+    );
+    let direct = out_re_im(
+        "\
+.optical_port ch0
+.optical_port out0
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xps ch0 out0 a 0 fc_pn_ps pin_at_ref=1 dn_dv=9e-5
+Vb a 0 DC -1.0
+.op
+.end
+",
+    );
+    assert!(
+        (leveled.0 - direct.0).abs() < 1e-12 && (leveled.1 - direct.1).abs() < 1e-12,
+        "instance dn_dv should override card dn_dv: leveled={leveled:?} direct={direct:?}"
+    );
+    // And confirm it actually differs from the card-only value (sanity).
+    let card_only = out_re_im(
+        "\
+.optical_port ch0
+.optical_port out0
+.model myps fc_pn_ps dn_dv=1e-5
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xps ch0 out0 a 0 myps pin_at_ref=1
+Vb a 0 DC -1.0
+.op
+.end
+",
+    );
+    assert!(
+        (leveled.1 - card_only.1).abs() > 1e-4,
+        "override should change the result vs card-only: {leveled:?} vs {card_only:?}"
+    );
+}

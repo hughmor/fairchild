@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::behavioral::BehavioralDevice;
 use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
-use crate::device_registry::DeviceRegistry;
+use crate::device_registry::{DeviceRegistry, ParamSet};
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology};
 use crate::options::SimOptions;
@@ -148,7 +148,7 @@ pub fn build_devices(
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                devices.push(factory(&[pos, neg], ctx));
+                devices.push(factory(&[pos, neg], &ParamSet::empty(), ctx));
             }
             Element::Mosfet {
                 drain,
@@ -175,7 +175,7 @@ pub fn build_devices(
                     let factory = registry
                         .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-                    devices.push(factory(&[d, g, s, b], ctx));
+                    devices.push(factory(&[d, g, s, b], &ParamSet::new(params), ctx));
                 }
             }
             Element::Bjt {
@@ -232,7 +232,11 @@ pub fn build_devices(
                     .iter()
                     .map(|net| topo.node_index.get(net).copied())
                     .collect();
-                let mut dev = factory(&terminals, ctx);
+                // build() applies the instance params (and the model-card
+                // defaults baked into the factory). It also tracks which params
+                // the device consumed, so we can warn about typos.
+                let ps = ParamSet::new(params);
+                let mut dev = factory(&terminals, &ps, ctx);
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
                     eprintln!(
@@ -241,8 +245,10 @@ pub fn build_devices(
                         terminals.len()
                     );
                 }
-                for (name, value) in params {
-                    dev.set_real_param(name, *value);
+                for key in ps.unconsumed() {
+                    eprintln!(
+                        "warning: '{model_name}' instance: unknown parameter '{key}' ignored"
+                    );
                 }
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:

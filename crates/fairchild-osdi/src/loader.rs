@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::sync::Arc;
 
-use fairchild_core::device_registry::DeviceRegistry;
+use fairchild_core::device_registry::{DeviceRegistry, ParamSet};
 use fairchild_core::Device;
 
 use crate::device::OsdiDevice;
@@ -107,11 +107,12 @@ impl OsdiLibrary {
                 continue;
             }
             let lib = Arc::clone(self);
-            registry.register(name, move |terminals, ctx| {
+            registry.register(name, move |terminals, params: &ParamSet, ctx| {
                 let mut dev = OsdiDevice::from_library(Arc::clone(&lib), i)
                     .expect("descriptor index must be valid");
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
+                params.apply(&mut dev);
                 Box::new(dev)
             });
         }
