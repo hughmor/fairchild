@@ -160,13 +160,25 @@ impl Device for ActiveOpticalDevice {
         s || m
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let intensity = self.seg.channel_intensities(x);
         let pert = self.model.eval(x, &intensity, ctx);
-        // Delay-on-phase-shifters is a future step; today's classes are
-        // instantaneous, so the segment runs with the delay line disengaged.
-        self.seg
-            .refresh(x, pert.dn_eff, pert.dphi, pert.dalpha_neper_m, false, ctx);
+        // Group-delay line: engaged in transient when the `waveguide_delay`
+        // option is on and the segment has a finite group delay τ_g = L·n_g/c.
+        // The lumped model delays the input envelope by τ_g and applies the
+        // current transmission (which carries Δn_eff/Δφ/Δα from the drive at
+        // time t). DC/AC and the default instantaneous path are unaffected; a
+        // zero-length segment (e.g. fc_thermal_ps) has τ_g = 0 and stays
+        // instantaneous regardless.
+        let delay_active = flags.transient && ctx.waveguide_delay && self.seg.tau_g_s() > 0.0;
+        self.seg.refresh(
+            x,
+            pert.dn_eff,
+            pert.dphi,
+            pert.dalpha_neper_m,
+            delay_active,
+            ctx,
+        );
     }
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -1273,6 +1285,64 @@ pub fn expr_phase_shifter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Group delay on a phase shifter: with `waveguide_delay` on, the output
+    /// envelope lags the input by τ_g = L·n_g/c (the segment's `DelayLine`);
+    /// with it off, the path is instantaneous (homogeneous residual).
+    #[test]
+    fn pn_ps_group_delay_engages_under_option() {
+        // pn_phase_shifter defaults: L = 1 mm, n_g = 4.02.
+        let tau = 1e-3 * 4.02 / 299_792_458.0;
+        let ctx = |delay: bool, t: f64| SimContext {
+            waveguide_delay: delay,
+            time_s: t,
+            ..SimContext::default()
+        };
+        // 8 terminals: in re/im/λ, out re/im/λ, anode, cathode; branches at 8.
+        let terminals: Vec<NodeId> = (0..8).map(Some).collect();
+        let build = |delay: bool| {
+            let mut d = pn_phase_shifter();
+            d.setup_model(&ctx(delay, 0.0));
+            d.setup_instance(&terminals, &ctx(delay, 0.0));
+            d.bind_extra_nodes(8);
+            d
+        };
+
+        // ── Delay ON: drive in_re=1 for t=0 and t=τ, then query at t=2τ where
+        // the delayed input (t−τ = τ) is the recorded 1.0. ──
+        let mut on = build(true);
+        let mut x_hi = vec![0.0; 11];
+        x_hi[0] = 1.0; // in_re
+        on.eval(&x_hi, EvalFlags::tran(), &ctx(true, 0.0));
+        on.commit_timestep(&x_hi);
+        on.eval(&x_hi, EvalFlags::tran(), &ctx(true, tau));
+        on.commit_timestep(&x_hi);
+        let x_lo = vec![0.0; 11]; // current input zero; output reflects delayed past
+        on.eval(&x_lo, EvalFlags::tran(), &ctx(true, 2.0 * tau));
+        let mut b = vec![0.0; 11];
+        on.load_residual(&mut b);
+        let out_mag = (b[8] * b[8] + b[9] * b[9]).sqrt();
+        // The delayed input was 1.0; the output is it attenuated by the
+        // propagation loss over L: t_amp = exp(-α·L/2), α from 20 dB/cm.
+        let t_amp = (-dB_per_cm_to_neper_per_m(20.0) * 1e-3 / 2.0).exp();
+        assert!(
+            (out_mag - t_amp).abs() < 1e-6,
+            "delay-on: output should be the delayed input × t_amp ({t_amp:.4}); got {out_mag:.4}"
+        );
+
+        // ── Delay OFF: instantaneous path — output lives in the Jacobian, the
+        // residual is homogeneous. ──
+        let mut off = build(false);
+        off.eval(&x_hi, EvalFlags::tran(), &ctx(false, 0.0));
+        off.commit_timestep(&x_hi);
+        off.eval(&x_lo, EvalFlags::tran(), &ctx(false, 2.0 * tau));
+        let mut b_off = vec![0.0; 11];
+        off.load_residual(&mut b_off);
+        assert!(
+            b_off.iter().all(|v| v.abs() < 1e-12),
+            "delay-off: residual must be homogeneous, got {b_off:?}"
+        );
+    }
 
     #[test]
     fn pn_drive_dn_eff_is_linear_in_vpn() {

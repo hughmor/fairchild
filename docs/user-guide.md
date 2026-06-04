@@ -415,7 +415,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
 | `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
-| `waveguide_delay` | false | Model the optical waveguide group delay τ_g = L·n_g/c as a true delay line (default: instantaneous transmission). See §12 `fc_waveguide`. |
+| `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See §12 `fc_waveguide`. |
 
 Setting any of these from the netlist:
 

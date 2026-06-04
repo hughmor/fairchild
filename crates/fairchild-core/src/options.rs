@@ -126,9 +126,12 @@ pub struct SimOptions {
     /// instantaneous transmission `exp(-αL/2)·exp(-jβL)` — correct for DC and
     /// steady-state spectra, and cheaper, but it ignores the finite transit
     /// time that matters at modulation bandwidths comparable to 1/τ_g.  For an
-    /// electrical transmission line the delay is intrinsic and always modelled;
-    /// this flag governs only the photonic waveguide.  Set via `.options
-    /// waveguide_delay=1` or `--opt waveguide_delay=1`.
+    /// electrical transmission line the delay is intrinsic and always modelled.
+    /// This flag governs every `OpticalSegment`-based device — the waveguide AND
+    /// the active phase shifters / modulators (which carry the same τ_g = L·n_g/c
+    /// over their length); a zero-length segment (e.g. `fc_thermal_ps`) stays
+    /// instantaneous regardless.  Set via `.options waveguide_delay=1`
+    /// (aliases `optical_delay`, `wg_delay`) or `--opt waveguide_delay=1`.
     pub waveguide_delay: bool,
 
     /// Estimate the 2-norm condition number κ(A) of the MNA matrix at the start
