@@ -35,7 +35,7 @@ native flow.
 ## 2. Project layout
 
 The fairchild repo ships the symbol library and reference KiCad examples
-under `examples/kicad/`:
+under `examples/kicad_photonics/`:
 
 ```
 fairchild/
@@ -57,7 +57,7 @@ my-photonic-project/
 
 Add `fairchild_photonics.kicad_sym` via **Preferences → Manage Symbol Libraries
 → Project Libraries → Add**, pointing at
-`<fairchild>/examples/kicad/fairchild_photonics.kicad_sym`. Update the
+`<fairchild>/examples/kicad_photonics/fairchild_photonics.kicad_sym`. Update the
 library path whenever you pull fairchild updates that touch the library.
 
 ---

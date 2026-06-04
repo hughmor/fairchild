@@ -63,12 +63,20 @@ PORT_SCHEMA: Dict[str, List[str]] = {
     "fc_dcoupler":        ["bundle", "bundle", "bundle", "bundle"],     # a1, a2, b1, b2
     "fc_splitter":        ["bundle", "bundle", "bundle"],               # in, out_a, out_b
     "fc_photodetector":   ["bundle", "scalar", "scalar"],               # in, anode, cathode
-    "fc_pn_ps":           ["bundle", "bundle", "scalar", "scalar"],     # in, out, anode, cathode
-    "fc_pn_ps_cap":       ["bundle", "bundle", "scalar", "scalar"],     # in, out, anode, cathode (L2)
-    "fc_thermal_ps":      ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n
-    "fc_thermal_ps_rc":   ["bundle", "bundle", "scalar", "scalar"],     # in, out, heat_p, heat_n (L2)
-    "fc_pn_th_ps":        ["bundle", "bundle", "scalar", "scalar",
-                           "scalar", "scalar"],                          # in, out, anode, cathode, heat_p, heat_n
+    # PN phase-shifter family (LEVEL 1-4 / dedicated names) — in, out, anode, cathode.
+    "fc_pn_ps":           ["bundle", "bundle", "scalar", "scalar"],     # L1 linear
+    "fc_pn_ps_cap":       ["bundle", "bundle", "scalar", "scalar"],     # L2 +Cj depletion
+    "fc_pn_ps_inj":       ["bundle", "bundle", "scalar", "scalar"],     # L3 forward injection
+    "fc_pn_ps_full":      ["bundle", "bundle", "scalar", "scalar"],     # L4 depletion+inj+TPA+self-heat
+    "fc_phase_shifter_expr": ["bundle", "bundle", "scalar", "scalar"],  # Tier-1 declarative (dneff/dalpha)
+    # Thermal phase shifters — in, out, heat_p, heat_n.
+    "fc_thermal_ps":      ["bundle", "bundle", "scalar", "scalar"],     # L1 instantaneous
+    "fc_thermal_ps_rc":   ["bundle", "bundle", "scalar", "scalar"],     # L2 thermal-RC
+    # PN + heater — in, out, anode, cathode, heat_p, heat_n.
+    "fc_pn_th_ps":        ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L1
+    "fc_pn_th_ps_cap":    ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L2
+    "fc_pn_th_ps_inj":    ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L3
+    "fc_pn_th_ps_full":   ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L4
     "fc_mzm":             ["bundle", "bundle", "scalar", "scalar"],     # in, out, sig, gnd
     # `fc_circulator` requires bidirectional propagation; pin count 3,
     # all bundle.  Included for completeness.

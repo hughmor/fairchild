@@ -54,8 +54,11 @@ CONVERTER = HERE / "kicad_to_fairchild.py"
 def _candidate_cli_paths():
     """Standard kicad-cli locations across platforms / installed versions."""
     yield from (shutil.which(n) for n in ("kicad-cli", "kicad-cli.exe"))
+    # macOS nightly / dev bundles (named KiCad-dev.app, KiCad-nightly.app).
+    for app in ("KiCad-dev", "KiCad-nightly"):
+        yield f"/Applications/{app}.app/Contents/MacOS/kicad-cli"
     # macOS application bundles (newest versions first).
-    for ver in ("", "_10", "_9", "_8", "_7"):
+    for ver in ("", "_11", "_10", "_9", "_8", "_7"):
         yield f"/Applications/KiCad{ver}/KiCad.app/Contents/MacOS/kicad-cli"
     # Linux package installs.
     yield from ("/usr/bin/kicad-cli", "/usr/local/bin/kicad-cli")

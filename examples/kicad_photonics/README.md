@@ -19,7 +19,7 @@ the repo root for the full setup guide.
 ## Reproducing the reference simulation
 
 ```bash
-python3 scripts/kicad_to_fairchild.py examples/kicad/mrm_kicad_test.cir \
+python3 scripts/kicad_to_fairchild.py examples/kicad_photonics/mrm_kicad_test.cir \
     --tran "10n 5u" --method gear --output /tmp/run_mrm.sp
 target/release/fairchild -f /tmp/run_mrm.sp --probe "V(Net-_PD1-cathode_),V(/Vmod)"
 ```
