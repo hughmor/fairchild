@@ -149,36 +149,51 @@ def looks_like_intermediate_xml(path: Path) -> bool:
 # Driver
 # ---------------------------------------------------------------------------
 
-def run_pipeline(args) -> int:
-    inp = Path(args.input)
-    if not inp.exists():
-        print(f"error: input not found: {inp}", file=sys.stderr)
-        return 2
+class PipelineError(RuntimeError):
+    """A pipeline step failed for a reason worth showing the user verbatim
+    (missing tool, unresolved schematic, bad input type) — not a stack trace."""
 
-    # Resolve the input down to a SPICE export (.cir), invoking kicad-cli if the
-    # input is a schematic or an intermediate netlist.
+
+def resolve_to_spice(inp: Path, kicad_cli_override: str | None, verbose: bool) -> Path:
+    """Resolve any supported input down to a SPICE export (.cir).
+
+    Schematics (.kicad_sch) and KiCad intermediate netlists (.xml) are run
+    through `kicad-cli sch export netlist --format spice`; an already-exported
+    SPICE netlist (.cir/.sp/.net/.spice) is returned as-is. Shared by the CLI
+    driver and the GUI so both locate kicad-cli and recover source schematics
+    identically. Raises PipelineError with a user-facing message on failure.
+    """
+    if not inp.exists():
+        raise PipelineError(f"input not found: {inp}")
+
     sch: Path | None = None
     if inp.suffix.lower() == ".kicad_sch":
         sch = inp
     elif looks_like_intermediate_xml(inp):
         sch = schematic_from_intermediate_netlist(inp)
         if sch is None or not sch.exists():
-            print(f"error: could not locate source schematic from {inp}", file=sys.stderr)
-            return 2
+            raise PipelineError(f"could not locate source schematic from {inp}")
 
     if sch is not None:
-        cli = find_kicad_cli(args.kicad_cli)
+        cli = find_kicad_cli(kicad_cli_override)
         if cli is None:
-            print("error: kicad-cli not found. Install KiCad 7+ or pass --kicad-cli PATH.\n"
-                  "       (Or export the SPICE netlist yourself and pass the .cir.)",
-                  file=sys.stderr)
-            return 3
-        cir = export_spice(sch, cli, args.verbose)
-    elif looks_like_spice(inp):
-        cir = inp
-    else:
-        print(f"error: unrecognised input type {inp.suffix!r}; expected .kicad_sch, "
-              f".xml (intermediate netlist), or a SPICE .cir/.sp", file=sys.stderr)
+            raise PipelineError(
+                "kicad-cli not found. Install KiCad 7+ or set its path.\n"
+                "(Or export the SPICE netlist yourself and open the .cir.)")
+        return export_spice(sch, cli, verbose)
+    if looks_like_spice(inp):
+        return inp
+    raise PipelineError(
+        f"unrecognised input type {inp.suffix!r}; expected .kicad_sch, "
+        f".xml (intermediate netlist), or a SPICE .cir/.sp")
+
+
+def run_pipeline(args) -> int:
+    inp = Path(args.input)
+    try:
+        cir = resolve_to_spice(inp, args.kicad_cli, args.verbose)
+    except PipelineError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
 
     # Output fairchild netlist path.

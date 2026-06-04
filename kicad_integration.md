@@ -219,6 +219,40 @@ pass `--raw` to keep the quadratures. `kicad_fairchild.py --plot` pipes its
 simulation CSV straight into it, so one command goes schematic → picture. This
 is the foundation the optical-probe spectrogram viewer (roadmap) will build on.
 
+### Desktop launcher — `scripts/fairchild_gui.py`
+
+For a point-and-click workflow without typing commands, `fairchild_gui.py` is a
+small PyQt6 control panel that wraps the whole pipeline:
+
+```bash
+python3 scripts/fairchild_gui.py                                   # empty, then Browse…
+python3 scripts/fairchild_gui.py examples/kicad_photonics/one_mod.kicad_sch
+```
+
+- **Pick a file** — a `.kicad_sch` schematic, a KiCad SPICE export (`.cir`),
+  the intermediate netlist (`.xml`), or a native fairchild netlist (`.sp`). The
+  *Transpile* box auto-arms for KiCad inputs and disarms for a native `.sp`
+  (which already carries its own `.optical_port`/analysis directives and is run
+  as-is).
+- **Choose an analysis** — operating point, transient (`step stop`), or AC
+  sweep (`type n f0 f1`) — plus integration method, waveguide group delay, extra
+  `.options`, a plot probe filter, and raw-quadratures.
+- **Run** — the pipeline runs on a worker thread (the UI stays live), streaming
+  a stage-by-stage log; the result is drawn into the embedded matplotlib canvas
+  (pan/zoom/save via the toolbar). Optical power is derived from the
+  `_re_/_im_` triplets exactly as in `fairchild_plot.py`.
+
+This is "Option C" of the GUI plan — a standalone app, deliberately decoupled
+from KiCad's PCB-only IPC API, so it needs no eeschema fork. It shares all its
+plumbing with the CLI driver (`kicad_fairchild.resolve_to_spice` / `transpile`)
+and all its plotting with `fairchild_plot`. Architecture note: the pipeline and
+render logic are Qt-free module functions (`run_to_csv`, `render`); the Qt
+classes are a thin shell, and `--selftest` exercises the full wiring headless
+under the offscreen Qt platform (CI-friendly, no display required).
+
+Requires PyQt6 (`pip install PyQt6`) and matplotlib; `cargo build --release`
+for the simulator binary.
+
 ### What the script detects
 
 For a KiCad export containing `Xdc wg1_out dc_b dc_c pn_in fc_dcoupler ...`,
@@ -362,11 +396,15 @@ The next steps for this integration, in rough order:
    `opt[0..3]` into `.optical_port opt 4` plus per-channel wiring.
 3. **One-button driver** — ✅ `scripts/kicad_fairchild.py` chains
    schematic → SPICE export → transpile → simulate in one command, and can be
-   registered as a KiCad schematic-editor "button" (see §9). Remaining: an
-   in-editor results viewer.
-4. **`fairchild.viewer`** Python helper — wrap matplotlib for common signal
-   shapes (V vs t, optical power vs t for `(re, im)` pairs, AC magnitude /
-   phase, noise PSD).
+   registered as a KiCad schematic-editor "button" (see §9).
+4. **Results viewer** — ✅ `scripts/fairchild_plot.py` (matplotlib viewer:
+   optical power from `(re, im)` pairs, V/I vs t, AC magnitude/phase) and
+   `scripts/fairchild_gui.py` (standalone PyQt6 launcher embedding it). Next:
+   AC noise PSD panels, and the optical-probe spectrogram once that lands.
+5. **GUI integration** — the standalone launcher (Option C) is the supported
+   front-end today. A native in-eeschema "Run fairchild" button is parked
+   pending either a KiCad source build/fork or the schematic IPC API; the
+   BOM/netlist-generator hook (§9) is the version-portable interim trigger.
 
 ---
 

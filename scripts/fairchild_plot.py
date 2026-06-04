@@ -29,12 +29,11 @@ import re
 import sys
 from collections import defaultdict
 
-import matplotlib
-
-# Use a non-interactive backend automatically when saving / headless.
-if "--save" in sys.argv or not sys.stdout.isatty():
-    matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+# Importing this module is deliberately free of any matplotlib backend
+# side-effect, so an embedder (fairchild_gui.py, which selects QtAgg and
+# supplies its own Figure) can import the plotters without a backend fight.
+# The plotters take an optional `fig=` to draw into; only the CLI (main())
+# touches pyplot and picks a backend.
 
 
 # ── CSV parsing ────────────────────────────────────────────────────────────
@@ -105,7 +104,14 @@ def _split_electrical(series):
     return volts, currs, other
 
 
-def plot_transient(x, series, raw, title):
+def _new_figure(figsize):
+    """CLI fallback: make a pyplot-managed Figure (only reached when no embedding
+    Figure was supplied). Kept local so importing the module needs no backend."""
+    import matplotlib.pyplot as plt
+    return plt.figure(figsize=figsize)
+
+
+def plot_transient(x, series, raw, title, fig=None):
     powers, consumed = ({}, set()) if raw else derive_optical_power(series)
     rest = {k: v for k, v in series.items() if k not in consumed}
     volts, currs, other = _split_electrical(rest)
@@ -114,9 +120,9 @@ def plot_transient(x, series, raw, title):
                           ("Branch current (A)", currs)) if p[1]]
     if not panels:
         panels = [("Signals", series)]
-    fig, axes = plt.subplots(len(panels), 1, sharex=True, figsize=(9, 2.6 * len(panels)))
-    if len(panels) == 1:
-        axes = [axes]
+    fig = fig or _new_figure((9, 2.6 * len(panels)))
+    fig.clear()
+    axes = fig.subplots(len(panels), 1, sharex=True, squeeze=False)[:, 0]
     x_us = [t * 1e6 for t in x]  # µs is a friendly transient unit
     for ax, (ylabel, sigs) in zip(axes, panels):
         for name, vals in sigs.items():
@@ -131,14 +137,16 @@ def plot_transient(x, series, raw, title):
     return fig
 
 
-def plot_ac(x, series, title):
+def plot_ac(x, series, title, fig=None):
     import math
 
     mags = {k: v for k, v in series.items() if k.lower().startswith("mag")}
     phases = {k: v for k, v in series.items() if k.lower().startswith("phase")}
     if not mags:  # fall back: treat all as magnitude
         mags = series
-    fig, (a_mag, a_ph) = plt.subplots(2, 1, sharex=True, figsize=(9, 6))
+    fig = fig or _new_figure((9, 6))
+    fig.clear()
+    a_mag, a_ph = fig.subplots(2, 1, sharex=True)
     for name, vals in mags.items():
         db = [20.0 * math.log10(v) if v > 0 else float("nan") for v in vals]
         a_mag.semilogx(x, db, label=name, lw=1.3)
@@ -155,11 +163,12 @@ def plot_ac(x, series, title):
     return fig
 
 
-def plot_op(series, raw, title):
+def plot_op(series, raw, title, fig=None):
     powers, consumed = ({}, set()) if raw else derive_optical_power(series)
     rest = {k: v[0] for k, v in series.items() if k not in consumed and v}
-    fig, axes = plt.subplots(1, 2 if powers else 1, figsize=(10, 4.5), squeeze=False)
-    axes = axes[0]
+    fig = fig or _new_figure((10, 4.5))
+    fig.clear()
+    axes = fig.subplots(1, 2 if powers else 1, squeeze=False)[0]
     if powers:
         names = list(powers)
         axes[0].barh(names, [p[0] for p in powers.values()], color="tab:orange")
@@ -183,6 +192,12 @@ def main():
     ap.add_argument("--raw", action="store_true", help="don't derive optical power from re/im")
     ap.add_argument("--title", help="figure title")
     args = ap.parse_args()
+
+    # Pick a backend now (not at import): headless/save → Agg, else interactive.
+    import matplotlib
+    if args.save or not sys.stdout.isatty():
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     stream = sys.stdin if args.csv == "-" else open(args.csv)
     x_name, x, series = read_csv(stream)
