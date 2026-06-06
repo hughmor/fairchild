@@ -23,6 +23,9 @@ jobs:
           key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-bench-
 
+      - name: Install SuiteSparse (KLU build dependency)
+        run: sudo apt-get install -y libsuitesparse-dev
+
       - name: Install ngspice
         run: sudo apt-get install -y ngspice
 
