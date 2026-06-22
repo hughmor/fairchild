@@ -1,1 +1,1 @@
-from .fairchild import Circuit, SimResult  # noqa: F401
+from .fairchild import Circuit, SimResult, WaveformSource  # noqa: F401
