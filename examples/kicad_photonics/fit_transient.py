@@ -69,14 +69,16 @@ class FitParam:
 
 # ── the simulator forward model ──────────────────────────────────────────────
 def simulate_pd(overrides: dict[str, float], drive_t, drive_v, *,
-                step=DEFAULT_STEP, waveguide_delay=True, observable="V(pd_anode)"):
+                step=DEFAULT_STEP, waveguide_delay=True, observable="V(pd_anode)",
+                netlist=NETLIST):
     """Drive Vmod with (drive_t, drive_v); return (t, observable).
 
     observable is either a raw signal name ("V(pd_anode)", "I(...)") or an
     optical-power readout "P(<port>)" = |A|² = re²+im² for an optical bundle.
+    `netlist` lets a caller swap the device under test (e.g. a different PN model).
     """
     ckt = fc.Circuit()
-    ckt.load_str(NETLIST)
+    ckt.load_str(netlist)
     for key, val in overrides.items():
         el, _, p = key.partition(".")
         ckt.set_param(el, p, float(val))
@@ -144,7 +146,7 @@ def model_trace(sim, meas, dt, *, bw_tau, max_lag, gain=None):
 # ── fitting ───────────────────────────────────────────────────────────────────
 def fit_transient(specs: list[FitParam], drive_t, drive_v, meas, *,
                   bw_tau, step=DEFAULT_STEP, max_lag=40, observable="V(pd_anode)",
-                  gain=None, seed=0, verbose=True):
+                  gain=None, seed=0, netlist=NETLIST, verbose=True):
     """Fit free params to a measured trace. offset/lag (and optionally gain) are
     handled per-eval. Uses differential_evolution + an LM polish: resonant
     time-domain cost surfaces are spiky/multi-modal (the resonance position is
@@ -161,7 +163,8 @@ def fit_transient(specs: list[FitParam], drive_t, drive_v, meas, *,
         ncall[0] += 1
         ov = dict(fixed)
         ov.update({s.name: xi for s, xi in zip(free, x)})
-        t_s, sim = simulate_pd(ov, drive_t, drive_v, step=step, observable=observable)
+        t_s, sim = simulate_pd(ov, drive_t, drive_v, step=step,
+                               observable=observable, netlist=netlist)
         sim = np.interp(drive_t, t_s, sim)   # solver grid → measurement grid
         dt = drive_t[1] - drive_t[0]
         fitm, _ = model_trace(sim, meas, dt, bw_tau=bw_tau, max_lag=max_lag, gain=gain)
