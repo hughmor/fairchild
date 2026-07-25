@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fit_transient.py — time-domain parameter fitting for a ring modulator.
 
-The transient counterpart to fit_photonic.py (which fits CW transmission
+The transient counterpart to ringfit.py (which fits CW transmission
 spectra). Here we drive the modulator with a measured numpy waveform and fit
 device params to a measured time-domain photodetector trace — the workflow for
 calibrating against a lightlab AWG-drive + off-chip-PD-on-scope capture (both
@@ -57,7 +57,7 @@ NETLIST = _quiet(RING.read_text())
 WS = getattr(fc, "WaveformSource", None) or fc.fairchild.WaveformSource
 
 
-# ── parameter spec (mirrors fit_photonic.ParamSpec, standalone) ──────────────
+# ── parameter spec (mirrors ringfit.ParamSpec, standalone) ──────────────
 @dataclass
 class FitParam:
     name: str          # "<element>.<param>", e.g. "Xpn.V_pi_L"

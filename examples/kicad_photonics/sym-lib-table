@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "fairchild_photonics") (type "KiCad") (uri "${KIPRJMOD}/fairchild_photonics.kicad_sym") (options "") (descr ""))
+)

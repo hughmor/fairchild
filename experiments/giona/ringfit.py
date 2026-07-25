@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-fit_photonic.py — add-drop ring resonator parameter fitting for fairchild.
+ringfit.py — add-drop ring machinery + staged CW fit (giona chip).
+
+Shared library for every fit in this directory (dataset -> observables,
+netlist build, ring wavelength sweep, staged fitter, plots) AND the CLI
+driver for the May sparse-sweep staged fit.
 
 Fits PN + thermal phase-shifter parameters to experimental transmission
 spectra from a lightlab NdSweeper dataset.
@@ -71,9 +75,11 @@ from lightlab.util.sweep import NdSweeper
 
 #%% ── dataset path & window ──────────────────────────────────────────────────
 
-DATA_PATH = str(
-    Path(__file__).parents[2] / "data" / "giona_neuron2_mod_joint_IV_spec"
-)
+HERE = Path(__file__).resolve().parent
+DATA_DIR = HERE / "data"        # raw lightlab captures (gitignored, large)
+RESULTS = HERE / "results"     # fitted params (.json) + plots (.png)
+
+DATA_PATH = str(DATA_DIR / "giona_neuron2_mod_joint_IV_spec")
 
 # Restrict to the resonance window of our target ring (nm).
 WL_LO, WL_HI = 1545.8, 1547.5
@@ -1546,7 +1552,8 @@ def explore_diode_models(
 
 def plot_all(model: str, best: dict[str, float], sd: SweepData, prefix: str = "") -> None:
     """Run all plot functions with a shared filename prefix."""
-    p = (prefix + "_") if prefix else ""
+    RESULTS.mkdir(exist_ok=True)
+    p = str(RESULTS / (prefix + "_")) if prefix else str(RESULTS) + "/"
     plot_ring_fit(model, best, sd,         out_path=f"{p}ring_fit.png")
     plot_2d_sweep(model, best, sd,         out_path=f"{p}ring_sweep.png")
     plot_iv_curves(model, best, sd,        out_path=f"{p}iv_curves.png")
@@ -1629,7 +1636,7 @@ if __name__ == "__main__":
     else:
         best  = fit_staged(model=args.model, path=args.data, verbose=True)
         model = args.model
-        json_path = args.save_params or f"{model}_fit.json"
+        json_path = args.save_params or str(RESULTS / f"{model}_fit.json")
         save_params(best, model, json_path)
 
     plot_all(model, best, sd, prefix=args.plot_prefix or model)

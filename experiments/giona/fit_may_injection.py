@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""fit_may_dn_di.py — fit the current-parametrized injection (dn_di/da_di)
+"""fit_may_injection.py — fit the current-parametrized injection (dn_di/da_di)
 against the May live-junction dataset (giona_neuron2_mod_joint_IV_spec).
 
 The decoupled workflow the dn_di parametrization enables:
   1. pin (i_sat, n_diode, r_series) from the measured junction IV alone
-     (fit_photonic.prefit_diode_iv, 2 kΩ PCB shunt subtracted),
+     (ringfit.prefit_diode_iv, 2 kΩ PCB shunt subtracted),
   2. fit (dn_di, da_di) — Δn = −dn_di·I_fwd, Δα = da_di·I_fwd — as two linear
      coefficients from the forward-bias spectra (0 < JV ≤ 0.9 V, heater off),
      with everything else pinned from the May staged fit (alphas converted to
      post-loss-fix units: fitted-pre-fix / 2).
 
-Run:  .venv/bin/python examples/kicad_photonics/fit_may_dn_di.py
+Run:  .venv/bin/python experiments/giona/fit_may_injection.py
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from scipy.optimize import differential_evolution, minimize
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from fit_photonic import (  # noqa: E402
+from ringfit import (  # noqa: E402
     extract_data, load_sweep, prefit_diode_iv, wavelength_sweep, _spectrum_loss,
 )
 
 DATA = str(HERE / "data" / "giona_neuron2_mod_joint_IV_spec")
-BASE_JSON = HERE / "data" / "giona_neuron7_pn_th_ps_full_fit.json"
-OUT_JSON = HERE / "data" / "giona_dn_di_fit.json"
+BASE_JSON = HERE / "results" / "giona_neuron7_pn_th_ps_full_fit.json"
+OUT_JSON = HERE / "results" / "giona_dn_di_fit.json"
 MODEL = "fc_pn_th_ps_full"
 
 
@@ -120,7 +120,7 @@ def main():
     np.atleast_1d(axs)[0].legend(fontsize=7)
     fig.suptitle("May neuron2 forward-bias spectra — dn_di/da_di fit")
     fig.tight_layout()
-    png = HERE / "data" / "may_dn_di_fit.png"
+    png = HERE / "results" / "may_dn_di_fit.png"
     fig.savefig(png, dpi=120)
     print(f"plot → {png}")
 

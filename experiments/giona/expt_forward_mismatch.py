@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fit_forward_mismatch.py — reproduce (and fix) the forward-bias fit failure.
+"""expt_forward_mismatch.py — reproduce (and fix) the forward-bias fit failure.
 
 The recovery test in fit_transient.py is an *inverse crime*: it generates and
 fits with the SAME model, so model-form error is zero by construction — it
@@ -15,7 +15,7 @@ enough for real data. This script asks the question that actually matters:
 The headline is the MINIMUM ACHIEVABLE RESIDUAL of each model — that comparison
 is inverse-crime-free (it measures structural adequacy, not param recovery).
 
-Run:  .venv/bin/python examples/kicad_photonics/fit_forward_mismatch.py
+Run:  .venv/bin/python experiments/giona/expt_forward_mismatch.py
 """
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def main():
         ax[1].set_xlabel("time (ps)"); ax[1].set_ylabel("residual"); ax[1].grid(alpha=0.3)
         ax[1].legend(fontsize=8)
         fig.tight_layout()
-        out = HERE / "fit_forward_mismatch.png"
+        out = HERE / "results" / "fit_forward_mismatch.png"
         fig.savefig(out, dpi=120); print(f"\nwrote {out}")
     except ImportError:
         pass

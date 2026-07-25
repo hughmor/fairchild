@@ -1,0 +1,11 @@
+{
+  "model": "fc_pn_th_ps_full",
+  "source": "May neuron2 dataset, post-loss-fix engine",
+  "i_sat": 5.098818919420131e-08,
+  "n_diode": 5.0,
+  "r_series": 0.0,
+  "dn_di": 3.993138169908259,
+  "da_di": 4627504.5719546005,
+  "loss": 0.20374299591585587,
+  "baseline_loss": 0.9825678649326886
+}

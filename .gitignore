@@ -16,22 +16,22 @@ examples/*/*.csv
 /_notes/
 sotu.md
 
-# kicad development project
-examples/kicad_photonics/.history
-examples/kicad_photonics/*.bak
-examples/kicad_photonics/*-backups
-examples/kicad_photonics/*.kicad_pcb
-examples/kicad_photonics/*.kicad_sch
+# kicad_photonics is a committed examples dir — only KiCad's per-user cruft
+# and its regenerable PCB stay out.
 examples/kicad_photonics/*.kicad_prl
-examples/kicad_photonics/*.kicad_pro*
-examples/kicad_photonics/sym-lib-table
-examples/kicad_photonics/*.cir
-examples/kicad_photonics/*.sp
-examples/kicad_photonics/results/
-examples/kicad_photonics/giona_out
-examples/kicad_photonics/giona_ff_transient.py
+examples/kicad_photonics/*.kicad_pcb
+examples/kicad_photonics/*.bak
+examples/kicad_photonics/*-backups/
+examples/kicad_photonics/.history/
 examples/kicad_photonics/~*
-examples/kicad_photonics/data/
+
+# chip experiments (experiments/<chip>/) — raw lightlab captures, extraction
+# caches, KiCad working projects and machine-generated netlists never get
+# committed. Fit outputs (results/*.json) and the model card do.
+/experiments/*/data/
+/experiments/*/kicad/
+/experiments/*/netlists/
+/experiments/*/results/*.png
 
 
 # kicad_to_fairchild.py transpiled wrappers + sim outputs

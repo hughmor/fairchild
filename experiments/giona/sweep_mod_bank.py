@@ -1,12 +1,12 @@
 #%%
 #!/usr/bin/env python3
-"""Wavelength sweep on giona_mod_bank.sp — 8-MRM cascade spectrum.
+"""Wavelength sweep on netlists/giona_mod_bank_full.sp — 8-MRM cascade spectrum.
 
 Sweeps the CW laser wavelength across a small band, solves DC operating
 point at each wavelength, and plots V(V_THRU) and V(V_DROP) — proportional
 to thru-port and drop-port optical power respectively.
 
-Usage:  python giona_mod_bank_sweep.py
+Usage:  python sweep_mod_bank.py
 """
 import os
 import sys
@@ -15,7 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NETLIST = os.path.join(HERE, "giona_mod_bank_full.sp")
+NETLIST = os.path.join(HERE, "netlists", "giona_mod_bank_full.sp")
 FAIRCHILD = os.path.abspath(os.path.join(HERE, "..", "..", "target", "release", "fairchild"))
 
 
@@ -85,7 +85,7 @@ def main():
     ax_dB.grid(alpha=0.3)
     ax_dB.set_ylim(-40, 5)
 
-    out_png = os.path.join(HERE, "giona_mod_bank_spectrum.png")
+    out_png = os.path.join(HERE, "results", "giona_mod_bank_spectrum.png")
     plt.tight_layout()
     plt.savefig(out_png, dpi=120)
     print(f"Saved {out_png}")

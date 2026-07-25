@@ -27,7 +27,7 @@ platform (no display needed).
 
 Run it:
     python3 scripts/fairchild_gui.py
-    python3 scripts/fairchild_gui.py examples/kicad_photonics/one_mod.kicad_sch
+    python3 scripts/fairchild_gui.py examples/kicad_photonics/mrm_single_channel.kicad_sch
 """
 from __future__ import annotations
 
@@ -369,7 +369,7 @@ def _selftest(initial_input: str | None) -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6 import QtCore
     sample = initial_input or str(
-        HERE.parent / "examples" / "kicad_photonics" / "one_mod.kicad_sch")
+        HERE.parent / "examples" / "kicad_photonics" / "mrm_single_channel.kicad_sch")
     app, win = make_app_and_window(sample)
     win.show()
 

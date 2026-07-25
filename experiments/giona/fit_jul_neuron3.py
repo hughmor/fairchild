@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fit_neuron3.py — staged fit of the neuron3 mod-bank ring to the 2026-07-10 sweep.
+"""fit_jul_neuron3.py — staged fit of the neuron3 mod-bank ring to the 2026-07-10 sweep.
 
 Data verdict first (see --report): in this capture the PN junction is
 electrically RESISTIVE (IV is a 15.9 kΩ straight line to 0.1 µA RMS over
@@ -16,9 +16,9 @@ Stages (each vs the extracted observables from the npz cache):
   3. EO      : notch λ vs junction voltage     → dn_dv (linear; the device IS linear)
 
 Cache (extracted once from the 3.6 GB pickle):
-  .venv/bin/python examples/kicad_photonics/fit_neuron3.py --cache  # rebuild
+  .venv/bin/python experiments/giona/fit_jul_neuron3.py --cache  # rebuild
 Run:
-  .venv/bin/python examples/kicad_photonics/fit_neuron3.py
+  .venv/bin/python experiments/giona/fit_jul_neuron3.py
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ import fairchild as fc
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data" / "giona_mod_neuron3_joint_IV_spec_20260710T151201Z.pkl.gz"
 CACHE = HERE / "data" / "neuron3_cache.npz"
-OUT_JSON = HERE / "data" / "giona_neuron3_pn_th_ps_fit.json"
+OUT_JSON = HERE / "results" / "giona_neuron3_pn_th_ps_fit.json"
 
 # Ring identified in the data: notches at 1541.245 / 1553.438 nm respond to
 # this neuron's heater (~400 pm) while the other 10 shift only ~30 pm (thermal
@@ -274,7 +274,7 @@ def main():
     ax[2].set_xlabel("JV (V)"); ax[2].set_ylabel("Δλ (pm)"); ax[2].legend(fontsize=8)
     ax[2].grid(alpha=0.3)
     fig.tight_layout()
-    out = HERE / "data" / "neuron3_fit.png"
+    out = HERE / "results" / "neuron3_fit.png"
     fig.savefig(out, dpi=120)
     print(f"plot → {out}")
 

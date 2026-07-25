@@ -1,0 +1,21 @@
+.title KiCad schematic
+PD8 Net-_GC3-out_ VDD V_DROP type=X model=fc_photodetector responsivity=0.7 i_dark_a=1e-9 r_shunt=20k
+R8 V_DROP GND 1k
+GC3 DROP_OPT Net-_GC3-out_ type=X model=fc_grating_coupler alpha_dB=6.5
+PD9 Net-_GC2-out_ VDD V_THRU type=X model=fc_photodetector responsivity=0.7 i_dark_a=1e-9 r_shunt=20k
+GC2 THRU_OPT Net-_GC2-out_ type=X model=fc_grating_coupler alpha_dB=6.5
+R9 V_THRU GND 1k
+V12 /Vmod1 GND DC 0 
+V13 /Vmod2 GND DC 0 
+GC1 Net-_CWL6-out_ IN_OPT type=X model=fc_grating_coupler alpha_dB=6.5
+V11 VDD GND DC 2 
+CWL6 Net-_CWL6-out_ type=X model=fc_cw_laser power_mW=1.0 wavelength_nm=1549.95
+WG26 Net-_CPL13-b2_ DROP_OPT type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
+WG25 IN_OPT Net-_CPL14-a1_ type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
+PS_PN_TH13 Net-_CPL13-b1_ Net-_CPL14-a2_ GND /Vmod Net-_PS_PN_TH13-heat_p_ GND type=X model=fc_pn_th_ps n_g=4.2 l_m=25.1327412287e-6 R_heater=200 V_pi_L=0.02  alpha_dB_cm=10
+CPL13 Net-_CPL13-a1_ Net-_CPL13-a2_ Net-_CPL13-b1_ Net-_CPL13-b2_ type=X model=fc_dcoupler kappa_L=0.0769
+CPL14 Net-_CPL14-a1_ Net-_CPL14-a2_ Net-_CPL14-b1_ Net-_CPL14-b2_ type=X model=fc_dcoupler kappa_L=0.0769
+WG27 Net-_CPL14-b1_ THRU_OPT type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
+PS_PN_TH14 Net-_CPL14-b2_ Net-_CPL13-a1_ GND /Vmod /Vheat Net-_PS_PN_TH13-heat_p_ type=X model=fc_pn_th_ps n_g=4.2 l_m=25.1327412287e-6 R_heater=200 V_pi_L=0.02  alpha_dB_cm=10
+WG28 ADD_OPT Net-_CPL13-a2_ type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
+.end

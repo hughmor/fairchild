@@ -40,9 +40,11 @@ under `examples/kicad_photonics/`:
 ```
 fairchild/
 └── examples/
-    └── kicad/
-        ├── fairchild_photonics.kicad_sym   ← native fc_* symbol library
-        └── mrm_kicad_test.cir              ← reference MRR-modulator export
+    └── kicad_photonics/
+        ├── fairchild_photonics.kicad_sym    ← native fc_* symbol library
+        ├── mrm_single_channel.kicad_sch     ← worked example (+ .kicad_pro)
+        ├── mrm_ring.kicad_sch               ← its add-drop-ring sub-sheet
+        └── mrm_kicad_test.cir               ← reference MRR-modulator export
 ```
 
 Your own project lives outside the fairchild repo and looks like:
@@ -226,7 +228,7 @@ small PyQt6 control panel that wraps the whole pipeline:
 
 ```bash
 python3 scripts/fairchild_gui.py                                   # empty, then Browse…
-python3 scripts/fairchild_gui.py examples/kicad_photonics/one_mod.kicad_sch
+python3 scripts/fairchild_gui.py examples/kicad_photonics/mrm_single_channel.kicad_sch
 ```
 
 - **Pick a file** — a `.kicad_sch` schematic, a KiCad SPICE export (`.cir`),
