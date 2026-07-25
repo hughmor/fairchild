@@ -44,6 +44,24 @@ fn pn_ps_full_forward_injection() {
     assert!((im - (-0.005_575_206)).abs() < 1e-8, "out_im={im:.9}");
 }
 
+/// Current-parametrized injection (dn_di/da_di) is the same physics as the
+/// (e−1)-factor form: I_fwd = i_sat·(e−1), so dn_di = dn_dv_inj/i_sat must
+/// reproduce the forward-injection golden bit-for-bit (r_series = 0 here).
+#[test]
+fn pn_ps_full_dn_di_reparametrization_equivalent() {
+    let r = solve(
+        "fc_pn_ps_full",
+        0.1,
+        1.0,
+        // defaults: dn_dv_inj=1.311e-4, da_dv_inj=150, i_sat=1e-12
+        "dn_dv_inj=0 da_dv_inj=0 dn_di=1.311e8 da_di=1.5e14",
+    );
+    let re = r.node_voltage("out0_re_0").unwrap();
+    let im = r.node_voltage("out0_im_0").unwrap();
+    assert!((re - (-0.004_833_139)).abs() < 1e-8, "out_re={re:.9}");
+    assert!((im - (-0.005_575_206)).abs() < 1e-8, "out_im={im:.9}");
+}
+
 /// Forward bias 0.7 V through R_series = 100 Ω: the junction voltage is solved
 /// implicitly each iterate, so the source current reflects the V_pn ≠ V_junc
 /// split. Pins that implicit solve.

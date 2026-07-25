@@ -619,6 +619,14 @@ pub struct FullPnDrive {
     tau_carrier: f64,
     dn_dv_inj: f64,
     da_dv_inj: f64,
+    // Current-parametrized injection: Δn = −dn_di·I_fwd, Δα = da_di·I_fwd
+    // (per ampere of forward diode current). Physically equivalent to the
+    // (e−1)-factor form above — I_fwd = i_sat·(e−1) — but decoupled from
+    // (i_sat, n_diode), so a fit can pin the diode from the measured IV and
+    // then fit these two as well-conditioned linear coefficients. Default 0
+    // (off); use EITHER this or dn_dv_inj/da_dv_inj, not both.
+    dn_di: f64,
+    da_di: f64,
     // Series resistance.
     r_series: f64,
     // TPA + thermal.
@@ -649,6 +657,8 @@ impl FullPnDrive {
             tau_carrier: 10e-9,
             dn_dv_inj: 1.311e-4,
             da_dv_inj: 150.0,
+            dn_di: 0.0,
+            da_di: 0.0,
             r_series: 0.0,
             beta_tpa_m_per_w: 7.9e-12,
             a_eff_m2: 1.257e-13,
@@ -732,16 +742,20 @@ impl PhotonicActiveModel for FullPnDrive {
         // Optical intensity (channel 0) drives TPA + self-heating back-action.
         let intensity = intensity_w.first().copied().unwrap_or(0.0).max(0.0);
         let inj = (e - 1.0).max(0.0);
+        let i_fwd = i_diode.max(0.0);
         let v_rev = (-v_junc).max(0.0);
         let alpha_tpa = self.beta_tpa_m_per_w * intensity / self.a_eff_m2;
         // Extra loss beyond the segment's base α: reverse + forward FCA + TPA.
-        let dalpha = self.da_dv_rev * v_rev + self.da_dv_inj * inj + alpha_tpa;
+        // Forward FCA has two equivalent parametrizations (see field docs).
+        let dalpha =
+            self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd + alpha_tpa;
         // Absorbed power uses the TOTAL loss (segment base α + dalpha).
         let alpha_total = self.alpha_neper_m + dalpha;
         let p_abs = alpha_total * self.length_m * intensity;
         let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
         // All three index changes are λ-dependent ⇒ fold into dn_eff.
-        let dn_eff = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj + dn_self;
+        let dn_eff =
+            self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd + dn_self;
 
         OpticalPerturbation {
             dn_eff,
@@ -812,6 +826,14 @@ impl PhotonicActiveModel for FullPnDrive {
             }
             "da_dv_inj" => {
                 self.da_dv_inj = value;
+                true
+            }
+            "dn_di" | "dn_di_per_a" => {
+                self.dn_di = value;
+                true
+            }
+            "da_di" | "da_di_per_a" => {
+                self.da_di = value;
                 true
             }
             "beta_tpa" | "beta_tpa_m_per_w" => {
