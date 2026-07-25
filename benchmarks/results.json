@@ -1,0 +1,166 @@
+{
+  "results": [
+    {
+      "label": "RC step response",
+      "circuit": "rc_step.sp",
+      "fairchild_ms": 3.9,
+      "fairchild_ok": true,
+      "fairchild_v": 0.8646602,
+      "ngspice_ms": 16.3,
+      "ngspice_ok": true,
+      "ngspice_v": 0.8646654,
+      "rel_error": 6.0138869903184596e-06
+    },
+    {
+      "label": "RLC resonator",
+      "circuit": "rlc_resonator.sp",
+      "fairchild_ms": 3.7,
+      "fairchild_ok": true,
+      "fairchild_v": 1.08,
+      "ngspice_ms": 13.3,
+      "ngspice_ok": true,
+      "ngspice_v": 1.081015,
+      "rel_error": 0.0009389323922424648
+    },
+    {
+      "label": "Diode rectifier",
+      "circuit": "diode_rectifier.sp",
+      "fairchild_ms": 5.2,
+      "fairchild_ok": true,
+      "fairchild_v": 1.206215,
+      "ngspice_ms": 14.4,
+      "ngspice_ok": true,
+      "ngspice_v": 1.206333,
+      "rel_error": 9.781710356929843e-05
+    },
+    {
+      "label": "CMOS inverter",
+      "circuit": "cmos_inverter.sp",
+      "fairchild_ms": 4.2,
+      "fairchild_ok": true,
+      "fairchild_v": 3.3,
+      "ngspice_ms": 13.3,
+      "ngspice_ok": true,
+      "ngspice_v": 3.3,
+      "rel_error": 0.0
+    },
+    {
+      "label": "BJT CE amplifier",
+      "circuit": "bjt_ce_amp.sp",
+      "fairchild_ms": 6.7,
+      "fairchild_ok": true,
+      "fairchild_v": 5.0,
+      "ngspice_ms": 15.8,
+      "ngspice_ok": true,
+      "ngspice_v": 5.0,
+      "rel_error": 0.0
+    },
+    {
+      "label": "Schmitt trigger",
+      "circuit": "schmitt_trigger.sp",
+      "fairchild_ms": 4.9,
+      "fairchild_ok": true,
+      "fairchild_v": 2.751859,
+      "ngspice_ms": 14.2,
+      "ngspice_ok": true,
+      "ngspice_v": 2.780401,
+      "rel_error": 0.010265425742545714
+    },
+    {
+      "label": "Ring osc 3-stage",
+      "circuit": "ring_osc_3.sp",
+      "n_stages": 3,
+      "fairchild_ms": 4.2,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 5.409292334169106e-10,
+      "oscillating": true,
+      "ngspice_ms": 14.5,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 5-stage",
+      "circuit": "ring_osc_5.sp",
+      "n_stages": 5,
+      "fairchild_ms": 7.1,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 1.0069645925548679e-09,
+      "oscillating": true,
+      "ngspice_ms": 22.7,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 11-stage",
+      "circuit": "ring_osc_11.sp",
+      "n_stages": 11,
+      "fairchild_ms": 9.8,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 2.225490186623515e-09,
+      "oscillating": true,
+      "ngspice_ms": 28.0,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 21-stage",
+      "circuit": "ring_osc_21.sp",
+      "n_stages": 21,
+      "fairchild_ms": 40.7,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 4.248818197428139e-09,
+      "oscillating": true,
+      "ngspice_ms": 100.5,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 51-stage",
+      "circuit": "ring_osc_51.sp",
+      "n_stages": 51,
+      "fairchild_ms": 371.9,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 1.0318976648905617e-08,
+      "oscillating": true,
+      "ngspice_ms": 531.7,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 101-stage",
+      "circuit": "ring_osc_101.sp",
+      "n_stages": 101,
+      "fairchild_ms": 596.7,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 2.043599819268843e-08,
+      "oscillating": true,
+      "ngspice_ms": 805.5,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 201-stage",
+      "circuit": "ring_osc_201.sp",
+      "n_stages": 201,
+      "fairchild_ms": 2400.6,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 4.0668185838768487e-08,
+      "oscillating": true,
+      "ngspice_ms": 3068.2,
+      "ngspice_ok": true
+    },
+    {
+      "label": "Ring osc 499-stage",
+      "circuit": "ring_osc_499.sp",
+      "n_stages": 499,
+      "fairchild_ms": 10755.0,
+      "fairchild_ok": true,
+      "fairchild_v": null,
+      "fc_period_s": 7.484999999999999e-08,
+      "oscillating": true,
+      "ngspice_ms": 19142.4,
+      "ngspice_ok": true
+    }
+  ]
+}
