@@ -3,7 +3,7 @@
 * Combines the best-measured piece from each dataset:
 *   [May26 n7] staged CW fit vs the live-junction sparse sweep (fit_photonic.py,
 *              giona_neuron7_pn_th_ps_full_fit.json):
-*              l_m, n_eff, alpha_db_cm=21.4, r_heater=184.4,
+*              l_m, n_eff, alpha_db_cm=10.7 (post-fix units; fitted 21.4 pre-fix), r_heater=184.4,
 *              dn_dv=-3.62e-5, da_dv=3.29e-4
 *   [Jul26 n3] dense 50x100 HC x JV sweep, fit_neuron3.py (junction path broken
 *              that day - only passive/thermal trusted):
@@ -30,15 +30,12 @@
 * The parser has no .include yet: concatenate this file ahead of the netlist
 * (fit scripts do card + netlist via load_str).
 *
-* UNIT WARNING (known factor-2 issue, _notes/sotu.md): fairchild currently
-* attenuates power by HALF the specified alpha_db_cm (dB->field-neper converter
-* and the segment's exp(-aL/2) both halve). All alphas in this card were FITTED
-* through fairchild, so in-sim behaviour is correct; but alpha_db_cm=21.4 here
-* corresponds to ~10.7 physical dB/cm. Do not paste datasheet dB/cm values
-* until the converter is fixed (then halve this card's alphas).
+* Units: the historic factor-2 loss bug (sotu.md section F) is FIXED —
+* alpha_db_cm is physical power dB/cm. Alphas fitted pre-fix were halved to
+* convert (21.4 pre-fix == 10.7 physical).
 
 .model giona_ps fc_pn_th_ps LEVEL=4
-+ l_m=2.5378e-5 n_g=4.2 n_eff=2.2810 pin_at_ref=0 alpha_db_cm=21.4
++ l_m=2.5378e-5 n_g=4.2 n_eff=2.2810 pin_at_ref=0 alpha_db_cm=10.7
 + r_heater=184.4 p_pi_th=26.4e-3
 + dn_dv=-3.62e-5 da_dv=3.29e-4 c_j0=1.375e-13 v_bi=0.917 m_j=0.5
 + i_sat=1e-12 n_diode=1.05 r_series=60 tau_carrier=10e-9

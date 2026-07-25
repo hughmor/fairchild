@@ -55,7 +55,10 @@ pub const C0: f64 = 299_792_458.0;
 
 #[allow(non_snake_case)]
 pub(super) fn dB_per_cm_to_neper_per_m(alpha_db_cm: f64) -> f64 {
-    alpha_db_cm * 100.0 * std::f64::consts::LN_10 / 20.0
+    // POWER nepers: P(L) = P0·exp(−α·L) ≡ P0·10^(−(dB/cm)·L_cm/10). The
+    // segment applies exp(−α·L/2) to the FIELD, so power decays by the full
+    // specified dB. (/20 here was the historic half-loss bug — sotu §F.)
+    alpha_db_cm * 100.0 * std::f64::consts::LN_10 / 10.0
 }
 
 /// First-order dispersion-corrected effective index at wavelength `lambda`.
@@ -120,8 +123,9 @@ mod tests {
     #[test]
     fn native_waveguide_amplitude_matches_closed_form() {
         // L = 100 µm, n_g = 4.2, α = 2 dB/cm, λ = 1.55 µm.
-        // T = exp(-α_Np/m · L / 2), where α_Np/m = 2·100·ln(10)/20 ≈ 23.026 Np/m.
-        //   → T = exp(-23.026·100e-6/2) = exp(-1.1513e-3) ≈ 0.998850
+        // Power nepers: α_Np/m = 2·100·ln(10)/10 ≈ 46.052 Np/m; the FIELD gets
+        // T = exp(-α·L/2) = exp(-2.3026e-3) ≈ 0.997700, so power drops by the
+        // full specified 2 dB/cm · 100 µm = 0.02 dB.
         // φ = 2π·n_g·L/λ ≈ 2π·4.2·100/1550 wraps; |A_out| = T regardless of φ.
         let netlist = parse_spice(
             "* native waveguide test\n\
@@ -138,7 +142,7 @@ mod tests {
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
         let amp = (v_re * v_re + v_im * v_im).sqrt();
-        let expected = (-23.0258509_f64 * 100e-6 / 2.0).exp(); // 0.99885
+        let expected = (-46.0517019_f64 * 100e-6 / 2.0).exp(); // 0.99770
         assert!(
             (amp - expected).abs() < 1e-5,
             "|A_out|={amp:.6} expected={expected:.6}"

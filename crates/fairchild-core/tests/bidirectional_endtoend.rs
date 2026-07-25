@@ -103,7 +103,8 @@ Xwg src wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
     let amp = (src_re_bw * src_re_bw + src_im_bw * src_im_bw).sqrt();
     // Expected amplitude: t_amp · 1.0 = exp(-α·L/2) ≈ exp(-2·100·ln10/20·100e-6/2)
     //                            = exp(-1.151e-3) ≈ 0.998850.
-    let t_expected = (-2.0_f64 * 100.0 * std::f64::consts::LN_10 / 20.0 * 100e-6 / 2.0).exp();
+    // Power nepers (2 dB/cm → ·ln10/10), field gets exp(−α·L/2).
+    let t_expected = (-2.0_f64 * 100.0 * std::f64::consts::LN_10 / 10.0 * 100e-6 / 2.0).exp();
     assert!(
         (amp - t_expected).abs() < 1e-5,
         "bw amplitude through waveguide = {amp:.6}; expected {t_expected:.6}"

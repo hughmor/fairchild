@@ -30,8 +30,8 @@ fn pn_ps_full_reverse_bias_depletion() {
     let r = solve("fc_pn_ps_full", -2.0, 1.0, "");
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - 0.030_759_10).abs() < 1e-7, "out_re={re:.8}");
-    assert!((im - 0.006_352_350).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - 0.030_670_69).abs() < 1e-7, "out_re={re:.8}");
+    assert!((im - 0.006_334_093).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Mild forward bias 0.1 V: injection Δn (negative) + forward FCA loss.
@@ -40,8 +40,8 @@ fn pn_ps_full_forward_injection() {
     let r = solve("fc_pn_ps_full", 0.1, 1.0, "");
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - (-0.004_833_139)).abs() < 1e-8, "out_re={re:.9}");
-    assert!((im - (-0.005_575_206)).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - (-0.004_819_248)).abs() < 1e-8, "out_re={re:.9}");
+    assert!((im - (-0.005_559_183)).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Current-parametrized injection (dn_di/da_di) is the same physics as the
@@ -58,8 +58,8 @@ fn pn_ps_full_dn_di_reparametrization_equivalent() {
     );
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - (-0.004_833_139)).abs() < 1e-8, "out_re={re:.9}");
-    assert!((im - (-0.005_575_206)).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - (-0.004_819_248)).abs() < 1e-8, "out_re={re:.9}");
+    assert!((im - (-0.005_559_183)).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Forward bias 0.7 V through R_series = 100 Ω: the junction voltage is solved

@@ -243,8 +243,9 @@ R3 v3 bias 1k
     let v1 = r.node_voltage("v1").unwrap();
     let v2 = r.node_voltage("v2").unwrap();
     let v3 = r.node_voltage("v3").unwrap();
-    // Each PD voltage = 1 + P_mW · 0.8 · 1k · 1e-3 · waveguide_loss(≈0.9988).
-    let expected = |p_mw: f64| 1.0 + p_mw * 0.8 * 0.9988;
+    // Each PD voltage = 1 + P_mW · 0.8 · 1k · 1e-3 · waveguide_loss, where the
+    // 2 dB/cm × 100 µm waveguide costs 0.02 dB of POWER: 10^(−0.002) ≈ 0.99540.
+    let expected = |p_mw: f64| 1.0 + p_mw * 0.8 * 0.99540;
     for (probe, p_mw, v) in [
         ("v0", 1.0, v0),
         ("v1", 2.0, v1),

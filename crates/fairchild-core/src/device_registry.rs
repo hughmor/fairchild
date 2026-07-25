@@ -554,7 +554,7 @@ mod tests {
         let v_re = r.node_voltage("out_re").unwrap();
         let v_im = r.node_voltage("out_im").unwrap();
         let amp = (v_re * v_re + v_im * v_im).sqrt();
-        let expected = (-23.0258509_f64 * 100e-6 / 2.0).exp();
+        let expected = (-46.0517019_f64 * 100e-6 / 2.0).exp();
         assert!(
             (amp - expected).abs() < 1e-5,
             "|A_out|={amp:.6} expected={expected:.6}"
