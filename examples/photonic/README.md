@@ -22,6 +22,16 @@ no Norton hack.  These are the recommended starting points.
   full FSR at V_pn = 0 and V_pn = Vπ, plotting both transmission spectra
   to visualise the resonance and how the PN bias shifts it.
 
+- **`native_mrr_bias_heater_sweep.py`** — the two static sweeps you run to
+  characterise a fabricated add-drop MRM, on a `LEVEL=4` card whose defaults
+  came from fitting a real silicon device (`experiments/giona/`). PN bias
+  −1 → +1 V and heater current 0 → 1 mA, with through- and drop-port spectra
+  plus Δλ_res versus each knob. Shows the three distinct tuning mechanisms
+  side by side: depletion (+13 pm at −1 V, linear in V), carrier injection
+  (−184 pm at +1 V, tracking the diode *current* — and visibly shallowing the
+  notch through free-carrier absorption), and thermo-optic (+78 pm at 1 mA,
+  linear in I²R). `--selftest` asserts all three, no plotting.
+
 - **`native_wdm_mrr_modulator.{sp,py}`** — two-wavelength WDM extension
   of the modulator: two lasers (±50 pm around the ring resonance) share
   one bus through one ring driven by one V_pn.  The two photodetectors
