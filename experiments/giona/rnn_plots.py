@@ -224,6 +224,101 @@ def fig_wta(out, files):
     print(f"wrote {out}")
 
 
+def fig_ac_weights(out, files):
+    """AC-driven weights: waveforms, the decision variable, the phase portrait.
+
+    Note the geometry. Independent square and triangle weights have a varying
+    SUM as well as a varying difference, and the sum is common-mode drive that
+    both neurons follow together. So the trajectory travels along the V1 = V2
+    diagonal while the decision lives in the (smaller) offset from it — which is
+    why the middle row plots the differential explicitly.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    runs = [np.load(f) for f in files]
+    n = len(runs)
+    fig, ax = plt.subplots(3, n, figsize=(8.4 * n, 12.4), squeeze=False)
+
+    for c, d in enumerate(runs):
+        t, v, w, p = d["t"] * 1e9, d["v"], d["w"], float(d["p"])
+        asym = w[0] - w[1]
+        diff = (v[0] - v[1]) * 1e3
+        agree = np.mean(np.sign(diff[asym != 0]) == np.sign(asym[asym != 0])) * 100
+
+        # ── row 0: weight waveforms and both neuron outputs ─────────────────
+        a = ax[0, c]
+        a.plot(t, w[0], lw=1.0, color="tab:blue", alpha=0.8, label="w13 (square)")
+        a.plot(t, w[1], lw=1.0, color="tab:orange", alpha=0.8, label="w23 (triangle, 2×f)")
+        a.set_ylabel("weight (V)")
+        a2 = a.twinx()
+        a2.plot(t, v[0] * 1e3, lw=1.4, color="tab:green", label="neuron 1")
+        a2.plot(t, v[1] * 1e3, lw=1.4, color="tab:red", label="neuron 2")
+        a2.set_ylabel("V(mod_cathode) (mV)")
+        h1, l1 = a.get_legend_handles_labels()
+        h2, l2 = a2.get_legend_handles_labels()
+        a.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower center", ncol=2)
+        a.set_title(f"{p:.0f} mW/channel — weights and neuron outputs", fontsize=11)
+        a.set_xlabel("time (ns)")
+        a.grid(alpha=0.25)
+
+        # ── row 1: the decision variable against the input asymmetry ────────
+        a = ax[1, c]
+        a.plot(t, asym, lw=1.1, color="tab:purple", label="w13 − w23 (input)")
+        a.axhline(0, color="k", lw=0.6)
+        a.set_ylabel("input asymmetry (V)", color="tab:purple")
+        a.set_xlabel("time (ns)")
+        a2 = a.twinx()
+        a2.plot(t, diff, lw=1.4, color="k", label="V1 − V2 (decision)")
+        a2.axhline(0, color="grey", lw=0.5, ls=":")
+        a2.set_ylabel("V1 − V2 (mV)")
+        h1, l1 = a.get_legend_handles_labels()
+        h2, l2 = a2.get_legend_handles_labels()
+        a.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower center")
+        # Where the decision actually errs: a static input-referred offset, not
+        # dynamics. Fit diff = k*(asym - offset) and report both.
+        k, b = np.polyfit(asym, diff, 1)
+        off = -b / k
+        a2.axhline(0, color="grey", lw=0.5, ls=":")
+        a.axvline(off, color="tab:brown", lw=0.9, ls="--",
+                  label=f"offset {off:+.3f}")
+        h1, l1 = a.get_legend_handles_labels()
+        h2, l2 = a2.get_legend_handles_labels()
+        a.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower center")
+        a.set_title(f"decision tracks the asymmetry — agreement {agree:.1f}%, "
+                    f"slope {k:.0f} mV/unit, offset {off:+.3f}", fontsize=10)
+        a.grid(alpha=0.25)
+
+        # ── row 2: phase portrait, coloured by who SHOULD win ───────────────
+        # Positive asymmetry suppresses neuron 1 (the neuron path inverts), so
+        # w13 > w23 means neuron 2 ought to be the winner.
+        a = ax[2, c]
+        n2 = asym > 0
+        a.scatter(v[0][n2] * 1e3, v[1][n2] * 1e3, s=8, alpha=0.22,
+                  color="tab:red", label="w13 > w23  (N2 should win)")
+        a.scatter(v[0][~n2] * 1e3, v[1][~n2] * 1e3, s=8, alpha=0.22,
+                  color="tab:green", label="w13 < w23  (N1 should win)")
+        lo = min(v[0].min(), v[1].min()) * 1e3
+        hi = max(v[0].max(), v[1].max()) * 1e3
+        pad = 0.04 * (hi - lo)
+        a.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=0.8,
+               alpha=0.7, label="V1 = V2 (no winner)")
+        a.set_xlabel("neuron 1  V(mod_cathode) (mV)")
+        a.set_ylabel("neuron 2  V(mod_cathode) (mV)")
+        a.set_title(f"phase portrait — basins split across the diagonal, "
+                    f"max |V1−V2| = {np.abs(diff).max():.1f} mV", fontsize=10)
+        a.legend(fontsize=8, loc="upper left")
+        a.grid(alpha=0.25)
+        a.set_aspect("equal", adjustable="datalim")
+
+    fig.suptitle("giona RNN — winner-take-all under AC weights "
+                 "(square w13, triangle w23 at 2× frequency)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(out, dpi=115)
+    print(f"wrote {out}")
+
+
 def main() -> int:
     RESULTS.mkdir(exist_ok=True)
     fig_rest_point(RESULTS / "rnn_rest_point.png")
@@ -232,6 +327,9 @@ def main() -> int:
         wta = sorted(scratch.glob("w3_30_*.npz")) + sorted(scratch.glob("c3_*.npz"))
         if len(wta) >= 3:
             fig_wta(RESULTS / "rnn_wta.png", wta)
+        ac = sorted(scratch.glob("ac_*.npz"), key=lambda f: float(np.load(f)["p"]))
+        if ac:
+            fig_ac_weights(RESULTS / "rnn_wta_ac.png", ac)
     return 0
 
 
