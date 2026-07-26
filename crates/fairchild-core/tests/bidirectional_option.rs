@@ -23,7 +23,12 @@ fn default_optical_port_emits_3_wires() {
     .unwrap();
     let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
     let bus = net.bundle_ports.iter().find(|p| p.name == "bus").unwrap();
-    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: false });
+    assert_eq!(
+        ch0.kind,
+        fairchild_parser::BundleKind::Optical {
+            bidirectional: false
+        }
+    );
     assert_eq!(ch0.wires_per_channel(), 3);
     let names = ch0.wires_for_channel(0);
     assert_eq!(names, vec!["ch0_re_0", "ch0_im_0", "ch0_wl_0"]);
@@ -50,7 +55,12 @@ fn enable_bidirectional_emits_5_wires() {
     .unwrap();
     let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
     let bus = net.bundle_ports.iter().find(|p| p.name == "bus").unwrap();
-    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: true });
+    assert_eq!(
+        ch0.kind,
+        fairchild_parser::BundleKind::Optical {
+            bidirectional: true
+        }
+    );
     assert_eq!(ch0.wires_per_channel(), 5);
     let names = ch0.wires_for_channel(0);
     assert_eq!(
@@ -84,7 +94,9 @@ fn enable_bidirectional_aliases() {
         let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
         assert_eq!(
             ch0.kind,
-            fairchild_parser::BundleKind::Optical { bidirectional: true },
+            fairchild_parser::BundleKind::Optical {
+                bidirectional: true
+            },
             "{keyword} should enable bidir"
         );
     }
@@ -103,5 +115,10 @@ fn enable_bidirectional_zero_stays_off() {
     )
     .unwrap();
     let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
-    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: false });
+    assert_eq!(
+        ch0.kind,
+        fairchild_parser::BundleKind::Optical {
+            bidirectional: false
+        }
+    );
 }

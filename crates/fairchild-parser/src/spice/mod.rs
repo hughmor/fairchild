@@ -22,7 +22,21 @@ use crate::{Analysis, Element, Netlist, ParseError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Parse a netlist from a string.
+///
+/// `.include` / `.lib` are resolved relative to the **current working
+/// directory**, since a string has no source path. Prefer
+/// [`parse_spice_file`] when the deck lives on disk — it resolves includes
+/// relative to the deck, which is what a library of `.subckt` files wants.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
+    // Resolving here (rather than only in parse_spice_file) means a
+    // programmatically-built deck — Python's `load_str`, a fit script's
+    // card + netlist concatenation — can pull in shared PCell files too.
+    let resolved = resolve_includes(input, None, 0)?;
+    parse_resolved(&resolved)
+}
+
+fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
     let all_lines = logical_lines(input);
     let mut netlist = Netlist::default();
 
@@ -216,8 +230,15 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 // port has channels > 1, the instance replicates per channel.
                 // Returns one XOsdi per channel; for non-XOsdi elements or
                 // unreferenced ports, returns a single-element vec.
+                // A subckt instance's port count picks its bundle semantics.
+                let subckt_ports = match &base_el {
+                    Element::XOsdi { model_name, .. } => {
+                        subckt_defs.get(model_name).map(|d| d.port_count())
+                    }
+                    _ => None,
+                };
                 let expanded_elements =
-                    expand_bundle_ports(base_el, &netlist.bundle_ports, *lineno)?;
+                    expand_bundle_ports(base_el, &netlist.bundle_ports, subckt_ports, *lineno)?;
 
                 for el in expanded_elements {
                     let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
@@ -246,10 +267,14 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                                 &mut expanding,
                                 *lineno,
                             )?;
+                            // Per-instance `.model` cards ride along with the
+                            // flattened elements that reference them.
                             if let Some(alter) = current_alter.as_mut() {
-                                alter.element_overrides.extend(flat);
+                                alter.element_overrides.extend(flat.elements);
+                                alter.model_overrides.extend(flat.models);
                             } else {
-                                netlist.elements.extend(flat);
+                                netlist.elements.extend(flat.elements);
+                                netlist.models.extend(flat.models);
                             }
                         }
                     } else if let Some(alter) = current_alter.as_mut() {
@@ -350,8 +375,22 @@ fn resolve_includes(
                 i += 1;
                 continue;
             } else if toks.len() == 2 {
+                // Ambiguous in SPICE: `.lib <section>` opens a definition block,
+                // but `.lib <file>` is what someone writing an include means. A
+                // filename-looking argument gets an error rather than silently
+                // swallowing the rest of the deck up to a `.endl` that never comes.
+                let arg = toks[1].trim_matches('"').trim_matches('\'');
+                if arg.contains('/') || arg.contains('\\') || arg.rsplit('.').count() > 1 {
+                    return Err(ParseError::UnsupportedDirective {
+                        directive: format!(
+                            ".lib {arg} (one argument that looks like a file — use \
+                             `.lib '{arg}' <section>` to include a section, or \
+                             `.include {arg}` for the whole file)"
+                        ),
+                        line: lineno,
+                    });
+                }
                 // Definition form: skip lines until matching `.endl`.
-                let _section = toks[1];
                 i += 1;
                 while i < lines.len() {
                     let l = lines[i].trim().to_lowercase();
@@ -425,45 +464,58 @@ pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
         msg: format!("cannot read '{}': {e}", path.display()),
     })?;
     let resolved = resolve_includes(&src, path.parent(), 0)?;
-    parse_spice(&resolved)
+    parse_resolved(&resolved)
 }
 
 // ─── analysis directive parsers ───────────────────────────────────────────────
 
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();
+    // Index of the last entry a `+` may continue: a real line, not a comment.
+    // Without this, interleaving `* …` comment lines inside a continuation block
+    // silently reattaches the rest of the block to the comment, so parameters
+    // vanish with no error. That has bitten real decks (a `.model` card whose
+    // sections were separated by comments); annotating a long parameter list is
+    // too natural to punish.
+    let mut last_real: Option<usize> = None;
     for (i, raw) in input.lines().enumerate() {
         let lineno = i + 1;
         let trimmed = raw.trim_start();
 
         if trimmed.starts_with('+') {
-            if let Some(last) = result.last_mut() {
-                last.1.push(' ');
-                last.1
+            if let Some(idx) = last_real {
+                result[idx].1.push(' ');
+                result[idx]
+                    .1
                     .push_str(trimmed.strip_prefix('+').unwrap_or("").trim());
             }
             continue;
         }
+        if trimmed.starts_with('*') || trimmed.starts_with(';') {
+            // Keep the entry (the title may be a comment, and line numbers stay
+            // meaningful) but don't let it capture later continuations.
+            result.push((lineno, raw.to_string()));
+            continue;
+        }
 
-        let prev_ends_backslash = result
-            .last()
-            .map(|(_, s)| s.trim_end().ends_with('\\'))
+        let prev_ends_backslash = last_real
+            .map(|idx| result[idx].1.trim_end().ends_with('\\'))
             .unwrap_or(false);
 
         if prev_ends_backslash {
-            if let Some(last) = result.last_mut() {
-                let without_bs = last
-                    .1
-                    .trim_end()
-                    .trim_end_matches('\\')
-                    .trim_end()
-                    .to_string();
-                last.1 = without_bs;
-                last.1.push(' ');
-                last.1.push_str(trimmed);
-            }
+            let idx = last_real.expect("checked above");
+            let without_bs = result[idx]
+                .1
+                .trim_end()
+                .trim_end_matches('\\')
+                .trim_end()
+                .to_string();
+            result[idx].1 = without_bs;
+            result[idx].1.push(' ');
+            result[idx].1.push_str(trimmed);
         } else {
             result.push((lineno, raw.to_string()));
+            last_real = Some(result.len() - 1);
         }
     }
     result
@@ -1059,10 +1111,7 @@ mod tests {
         // Electrical wires must NOT be filed as optical nets, or the discipline
         // check would reject an ordinary voltage source driving them.
         for w in ctl.all_wires() {
-            assert!(
-                !net.optical_nets.contains(&w),
-                "{w} must stay electrical"
-            );
+            assert!(!net.optical_nets.contains(&w), "{w} must stay electrical");
         }
         // fc_dcoupler is bundle-Aware → one instance, bundles flattened in
         // declaration order: 9 optical + 9 optical + 3 control + literal "0".
@@ -1602,6 +1651,157 @@ R1 a b 1k
             .iter()
             .find(|el| matches!(el, Element::Resistor { .. }));
         assert!(res.is_some(), "forward-referenced subckt not expanded");
+    }
+
+    /// A `*` comment interleaved in a continuation block must not swallow the
+    /// rest of the block. Annotating a long parameter list is natural, and the
+    /// old behaviour silently dropped everything after the comment.
+    #[test]
+    fn comment_inside_continuation_block_is_transparent() {
+        let net = parse_spice(
+            "* deck\n\
+             .model m fc_pn_ps LEVEL=4\n\
+             * geometry\n\
+             + l_m=1e-4 n_g=4.2\n\
+             * electro-optic\n\
+             + dn_dv=-3.6e-5\n\
+             V1 a 0 DC 1\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let card = &net.models[0];
+        for (k, want) in [
+            ("level", 4.0),
+            ("l_m", 1e-4),
+            ("n_g", 4.2),
+            ("dn_dv", -3.6e-5),
+        ] {
+            let got = card
+                .params
+                .iter()
+                .find(|(pk, _)| pk == k)
+                .unwrap_or_else(|| panic!("missing {k} in {:?}", card.params))
+                .1;
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{k}: {got}"
+            );
+        }
+    }
+
+    /// PCell arithmetic: `{…}` may hold an expression over the instance's
+    /// parameters, so a ring's length can derive from its radius instead of
+    /// being pre-computed by the caller.
+    #[test]
+    fn subckt_param_expressions_evaluate() {
+        let net = parse_spice(
+            "* pcell arithmetic\n\
+             .subckt ring a b radius=8e-6 n=2\n\
+             R1 a b {2*pi*radius*n}\n\
+             .ends\n\
+             X1 p q ring radius=1e-5 n=3\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let Element::Resistor { resistance, .. } = &net.elements[0] else {
+            panic!("expected resistor, got {:?}", net.elements[0]);
+        };
+        let want = 2.0 * std::f64::consts::PI * 1e-5 * 3.0;
+        assert!(
+            (resistance - want).abs() < 1e-18,
+            "got {resistance}, want {want}"
+        );
+    }
+
+    #[test]
+    fn subckt_param_expression_undefined_errors() {
+        let err = parse_spice(
+            "* bad param\n\
+             .subckt s a b r=1\n\
+             R1 a b {2*nope}\n\
+             .ends\n\
+             X1 p q s\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not finite"), "{msg}");
+    }
+
+    /// A `.model` card inside a `.subckt` becomes a PRIVATE, per-instance card:
+    /// its name is mangled with the instance prefix and references from inside
+    /// that instance are retargeted. Two instances therefore carry independent
+    /// model parameters — the thing that makes a `.subckt` a real PCell, since
+    /// LEVEL is only ever read from a card.
+    #[test]
+    fn subckt_model_cards_are_per_instance() {
+        let net = parse_spice(
+            "* per-instance cards\n\
+             .subckt ps a b vpn gnd alpha=10 lvl=4\n\
+             .model local_ps fc_pn_ps LEVEL={lvl} alpha_db_cm={alpha}\n\
+             Xp a b vpn gnd local_ps\n\
+             .ends\n\
+             X1 i1 o1 v1 0 ps alpha=7\n\
+             X2 i2 o2 v2 0 ps alpha=21\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        // Two independent cards, one per instance.
+        assert_eq!(net.models.len(), 2, "{:?}", net.models);
+        let mut by_name: Vec<(String, f64)> = net
+            .models
+            .iter()
+            .map(|m| {
+                let a = m
+                    .params
+                    .iter()
+                    .find(|(k, _)| k == "alpha_db_cm")
+                    .map(|(_, v)| *v)
+                    .unwrap();
+                (m.name.clone(), a)
+            })
+            .collect();
+        by_name.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(by_name[0].0, "x1.local_ps");
+        assert_eq!(by_name[1].0, "x2.local_ps");
+        assert!((by_name[0].1 - 7.0).abs() < 1e-12, "{:?}", by_name);
+        assert!((by_name[1].1 - 21.0).abs() < 1e-12, "{:?}", by_name);
+        // LEVEL came through the parameter, so the card dispatches to LEVEL=4.
+        for m in &net.models {
+            let lvl = m.params.iter().find(|(k, _)| k == "level").unwrap().1;
+            assert!((lvl - 4.0).abs() < 1e-12);
+        }
+        // And each instance's device points at its OWN card.
+        let refs: Vec<&str> = net
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::XOsdi { model_name, .. } => Some(model_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(refs.contains(&"x1.local_ps"), "{refs:?}");
+        assert!(refs.contains(&"x2.local_ps"), "{refs:?}");
+    }
+
+    /// `.include` now resolves for string input too, so a deck assembled in
+    /// Python can pull in a shared PCell file.
+    #[test]
+    fn parse_spice_resolves_includes_from_string() {
+        let dir = std::env::temp_dir().join("fc_include_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let inc = dir.join("pcell_r.sp");
+        std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n").unwrap();
+        let src = format!(
+            "* including deck\n.include {}\nX1 p q twice r=50\n.op\n.end\n",
+            inc.display()
+        );
+        let net = parse_spice(&src).unwrap();
+        let Element::Resistor { resistance, .. } = &net.elements[0] else {
+            panic!("expected the included subckt's resistor");
+        };
+        assert!((resistance - 100.0).abs() < 1e-12, "got {resistance}");
+        std::fs::remove_file(&inc).ok();
     }
 
     #[test]

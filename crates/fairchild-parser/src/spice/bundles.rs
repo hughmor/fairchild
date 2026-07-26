@@ -95,9 +95,13 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
 ///
 /// This is also where the per-instance channel-count agreement is enforced for
 /// `Aware` devices — see [`BundleArity::Aware`].
+/// `subckt_ports` is the declared port count of the `.subckt` this element
+/// names, when it names one — it selects flatten-vs-replicate semantics for
+/// subcircuit instances (see the arithmetic below).
 pub(super) fn expand_bundle_ports(
     el: Element,
     ports: &[crate::BundlePort],
+    subckt_ports: Option<usize>,
     lineno: usize,
 ) -> Result<Vec<Element>, ParseError> {
     let Element::XOsdi {
@@ -171,7 +175,11 @@ pub(super) fn expand_bundle_ports(
             .flatten()
             .map(|&i| {
                 let p = &ports[i];
-                let kind = if p.is_optical() { "optical" } else { "electrical" };
+                let kind = if p.is_optical() {
+                    "optical"
+                } else {
+                    "electrical"
+                };
                 format!("{}({kind}, {} ch)", p.name, p.channels)
             })
             .collect::<Vec<_>>()
@@ -191,6 +199,45 @@ pub(super) fn expand_bundle_ports(
             model_name,
             params,
         }]);
+    }
+    // A `.subckt` instance is Scalar by name, but which semantics it *wants*
+    // is declared by its own port list, so let the arithmetic decide:
+    //   ports == flattened width   → one instance carrying the whole bus
+    //                                (a WDM block: N lasers, a mux, …)
+    //   ports == per-channel width → replicate, one instance per channel
+    //                                (a single-channel PCell along a bus)
+    // The two widths coincide only at N=1, where the outcome is identical, so
+    // there is nothing to disambiguate. Anything else is a port-count error
+    // here rather than a confusing one after expansion.
+    if let Some(n_ports) = subckt_ports {
+        let flat_width = flatten().len();
+        let per_ch_width: usize = nets
+            .iter()
+            .zip(port_refs.iter())
+            .map(|(_, r)| match r {
+                Some(i) => ports[*i].wires_per_channel(),
+                None => 1,
+            })
+            .sum();
+        if n_ports == flat_width && flat_width != per_ch_width {
+            return Ok(vec![Element::XOsdi {
+                name,
+                nets: flatten(),
+                model_name,
+                params,
+            }]);
+        }
+        if n_ports != per_ch_width {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!(
+                    "X{name}: subckt '{model_name}' declares {n_ports} ports, but the \
+                     instance's bundle references expand to {per_ch_width} (one channel \
+                     per instance, replicated {max_n}×) or {flat_width} (one instance \
+                     for the whole {max_n}-channel bus). Match one of those."
+                ),
+            });
+        }
     }
     // BundleArity::Scalar — replicate per channel.
     let mut out = Vec::with_capacity(max_n);

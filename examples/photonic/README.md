@@ -53,6 +53,30 @@ no Norton hack.  These are the recommended starting points.
   timestep constraint. `--selftest` asserts the weights, passivity, and that the
   balanced output tracks Σ w_k(t).
 
+## PCell library (`pcells/`)
+
+Parameterized `.subckt` cells, one file per component, meant to be `.include`d.
+Every sub-device parameter is a cell parameter, and each instance gets its own
+`.model` card built from them — so two instances of the same cell can differ.
+
+- **`mrm.sp`** — add-drop micro-ring modulator. Four optical ports
+  (in/thru/add/drop) and four electrical (PN anode/cathode, heater ±). `radius`
+  (default 8 µm) drives the arc length as `{pi*radius}`; the full LEVEL=4 EO
+  model (depletion, current-driven injection, TPA, thermo-optic) is exposed
+  parameter by parameter, defaulting to the fitted giona values. Single-channel
+  by design — read the header for what that means on a WDM bus.
+
+- **`source_bank.sp`** — 8-channel WDM signal generator: eight lasers, each
+  through its own ideal MZM, multiplexed onto one 8-channel optical bus. One
+  optical output, eight electrical drives. Wavelengths and per-laser powers are
+  parameters, so `p3=0` turns channel 3 off.
+
+- **`native_pcell_link.py`** (in this directory) — wires both together: the
+  source bank feeding a cascade of eight `mrm` instances, each trimmed to its
+  own channel, each with independent PN bias and heater. Shows the drop matrix
+  is diagonal, that a PN bias detunes exactly one ring, and that the MZM
+  transfer matches `(1+cos(πV/Vπ))/2`. `--selftest` asserts all of it.
+
 ## Legacy (`legacy/`)
 
 The older examples use the pre-B1 OSDI-based photonic models with the

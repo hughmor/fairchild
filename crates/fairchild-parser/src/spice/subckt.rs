@@ -1,7 +1,7 @@
 use super::common::{canon_node, parse_value};
 use super::directives::is_silent_directive;
-use super::element::parse_element_expanded;
-use crate::{Element, ParseError};
+use super::element::{parse_element_expanded, parse_model};
+use crate::{Element, ModelCard, ParseError};
 use std::collections::{HashMap, HashSet};
 
 type CollectDefsResult = (
@@ -11,6 +11,14 @@ type CollectDefsResult = (
 );
 type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
 
+/// What one `.subckt` instance flattens into: its elements, plus a private copy
+/// of every `.model` card declared in its body (name-mangled per instance).
+#[derive(Default)]
+pub(super) struct Expansion {
+    pub elements: Vec<Element>,
+    pub models: Vec<ModelCard>,
+}
+
 // ─── internal types ──────────────────────────────────────────────────────────
 
 /// Internal representation of a `.subckt ... .ends` block collected in pass 1.
@@ -18,6 +26,13 @@ pub(super) struct SubcktDef {
     ports: Vec<String>,               // port names (lowercased), in declaration order
     params: Vec<(String, f64)>,       // default parameter values (header + body .param)
     body_lines: Vec<(usize, String)>, // (original_lineno, raw_line) for pass-2 expansion
+}
+
+impl SubcktDef {
+    /// Declared port count — used to pick bundle flatten-vs-replicate semantics.
+    pub(super) fn port_count(&self) -> usize {
+        self.ports.len()
+    }
 }
 
 // ─── pass 1: collect definitions ─────────────────────────────────────────────
@@ -145,7 +160,37 @@ pub(super) fn parse_param_directive(
 
 // ─── expansion helpers ────────────────────────────────────────────────────────
 
-/// Replace `{param_name}` placeholders using `params`.  Errors on undefined names.
+/// Evaluation context that resolves bare variables from a subckt's parameter
+/// map, so `{…}` can hold arithmetic and not just a name. `pi` is supplied as a
+/// constant because deriving a ring's length from its radius is the single most
+/// common PCell expression.
+struct ParamCtx<'a>(&'a HashMap<String, f64>);
+
+impl crate::expr::EvalContext for ParamCtx<'_> {
+    fn node_voltage(&self, _node: &str) -> f64 {
+        f64::NAN // a parameter expression cannot reference the solution
+    }
+    fn branch_current(&self, _vsrc: &str) -> f64 {
+        f64::NAN
+    }
+    fn time(&self) -> f64 {
+        f64::NAN
+    }
+    fn variable(&self, name: &str) -> f64 {
+        match name {
+            "pi" => std::f64::consts::PI,
+            _ => self.0.get(name).copied().unwrap_or(f64::NAN),
+        }
+    }
+}
+
+/// Replace `{…}` placeholders using `params`.
+///
+/// The contents may be a bare parameter name (`{radius}`) or any arithmetic
+/// expression over parameters, numeric literals, `pi`, and the functions
+/// `Expr::parse` supports (`{2*pi*radius}`, `{sqrt(p_pi/r_heater)}`). Errors on
+/// an undefined name, an unparseable expression, or one that evaluates to a
+/// non-finite value — a silently-NaN geometry is far worse than a parse error.
 pub(super) fn substitute_params(
     line: &str,
     params: &HashMap<String, f64>,
@@ -176,16 +221,29 @@ pub(super) fn substitute_params(
                 msg: "unclosed '{' in parameter reference".into(),
             });
         }
-        let key = name.to_lowercase();
-        match params.get(&key) {
-            Some(val) => result.push_str(&format!("{val:e}")),
-            None => {
-                return Err(ParseError::Syntax {
-                    line: lineno,
-                    msg: format!("undefined parameter '{name}'"),
-                })
-            }
+        let key = name.trim().to_lowercase();
+        // Fast path: a bare parameter name.
+        if let Some(val) = params.get(&key) {
+            result.push_str(&format!("{val:e}"));
+            continue;
         }
+        // Otherwise evaluate it as an expression over the parameter map.
+        let expr = crate::expr::Expr::parse(&key).map_err(|e| ParseError::Syntax {
+            line: lineno,
+            msg: format!("cannot evaluate parameter expression '{name}': {e}"),
+        })?;
+        let val = expr.eval(&ParamCtx(params));
+        if !val.is_finite() {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!(
+                    "parameter expression '{name}' is not finite — undefined \
+                     parameter, or a reference to a node voltage / time, which \
+                     parameters cannot use"
+                ),
+            });
+        }
+        result.push_str(&format!("{val:e}"));
     }
     Ok(result)
 }
@@ -380,7 +438,7 @@ pub(super) fn expand_instance(
     global_params: &HashMap<String, f64>,
     expanding: &mut HashSet<String>,
     call_lineno: usize,
-) -> Result<Vec<Element>, ParseError> {
+) -> Result<Expansion, ParseError> {
     // Port-count check.
     if call_nets.len() != def.ports.len() {
         return Err(ParseError::SubcktPortCount {
@@ -416,7 +474,29 @@ pub(super) fn expand_instance(
         inst_params.insert(k.clone(), *v);
     }
 
-    let mut result: Vec<Element> = Vec::new();
+    let mut out = Expansion::default();
+    // Model cards declared in this body: local name → per-instance mangled name.
+    // Each instance gets its OWN card built from its own parameters, which is
+    // what makes a `.subckt` usable as a PCell — LEVEL is only ever read from a
+    // card, so without this an instance could not carry its own EO model.
+    let mut local_models: HashMap<String, String> = HashMap::new();
+
+    // Two passes over the body: cards first, so an element line may reference a
+    // model declared below it (SPICE decks are order-independent for `.model`).
+    for (lineno, body_line) in &def.body_lines {
+        let trimmed = body_line.trim();
+        if !trimmed.to_lowercase().starts_with(".model") {
+            continue;
+        }
+        let substituted = substitute_params(trimmed, &inst_params, *lineno)?;
+        if let Some(mut card) = parse_model(&substituted, *lineno)? {
+            let local = card.name.to_lowercase();
+            let mangled = format!("{inst_name}.{local}");
+            local_models.insert(local, mangled.clone());
+            card.name = mangled;
+            out.models.push(card);
+        }
+    }
 
     for (lineno, body_line) in &def.body_lines {
         let lineno = *lineno;
@@ -426,11 +506,12 @@ pub(super) fn expand_instance(
         }
         let lc = trimmed.to_lowercase();
 
-        // Directives consumed by collect_defs — skip.
+        // Directives consumed by collect_defs or the card pass above — skip.
         if lc == ".end"
             || lc.starts_with(".ends")
             || lc.starts_with(".subckt")
             || lc.starts_with(".param")
+            || lc.starts_with(".model")
         {
             continue;
         }
@@ -452,14 +533,25 @@ pub(super) fn expand_instance(
 
         let substituted = substitute_params(trimmed, &inst_params, lineno)?;
         for el in parse_element_expanded(&substituted, lineno)? {
-            let el = remap_element_nodes(el, &port_map, inst_name);
+            let mut el = remap_element_nodes(el, &port_map, inst_name);
+
+            // Point references at this instance's own copy of a local card.
+            // Checked before the subckt lookup so a local model always wins.
+            let mut used_local_model = false;
+            if let Element::XOsdi {
+                ref mut model_name, ..
+            } = el
+            {
+                if let Some(mangled) = local_models.get(model_name.as_str()) {
+                    *model_name = mangled.clone();
+                    used_local_model = true;
+                }
+            }
 
             // Recurse if this element is a nested subckt instance.
-            let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
-                subckt_defs.contains_key(model_name)
-            } else {
-                false
-            };
+            let is_subckt_inst = !used_local_model
+                && matches!(&el, Element::XOsdi { model_name, .. }
+                    if subckt_defs.contains_key(model_name));
 
             if is_subckt_inst {
                 if let Element::XOsdi {
@@ -481,14 +573,15 @@ pub(super) fn expand_instance(
                         expanding,
                         lineno,
                     )?;
-                    result.extend(nested);
+                    out.elements.extend(nested.elements);
+                    out.models.extend(nested.models);
                 }
             } else {
-                result.push(el);
+                out.elements.push(el);
             }
         }
     }
 
     expanding.remove(def_name);
-    Ok(result)
+    Ok(out)
 }

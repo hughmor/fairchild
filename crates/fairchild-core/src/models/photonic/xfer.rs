@@ -603,9 +603,6 @@ mod tests {
         assert_eq!(NativeOptical2x2::split_index("w"), ("w", None));
         assert_eq!(NativeOptical2x2::split_index("dw_dv"), ("dw_dv", None));
         assert_eq!(NativeOptical2x2::split_index("dw_dv_2"), ("dw_dv", Some(2)));
-        assert_eq!(
-            NativeOptical2x2::split_index("s12_mag"),
-            ("s12_mag", None)
-        );
+        assert_eq!(NativeOptical2x2::split_index("s12_mag"), ("s12_mag", None));
     }
 }

@@ -747,15 +747,13 @@ impl PhotonicActiveModel for FullPnDrive {
         let alpha_tpa = self.beta_tpa_m_per_w * intensity / self.a_eff_m2;
         // Extra loss beyond the segment's base α: reverse + forward FCA + TPA.
         // Forward FCA has two equivalent parametrizations (see field docs).
-        let dalpha =
-            self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd + alpha_tpa;
+        let dalpha = self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd + alpha_tpa;
         // Absorbed power uses the TOTAL loss (segment base α + dalpha).
         let alpha_total = self.alpha_neper_m + dalpha;
         let p_abs = alpha_total * self.length_m * intensity;
         let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
         // All three index changes are λ-dependent ⇒ fold into dn_eff.
-        let dn_eff =
-            self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd + dn_self;
+        let dn_eff = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd + dn_self;
 
         OpticalPerturbation {
             dn_eff,

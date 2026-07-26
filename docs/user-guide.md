@@ -348,15 +348,71 @@ re-run with overrides applied.
 
 Any field of `SimOptions` (§7) can be set this way.
 
-### Subcircuits
+### Subcircuits (and PCells)
 
 ```
-.subckt <name>  <p1> <p2> ...
-...
+.subckt <name>  <port1> <port2> …  [param=default …]
+…
 .ends [name]
+
+X<inst>  <net1> <net2> …  <name>  [param=value …]
 ```
 
-Two-pass parse-time flattening; supports nested `.subckt` and `.param`.
+Two-pass parse-time flattening. Instances may nest (with cycle detection);
+nested *definitions* — a `.subckt` inside a `.subckt` — are rejected. Internal
+nets are namespaced `<inst>.<net>`; `0`/`gnd` stays global.
+
+Parameters resolve global `.param` < subckt defaults < call-site overrides, and
+are referenced as `{…}`, which may hold **arithmetic** over parameters, numeric
+literals, `pi`, and the usual functions:
+
+```spice
+.subckt ring in out radius=8e-6 n_g=4.2
+Xwg in out fc_waveguide l_m={2*pi*radius} n_g={n_g}
+.ends
+```
+
+An undefined name, or an expression that evaluates non-finite, is an error —
+never a silent zero.
+
+**`.model` cards inside a `.subckt` are per-instance.** The card is name-mangled
+to `<inst>.<card>` and references from inside that instance are retargeted, so
+each instance carries its own model built from its own parameters. That is what
+makes a `.subckt` a real parameterized cell for photonics, where `LEVEL` is only
+ever read from a card:
+
+```spice
+.subckt mrm_arc a b vpn gnd radius=8e-6 alpha_db_cm=10.7 dn_di=3.99
+.model arc_ps fc_pn_th_ps LEVEL=4 l_m={pi*radius} alpha_db_cm={alpha_db_cm}
++ dn_di={dn_di}
+Xps a b vpn gnd arc_ps
+.ends
+```
+
+**Separate files per cell** work through `.include`, resolved relative to the
+including deck (`Circuit.load`) or the working directory (`Circuit.load_str`).
+See `examples/photonic/pcells/` for `mrm.sp` and `source_bank.sp`, and
+`examples/photonic/native_pcell_link.py` for a deck that includes both.
+
+**Optical bundles across the boundary.** A subcircuit's port list is a flat list
+of nets, so an optical port costs 3 (or 5) tokens — `in_re in_im in_wl`. When an
+instance references a declared `.optical_port`/`.electrical_port`, the port count
+of the subckt picks the semantics:
+
+| Declared ports match | Meaning |
+|---|---|
+| the **flattened** width | one instance carries the whole N-channel bus (a WDM block: N lasers + a mux) |
+| the **per-channel** width | replicate, one instance per channel (a single-channel cell along a bus) |
+
+Anything else is a port-count error naming both candidate widths. The two
+coincide at N=1, so there is nothing to disambiguate there.
+
+Note the consequence for replication: every element inside is duplicated,
+*including electrical ones*. A single-channel ring cell handed an 8-channel bus
+becomes 8 rings — right for a ring bank, but if they share an electrical net
+they also share 8 parallel junctions. Give each replica its own drive with an
+`.electrical_port`, or use a bundle-aware device (`fc_optical_2x2`) when one
+electrical interface must serve every channel.
 
 ### OSDI
 

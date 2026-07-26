@@ -98,8 +98,12 @@ impl BundlePort {
     /// unidirectional, 5 optical bidirectional.
     pub fn wires_per_channel(&self) -> usize {
         match self.kind {
-            BundleKind::Optical { bidirectional: true } => 5,
-            BundleKind::Optical { bidirectional: false } => 3,
+            BundleKind::Optical {
+                bidirectional: true,
+            } => 5,
+            BundleKind::Optical {
+                bidirectional: false,
+            } => 3,
             BundleKind::Electrical => 1,
         }
     }
@@ -112,14 +116,18 @@ impl BundlePort {
     /// Underlying wire names for channel `ch` of this port.
     pub fn wires_for_channel(&self, ch: usize) -> Vec<String> {
         match self.kind {
-            BundleKind::Optical { bidirectional: true } => vec![
+            BundleKind::Optical {
+                bidirectional: true,
+            } => vec![
                 format!("{}_re_fw_{}", self.name, ch),
                 format!("{}_im_fw_{}", self.name, ch),
                 format!("{}_re_bw_{}", self.name, ch),
                 format!("{}_im_bw_{}", self.name, ch),
                 format!("{}_wl_{}", self.name, ch),
             ],
-            BundleKind::Optical { bidirectional: false } => vec![
+            BundleKind::Optical {
+                bidirectional: false,
+            } => vec![
                 format!("{}_re_{}", self.name, ch),
                 format!("{}_im_{}", self.name, ch),
                 format!("{}_wl_{}", self.name, ch),
