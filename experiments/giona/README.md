@@ -22,6 +22,7 @@ scripts here assume the chip's topology, PCB network, and dataset layout.
 | `fit_transient.py` | (machinery + synthetic recovery selftest) | time-domain fitting vs an AWG-drive/scope-PD capture | — |
 | `expt_forward_mismatch.py` | synthetic | model-**form** adequacy: linear vs full PN | 4.6× residual floor gap |
 | `sweep_mod_bank.py` | — | 8-ring cascade spectrum from `netlists/giona_mod_bank_full.sp` | `results/giona_mod_bank_spectrum.png` |
+| `build_frontend.py` | — | generates the chip front-end netlist (source bank → 8-ring bank → 2 mm bus → 1:8 log tree → 8 programmable 2×2 weight blocks) | `netlists/giona_frontend.sp`, `netlists/mrm_wdm8.sp` |
 
 `ringfit.py` is also the shared library: dataset → observables
 (`load_sweep`, `extract_data`), netlist assembly, ring wavelength sweep,
@@ -39,8 +40,10 @@ maturin develop --release -m crates/fairchild-py/Cargo.toml   # once
 - `data/` — raw lightlab `NdSweeper` pickles + extraction caches (`.npz`).
   Gitignored: ~13 GB.
 - `results/` — fitted params (`.json`, committed) and plots (`.png`, ignored).
-- `netlists/` — KiCad SPICE exports of the chip and hand-written testbenches.
-  Gitignored (machine-generated, and the chip layout isn't ours to publish).
+- `netlists/` — KiCad SPICE exports of the chip, hand-written testbenches, and
+  the output of `build_frontend.py`. Gitignored (machine-generated, and the chip
+  layout isn't ours to publish) — regenerate with
+  `.venv/bin/python experiments/giona/build_frontend.py`.
 - `kicad/` — the KiCad working project for the chip. Gitignored. Its
   `sym-lib-table` resolves the shared symbol library out of
   `examples/kicad_photonics/`, so there is only one copy of it.
