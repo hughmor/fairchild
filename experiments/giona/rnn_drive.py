@@ -41,35 +41,52 @@ def op(W, pdb, powers):
     c = fc.Circuit(); c.load_str(src(W, pdb, powers)); r = c.run("op")
     return np.array([float(r[f"V(mod_cathode{i+1})"][0]) for i in range(N)])
 
-def solve_bias(W, powers, v_star, n_active=2, iters=12, verbose=True):
-    """Per-neuron PD_B so every neuron rests at v_star WITH the weights applied.
+def solve_bias(W, powers, v_star, n_active=2, iters=14, verbose=True):
+    """Per-neuron PD_B so every active neuron rests at v_star, WITH weights on.
 
-    The rule: choose the rest state for all neurons at once, and the required
-    bias follows — no iteration on the recurrence itself. Here the residual
-    algebra (2k/10k network + clamping diode) is mopped up with a secant, the
-    slope re-measured each step because the diode stiffens as it turns on.
+    The rule: choose the rest state for all neurons at once and the required bias
+    follows in closed form, because then every T_j(I*) is a known constant — no
+    iteration on the recurrence itself. What remains is only the residual algebra
+    of the bias network (2k || 10k plus a clamping diode), and that is what this
+    solves numerically.
+
+    It uses a COUPLED Newton on the full n_active x n_active sensitivity matrix
+    dV_i/dPD_B_j, not per-neuron secants. Independent secants work only while
+    each bias mostly moves its own neuron; once the differential mode goes
+    unstable (2*G > 1, the winner-take-all regime we actually want) the
+    off-diagonal terms dominate and per-neuron updates chase their own tails —
+    that showed up as a 45 mV residual at 60 mW/channel.
+
+    Raises if the residual stays above 5 mV rather than returning whatever the
+    last iterate happened to be: a silently-wrong operating point is worse than
+    no answer (an early version "converged" to PD_B = +17 V, reverse-biasing the
+    junctions so hard there was no gain at all).
     """
     pdb = np.full(N, -9.0)
+    h = 0.2
     for it in range(iters):
         v = op(W, pdb, powers)
         err = v[:n_active] - v_star
         if verbose:
-            print(f"    bias iter {it}: V={np.round(v[:n_active],5)} "
-                  f"max|err|={np.abs(err).max()*1e3:7.3f} mV", flush=True)
+            print(f"    bias iter {it}: V={np.round(v[:n_active], 5)} "
+                  f"max|err|={np.abs(err).max() * 1e3:7.3f} mV", flush=True)
         if np.abs(err).max() < 1e-3:
             break
-        v2 = op(W, pdb - 0.25, powers)
-        slope = (v - v2) / 0.25
-        slope = np.where(np.abs(slope) > 1e-4, slope, 1/6)
-        # Damped + step-limited: the undamped secant rings, because the diode's
-        # incremental stiffness changes faster than the secant's memory of it.
-        step = -0.65 * err / slope[:n_active]
-        step = np.clip(step, -2.0, 2.0)
-        # A POSITIVE bias can never forward-bias the junction, so the solution
-        # lives in [-40, 0]. Without the clamp the secant can wander into
-        # positive territory, where the diode is fully off, the slope collapses,
-        # and it converges to a reverse-biased nonsense point (+17 V was a real
-        # outcome) — and silently returns it.
+        # Numerical sensitivity matrix: column j is the response of every active
+        # neuron to neuron j's bias.
+        J = np.zeros((n_active, n_active))
+        for j in range(n_active):
+            pj = pdb.copy()
+            pj[j] -= h
+            J[:, j] = (v[:n_active] - op(W, pj, powers)[:n_active]) / h
+        try:
+            step = -np.linalg.solve(J, err)
+        except np.linalg.LinAlgError:
+            step = -err / np.where(np.abs(np.diag(J)) > 1e-4, np.diag(J), 1 / 6)
+        # Damp and step-limit: the diode's incremental stiffness changes faster
+        # than a linearisation can track. Clamp to negative bias — a positive one
+        # can never forward-bias the junction, so it cannot be a solution.
+        step = np.clip(0.7 * step, -2.0, 2.0)
         pdb[:n_active] = np.clip(pdb[:n_active] + step, -40.0, -0.2)
     v = op(W, pdb, powers)
     resid = np.abs(v[:n_active] - v_star).max()
@@ -78,6 +95,7 @@ def solve_bias(W, powers, v_star, n_active=2, iters=12, verbose=True):
             f"bias solve did not converge: |V - V*| = {resid * 1e3:.2f} mV, "
             f"PD_B={np.round(pdb[:n_active], 3)}, V={np.round(v[:n_active], 5)}")
     return pdb, v
+
 
 def transient(W, pdb, powers, step, stop, kick):
     c = fc.Circuit(); c.load_str(src(W, pdb, powers, tran=(step, stop), kick=kick))
