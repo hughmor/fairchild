@@ -153,18 +153,85 @@ def fig_dynamics(out, traces):
     print(f"wrote {out}")
 
 
+def fig_wta(out, files):
+    """Winner-take-all: the latch, the optical outcome, and the decision curve."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    runs = []
+    for f in files:
+        d = np.load(f)
+        runs.append(dict(t=d["t"] * 1e9, v=d["v"], bus=d["bus"],
+                         in_w=d["in_w"], p=float(d["p"])))
+    runs.sort(key=lambda r: r["in_w"][0] - r["in_w"][1])
+    seen, uniq = set(), []
+    for r in runs:
+        key = round(float(r["in_w"][0] - r["in_w"][1]), 3)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    runs = uniq
+
+    # The two most decisive runs, for the time-domain panels.
+    lo, hi = runs[0], runs[-1]
+    fig, ax = plt.subplots(2, 3, figsize=(15, 8))
+
+    for col, r in ((0, lo), (1, hi)):
+        w = r["in_w"]
+        ax[0, col].plot(r["t"], r["v"][0] * 1e3, lw=1.4, label="neuron 1")
+        ax[0, col].plot(r["t"], r["v"][1] * 1e3, lw=1.4, label="neuron 2")
+        ax[0, col].axvline(5, color="k", ls=":", lw=0.8)
+        ax[0, col].set_title(f"input (w13, w23) = ({w[0]:.2f}, {w[1]:.2f})",
+                             fontsize=10)
+        ax[0, col].set_ylabel("V(mod_cathode) (mV)")
+        ax[0, col].legend(fontsize=8)
+        ax[0, col].grid(alpha=0.3)
+        ax[1, col].plot(r["t"], r["bus"][0], lw=1.4, label="λ1 on bus")
+        ax[1, col].plot(r["t"], r["bus"][1], lw=1.4, label="λ2 on bus")
+        ax[1, col].axvline(5, color="k", ls=":", lw=0.8)
+        ax[1, col].set_xlabel("time (ns)")
+        ax[1, col].set_ylabel("bus power (mW)")
+        ax[1, col].legend(fontsize=8)
+        ax[1, col].grid(alpha=0.3)
+
+    # Decision curve: final differential vs input asymmetry.
+    asym = np.array([r["in_w"][0] - r["in_w"][1] for r in runs])
+    split = np.array([(r["v"][0][-1] - r["v"][1][-1]) * 1e3 for r in runs])
+    a = ax[0, 2]
+    a.plot(asym, split, "o-", lw=1.5)
+    a.axhline(0, color="k", lw=0.6)
+    a.axvline(0, color="k", lw=0.6)
+    a.set_xlabel("input asymmetry  w13 − w23")
+    a.set_ylabel("final V1 − V2 (mV)")
+    a.set_title("Decision curve: the input picks the basin", fontsize=10)
+    a.grid(alpha=0.3)
+
+    a = ax[1, 2]
+    contrast = np.array([r["bus"][0][-1] - r["bus"][1][-1] for r in runs])
+    a.plot(asym, contrast, "s-", lw=1.5, color="tab:green")
+    a.axhline(0, color="k", lw=0.6)
+    a.axvline(0, color="k", lw=0.6)
+    a.set_xlabel("input asymmetry  w13 − w23")
+    a.set_ylabel("final bus λ1 − λ2 (mW)")
+    a.set_title("Optical contrast between the two channels", fontsize=10)
+    a.grid(alpha=0.3)
+
+    fig.suptitle(f"giona RNN — winner-take-all, W_rec = [[1,−1],[−1,1]], "
+                 f"{runs[0]['p']:.0f} mW/channel")
+    fig.tight_layout()
+    fig.savefig(out, dpi=115)
+    print(f"wrote {out}")
+
+
 def main() -> int:
     RESULTS.mkdir(exist_ok=True)
     fig_rest_point(RESULTS / "rnn_rest_point.png")
     scratch = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     if scratch and scratch.is_dir():
-        found = sorted(scratch.glob("h_*.npz"))
-        if found:
-            traces = []
-            for f in found:
-                d = np.load(f)
-                traces.append((f"{float(d['p']):.0f} mW, V*={float(d['v_star']):.2f} V", f))
-            fig_dynamics(RESULTS / "rnn_dynamics.png", traces[:4])
+        wta = sorted(scratch.glob("w3_30_*.npz")) + sorted(scratch.glob("c3_*.npz"))
+        if len(wta) >= 3:
+            fig_wta(RESULTS / "rnn_wta.png", wta)
     return 0
 
 
