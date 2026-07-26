@@ -24,7 +24,7 @@ use crate::mna::MnaMatrix;
 ///    anode, cathode]
 ///
 /// The parser does NOT replicate this device (see fairchild-parser's
-/// `expand_optical_ports` exception list) — instead the device flattens all
+/// `expand_bundle_ports` exception list) — instead the device flattens all
 /// channels into one terminal block.  Photocurrent
 /// `I_ph = responsivity · Σ_k (re_k² + im_k²) + i_dark` is computed in one
 /// place; the shunt `1/r_shunt` is stamped once between anode and cathode.

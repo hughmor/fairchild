@@ -10,7 +10,8 @@ use crate::models::{
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
     thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeCirculator,
     NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler, NativeMux,
-    NativeMzm, NativePhotodetector, NativeSplitter, NativeWaveguide, ShockleyDiode,
+    NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
+    ShockleyDiode,
 };
 
 /// The set of instance parameters from an `X…` element line, threaded into a
@@ -468,6 +469,7 @@ impl DeviceRegistry {
         self.register_default::<NativeCwLaser>("fc_cw_laser");
         self.register_default::<NativeMux>("fc_mux");
         self.register_default::<NativeDemux>("fc_demux");
+        self.register_default::<NativeOptical2x2>("fc_optical_2x2");
 
         // Active phase shifters (built by constructors → ActiveOpticalDevice).
         self.register_ctor("fc_thermal_ps", thermal_phase_shifter);

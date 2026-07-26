@@ -26,6 +26,7 @@ pub mod segment;
 pub mod splitter;
 pub mod waveguide;
 pub mod wdm;
+pub mod xfer;
 
 pub use active::{
     expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
@@ -44,6 +45,7 @@ pub use segment::OpticalSegment;
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;
 pub use wdm::{NativeDemux, NativeMux};
+pub use xfer::NativeOptical2x2;
 
 // ── Shared photonic stamping utilities ─────────────────────────────────────
 

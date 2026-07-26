@@ -380,6 +380,23 @@ amplitude and per-channel wavelength. Photonic device instances on the bundle
 are auto-replicated per channel. See §12.
 
 ```
+.electrical_port  <name>  [<N>]
+```
+
+The electrical sibling: one plain wire per channel, `name_0 … name_{N-1}`.
+Like `.optical_port` it makes `name` usable as a *single net token* on an
+X-element line, which the parser expands in place. This is how a bundle-aware
+device takes one control signal per WDM channel without needing a per-N variant
+of the device — see `fc_optical_2x2`. These wires stay in the **electrical**
+discipline, so ordinary `V`/`I`/`R`/`C` may drive them.
+
+Both directives create a *port*. Contrast `.optical <net> …` and
+`.optical_bus <N> <re_base> <im_base> <wl_base>`, which are **discipline
+annotations only** — they tag already-named nets as optical and create nothing
+you can reference by a single name. `.optical_port NAME N` does strictly more
+than `.optical_bus`; the latter is kept for older netlists.
+
+```
 net[M..N]    expands to net_M, net_{M+1}, ..., net_N
 ```
 
@@ -623,7 +640,8 @@ The parser dispatches per the centralised `BundleArity` table in
 
 - **`BundleArity::Aware`** (default for photonics): `fc_waveguide`,
   `fc_splitter`, `fc_dcoupler`, `fc_grating_coupler`, `fc_pn_ps`,
-  `fc_thermal_ps`, `fc_photodetector`. The parser flattens every bundle
+  `fc_thermal_ps`, `fc_photodetector`, `fc_optical_2x2`. The parser
+  flattens every bundle
   into its underlying wires and emits ONE X-element with the combined
   terminal vector; the device's `setup_instance` derives the channel
   count from `terminals.len()`. Pure-optical devices run independent
@@ -797,6 +815,79 @@ resonators) and causes the PN PS to read `λ ≈ 0`. Both outputs now route
 the input-arm-`a` wavelength. For asymmetric WDM topologies where you
 genuinely want different wavelengths on the two arms, that's a future
 device — file an issue.
+
+### `fc_optical_2x2` — behavioural per-channel 2×2 transfer block
+
+```
+X<name>  in1 in2 thru drop  wctl  ctl_ret  fc_optical_2x2  [param=val …]
+```
+
+A 2-in/2-out block whose response you *specify* rather than derive, with an
+independent matrix per wavelength channel:
+
+```
+[ thru ]   [ s11  s12 ] [ in1 ]
+[ drop ] = [ s21  s22 ] [ in2 ]
+```
+
+The motivating case is a weight bank — a cascade of ring modulators sharing a
+through bus and a drop bus — collapsed to one instance with N weights. That
+drops the rings' free parameters and, more importantly, their resonance: with no
+resonance the transient timestep is set by your electronics rather than by a
+sub-round-trip optical constraint.
+
+Terminals are `4·wpc·N + N + 1`: the four optical bundle ports (all N channels
+of each, in port order), then N control wires, then one shared control return.
+Declare it with vector ports and the netlist scales by changing one number:
+
+```
+.optical_port     in1  4
+.optical_port     in2  4
+.optical_port     thru 4
+.optical_port     drop 4
+.electrical_port  wctl 4
+Xwb in1 in2 thru drop wctl 0 fc_optical_2x2 w=0 dw_dv=0.4
+```
+
+A control bus whose width disagrees with the optical ports is a parse error —
+that check lives in the parser, the only layer that still knows each port's
+declared width.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `w`, `w_<k>` | 0 | Bipolar weight, clamped to [−1, 1]. Defined so `P_drop − P_thru = w·P_in`: `−1` all-through, `+1` all-drop, `0` a 50/50 split. Passivity is automatic. |
+| `dw_dv`, `dw_dv_<k>` | 0 | Weight per volt on that channel's control wire. This is what moves a weight *during* a transient — `set_param` only works between runs. |
+| `s11_mag_<k>` … `s22_deg_<k>` | identity-ish | Explicit matrix entries (magnitude, phase in degrees). Setting any switches that channel out of weight mode. |
+| `il_db` | 0 | Extra insertion loss, power dB, applied to every entry. |
+| `tau_s` | 0 | Latency (s). Engages a delay line in transient. |
+| `allow_gain` | 0 | Permit a matrix with largest singular value > 1. |
+
+Unindexed parameter names broadcast to every channel; the `_<k>` form overrides
+one. So `w=0 w_2=0.8` sets channel 2 only.
+
+**Weight mode** builds the lossless coupler-form matrix `s11 = s22 = cos θ`,
+`s12 = s21 = −j sin θ` with `θ = ½·acos(−w)` — exactly the `fc_dcoupler` matrix
+at `κL = θ`, but with `w` (the number a balanced photodetector pair reads)
+as the knob instead of a coupling length.
+
+**Latency caveat.** What `tau_s` delays is the *field*: the output is
+`S(t)·in(t − τ)`, matching `OpticalSegment`. A step on a control voltage
+therefore reaches the output immediately; only a step on the input field is
+delayed. Also note resolving a latency needs a timestep of order `tau_s`, so
+leave it at 0 when you want the speed.
+
+**Passivity guard.** An explicit matrix with gain is rejected unless
+`allow_gain=1`, because a gain block inside a feedback path diverges silently.
+Weight mode is unitary by construction and its clamp keeps it that way under
+any control voltage.
+
+**Not yet supported.** Bidirectional mode (`.options enable_bidirectional=1`):
+the backward-travelling fields would need their own matrix, and reflection
+entries only become meaningful there. The device rejects it outright rather
+than leaving the backward wires undriven.
+
+Worked example: `examples/photonic/native_weight_bank.py` (4 channels, balanced
+PD pair, weights swept by their control wires inside one `.tran`).
 
 ### `fc_splitter` — 1×2 Y-junction (configurable loss + asymmetry)
 
@@ -1560,7 +1651,7 @@ For variable-arity (e.g. an N-channel waveguide), use `Vec<NodeId>` for
 nodes, derive N from `terminals.len()` in `setup_instance`, and loop
 over channels in `load_jacobian`. `NativeMux` / `NativeDemux` are the
 worked examples. The parser side requires adding the device's model
-name to the "don't replicate" list in `expand_optical_ports`.
+name to the `BundleArity` table read by `expand_bundle_ports`.
 
 ### 13.4 Verilog-A ↔ Rust cheat sheet
 
@@ -1646,7 +1737,8 @@ will pick up your new device automatically once it's registered.
 The parser-side `.optical_port` bundle handling DOES need a touch if
 your device is variable-arity (treats the bundle as multi-channel
 internally) — add its name to the "don't replicate" list in
-`expand_optical_ports`. Pure scalar devices don't need this.
+`bundle_arity_for` (read by `expand_bundle_ports`). Pure scalar
+devices don't need this.
 
 If you find yourself wanting a more general extension point (e.g. a
 plugin registry that loads compiled `.so` files from outside the

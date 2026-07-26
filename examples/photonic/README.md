@@ -41,6 +41,18 @@ no Norton hack.  These are the recommended starting points.
   is needed: each wavelength is its own bundle channel, and the
   parser's per-channel replication does the routing automatically.
 
+- **`native_weight_bank.py`** — WDM weight bank built on `fc_optical_2x2`, the
+  behavioural 2×2 transfer block: one instance stands in for a cascade of ring
+  modulators sharing a through bus and a drop bus, with an independent bipolar
+  weight per wavelength feeding a balanced photodetector pair. Shows the two
+  things a static ring netlist can't do — one control wire per channel via
+  `.electrical_port wctl N` (so the netlist scales by changing one number), and
+  weights swept by those control voltages *inside* a single `.tran`. Reach for
+  this when the interesting physics is downstream of the weights (the O/E/O
+  nonlinearity, the receiver) and the rings are just free parameters and a
+  timestep constraint. `--selftest` asserts the weights, passivity, and that the
+  balanced output tracks Σ w_k(t).
+
 ## Legacy (`legacy/`)
 
 The older examples use the pre-B1 OSDI-based photonic models with the

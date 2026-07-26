@@ -51,6 +51,7 @@ expansion.
 | CW laser | `fc_cw_laser` |
 | Waveguide | `fc_waveguide` |
 | 2×2 directional coupler | `fc_dcoupler` |
+| Behavioural 2×2 transfer block | `fc_optical_2x2` |
 | Y-splitter | `fc_splitter` |
 | Grating coupler | `fc_grating_coupler` |
 | 3-port circulator (bidir) | `fc_circulator` |

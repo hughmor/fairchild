@@ -27,7 +27,7 @@ use crate::mna::MnaMatrix;
 // The parser knows these two model names are "bundle-bridging" and must
 // (a) skip the channel-count matching check and (b) emit a single instance
 // with every bundle flattened to its underlying wires.  See
-// `expand_optical_ports` in fairchild-parser.
+// `expand_bundle_ports` in fairchild-parser.
 
 /// Identity-routing combiner: N single-channel optical bundles → 1 N-channel
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.

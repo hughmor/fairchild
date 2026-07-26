@@ -1,6 +1,6 @@
 //! Regression tests for the `enable_bidirectional` option (C.1 plumbing only).
 //!
-//! At this commit the flag flows through `.options` → parser → `OpticalPort`
+//! At this commit the flag flows through `.options` → parser → `BundlePort`
 //! wire emission AND `SimOptions::bidirectional_propagation` → `SimContext`.
 //! Photonic devices haven't been refactored to USE the 5-wire bundles yet
 //! (C.2), so any netlist that *enables* bidir and references a port from a
@@ -21,9 +21,9 @@ fn default_optical_port_emits_3_wires() {
 ",
     )
     .unwrap();
-    let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
-    let bus = net.optical_ports.iter().find(|p| p.name == "bus").unwrap();
-    assert!(!ch0.bidirectional);
+    let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
+    let bus = net.bundle_ports.iter().find(|p| p.name == "bus").unwrap();
+    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: false });
     assert_eq!(ch0.wires_per_channel(), 3);
     let names = ch0.wires_for_channel(0);
     assert_eq!(names, vec!["ch0_re_0", "ch0_im_0", "ch0_wl_0"]);
@@ -48,9 +48,9 @@ fn enable_bidirectional_emits_5_wires() {
 ",
     )
     .unwrap();
-    let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
-    let bus = net.optical_ports.iter().find(|p| p.name == "bus").unwrap();
-    assert!(ch0.bidirectional);
+    let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
+    let bus = net.bundle_ports.iter().find(|p| p.name == "bus").unwrap();
+    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: true });
     assert_eq!(ch0.wires_per_channel(), 5);
     let names = ch0.wires_for_channel(0);
     assert_eq!(
@@ -81,8 +81,12 @@ fn enable_bidirectional_aliases() {
     ] {
         let src = format!(".options {keyword}=1\n.optical_port ch0\n.op\n.end\n");
         let net = parse_spice(&src).unwrap();
-        let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
-        assert!(ch0.bidirectional, "{keyword} should enable bidir");
+        let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
+        assert_eq!(
+            ch0.kind,
+            fairchild_parser::BundleKind::Optical { bidirectional: true },
+            "{keyword} should enable bidir"
+        );
     }
 }
 
@@ -98,6 +102,6 @@ fn enable_bidirectional_zero_stays_off() {
 ",
     )
     .unwrap();
-    let ch0 = net.optical_ports.iter().find(|p| p.name == "ch0").unwrap();
-    assert!(!ch0.bidirectional);
+    let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
+    assert_eq!(ch0.kind, fairchild_parser::BundleKind::Optical { bidirectional: false });
 }

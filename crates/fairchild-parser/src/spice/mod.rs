@@ -9,8 +9,8 @@ pub use bundles::{bundle_arity_for, BundleArity};
 
 // Pull internal helpers into scope so parse_spice + the test module can call
 // them unqualified (as they did before the split).
-use bundles::{expand_optical_ports, scan_bidirectional};
-use common::{canon_node, expand_bus_vectors, parse_value};
+use bundles::{expand_bundle_ports, scan_bidirectional};
+use common::{canon_node, expand_bus_vectors, parse_port_decl, parse_value};
 use directives::{
     is_silent_directive, parse_ac, parse_dc, parse_measure, parse_node_assignments, parse_noise,
     parse_options_directive, parse_tran,
@@ -96,37 +96,47 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 model_overrides: Vec::new(),
             });
         } else if lc.starts_with(".optical_port") {
-            // .optical_port NAME [N]  — declare a bundle port that expands
-            // to 3·N underlying wires (re/im/λ per channel).  Subsequent
-            // X-element lines that reference NAME as a net token are
-            // expanded; for N>1 the X-instance is also replicated per
-            // channel.  All underlying wires are registered as optical
-            // nets so the discipline check works as before.
-            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            if tokens.len() >= 2 {
-                let name = canon_node(tokens[1]);
-                let channels = if tokens.len() >= 3 {
-                    tokens[2].parse::<usize>().map_err(|_| ParseError::Syntax {
-                        line: *lineno,
-                        msg: format!("invalid channel count '{}' in .optical_port", tokens[2]),
-                    })?
-                } else {
-                    1
-                };
-                let port = crate::OpticalPort {
-                    name,
-                    channels,
-                    bidirectional,
-                };
-                for w in port.all_wires() {
-                    netlist.optical_nets.push(w);
-                }
-                netlist.optical_ports.push(port);
+            // .optical_port NAME [N]  — declare a bundle PORT that expands to
+            // 3·N underlying wires (re/im/λ per channel), or 5·N when
+            // bidirectional.  Unlike `.optical` / `.optical_bus` below, this
+            // creates a *referenceable* port: subsequent X-element lines may
+            // use NAME as a single net token, which `expand_bundle_ports`
+            // flattens (bundle-aware devices) or replicates per channel
+            // (scalar devices).  All underlying wires are also registered as
+            // optical nets so the discipline check works as before.
+            let (name, channels) = parse_port_decl(trimmed, ".optical_port", *lineno)?;
+            let port = crate::BundlePort {
+                name,
+                channels,
+                kind: crate::BundleKind::Optical { bidirectional },
+            };
+            for w in port.all_wires() {
+                netlist.optical_nets.push(w);
             }
+            netlist.bundle_ports.push(port);
+        } else if lc.starts_with(".electrical_port") {
+            // .electrical_port NAME [N]  — the electrical sibling of
+            // `.optical_port`: one plain wire per channel (NAME_0 … NAME_{N-1}),
+            // referenceable as a single net token on an X-line.  This is how a
+            // bundle-aware device takes one control signal per WDM channel
+            // without needing a per-N device variant.
+            //
+            // Deliberately NOT registered in `optical_nets` — these wires stay
+            // in the electrical discipline, so ordinary V/I/R/C may drive them.
+            let (name, channels) = parse_port_decl(trimmed, ".electrical_port", *lineno)?;
+            netlist.bundle_ports.push(crate::BundlePort {
+                name,
+                channels,
+                kind: crate::BundleKind::Electrical,
+            });
         } else if lc.starts_with(".optical_bus") {
             // .optical_bus N re_base im_base wl_base
-            // Declares an N-channel WDM optical bus, generating 3N net entries:
-            //   re_base_0 im_base_0 wl_base_0  re_base_1 im_base_1 wl_base_1  ...
+            // DISCIPLINE ANNOTATION ONLY — tags 3N generated net names as
+            // optical:
+            //   re_base_0 im_base_0 wl_base_0  re_base_1 im_base_1 wl_base_1 …
+            // It creates no referenceable port, so X-lines must spell out the
+            // individual wire names.  `.optical_port NAME N` is the modern
+            // equivalent and does strictly more; this stays for older netlists.
             // Must come before the ".optical" check.
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
             if tokens.len() >= 5 {
@@ -140,7 +150,8 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 }
             }
         } else if lc.starts_with(".optical") {
-            // Must come before ".op" check.
+            // DISCIPLINE ANNOTATION ONLY (see `.optical_bus` above) — tags
+            // already-named nets as optical.  Must come before ".op" check.
             // Supports bus-vector notation: .optical net[0..3] expands to net_0 net_1 net_2 net_3
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
             for tok in &tokens[1..] {
@@ -206,7 +217,7 @@ pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
                 // Returns one XOsdi per channel; for non-XOsdi elements or
                 // unreferenced ports, returns a single-element vec.
                 let expanded_elements =
-                    expand_optical_ports(base_el, &netlist.optical_ports, *lineno)?;
+                    expand_bundle_ports(base_el, &netlist.bundle_ports, *lineno)?;
 
                 for el in expanded_elements {
                     let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
@@ -918,7 +929,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(net.title, "", "no title comment present");
-        assert_eq!(net.optical_ports.len(), 2, "both ports should parse");
+        assert_eq!(net.bundle_ports.len(), 2, "both ports should parse");
         assert_eq!(net.elements.len(), 1, "Xwg should be present");
     }
 
@@ -944,9 +955,9 @@ mod tests {
              Xwg portin portout some_model\n.end\n",
         )
         .unwrap();
-        assert_eq!(net.optical_ports.len(), 2);
-        assert_eq!(net.optical_ports[0].name, "portin");
-        assert_eq!(net.optical_ports[0].channels, 1);
+        assert_eq!(net.bundle_ports.len(), 2);
+        assert_eq!(net.bundle_ports[0].name, "portin");
+        assert_eq!(net.bundle_ports[0].channels, 1);
         // Single XOsdi (max_n = 1); nets list is 6 wires (3 per port).
         assert_eq!(net.elements.len(), 1);
         match &net.elements[0] {
@@ -994,7 +1005,7 @@ mod tests {
              Xwg bus_in bus_out some_model L_um=100\n.end\n",
         )
         .unwrap();
-        assert_eq!(net.optical_ports[0].channels, 4);
+        assert_eq!(net.bundle_ports[0].channels, 4);
         // 4 channels → 4 device instances.
         assert_eq!(net.elements.len(), 4);
         for ch in 0..4 {
@@ -1022,6 +1033,81 @@ mod tests {
                 _ => panic!("expected XOsdi"),
             }
         }
+    }
+
+    /// `.electrical_port NAME N` expands to one plain wire per channel, in
+    /// place, alongside the optical bundles — this is what lets one
+    /// bundle-aware instance take a per-WDM-channel control signal.
+    #[test]
+    fn electrical_port_expands_one_wire_per_channel() {
+        let net = parse_spice(
+            "* control bus test\n\
+             .optical_port bus 3\n\
+             .optical_port out 3\n\
+             .electrical_port wctl 3\n\
+             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n.end\n",
+        )
+        .unwrap();
+        let ctl = net
+            .bundle_ports
+            .iter()
+            .find(|p| p.name == "wctl")
+            .expect("electrical port declared");
+        assert_eq!(ctl.channels, 3);
+        assert_eq!(ctl.wires_per_channel(), 1);
+        assert!(!ctl.is_optical());
+        // Electrical wires must NOT be filed as optical nets, or the discipline
+        // check would reject an ordinary voltage source driving them.
+        for w in ctl.all_wires() {
+            assert!(
+                !net.optical_nets.contains(&w),
+                "{w} must stay electrical"
+            );
+        }
+        // fc_dcoupler is bundle-Aware → one instance, bundles flattened in
+        // declaration order: 9 optical + 9 optical + 3 control + literal "0".
+        assert_eq!(net.elements.len(), 1);
+        let Element::XOsdi { nets, .. } = &net.elements[0] else {
+            panic!("expected XOsdi");
+        };
+        assert_eq!(nets.len(), 9 + 9 + 3 + 1);
+        assert_eq!(&nets[18..], &["wctl_0", "wctl_1", "wctl_2", "0"]);
+    }
+
+    /// The per-instance width check must span kinds: a 4-channel optical bus
+    /// with a 2-wire control bus on the same bundle-aware device is meaningless
+    /// and must fail at parse time, naming both ports.
+    #[test]
+    fn electrical_port_width_mismatch_with_optical_errors() {
+        let err = parse_spice(
+            "* bad widths\n\
+             .optical_port bus 4\n\
+             .optical_port out 4\n\
+             .electrical_port wctl 2\n\
+             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("same channel count"), "{msg}");
+        assert!(msg.contains("bus(optical, 4 ch)"), "{msg}");
+        assert!(msg.contains("wctl(electrical, 2 ch)"), "{msg}");
+    }
+
+    /// Differing widths are only an error *within one instance*. A netlist may
+    /// mix a 4-channel optical bus and an 8-wire control bus that never meet.
+    #[test]
+    fn differing_bus_widths_are_fine_across_instances() {
+        let net = parse_spice(
+            "* independent buses\n\
+             .optical_port bus 4\n\
+             .optical_port out 4\n\
+             .electrical_port wide 8\n\
+             Xwg bus out fc_waveguide L_um=100\n\
+             R1 wide_0 wide_7 1k\n.end\n",
+        )
+        .unwrap();
+        assert_eq!(net.bundle_ports.len(), 3);
+        assert_eq!(net.elements.len(), 2);
     }
 
     #[test]

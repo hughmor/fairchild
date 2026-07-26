@@ -1,5 +1,35 @@
 use crate::ParseError;
 
+/// Parse a `.<directive> NAME [N]` vector-port declaration into
+/// `(canonical name, channel count)`.  Shared by `.optical_port` and
+/// `.electrical_port` so both reject a bad count the same way.
+pub(super) fn parse_port_decl(
+    line: &str,
+    directive: &str,
+    lineno: usize,
+) -> Result<(String, usize), crate::ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return Err(crate::ParseError::Syntax {
+            line: lineno,
+            msg: format!("{directive} needs a port name"),
+        });
+    }
+    let channels = if tokens.len() >= 3 {
+        tokens[2]
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or_else(|| crate::ParseError::Syntax {
+                line: lineno,
+                msg: format!("invalid channel count '{}' in {directive}", tokens[2]),
+            })?
+    } else {
+        1
+    };
+    Ok((canon_node(tokens[1]), channels))
+}
+
 pub(super) fn canon_node(s: &str) -> String {
     let s = s.to_lowercase();
     if s == "gnd" {

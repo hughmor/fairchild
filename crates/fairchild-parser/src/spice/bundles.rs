@@ -26,7 +26,7 @@ pub(super) fn scan_bidirectional(main_lines: &[(usize, String)]) -> bool {
 }
 
 /// How a device handles WDM bundles, from the *parser's* perspective.  Drives
-/// `expand_optical_ports`: whether to replicate the X-element per channel or
+/// `expand_bundle_ports`: whether to replicate the X-element per channel or
 /// flatten the bundle into one instance.
 ///
 /// This is the single source of truth for WDM dispatch.  When you add a new
@@ -41,8 +41,17 @@ pub enum BundleArity {
     /// Bundle-aware — parser flattens *every* referenced bundle into its
     /// underlying wires and emits a SINGLE X-element with the combined
     /// terminal vector.  The device's `setup_instance` derives the channel
-    /// count from `terminals.len()`.  All referenced bundles must agree on
-    /// their channel count.
+    /// count from `terminals.len()`.
+    ///
+    /// All bundles referenced by one such instance must agree on their channel
+    /// count — optical AND electrical alike, since a device that takes one
+    /// control wire per WDM channel is only well-defined when the two widths
+    /// match.  This is a *per-instance* rule, not a global one: a netlist may
+    /// freely mix a 4-channel optical bus with an 8-wire electrical bus as long
+    /// as no single `Aware` instance straddles both.  Enforced in
+    /// [`expand_bundle_ports`], which is the only layer that knows each port's
+    /// declared width — by the time the device sees a flat terminal vector the
+    /// grouping is no longer recoverable.
     Aware,
     /// Bundle bridge (e.g. `fc_mux`, `fc_demux`) — like `Aware`, but skips
     /// the matching-channel-count check (one side intentionally has N
@@ -69,7 +78,7 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
         // not the exception.
         "fc_waveguide" | "fc_splitter" | "fc_dcoupler" | "fc_grating_coupler" | "fc_pn_ps"
         | "fc_pn_ps_cap" | "fc_pn_th_ps" | "fc_thermal_ps" | "fc_thermal_ps_rc" | "fc_mzm"
-        | "fc_photodetector" | "fc_circulator" => BundleArity::Aware,
+        | "fc_photodetector" | "fc_circulator" | "fc_optical_2x2" => BundleArity::Aware,
         // `fc_cw_laser` deliberately stays Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for
         // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
@@ -79,12 +88,16 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
 }
 
 /// Expand any tokens in an XOsdi element's net list that match a declared
-/// `.optical_port`.  Returns one XOsdi per channel (most ports have channels
-/// = 1, so most lines return a single element).  Non-XOsdi elements are
-/// passed through unchanged.
-pub(super) fn expand_optical_ports(
+/// `.optical_port` / `.electrical_port`.  Returns one XOsdi per channel for
+/// `Scalar` devices (most ports have channels = 1, so most lines return a
+/// single element) and exactly one for `Aware` / `Bridge` devices.  Non-XOsdi
+/// elements are passed through unchanged.
+///
+/// This is also where the per-instance channel-count agreement is enforced for
+/// `Aware` devices — see [`BundleArity::Aware`].
+pub(super) fn expand_bundle_ports(
     el: Element,
-    ports: &[crate::OpticalPort],
+    ports: &[crate::BundlePort],
     lineno: usize,
 ) -> Result<Vec<Element>, ParseError> {
     let Element::XOsdi {
@@ -147,13 +160,27 @@ pub(super) fn expand_optical_ports(
         }]);
     }
     // Validate consistent channel count when more than one port is involved.
+    // A bundle-aware device serves all its channels from one instance, so a
+    // 4-channel optical bus alongside a 2-wire control bus has no meaning —
+    // and by the time the device sees a flat terminal vector, the grouping is
+    // unrecoverable. Reject it here, naming each port so the fix is obvious.
     let max_n = channel_counts.iter().copied().max().unwrap_or(1);
     if channel_counts.iter().any(|&n| n != max_n) {
+        let detail = port_refs
+            .iter()
+            .flatten()
+            .map(|&i| {
+                let p = &ports[i];
+                let kind = if p.is_optical() { "optical" } else { "electrical" };
+                format!("{}({kind}, {} ch)", p.name, p.channels)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(ParseError::Syntax {
             line: lineno,
             msg: format!(
-                "X{name}: bundle ports must have matching channel counts, got {:?}",
-                channel_counts
+                "X{name}: every bundle port on one instance must declare the same \
+                 channel count; got {detail}"
             ),
         });
     }

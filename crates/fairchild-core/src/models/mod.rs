@@ -11,7 +11,8 @@ pub use photonic::{
     pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
     thermal_rc_phase_shifter, ActiveOpticalDevice, NativeCirculator, NativeCwLaser, NativeDemux,
-    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativePhotodetector,
+    NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm, NativeOptical2x2,
+    NativePhotodetector,
     NativeSplitter, NativeWaveguide,
 };
 pub use tline::NativeTLine;

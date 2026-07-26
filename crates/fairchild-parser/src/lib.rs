@@ -43,60 +43,93 @@ pub struct Netlist {
     /// applied on top of the base netlist for a re-run pass.  The base run
     /// uses the original netlist; each block runs once after applying.
     pub alters: Vec<AlterBlock>,
-    /// `.optical_port NAME [N]` declarations.  Each entry is a single
-    /// user-visible port that expands to 3·N underlying wires (re, im, λ
-    /// per channel).  Used by the parser's X-line preprocessor.
-    pub optical_ports: Vec<OpticalPort>,
+    /// `.optical_port` / `.electrical_port` declarations.  Each entry is a
+    /// single user-visible port name that expands to `channels ×
+    /// wires_per_channel()` underlying wires.  Used by the parser's X-line
+    /// preprocessor (`expand_bundle_ports`).
+    pub bundle_ports: Vec<BundlePort>,
 }
 
-/// A bundle optical port declared via `.optical_port NAME [N]`.
+/// What kind of signal a [`BundlePort`]'s channels carry.  Decides how many
+/// underlying wires each channel expands to, and — critically — whether those
+/// wires are registered as optical nets for the discipline check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleKind {
+    /// Optical channel: an SVEA field bundle, 3 wires (`re`, `im`, `λ`) or 5
+    /// when bidirectional propagation is on.  Registered as optical nets.
+    Optical { bidirectional: bool },
+    /// Electrical channel: one plain wire per channel.  NOT optical — these
+    /// nets stay in the electrical discipline and may carry R/C/V/I freely.
+    Electrical,
+}
+
+/// A vector port declared via `.optical_port NAME [N]` or
+/// `.electrical_port NAME [N]`.
 ///
-/// Each channel expands to either a 3-wire `(NAME_re_i, NAME_im_i,
-/// NAME_wl_i)` tuple (unidirectional, default) or a 5-wire `(NAME_re_fw_i,
-/// NAME_im_fw_i, NAME_re_bw_i, NAME_im_bw_i, NAME_wl_i)` tuple when
-/// bidirectional propagation is enabled via
-/// `.options enable_bidirectional=1`.  The `bidirectional` flag is set by
-/// the parser after reading `.options`; downstream `wires_for_channel` /
+/// The point of a bundle port is that `NAME` is usable as a *single net token*
+/// on an X-element line; the parser then expands it in place into the
+/// underlying per-channel wires (see
+/// `expand_bundle_ports`).  That is what lets
+/// one device instance serve any number of WDM channels without a per-N
+/// variant of the device.
+///
+/// Wire naming, for `channels = N`:
+/// - `Optical { bidirectional: false }` → `NAME_re_i`, `NAME_im_i`, `NAME_wl_i`
+/// - `Optical { bidirectional: true }`  → `NAME_re_fw_i`, `NAME_im_fw_i`,
+///   `NAME_re_bw_i`, `NAME_im_bw_i`, `NAME_wl_i`
+/// - `Electrical`                       → `NAME_i`
+///
+/// The `bidirectional` flag on optical ports is set by the parser after
+/// reading `.options enable_bidirectional=1`; `wires_for_channel` /
 /// `all_wires` honour it transparently.
+///
+/// Not to be confused with `.optical_bus` / `.optical`, which are *discipline
+/// annotations only* — they tag existing net names as optical and create no
+/// referenceable port.  See the directive handlers in `parse_spice`.
 #[derive(Debug, Clone)]
-pub struct OpticalPort {
+pub struct BundlePort {
     pub name: String,
     pub channels: usize,
-    pub bidirectional: bool,
+    pub kind: BundleKind,
 }
 
-impl OpticalPort {
-    /// Number of underlying wires per channel — 3 for unidirectional,
-    /// 5 for bidirectional.
+impl BundlePort {
+    /// Number of underlying wires per channel — 1 electrical, 3 optical
+    /// unidirectional, 5 optical bidirectional.
     pub fn wires_per_channel(&self) -> usize {
-        if self.bidirectional {
-            5
-        } else {
-            3
+        match self.kind {
+            BundleKind::Optical { bidirectional: true } => 5,
+            BundleKind::Optical { bidirectional: false } => 3,
+            BundleKind::Electrical => 1,
         }
+    }
+
+    /// Whether this port's wires belong to the optical discipline.
+    pub fn is_optical(&self) -> bool {
+        matches!(self.kind, BundleKind::Optical { .. })
     }
 
     /// Underlying wire names for channel `ch` of this port.
     pub fn wires_for_channel(&self, ch: usize) -> Vec<String> {
-        if self.bidirectional {
-            vec![
+        match self.kind {
+            BundleKind::Optical { bidirectional: true } => vec![
                 format!("{}_re_fw_{}", self.name, ch),
                 format!("{}_im_fw_{}", self.name, ch),
                 format!("{}_re_bw_{}", self.name, ch),
                 format!("{}_im_bw_{}", self.name, ch),
                 format!("{}_wl_{}", self.name, ch),
-            ]
-        } else {
-            vec![
+            ],
+            BundleKind::Optical { bidirectional: false } => vec![
                 format!("{}_re_{}", self.name, ch),
                 format!("{}_im_{}", self.name, ch),
                 format!("{}_wl_{}", self.name, ch),
-            ]
+            ],
+            BundleKind::Electrical => vec![format!("{}_{}", self.name, ch)],
         }
     }
 
-    /// Every underlying wire across every channel.  Used to register the
-    /// port's wires as optical nets for discipline-check purposes.
+    /// Every underlying wire across every channel.  For optical ports this is
+    /// what gets registered as optical nets for the discipline check.
     pub fn all_wires(&self) -> Vec<String> {
         let stride = self.wires_per_channel();
         let mut out = Vec::with_capacity(self.channels * stride);
