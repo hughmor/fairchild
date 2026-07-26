@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""rnn_plots.py — figures for the giona RNN calibration and programming.
+
+Produces, into `results/`:
+
+  rnn_activation.png     the two candidate activations vs junction current, the
+                         diode clamp, the heater knob, the calibrated comb
+  rnn_rest_point.png     how to choose the rest current: dT/dI, the AC coupling
+                         efficiency, their product (the loop gain), and the
+                         measured gain map over (operating point, laser power)
+  rnn_dynamics.png       transients across the oscillation threshold
+
+Reads the transient traces that `rnn_hunt` saved as npz; recomputes the
+single-ring curves directly (cheap).
+
+Run:  .venv/bin/python experiments/giona/rnn_plots.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import rnn_explore as ex  # noqa: E402
+
+RESULTS = HERE / "results"
+N_DIODE, V_T = 5.0, 0.025852          # from the fitted card
+R_SHUNT_PAR = 1.0 / (1 / 2e3 + 1 / 10e3)   # R1 (on chip) || Rb3 (PCB)
+
+# Loop gain measured on the full deck (rnn_explore --gain), rows PD_B, cols mW/ch.
+GAIN_PDB = [-5, -6, -7.2, -8, -9, -10, -12, -15]
+GAIN_POW = [12, 30, 60, 120]
+GAIN = np.array([
+    [-0.0448, -0.1777, -0.4836, -1.0987],
+    [-0.0919, -0.4237, -1.2184, -2.8542],
+    [+0.0245, -0.0126, -0.4788, -2.3820],
+    [+0.1028, +0.4065, +0.7261, -0.2624],
+    [+0.1069, +0.5380, +1.5793, +2.4466],
+    [+0.0755, +0.4125, +1.5290, +3.8925],
+    [+0.0292, +0.1528, +0.6895, +3.2898],
+    [-0.0103, -0.0829, -0.2488, -0.0252],
+])
+
+
+def fig_rest_point(out):
+    """How to choose the rest current — the two competing effects and the map."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    radii = ex.stage_radii(verbose=False)
+    r1, lam = radii[0], ex.LAMBDAS_NM[0]
+
+    I = np.linspace(5e-6, 700e-6, 60)
+    T = np.array([ex.probe_i(r1, lam, float(i))[0] for i in I])
+    dT_dI = np.gradient(T, I)                      # mW per A
+
+    # AC coupling efficiency: the junction's small-signal conductance against
+    # the resistive load it competes with. Only this fraction of the AC
+    # photocurrent drives the modulator; the rest leaks off chip.
+    g_d = I / (N_DIODE * V_T)
+    eta = g_d / (g_d + 1.0 / R_SHUNT_PAR)
+
+    fig, ax = plt.subplots(2, 2, figsize=(12, 8))
+
+    ax[0, 0].plot(I * 1e6, T, lw=1.6)
+    ax[0, 0].set_xlabel("rest junction current (µA)")
+    ax[0, 0].set_ylabel("transmission (mW)")
+    ax[0, 0].set_title("Activation T(I) — notch port, on resonance at rest")
+    ax[0, 0].grid(alpha=0.3)
+
+    a = ax[0, 1]
+    a.plot(I * 1e6, dT_dI / dT_dI.max(), label="dT/dI  (falls)", lw=1.6)
+    a.plot(I * 1e6, eta, label="AC coupling η  (rises)", lw=1.6)
+    prod = (dT_dI / dT_dI.max()) * eta
+    # Single-ring estimate only: it ignores the 8-ring cascade, where each
+    # ring's transmission also changes what every downstream ring sees. The
+    # measured map (bottom right) is the authority — and it disagrees, peaking
+    # at a much higher rest current.
+    a.plot(I * 1e6, prod / prod.max(), "k--", lw=1.8,
+           label="product (single-ring estimate)")
+    i_best = I[int(np.argmax(prod))]
+    a.axvline(i_best * 1e6, color="r", ls=":", lw=1.0,
+              label=f"optimum ≈ {i_best * 1e6:.0f} µA")
+    a.set_xlabel("rest junction current (µA)")
+    a.set_ylabel("normalised")
+    a.set_title("Choosing the rest current: two competing effects")
+    a.legend(fontsize=8)
+    a.grid(alpha=0.3)
+
+    a = ax[1, 0]
+    a.plot(I * 1e6, eta * 100, lw=1.6)
+    a.set_xlabel("rest junction current (µA)")
+    a.set_ylabel("AC photocurrent reaching the junction (%)")
+    a.set_title("Raising the rest point recovers AC gain\n"
+                "(g_d rises against the fixed 2k‖10k load)", fontsize=10)
+    a.grid(alpha=0.3)
+
+    a = ax[1, 1]
+    im = a.imshow(GAIN, aspect="auto", cmap="RdBu_r", origin="upper",
+                  vmin=-3, vmax=3,
+                  extent=[-0.5, len(GAIN_POW) - 0.5, len(GAIN_PDB) - 0.5, -0.5])
+    a.set_xticks(range(len(GAIN_POW)))
+    a.set_xticklabels(GAIN_POW)
+    a.set_yticks(range(len(GAIN_PDB)))
+    a.set_yticklabels(GAIN_PDB)
+    a.set_xlabel("laser power (mW/channel)")
+    a.set_ylabel("PD_B (V)")
+    a.set_title("Measured loop gain G per unit weight\n"
+                "|G|·√2 > 1 needed for W=[[1,-1],[1,1]]", fontsize=10)
+    for i in range(len(GAIN_PDB)):
+        for j in range(len(GAIN_POW)):
+            g = GAIN[i, j]
+            a.text(j, i, f"{g:+.2f}", ha="center", va="center", fontsize=7,
+                   color="white" if abs(g) > 1.6 else "black")
+    fig.colorbar(im, ax=a)
+
+    fig.suptitle("giona RNN — picking the rest current and the loop gain it buys")
+    fig.tight_layout()
+    fig.savefig(out, dpi=115)
+    print(f"wrote {out}")
+
+
+def fig_dynamics(out, traces):
+    """Transients across the threshold, from saved npz files."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n = len(traces)
+    fig, ax = plt.subplots(2, n, figsize=(4.6 * n, 7), squeeze=False)
+    for c, (label, f) in enumerate(traces):
+        d = np.load(f)
+        t, v, bus = d["t"] * 1e9, d["v"], d["bus"]
+        ax[0, c].plot(t, v[0] * 1e3, lw=1.2, label="neuron 1")
+        ax[0, c].plot(t, v[1] * 1e3, lw=1.2, label="neuron 2")
+        ax[0, c].set_ylabel("V(mod_cathode) (mV)")
+        ax[0, c].set_title(label, fontsize=10)
+        ax[0, c].legend(fontsize=8)
+        ax[0, c].grid(alpha=0.3)
+        ax[1, c].plot(t, bus[0], lw=1.2, label="λ1 on bus")
+        ax[1, c].plot(t, bus[1], lw=1.2, label="λ2 on bus")
+        ax[1, c].set_xlabel("time (ns)")
+        ax[1, c].set_ylabel("bus power (mW)")
+        ax[1, c].legend(fontsize=8)
+        ax[1, c].grid(alpha=0.3)
+    fig.suptitle("giona RNN — two-neuron dynamics, W = [[1,−1],[1,1]]")
+    fig.tight_layout()
+    fig.savefig(out, dpi=115)
+    print(f"wrote {out}")
+
+
+def main() -> int:
+    RESULTS.mkdir(exist_ok=True)
+    fig_rest_point(RESULTS / "rnn_rest_point.png")
+    scratch = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+    if scratch and scratch.is_dir():
+        found = sorted(scratch.glob("h_*.npz"))
+        if found:
+            traces = []
+            for f in found:
+                d = np.load(f)
+                traces.append((f"{float(d['p']):.0f} mW, V*={float(d['v_star']):.2f} V", f))
+            fig_dynamics(RESULTS / "rnn_dynamics.png", traces[:4])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
