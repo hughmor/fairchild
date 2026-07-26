@@ -49,7 +49,7 @@ def solve_bias(W, powers, v_star, n_active=2, iters=12, verbose=True):
     algebra (2k/10k network + clamping diode) is mopped up with a secant, the
     slope re-measured each step because the diode stiffens as it turns on.
     """
-    pdb = np.full(N, -7.0)
+    pdb = np.full(N, -9.0)
     for it in range(iters):
         v = op(W, pdb, powers)
         err = v[:n_active] - v_star
@@ -65,8 +65,19 @@ def solve_bias(W, powers, v_star, n_active=2, iters=12, verbose=True):
         # incremental stiffness changes faster than the secant's memory of it.
         step = -0.65 * err / slope[:n_active]
         step = np.clip(step, -2.0, 2.0)
-        pdb[:n_active] = pdb[:n_active] + step
-    return pdb, op(W, pdb, powers)
+        # A POSITIVE bias can never forward-bias the junction, so the solution
+        # lives in [-40, 0]. Without the clamp the secant can wander into
+        # positive territory, where the diode is fully off, the slope collapses,
+        # and it converges to a reverse-biased nonsense point (+17 V was a real
+        # outcome) — and silently returns it.
+        pdb[:n_active] = np.clip(pdb[:n_active] + step, -40.0, -0.2)
+    v = op(W, pdb, powers)
+    resid = np.abs(v[:n_active] - v_star).max()
+    if resid > 5e-3:
+        raise RuntimeError(
+            f"bias solve did not converge: |V - V*| = {resid * 1e3:.2f} mV, "
+            f"PD_B={np.round(pdb[:n_active], 3)}, V={np.round(v[:n_active], 5)}")
+    return pdb, v
 
 def transient(W, pdb, powers, step, stop, kick):
     c = fc.Circuit(); c.load_str(src(W, pdb, powers, tran=(step, stop), kick=kick))
