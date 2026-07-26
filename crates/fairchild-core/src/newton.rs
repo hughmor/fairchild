@@ -740,6 +740,7 @@ fn residual_l2(
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
     for dev in devices.iter_mut() {
+        dev.set_source_scale(source_scale);
         dev.eval(x, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
         dev.load_jacobian(&mut mat);
@@ -802,6 +803,9 @@ fn nr_inner(
         );
 
         for dev in devices.iter_mut() {
+            // Independent-source devices (lasers) ramp with the homotopy too;
+            // no-op for everything else.
+            dev.set_source_scale(source_scale);
             dev.eval(&x, EvalFlags::dc(), ctx);
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);

@@ -18,6 +18,10 @@ pub struct NativeCwLaser {
     re_amp: f64,
     im_amp: f64,
     wavelen_m: f64,
+    /// Source-stepping homotopy factor on the FIELD amplitude, 0 → 1. The
+    /// wavelength tag is never scaled: it is a label, and a ring detuned by a
+    /// ramped lambda would be a worse homotopy path than one that is simply dark.
+    src_scale: f64,
     wpc: usize, // 3 (unidir) or 5 (bidir)
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
@@ -37,6 +41,7 @@ impl NativeCwLaser {
             re_amp: p.sqrt(),
             im_amp: 0.0,
             wavelen_m: 1550e-9,
+            src_scale: 1.0,
             wpc: 3,
             nodes: Vec::new(),
             branches: Vec::new(),
@@ -122,6 +127,10 @@ impl Device for NativeCwLaser {
         }
     }
 
+    fn set_source_scale(&mut self, scale: f64) {
+        self.src_scale = scale;
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -130,10 +139,10 @@ impl Device for NativeCwLaser {
         //             [re,    im,    λ]               (3-wire unidir).
         if self.wpc == 5 {
             if let Some(j) = self.branches[0] {
-                b[j] += self.re_amp;
+                b[j] += self.src_scale * self.re_amp;
             }
             if let Some(j) = self.branches[1] {
-                b[j] += self.im_amp;
+                b[j] += self.src_scale * self.im_amp;
             }
             // bw wires forced to 0 — no contribution from RHS (branch row
             // already enforces V = 0 because rhs is 0).
@@ -142,10 +151,10 @@ impl Device for NativeCwLaser {
             }
         } else {
             if let Some(j) = self.branches[0] {
-                b[j] += self.re_amp;
+                b[j] += self.src_scale * self.re_amp;
             }
             if let Some(j) = self.branches[1] {
-                b[j] += self.im_amp;
+                b[j] += self.src_scale * self.im_amp;
             }
             if let Some(j) = self.branches[2] {
                 b[j] += self.wavelen_m;

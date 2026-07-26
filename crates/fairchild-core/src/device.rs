@@ -220,6 +220,21 @@ pub trait Device: Send + Sync {
         false
     }
 
+    /// Scale this device's INDEPENDENT source output for source-stepping
+    /// homotopy, where `scale` ramps 0 → 1.
+    ///
+    /// Netlist `V`/`I` sources are ramped by the solver directly (see
+    /// `mna::stamp_netlist_scaled_in_place`), but a device that is itself an
+    /// independent source — an optical laser, most importantly — is invisible
+    /// to that machinery, so without this hook it stays at full output for the
+    /// whole ramp. In a photonic circuit the optical power IS the dominant
+    /// excitation, which left source-stepping with no homotopy path at all:
+    /// every trial point sat in the fully-illuminated nonlinearity.
+    ///
+    /// Default is a no-op, which is correct for every device that is not an
+    /// independent source.
+    fn set_source_scale(&mut self, _scale: f64) {}
+
     /// Internal noise current sources for `.noise` analysis.
     ///
     /// Called AFTER a DC-OP `eval()` so the device can read its cached

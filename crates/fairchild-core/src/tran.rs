@@ -683,6 +683,7 @@ pub fn tran_nr_with_registry_opts(
             crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t, &cap_state, &ind_state);
 
             for dev in &mut devices {
+                dev.set_source_scale(1.0);
                 dev.eval(&x, EvalFlags::tran(), &ctx);
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
@@ -1067,6 +1068,7 @@ pub fn tran_nr_with_registry_var_opts(
             );
 
             for dev in devices.iter_mut() {
+                dev.set_source_scale(1.0);
                 dev.eval(&x_try, EvalFlags::tran(), &ctx);
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);

@@ -47,6 +47,25 @@ pub struct OpticalSegment {
     branches: Vec<Option<usize>>,
     c_cached: Vec<f64>,
     s_cached: Vec<f64>,
+    // ── Newton cross-terms for voltage-dependent coefficients ────────────────
+    // c and s depend on the drive's control voltages, so `out = c·in + s·in`
+    // is BILINEAR in the unknowns. Stamping c/s frozen (their value at the
+    // previous iterate) turns Newton into successive substitution for this
+    // coupling: it converges only while the loop's iteration map contracts, and
+    // silently fails once a feedback path pushes the spectral radius past 1 —
+    // exactly what an unstable fixed point in a photonic recurrent network is.
+    // Stamping ∂(out)/∂V restores a true Newton, which does not care about
+    // stability. See `set_control_sensitivity`.
+    ctrl_nodes: Vec<NodeId>,
+    /// Per (channel, control-node): ∂c/∂V and ∂s/∂V at the current iterate.
+    dc_dv: Vec<f64>,
+    ds_dv: Vec<f64>,
+    /// The control-node voltages at the current iterate (for the RHS offset).
+    ctrl_v0: Vec<f64>,
+    /// The (re, im) source values that c and s multiply in the CURRENT mode —
+    /// the live inputs normally, the delay-line history in delay mode.
+    src_re: Vec<f64>,
+    src_im: Vec<f64>,
     // ── Group-delay line (engaged only when the owning device asks) ──────────
     delay: DelayLine,
     delayed: Vec<f64>,
@@ -72,6 +91,12 @@ impl OpticalSegment {
             branches: Vec::new(),
             c_cached: Vec::new(),
             s_cached: Vec::new(),
+            ctrl_nodes: Vec::new(),
+            dc_dv: Vec::new(),
+            ds_dv: Vec::new(),
+            ctrl_v0: Vec::new(),
+            src_re: Vec::new(),
+            src_im: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
         }
@@ -123,6 +148,22 @@ impl OpticalSegment {
         self.branches = vec![None; wpc * n];
         self.c_cached = vec![1.0; n];
         self.s_cached = vec![0.0; n];
+        let nc = self.ctrl_nodes.len();
+        self.dc_dv = vec![0.0; n * nc];
+        self.ds_dv = vec![0.0; n * nc];
+        self.ctrl_v0 = vec![0.0; nc];
+        self.src_re = vec![0.0; n];
+        self.src_im = vec![0.0; n];
+    }
+
+    /// Declare the drive's electrical terminals, so the segment can stamp the
+    /// Newton cross-terms ∂(optical output)/∂(control voltage).
+    pub fn set_control_nodes(&mut self, nodes: &[NodeId]) {
+        self.ctrl_nodes = nodes.to_vec();
+        let n = self.n_channels.max(1);
+        self.dc_dv = vec![0.0; n * nodes.len()];
+        self.ds_dv = vec![0.0; n * nodes.len()];
+        self.ctrl_v0 = vec![0.0; nodes.len()];
     }
 
     /// Number of optical bundle wires this segment occupies (`2·wpc·N`).
@@ -235,6 +276,24 @@ impl OpticalSegment {
         delay_active: bool,
         ctx: &SimContext,
     ) {
+        self.refresh_with_sens(x, dn_eff, dphi, dalpha_neper_m, delay_active, ctx, &[]);
+    }
+
+    /// As [`refresh`](Self::refresh), plus the drive's `(d dn_eff/dV, d dphi/dV,
+    /// d dalpha/dV)` per control node. Pass an empty slice to skip the Newton
+    /// cross-terms (correct for a passive segment, or a drive with no
+    /// voltage dependence).
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_with_sens(
+        &mut self,
+        x: &[f64],
+        dn_eff: f64,
+        dphi: f64,
+        dalpha_neper_m: f64,
+        delay_active: bool,
+        ctx: &SimContext,
+        dpert_dv: &[(f64, f64, f64)],
+    ) {
         self.delay.set_state(delay_active, ctx.time_s);
         if delay_active {
             let width = self.n_channels * self.vals_per_channel();
@@ -248,15 +307,60 @@ impl OpticalSegment {
         } else {
             0.0
         };
+        let nc = self.ctrl_nodes.len();
+        let want_sens = nc > 0 && dpert_dv.len() == nc;
+        if want_sens {
+            for (i, n) in self.ctrl_nodes.iter().enumerate() {
+                self.ctrl_v0[i] = n.map_or(0.0, |j| x[j]);
+            }
+        }
+        let per = self.vals_per_channel();
         for k in 0..self.n_channels {
             let lambda = self.lambda_of(x, k);
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
             // Δn_eff folds into the index (φ_eo = 2π·Δn_eff·L/λ); Δφ adds a
             // wavelength-independent rotation (heater, Pockels-with-fixed-gap…).
             let phi = two_pi * (n_eff_lam + dn_eff) * self.length_m / lambda - phi_ref + dphi;
-            self.c_cached[k] = t_amp * phi.cos();
-            self.s_cached[k] = t_amp * phi.sin();
+            let (c, s) = (t_amp * phi.cos(), t_amp * phi.sin());
+            self.c_cached[k] = c;
+            self.s_cached[k] = s;
+            if !want_sens {
+                continue;
+            }
+            // The (re, im) pair that c and s multiply in the current mode.
+            let (sr, si) = if delay_active {
+                (self.delayed[per * k], self.delayed[per * k + 1])
+            } else {
+                let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
+                (read(self.nodes[self.wpc * k]), read(self.nodes[self.wpc * k + 1]))
+            };
+            self.src_re[k] = sr;
+            self.src_im[k] = si;
+            // dc/dV = (dt/dV)·cos φ − t·sin φ·(dφ/dV) = (dt/dV)/t·c − s·(dφ/dV)
+            // ds/dV = (dt/dV)/t·s + c·(dφ/dV)
+            let kphi = two_pi * self.length_m / lambda;
+            for (i, (dn_dv, ddphi_dv, dalpha_dv)) in dpert_dv.iter().enumerate() {
+                let dphi_dv = kphi * dn_dv + ddphi_dv;
+                // t_amp = exp(−(α+Δα)·L/2) ⇒ dt/dV = −t·(L/2)·dΔα/dV, so
+                // (dt/dV)/t is just −(L/2)·dΔα/dV and needs no division by t.
+                let dlnt_dv = -0.5 * self.length_m * dalpha_dv;
+                self.dc_dv[k * nc + i] = dlnt_dv * c - s * dphi_dv;
+                self.ds_dv[k * nc + i] = dlnt_dv * s + c * dphi_dv;
+            }
         }
+    }
+
+    /// Whether Newton cross-terms are armed for this segment.
+    fn has_sens(&self) -> bool {
+        !self.ctrl_nodes.is_empty() && self.dc_dv.len() == self.n_channels * self.ctrl_nodes.len()
+    }
+
+    /// ∂(out_re)/∂V and ∂(out_im)/∂V for channel `k`, control node `i`.
+    fn dout_dv(&self, k: usize, i: usize) -> (f64, f64) {
+        let nc = self.ctrl_nodes.len();
+        let (dc, ds) = (self.dc_dv[k * nc + i], self.ds_dv[k * nc + i]);
+        let (sr, si) = (self.src_re[k], self.src_im[k]);
+        (dc * sr + ds * si, -ds * sr + dc * si)
     }
 
     /// Stamp the per-channel optical branch equations. In delay mode the output
@@ -289,6 +393,23 @@ impl OpticalSegment {
             };
             stamp_potential_eq(mat, &self.branches, wpc * k, out_re_fw, re_ins);
             stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw, im_ins);
+            // Newton cross-terms: c and s are functions of the control voltage,
+            // so the output equation is bilinear. Without these the coupling is
+            // stamped frozen and Newton degenerates into successive
+            // substitution, which cannot reach a fixed point whose iteration
+            // map expands (an unstable operating point in a feedback loop).
+            if self.has_sens() {
+                for i in 0..self.ctrl_nodes.len() {
+                    let Some(cn) = self.ctrl_nodes[i] else { continue };
+                    let (g_re, g_im) = self.dout_dv(k, i);
+                    if let Some(j) = self.branches[wpc * k] {
+                        mat.a[j][cn] -= g_re;
+                    }
+                    if let Some(j) = self.branches[wpc * k + 1] {
+                        mat.a[j][cn] -= g_im;
+                    }
+                }
+            }
             // λ passes through unchanged (a wavelength label is not delayed).
             stamp_potential_eq(mat, &self.branches, wpc * k + lam, out_l, &[(in_l, -1.0)]);
             if wpc == 5 {
@@ -313,6 +434,27 @@ impl OpticalSegment {
     /// Stamp the delay-line history source onto the RHS. No-op when the delay
     /// line is inactive (the instantaneous path is fully homogeneous).
     pub fn stamp_residual(&self, b: &mut [f64]) {
+        // The Newton cross-terms carry an inhomogeneous offset −G·V0 (the
+        // linearisation is about the previous iterate), independent of the
+        // delay line.
+        if self.has_sens() {
+            let nc = self.ctrl_nodes.len();
+            for k in 0..self.n_channels {
+                for i in 0..nc {
+                    if self.ctrl_nodes[i].is_none() {
+                        continue;
+                    }
+                    let (g_re, g_im) = self.dout_dv(k, i);
+                    let v0 = self.ctrl_v0[i];
+                    if let Some(j) = self.branches[self.wpc * k] {
+                        b[j] -= g_re * v0;
+                    }
+                    if let Some(j) = self.branches[self.wpc * k + 1] {
+                        b[j] -= g_im * v0;
+                    }
+                }
+            }
+        }
         if !self.delay.is_active() {
             return;
         }

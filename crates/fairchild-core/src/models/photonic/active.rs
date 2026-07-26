@@ -109,11 +109,25 @@ pub trait PhotonicActiveModel: Send + Sync {
 pub struct ActiveOpticalDevice {
     seg: OpticalSegment,
     model: Box<dyn PhotonicActiveModel>,
+    /// The drive's electrical terminals, kept so `eval` can finite-difference
+    /// the perturbation against each one (see the Newton cross-terms in
+    /// `OpticalSegment::stamp`). Numerical rather than analytic so every drive —
+    /// including `ExprDrive`, whose constitutive law is user text — gets exact
+    /// Jacobian coupling for free; the cost is a few extra scalar model evals
+    /// per iteration, negligible against one linear solve.
+    elec_nodes: Vec<NodeId>,
+    /// Scratch for the finite difference, reused to avoid per-iteration allocs.
+    dpert_dv: Vec<(f64, f64, f64)>,
 }
 
 impl ActiveOpticalDevice {
     pub fn new(seg: OpticalSegment, model: Box<dyn PhotonicActiveModel>) -> Self {
-        ActiveOpticalDevice { seg, model }
+        ActiveOpticalDevice {
+            seg,
+            model,
+            elec_nodes: Vec::new(),
+            dpert_dv: Vec::new(),
+        }
     }
 }
 
@@ -139,6 +153,9 @@ impl Device for ActiveOpticalDevice {
         let optical_len = terminals.len() - n_elec;
         self.seg.setup_instance(&terminals[..optical_len], ctx);
         self.model.set_terminals(&terminals[optical_len..]);
+        self.elec_nodes = terminals[optical_len..].to_vec();
+        self.seg.set_control_nodes(&self.elec_nodes);
+        self.dpert_dv = vec![(0.0, 0.0, 0.0); self.elec_nodes.len()];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -163,6 +180,32 @@ impl Device for ActiveOpticalDevice {
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let intensity = self.seg.channel_intensities(x);
         let pert = self.model.eval(x, &intensity, ctx);
+        // Finite-difference the perturbation against each control voltage so the
+        // segment can stamp ∂(optical output)/∂V. Step is relative to the local
+        // voltage with an absolute floor, the usual compromise between
+        // truncation and cancellation error.
+        if !self.elec_nodes.is_empty() {
+            let mut xp = x.to_vec();
+            for (i, node) in self.elec_nodes.iter().enumerate() {
+                let Some(j) = *node else {
+                    self.dpert_dv[i] = (0.0, 0.0, 0.0);
+                    continue;
+                };
+                let v = x[j];
+                let h = 1e-6_f64.max(v.abs() * 1e-6);
+                xp[j] = v + h;
+                let pp = self.model.eval(&xp, &intensity, ctx);
+                xp[j] = v;
+                self.dpert_dv[i] = (
+                    (pp.dn_eff - pert.dn_eff) / h,
+                    (pp.dphi - pert.dphi) / h,
+                    (pp.dalpha_neper_m - pert.dalpha_neper_m) / h,
+                );
+            }
+            // The probing evals left the model's cached electrical state at the
+            // perturbed point; restore it at x before anything stamps.
+            let _ = self.model.eval(x, &intensity, ctx);
+        }
         // Group-delay line: engaged in transient when the `waveguide_delay`
         // option is on and the segment has a finite group delay τ_g = L·n_g/c.
         // The lumped model delays the input envelope by τ_g and applies the
@@ -171,13 +214,14 @@ impl Device for ActiveOpticalDevice {
         // zero-length segment (e.g. fc_thermal_ps) has τ_g = 0 and stays
         // instantaneous regardless.
         let delay_active = flags.transient && ctx.waveguide_delay && self.seg.tau_g_s() > 0.0;
-        self.seg.refresh(
+        self.seg.refresh_with_sens(
             x,
             pert.dn_eff,
             pert.dphi,
             pert.dalpha_neper_m,
             delay_active,
             ctx,
+            &self.dpert_dv,
         );
     }
 
