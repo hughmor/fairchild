@@ -99,10 +99,7 @@ pub fn noise_analysis(
     for dev in devices.iter_mut() {
         // tran() flags so device small-signal cap caches populate (see ac.rs).
         dev.eval(&x0, EvalFlags::tran(), &ctx);
-        let mut tmp = crate::mna::MnaMatrix {
-            a: vec![vec![0.0; size]; size],
-            b: vec![0.0; size],
-        };
+        let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
             for (g, t) in g_row.iter_mut().zip(t_row.iter()) {

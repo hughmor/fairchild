@@ -265,4 +265,18 @@ pub trait Device: Send + Sync {
     /// have been allocated for its internal nodes.  Called once after
     /// construction and before the first `eval()`.  Default is a no-op.
     fn bind_extra_nodes(&mut self, _first_idx: usize) {}
+
+    /// MNA rows/columns this device stamps into *beyond* its own terminals and
+    /// the extra rows bound by `bind_extra_nodes`.
+    ///
+    /// The sparsity pattern (`mna::Pattern`) is derived structurally from every
+    /// device's terminals plus extras, on the invariant that a device only
+    /// couples nodes it was handed.  Devices that reach further — a behavioural
+    /// source whose expression references arbitrary `V(node)` / `I(vsrc)` —
+    /// must report those rows here, or their entries get silently dropped from
+    /// the sparse solve.  Debug builds catch a violation via
+    /// `MnaMatrix::debug_assert_covers`.  Default is empty.
+    fn extra_stamp_rows(&self) -> Vec<usize> {
+        Vec::new()
+    }
 }

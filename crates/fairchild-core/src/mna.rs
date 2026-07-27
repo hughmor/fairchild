@@ -7,7 +7,9 @@
 /// Ground node "0" is eliminated from the matrix.
 use fairchild_parser::{Element, Netlist};
 use indexmap::IndexMap;
+use std::sync::Arc;
 
+use crate::device::NodeId;
 use crate::error::SimError;
 
 /// The topology/index maps for a circuit — built once, reused across time steps.
@@ -99,10 +101,136 @@ impl CircuitTopology {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Structural sparsity pattern
+// ---------------------------------------------------------------------------
+
+/// The set of `(row, col)` cells any stamper may write, stored row-major to
+/// mirror `MnaMatrix::a`.
+///
+/// The matrix itself stays dense (`Vec<Vec<f64>>`) because every device stamps
+/// through `mat.a[i][j] += v`, but a circuit matrix is ~0.1 % occupied, so the
+/// two full-matrix passes per Newton iteration — zeroing it, then scanning it
+/// to build the solver's CSC — cost O(n²) against O(nnz) of real work.  At
+/// n ≈ 3000 that was ~90 % of solve time with the numeric LU itself at ~1 %.
+/// Knowing the footprint up front turns both passes into O(nnz).
+///
+/// This is a *superset*: it is built structurally, from each element's
+/// terminals and each device's terminals + bound extra rows, without regard to
+/// whether a given cell happens to be non-zero at the current operating point.
+/// That matters — a cell that is zero at x=0 and non-zero at the solution must
+/// still be in the pattern, and value-based discovery on the first iteration
+/// would miss exactly those (photonic devices stamp such cells; see the WDM DC
+/// OP regression).  Consumers that want the tight numeric set (the sparse
+/// solver) narrow it themselves and can detect growth in O(nnz).
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    /// Column indices per row, sorted and deduplicated.
+    pub cols: Vec<Vec<u32>>,
+    /// Total cell count — the `nnz` upper bound.
+    pub nnz: usize,
+}
+
+impl Pattern {
+    /// Structural footprint of a netlist plus its device instances.
+    ///
+    /// `device_nodes[k]` is every MNA row/column device `k` may touch: its
+    /// resolved terminals plus any extra rows it was bound.  Devices only ever
+    /// stamp within that set (verified in debug builds by
+    /// [`MnaMatrix::debug_assert_covers`]), except for those that report more
+    /// via [`crate::device::Device::extra_stamp_rows`].
+    pub fn build(
+        topo: &CircuitTopology,
+        netlist: &Netlist,
+        device_nodes: &[Vec<usize>],
+    ) -> Pattern {
+        let n = topo.size;
+        let mut b = PatternBuilder::new(n);
+        // `stamp_gmin` floors the diagonal, and a structurally present diagonal
+        // is what sparse LU wants anyway.
+        for i in 0..n {
+            b.touch(i, i);
+        }
+        let idx = |name: &str| topo.node_index.get(name).copied();
+        let n_nodes = topo.n_nodes();
+        for el in &netlist.elements {
+            match el {
+                Element::Resistor { pos, neg, .. }
+                | Element::Capacitor { pos, neg, .. }
+                | Element::Inductor { pos, neg, .. } => {
+                    b.clique(&[idx(pos), idx(neg)]);
+                }
+                Element::CoupledInductors { l1, l2, .. } => {
+                    let (p1, n1) = find_inductor_terminals(netlist, l1);
+                    let (p2, n2) = find_inductor_terminals(netlist, l2);
+                    b.clique(&[idx(p1), idx(n1), idx(p2), idx(n2)]);
+                }
+                Element::VoltageSource { name, pos, neg, .. } => {
+                    let vi = topo.vsrc_index.get(name).map(|&i| n_nodes + i);
+                    b.clique(&[idx(pos), idx(neg), vi]);
+                }
+                // Current sources touch b only; devices are handled below.
+                _ => {}
+            }
+        }
+        for nodes in device_nodes {
+            let ids: Vec<Option<usize>> = nodes.iter().map(|&i| Some(i)).collect();
+            b.clique(&ids);
+        }
+        b.finish()
+    }
+}
+
+/// Accumulator for [`Pattern::build`].
+struct PatternBuilder {
+    cols: Vec<Vec<u32>>,
+}
+
+impl PatternBuilder {
+    fn new(size: usize) -> Self {
+        PatternBuilder {
+            cols: vec![Vec::new(); size],
+        }
+    }
+
+    fn touch(&mut self, i: usize, j: usize) {
+        self.cols[i].push(j as u32);
+    }
+
+    /// Mark every ordered pair drawn from `nodes` (ground entries skipped).  A
+    /// stamper handed a set of rows can couple any of them to any other, so the
+    /// clique is the tightest footprint derivable without asking the stamper.
+    fn clique(&mut self, nodes: &[Option<usize>]) {
+        for &i in nodes.iter().flatten() {
+            for &j in nodes.iter().flatten() {
+                self.touch(i, j);
+            }
+        }
+    }
+
+    fn finish(mut self) -> Pattern {
+        let mut nnz = 0;
+        for row in self.cols.iter_mut() {
+            row.sort_unstable();
+            row.dedup();
+            row.shrink_to_fit();
+            nnz += row.len();
+        }
+        Pattern {
+            cols: self.cols,
+            nnz,
+        }
+    }
+}
+
 /// An assembled MNA system: A·x = b.
 pub struct MnaMatrix {
     pub a: Vec<Vec<f64>>,
     pub b: Vec<f64>,
+    /// Structural footprint, when the caller built one.  Present only on the
+    /// matrices owned by the hot NR / transient loops; `None` keeps the
+    /// original dense behaviour for one-shot and diagnostic stamps.
+    pattern: Option<Arc<Pattern>>,
 }
 
 impl MnaMatrix {
@@ -110,6 +238,7 @@ impl MnaMatrix {
         MnaMatrix {
             a: vec![vec![0.0f64; size]; size],
             b: vec![0.0f64; size],
+            pattern: None,
         }
     }
 
@@ -120,15 +249,159 @@ impl MnaMatrix {
         Self::new(size)
     }
 
+    /// Zero-filled, carrying a structural [`Pattern`] so `clear` and
+    /// `residual_norm` run at O(nnz) instead of O(n²).
+    pub fn with_pattern(size: usize, pattern: Arc<Pattern>) -> Self {
+        assert_eq!(
+            pattern.cols.len(),
+            size,
+            "pattern built at a different size"
+        );
+        MnaMatrix {
+            pattern: Some(pattern),
+            ..Self::new(size)
+        }
+    }
+
+    pub fn pattern(&self) -> Option<&Arc<Pattern>> {
+        self.pattern.as_ref()
+    }
+
     /// Zero every cell of `a` and every entry of `b` in place.  Used by
     /// the hot NR / transient loops to reuse a single `MnaMatrix`
     /// allocation across iterations instead of paying N+1 heap
     /// allocations per stamp.
+    ///
+    /// With a pattern attached, only cells inside it are touched — sound
+    /// because the pattern is a superset of what any stamper writes, so
+    /// everything outside it is already zero and stays zero.
     pub fn clear(&mut self) {
-        for row in self.a.iter_mut() {
-            row.fill(0.0);
+        match &self.pattern {
+            Some(p) => {
+                for (row, cols) in self.a.iter_mut().zip(p.cols.iter()) {
+                    for &j in cols {
+                        row[j as usize] = 0.0;
+                    }
+                }
+            }
+            None => {
+                for row in self.a.iter_mut() {
+                    row.fill(0.0);
+                }
+            }
         }
         self.b.fill(0.0);
+    }
+
+    /// ‖A·x − b‖₂ for the currently stamped system.
+    ///
+    /// This is the Newton residual norm the Armijo line search compares.  The
+    /// caller must not re-stamp to get it: whatever `A` and `b` hold right now
+    /// is the linearisation at whichever `x` was last stamped.
+    pub fn residual_norm(&self, x: &[f64]) -> f64 {
+        let mut sumsq = 0.0_f64;
+        match &self.pattern {
+            Some(p) => {
+                for (i, cols) in p.cols.iter().enumerate() {
+                    let row = &self.a[i];
+                    let mut acc = 0.0_f64;
+                    for &j in cols {
+                        acc += row[j as usize] * x[j as usize];
+                    }
+                    let f = acc - self.b[i];
+                    sumsq += f * f;
+                }
+            }
+            None => {
+                for (i, row) in self.a.iter().enumerate() {
+                    let acc: f64 = row.iter().zip(x.iter()).map(|(a, xj)| a * xj).sum();
+                    let f = acc - self.b[i];
+                    sumsq += f * f;
+                }
+            }
+        }
+        sumsq.sqrt()
+    }
+
+    /// Debug-only check that the attached pattern really covers every non-zero
+    /// in `a`.  A miss means some stamper wrote outside the footprint derived
+    /// from its terminals, which would silently drop that entry from the sparse
+    /// solve — so this guards the one invariant the whole scheme rests on.
+    /// Called once per NR loop after the first stamp; O(n²), debug builds only.
+    pub fn debug_assert_covers(&self) {
+        let Some(p) = &self.pattern else { return };
+        for (i, row) in self.a.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 && p.cols[i].binary_search(&(j as u32)).is_err() {
+                    panic!(
+                        "sparsity pattern misses a stamped cell at ({i}, {j}) = {v}; \
+                         a device stamped outside its terminals + extra rows without \
+                         reporting them via Device::extra_stamp_rows"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Per-circuit stamping plan: everything about `(topo, netlist)` that the
+/// element stamper would otherwise recompute on every Newton iteration.
+///
+/// Built once by each NR / transient loop.  Two things live here: the resolved
+/// node indices (the stamper hashed element node *names* into `node_index` on
+/// every pass — ~8 % of runtime on a large ladder), and the structural
+/// [`Pattern`].
+pub struct StampPlan {
+    /// `(pos, neg)` resolved MNA indices, one entry per element in
+    /// `netlist.elements` order.  `None` = ground or unknown.
+    elem_nodes: Vec<(NodeId, NodeId)>,
+    /// Voltage-source aux row per element (only set for `VoltageSource`).
+    elem_vi: Vec<Option<usize>>,
+    /// Whether the netlist has any coupled inductors.  When it doesn't — the
+    /// overwhelmingly common case — the stamper skips building two name-keyed
+    /// maps (with `String` clones) on every pass.
+    has_coupled: bool,
+    pub pattern: Arc<Pattern>,
+}
+
+impl StampPlan {
+    pub fn new(
+        topo: &CircuitTopology,
+        netlist: &Netlist,
+        device_nodes: &[Vec<usize>],
+    ) -> StampPlan {
+        let n_nodes = topo.n_nodes();
+        let mut elem_nodes = Vec::with_capacity(netlist.elements.len());
+        let mut elem_vi = Vec::with_capacity(netlist.elements.len());
+        for el in &netlist.elements {
+            let (pos, neg) = match el {
+                Element::Resistor { pos, neg, .. }
+                | Element::Capacitor { pos, neg, .. }
+                | Element::Inductor { pos, neg, .. }
+                | Element::VoltageSource { pos, neg, .. }
+                | Element::CurrentSource { pos, neg, .. } => (
+                    topo.node_index.get(pos).copied(),
+                    topo.node_index.get(neg).copied(),
+                ),
+                _ => (None, None),
+            };
+            elem_nodes.push((pos, neg));
+            elem_vi.push(match el {
+                Element::VoltageSource { name, .. } => {
+                    topo.vsrc_index.get(name).map(|&i| n_nodes + i)
+                }
+                _ => None,
+            });
+        }
+        StampPlan {
+            elem_nodes,
+            elem_vi,
+            has_coupled: netlist
+                .elements
+                .iter()
+                .any(|e| matches!(e, Element::CoupledInductors { .. })),
+            pattern: Arc::new(Pattern::build(topo, netlist, device_nodes)),
+        }
     }
 }
 
@@ -146,8 +419,9 @@ pub fn stamp_netlist_scaled_in_place(
     source_scale: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    plan: Option<&StampPlan>,
 ) {
-    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state);
+    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state, plan);
     if (source_scale - 1.0).abs() < 1e-15 {
         return;
     }
@@ -247,9 +521,10 @@ pub fn stamp_netlist_in_place(
     t: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    plan: Option<&StampPlan>,
 ) {
     mat.clear();
-    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state);
+    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state, plan);
 }
 
 /// Allocating variant: produces a fresh `MnaMatrix`.  Kept for non-hot
@@ -266,7 +541,7 @@ pub fn stamp_netlist(
     ind_state: &IndexMap<String, (f64, f64)>,
 ) -> MnaMatrix {
     let mut mat = MnaMatrix::new(topo.size);
-    stamp_netlist_into(&mut mat, topo, netlist, t, cap_state, ind_state);
+    stamp_netlist_into(&mut mat, topo, netlist, t, cap_state, ind_state, None);
     mat
 }
 
@@ -279,32 +554,40 @@ fn stamp_netlist_into(
     t: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    plan: Option<&StampPlan>,
 ) {
     use std::collections::HashMap;
 
     let n_nodes = topo.n_nodes();
 
     // Build coupled-inductor map: inductor_name → (partner_name, coupling_k)
-    // and a value map for inductance lookups.
+    // and a value map for inductance lookups.  Skipped outright when the
+    // netlist has no coupled inductors: it is two allocations plus a `String`
+    // clone per inductor, on a path that runs every Newton iteration.
     let mut coupled_map: HashMap<String, (String, f64)> = HashMap::new();
     let mut ind_values: HashMap<String, f64> = HashMap::new();
-    for el in &netlist.elements {
-        if let Element::Inductor {
-            name, inductance, ..
-        } = el
-        {
-            ind_values.insert(name.clone(), *inductance);
-        }
-        if let Element::CoupledInductors {
-            l1, l2, coupling, ..
-        } = el
-        {
-            coupled_map.insert(l1.clone(), (l2.clone(), *coupling));
-            coupled_map.insert(l2.clone(), (l1.clone(), *coupling));
+    if plan.is_none_or(|p| p.has_coupled) {
+        for el in &netlist.elements {
+            if let Element::Inductor {
+                name, inductance, ..
+            } = el
+            {
+                ind_values.insert(name.clone(), *inductance);
+            }
+            if let Element::CoupledInductors {
+                l1, l2, coupling, ..
+            } = el
+            {
+                coupled_map.insert(l1.clone(), (l2.clone(), *coupling));
+                coupled_map.insert(l2.clone(), (l1.clone(), *coupling));
+            }
         }
     }
 
-    for el in &netlist.elements {
+    for (ei, el) in netlist.elements.iter().enumerate() {
+        // Pre-resolved terminals when the caller built a plan; otherwise hash
+        // the node names as before.
+        let resolved = plan.map(|p| p.elem_nodes[ei]);
         match el {
             Element::Resistor {
                 pos,
@@ -312,26 +595,44 @@ fn stamp_netlist_into(
                 resistance,
                 ..
             } => {
-                stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, 1.0 / resistance);
+                let (p, n) = resolved.unwrap_or_else(|| {
+                    (
+                        topo.node_index.get(pos).copied(),
+                        topo.node_index.get(neg).copied(),
+                    )
+                });
+                stamp_conductance_at(&mut mat.a, p, n, 1.0 / resistance);
             }
             Element::Capacitor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = cap_state.get(name) {
-                    stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
+                    let (p, n) = resolved.unwrap_or_else(|| {
+                        (
+                            topo.node_index.get(pos).copied(),
+                            topo.node_index.get(neg).copied(),
+                        )
+                    });
+                    stamp_conductance_at(&mut mat.a, p, n, g_eq);
                     // BE companion: KCL at pos gives b[pos] += I_hist.
                     // stamp_current_source(neg, pos, v) adds v to b[pos].
-                    stamp_current_source(&mut mat.b, &topo.node_index, neg, pos, i_hist);
+                    stamp_current_source_at(&mut mat.b, n, p, i_hist);
                 }
                 // Capacitor absent from cap_state = open circuit (correct for DC OP).
             }
             Element::Inductor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
+                    let (p, n) = resolved.unwrap_or_else(|| {
+                        (
+                            topo.node_index.get(pos).copied(),
+                            topo.node_index.get(neg).copied(),
+                        )
+                    });
                     // For coupled inductors, skip the standalone self-conductance stamp;
                     // the CoupledInductors arm below handles the full 2×2 companion.
                     if !coupled_map.contains_key(name) {
-                        stamp_conductance(&mut mat.a, &topo.node_index, pos, neg, g_eq);
+                        stamp_conductance_at(&mut mat.a, p, n, g_eq);
                     }
                     // Always stamp history current source.
-                    stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, i_hist);
+                    stamp_current_source_at(&mut mat.b, p, n, i_hist);
                 }
                 // If not in ind_state (no transient yet), inductor = open circuit at DC.
             }
@@ -379,22 +680,29 @@ fn stamp_netlist_into(
                 neg,
                 waveform,
             } => {
-                let vi = n_nodes + topo.vsrc_index[name];
-                stamp_vsource(
-                    &mut mat.a,
-                    &mut mat.b,
-                    &topo.node_index,
-                    pos,
-                    neg,
-                    vi,
-                    waveform.at(t),
-                );
+                let (p, n) = resolved.unwrap_or_else(|| {
+                    (
+                        topo.node_index.get(pos).copied(),
+                        topo.node_index.get(neg).copied(),
+                    )
+                });
+                let vi = match plan.and_then(|pl| pl.elem_vi[ei]) {
+                    Some(vi) => vi,
+                    None => n_nodes + topo.vsrc_index[name],
+                };
+                stamp_vsource_at(&mut mat.a, &mut mat.b, p, n, vi, waveform.at(t));
             }
             Element::CurrentSource {
                 pos, neg, waveform, ..
             } => {
                 // SPICE: current flows from n+ through source to n- → subtract from n+, add to n-.
-                stamp_current_source(&mut mat.b, &topo.node_index, pos, neg, waveform.at(t));
+                let (p, n) = resolved.unwrap_or_else(|| {
+                    (
+                        topo.node_index.get(pos).copied(),
+                        topo.node_index.get(neg).copied(),
+                    )
+                });
+                stamp_current_source_at(&mut mat.b, p, n, waveform.at(t));
             }
             Element::Diode { .. }
             | Element::Mosfet { .. }
@@ -421,33 +729,37 @@ pub fn stamp_conductance(
     neg: &str,
     g: f64,
 ) {
-    if let Some(&p) = idx.get(pos) {
+    stamp_conductance_at(a, idx.get(pos).copied(), idx.get(neg).copied(), g);
+}
+
+/// [`stamp_conductance`] against pre-resolved row indices.  `None` = ground.
+pub fn stamp_conductance_at(a: &mut [Vec<f64>], pos: NodeId, neg: NodeId, g: f64) {
+    if let Some(p) = pos {
         a[p][p] += g;
-        if let Some(&n) = idx.get(neg) {
+        if let Some(n) = neg {
             a[p][n] -= g;
             a[n][p] -= g;
         }
     }
-    if let Some(&n) = idx.get(neg) {
+    if let Some(n) = neg {
         a[n][n] += g;
     }
 }
 
 /// Stamp a voltage source at aux row `vi`: V(pos) - V(neg) = value.
-fn stamp_vsource(
+fn stamp_vsource_at(
     a: &mut [Vec<f64>],
     b: &mut [f64],
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
+    pos: NodeId,
+    neg: NodeId,
     vi: usize,
     value: f64,
 ) {
-    if let Some(&p) = idx.get(pos) {
+    if let Some(p) = pos {
         a[p][vi] += 1.0;
         a[vi][p] += 1.0;
     }
-    if let Some(&n) = idx.get(neg) {
+    if let Some(n) = neg {
         a[n][vi] -= 1.0;
         a[vi][n] -= 1.0;
     }
@@ -457,17 +769,11 @@ fn stamp_vsource(
 /// Stamp a current source.
 /// SPICE convention: positive current flows from pos through source to neg.
 ///   → b[pos] -= value,  b[neg] += value
-fn stamp_current_source(
-    b: &mut [f64],
-    idx: &IndexMap<String, usize>,
-    pos: &str,
-    neg: &str,
-    value: f64,
-) {
-    if let Some(&p) = idx.get(pos) {
+fn stamp_current_source_at(b: &mut [f64], pos: NodeId, neg: NodeId, value: f64) {
+    if let Some(p) = pos {
         b[p] -= value;
     }
-    if let Some(&n) = idx.get(neg) {
+    if let Some(n) = neg {
         b[n] += value;
     }
 }

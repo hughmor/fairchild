@@ -332,7 +332,10 @@ impl OpticalSegment {
                 (self.delayed[per * k], self.delayed[per * k + 1])
             } else {
                 let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
-                (read(self.nodes[self.wpc * k]), read(self.nodes[self.wpc * k + 1]))
+                (
+                    read(self.nodes[self.wpc * k]),
+                    read(self.nodes[self.wpc * k + 1]),
+                )
             };
             self.src_re[k] = sr;
             self.src_im[k] = si;
@@ -400,7 +403,9 @@ impl OpticalSegment {
             // map expands (an unstable operating point in a feedback loop).
             if self.has_sens() {
                 for i in 0..self.ctrl_nodes.len() {
-                    let Some(cn) = self.ctrl_nodes[i] else { continue };
+                    let Some(cn) = self.ctrl_nodes[i] else {
+                        continue;
+                    };
                     let (g_re, g_im) = self.dout_dv(k, i);
                     if let Some(j) = self.branches[wpc * k] {
                         mat.a[j][cn] -= g_re;

@@ -133,7 +133,47 @@ pub fn build_devices(
     ctx: &SimContext,
     registry: &DeviceRegistry,
 ) -> Result<Vec<Box<dyn Device>>, SimError> {
+    build_devices_with_footprints(netlist, topo, ctx, registry).map(|(d, _)| d)
+}
+
+/// Register a built device: allocate its extra MNA rows, bind them, and record
+/// the structural footprint `mna::Pattern` needs — every row/column it can
+/// stamp into.
+fn push_device(
+    devices: &mut Vec<Box<dyn Device>>,
+    foot: &mut Vec<Vec<usize>>,
+    topo: &mut CircuitTopology,
+    terminals: &[NodeId],
+    mut dev: Box<dyn Device>,
+) {
+    let mut rows: Vec<usize> = terminals.iter().flatten().copied().collect();
+    let extras = dev.num_extra_nodes();
+    if extras > 0 {
+        let first = topo.allocate_extra_rows(extras);
+        dev.bind_extra_nodes(first);
+        rows.extend(first..first + extras);
+    }
+    rows.extend(dev.extra_stamp_rows());
+    rows.sort_unstable();
+    rows.dedup();
+    foot.push(rows);
+    devices.push(dev);
+}
+
+/// A device list paired with each device's structural MNA footprint.
+pub type DevicesWithFootprints = (Vec<Box<dyn Device>>, Vec<Vec<usize>>);
+
+/// [`build_devices`] plus each device's structural footprint, in device order.
+/// The hot NR / transient loops need the footprints to build a sparsity
+/// pattern; everything else can use the simpler wrapper.
+pub fn build_devices_with_footprints(
+    netlist: &Netlist,
+    topo: &mut CircuitTopology,
+    ctx: &SimContext,
+    registry: &DeviceRegistry,
+) -> Result<DevicesWithFootprints, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
+    let mut foot: Vec<Vec<usize>> = Vec::new();
     let topo_arc = Arc::new(topo.clone());
     for el in &netlist.elements {
         match el {
@@ -148,7 +188,8 @@ pub fn build_devices(
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                devices.push(factory(&[pos, neg], &ParamSet::empty(), ctx));
+                let dev = factory(&[pos, neg], &ParamSet::empty(), ctx);
+                push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
             Element::Mosfet {
                 drain,
@@ -163,19 +204,14 @@ pub fn build_devices(
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                if let Some(mut dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx)
-                {
-                    let extras = dev.num_extra_nodes();
-                    if extras > 0 {
-                        let first = topo.allocate_extra_rows(extras);
-                        dev.bind_extra_nodes(first);
-                    }
-                    devices.push(dev);
+                if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
+                    push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 } else {
                     let factory = registry
                         .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-                    devices.push(factory(&[d, g, s, b], &ParamSet::new(params), ctx));
+                    let dev = factory(&[d, g, s, b], &ParamSet::new(params), ctx);
+                    push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 }
             }
             Element::Bjt {
@@ -190,17 +226,12 @@ pub fn build_devices(
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
-                let mut dev = registry
+                let dev = registry
                     .build_bjt(model_name, &[c, b, e, s], ctx)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 // RB/RC/RE series resistances declare internal nodes (one per
-                // non-zero resistance); allocate MNA rows and bind them.
-                let extras = dev.num_extra_nodes();
-                if extras > 0 {
-                    let first = topo.allocate_extra_rows(extras);
-                    dev.bind_extra_nodes(first);
-                }
-                devices.push(dev);
+                // non-zero resistance); push_device allocates and binds them.
+                push_device(&mut devices, &mut foot, topo, &[c, b, e, s], dev);
             }
             Element::Behavioral {
                 name,
@@ -217,7 +248,9 @@ pub fn build_devices(
                     *kind,
                     expr.clone(),
                 );
-                devices.push(Box::new(dev));
+                // Terminals empty on purpose: a B-element reports its whole
+                // footprint (terminals, aux row, referenced nodes) itself.
+                push_device(&mut devices, &mut foot, topo, &[], Box::new(dev));
             }
             Element::XOsdi {
                 nets,
@@ -236,7 +269,7 @@ pub fn build_devices(
                 // defaults baked into the factory). It also tracks which params
                 // the device consumed, so we can warn about typos.
                 let ps = ParamSet::new(params);
-                let mut dev = factory(&terminals, &ps, ctx);
+                let dev = factory(&terminals, &ps, ctx);
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
                     eprintln!(
@@ -253,14 +286,10 @@ pub fn build_devices(
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:
                 // OpenVAF surfaces these as `num_nodes − num_terminals`.
-                // Allocate MNA rows for them so the OSDI runtime has real
-                // slots to stamp into instead of running past mna_nodes.
-                let extras = dev.num_extra_nodes();
-                if extras > 0 {
-                    let first = topo.allocate_extra_rows(extras);
-                    dev.bind_extra_nodes(first);
-                }
-                devices.push(dev);
+                // push_device allocates MNA rows for them so the OSDI runtime
+                // has real slots to stamp into instead of running past
+                // mna_nodes.
+                push_device(&mut devices, &mut foot, topo, &terminals, dev);
             }
             Element::TransmissionLine {
                 a_pos,
@@ -272,22 +301,18 @@ pub fn build_devices(
                 ..
             } => {
                 let term = |n: &fairchild_parser::NodeName| topo.node_index.get(n).copied();
+                let terms = [term(a_pos), term(a_neg), term(b_pos), term(b_neg)];
                 let mut dev: Box<dyn Device> =
                     Box::new(crate::models::tline::NativeTLine::new(*z0, *td));
                 dev.setup_model(ctx);
-                dev.setup_instance(&[term(a_pos), term(a_neg), term(b_pos), term(b_neg)], ctx);
-                // Two branch-current rows (i1, i2).
-                let extras = dev.num_extra_nodes();
-                if extras > 0 {
-                    let first = topo.allocate_extra_rows(extras);
-                    dev.bind_extra_nodes(first);
-                }
-                devices.push(dev);
+                dev.setup_instance(&terms, ctx);
+                // Two branch-current rows (i1, i2), allocated by push_device.
+                push_device(&mut devices, &mut foot, topo, &terms, dev);
             }
             _ => {}
         }
     }
-    Ok(devices)
+    Ok((devices, foot))
 }
 
 /// Report MNA matrix size, NNZ, sparsity, and diagonal magnitude spread.
@@ -727,7 +752,17 @@ fn report_failure(
 /// The Norton-equivalent MNA stamp returns (J, b) such that the linearised
 /// solve J·x_{k+1} = b yields the Newton step x_{k+1} − x_k = −J⁻¹·f(x_k);
 /// equivalently f(x) = J(x)·x − b(x), zero at the true operating point.
+/// ‖f(x)‖₂ at an arbitrary trial point, for the Armijo line search.
+///
+/// Stamps into a caller-owned `scratch` matrix so the line search neither
+/// allocates an n×n matrix per trial nor walks the full dense row for the
+/// matvec — both were O(n²) per call, and this is the hottest path in a large
+/// photonic solve.  ‖f(x)‖ at the *current* iterate needs none of this: the
+/// NR loop's own matrix is already stamped there, so call
+/// `MnaMatrix::residual_norm` on it directly.
+#[allow(clippy::too_many_arguments)]
 fn residual_l2(
+    scratch: &mut crate::mna::MnaMatrix,
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
@@ -735,29 +770,27 @@ fn residual_l2(
     opts: &SimOptions,
     source_scale: f64,
     gmin_extra: f64,
+    plan: Option<&crate::mna::StampPlan>,
     x: &[f64],
 ) -> f64 {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+    crate::mna::stamp_netlist_scaled_in_place(
+        scratch,
+        topo,
+        netlist,
+        source_scale,
+        &empty,
+        &empty,
+        plan,
+    );
     for dev in devices.iter_mut() {
         dev.set_source_scale(source_scale);
         dev.eval(x, EvalFlags::dc(), ctx);
-        dev.load_residual(&mut mat.b);
-        dev.load_jacobian(&mut mat);
+        dev.load_residual(&mut scratch.b);
+        dev.load_jacobian(scratch);
     }
-    topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra);
-    let n = topo.size;
-    let mut sumsq = 0.0_f64;
-    for i in 0..n {
-        let mut row = 0.0_f64;
-        let a_row = &mat.a[i];
-        for j in 0..n {
-            row += a_row[j] * x[j];
-        }
-        let fi = row - mat.b[i];
-        sumsq += fi * fi;
-    }
-    sumsq.sqrt()
+    topo.stamp_gmin(&mut scratch.a, opts.gmin + gmin_extra);
+    scratch.residual_norm(x)
 }
 
 /// Core Newton-Raphson loop at a fixed source scale and gmin.
@@ -776,6 +809,7 @@ fn nr_inner(
     gmin_extra: f64,
     dev_names: &[String],
     phase: &str,
+    plan: Option<&crate::mna::StampPlan>,
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
@@ -783,14 +817,22 @@ fn nr_inner(
     // Sparsity pattern is fixed across this NR loop — devices stamp the
     // same matrix positions each iteration, only the values change.  The
     // factorisation cache captures the symbolic LU once on iteration 0
-    // and reuses it for every subsequent solve (KLU's `klu_refactor`
-    // fast path; faer-sparse skips the dense→CSC rescan but still re-
-    // runs `sp_lu` since faer 0.24 has no separate refactor primitive).
+    // and reuses it for every subsequent solve: KLU's `klu_refactor` fast
+    // path, or faer's `Lu::try_new_with_symbolic`.
     let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
 
     // Reuse one MnaMatrix across iterations — saves N+1 heap allocations
-    // per NR step versus rebuilding from scratch each time.
-    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+    // per NR step versus rebuilding from scratch each time.  With a plan
+    // attached it also carries the structural pattern, which turns the
+    // per-iteration clear and the solver's dense→CSC scan into O(nnz).
+    let mut mat = match plan {
+        Some(p) => crate::mna::MnaMatrix::with_pattern(topo.size, p.pattern.clone()),
+        None => crate::mna::MnaMatrix::zeros(topo.size),
+    };
+    // Second matrix for the Armijo trial points; allocated only if the line
+    // search actually runs (it needs a clamped step first).
+    let mut trial: Option<crate::mna::MnaMatrix> = None;
+    let mut first_stamp = true;
 
     for _ in 0..opts.itl1 {
         crate::mna::stamp_netlist_scaled_in_place(
@@ -800,6 +842,7 @@ fn nr_inner(
             source_scale,
             &empty,
             &empty,
+            plan,
         );
 
         for dev in devices.iter_mut() {
@@ -815,13 +858,22 @@ fn nr_inner(
         // `gmin_extra` is the homotopy step. See CircuitTopology::stamp_gmin.
         topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra);
 
+        if first_stamp {
+            // The pattern is a structural superset, so a stamped cell outside
+            // it means some device coupled nodes it was never handed.  Cheap
+            // insurance against a silently wrong sparse solve.
+            #[cfg(debug_assertions)]
+            mat.debug_assert_covers();
+            first_stamp = false;
+        }
+
         let solve_result = if let Some(f) = fact.as_mut() {
-            f.refactor_and_solve(&mat.a, &mat.b)
+            f.refactor_and_solve_mat(&mat)
         } else {
             // First iteration of this NR loop: build the cache.
-            match solver.factorise(&mat.a) {
+            match solver.factorise_mat(&mat) {
                 Ok(mut f) => {
-                    let x = f.refactor_and_solve(&mat.a, &mat.b);
+                    let x = f.refactor_and_solve_mat(&mat);
                     fact = Some(f);
                     x
                 }
@@ -868,9 +920,11 @@ fn nr_inner(
         // with α_min — the next iteration's stamp will see the partial
         // step and try again.
         //
-        // Residual is f(x) = J(x)·x − b(x); evaluating it requires a full
-        // restamp at the trial point, so the line search costs up to 5
-        // extra eval+stamp passes on each clamped iteration.
+        // Residual is f(x) = J(x)·x − b(x); evaluating it needs a restamp at
+        // each trial point, so the line search costs up to 5 extra eval+stamp
+        // passes on each clamped iteration.  ‖f(x)‖ itself is free — `mat` is
+        // already stamped there.
+        //
         let x_next: Vec<f64> = if max_dv > opts.vmax {
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
@@ -881,7 +935,21 @@ fn nr_inner(
                 .map(|(o, n)| scale * (n - o))
                 .collect();
 
+            // `mat` still holds J(x) and b(x) from the stamp at the top of this
+            // iteration, so ‖f(x)‖ is free — no restamp.
+            let scratch = trial.get_or_insert_with(|| match plan {
+                Some(p) => crate::mna::MnaMatrix::with_pattern(topo.size, p.pattern.clone()),
+                None => crate::mna::MnaMatrix::zeros(topo.size),
+            });
+            // Measured the same way as the trial residuals below, deliberately.
+            // Reading it off `mat` instead would be free — it is already
+            // stamped at `x` — but device limiters (pnjlim) carry state across
+            // evals, so a residual from the loop's stamp and one from a fresh
+            // restamp are not the same quantity, and Armijo would be comparing
+            // two different functions.  The saving here comes from making each
+            // evaluation O(nnz) rather than from skipping one.
             let f_prev = residual_l2(
+                scratch,
                 topo,
                 netlist,
                 devices,
@@ -889,6 +957,7 @@ fn nr_inner(
                 opts,
                 source_scale,
                 gmin_extra,
+                plan,
                 &x,
             );
             const C_ARMIJO: f64 = 1e-4;
@@ -902,6 +971,7 @@ fn nr_inner(
                     .map(|(o, d)| o + alpha * d)
                     .collect();
                 let f_trial = residual_l2(
+                    scratch,
                     topo,
                     netlist,
                     devices,
@@ -909,6 +979,7 @@ fn nr_inner(
                     opts,
                     source_scale,
                     gmin_extra,
+                    plan,
                     &x_trial,
                 );
                 if f_trial <= (1.0 - C_ARMIJO * alpha) * f_prev || alpha <= ALPHA_MIN {
@@ -958,6 +1029,7 @@ fn source_stepping(
     solver: &dyn LinearSolver,
     x0: Vec<f64>,
     dev_names: &[String],
+    plan: Option<&crate::mna::StampPlan>,
 ) -> Result<Vec<f64>, SimError> {
     let mut x = x0;
     let mut scale = 0.0_f64;
@@ -981,6 +1053,7 @@ fn source_stepping(
             0.0,
             &[],
             "",
+            plan,
         ) {
             Ok(x_new) => {
                 x = x_new;
@@ -1009,6 +1082,7 @@ fn source_stepping(
                             0.0,
                             dev_names,
                             &format!("source-stepping @ scale={:.3}", (scale + ds * 2.0).min(1.0)),
+                            plan,
                         );
                     }
                     return Err(SimError::NoConvergence { iters: opts.itl1 });
@@ -1028,6 +1102,7 @@ fn gmin_stepping(
     opts: &SimOptions,
     solver: &dyn LinearSolver,
     dev_names: &[String],
+    plan: Option<&crate::mna::StampPlan>,
 ) -> Result<Vec<f64>, SimError> {
     let mut gmin_extra = opts.gmin_max;
     let target = opts.gmin;
@@ -1047,6 +1122,7 @@ fn gmin_stepping(
             gmin_extra,
             &[],
             "",
+            plan,
         ) {
             Ok(x_new) => {
                 x = x_new;
@@ -1073,6 +1149,7 @@ fn gmin_stepping(
                         gmin_extra,
                         dev_names,
                         &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"),
+                        plan,
                     );
                 }
                 return Err(SimError::NoConvergence { iters: opts.itl1 });
@@ -1112,10 +1189,14 @@ pub fn dc_op_nr_with_registry_opts(
     let ctx = opts.sim_context();
     let mut topo = CircuitTopology::build(netlist);
 
-    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let (mut devices, footprints) =
+        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     let dev_names = build_device_names(netlist);
     let x0 = build_x0_from_nodeset(netlist, &topo);
     let solver = opts.linear_solver(topo.size);
+    // Built after build_devices: extra device rows have to be allocated first,
+    // since they widen topo.size.
+    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
 
     if opts.verbose {
         let nonfinite = report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);
@@ -1145,6 +1226,7 @@ pub fn dc_op_nr_with_registry_opts(
         0.0,
         &dev_names,
         "direct NR (DC OP)",
+        Some(&plan),
     ) {
         if opts.verbose {
             eprintln!("info: DC OP: direct NR succeeded");
@@ -1164,6 +1246,7 @@ pub fn dc_op_nr_with_registry_opts(
         &*solver,
         x0,
         &dev_names,
+        Some(&plan),
     ) {
         if opts.verbose {
             eprintln!("info: DC OP: source-stepping succeeded");
@@ -1182,6 +1265,7 @@ pub fn dc_op_nr_with_registry_opts(
         opts,
         &*solver,
         &dev_names,
+        Some(&plan),
     ) {
         Ok(x) => {
             if opts.verbose {
@@ -1216,6 +1300,12 @@ pub fn dc_op_nr_with_devices_opts(
     let x0 = vec![0.0f64; topo.size];
     let solver = opts.linear_solver(topo.size);
     let dev_names = build_device_names(netlist);
+    // No sparsity pattern on this path: the caller handed over pre-built
+    // devices, so the per-device terminal footprints the pattern needs are
+    // gone.  Falls back to the dense clear + scan.  Sweeps that care can call
+    // `dc_op_nr_with_registry_opts` per point instead — they already run in
+    // parallel across points.
+    let plan: Option<&crate::mna::StampPlan> = None;
 
     if let Ok(x) = nr_inner(
         topo,
@@ -1229,6 +1319,7 @@ pub fn dc_op_nr_with_devices_opts(
         0.0,
         &dev_names,
         "direct NR (DC OP)",
+        plan,
     ) {
         return Ok(NrResult {
             topo: topo.clone(),
@@ -1237,7 +1328,9 @@ pub fn dc_op_nr_with_devices_opts(
         });
     }
 
-    if let Ok(x) = source_stepping(topo, netlist, devices, ctx, opts, &*solver, x0, &dev_names) {
+    if let Ok(x) = source_stepping(
+        topo, netlist, devices, ctx, opts, &*solver, x0, &dev_names, plan,
+    ) {
         return Ok(NrResult {
             topo: topo.clone(),
             x,
@@ -1245,7 +1338,9 @@ pub fn dc_op_nr_with_devices_opts(
         });
     }
 
-    match gmin_stepping(topo, netlist, devices, ctx, opts, &*solver, &dev_names) {
+    match gmin_stepping(
+        topo, netlist, devices, ctx, opts, &*solver, &dev_names, plan,
+    ) {
         Ok(x) => Ok(NrResult {
             topo: topo.clone(),
             x,

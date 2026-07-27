@@ -404,10 +404,7 @@ mod tests {
         d.eval(&x, EvalFlags::tran(), &ctx());
         // At V=0: Cj = CJO (no voltage across the junction)
         let alpha = 1e8; // 1/h where h = 10 ns
-        let mut mat = MnaMatrix {
-            a: vec![vec![0.0; 2]; 2],
-            b: vec![0.0; 2],
-        };
+        let mut mat = MnaMatrix::zeros(2);
         d.load_jacobian_tran(&mut mat, alpha);
         let g_cap_expected = alpha * 4e-12; // Cj(0) * alpha
                                             // Conductance stamp: a[0][0] includes gd_eff + g_cap; a[0][1] = -(gd_eff + g_cap)

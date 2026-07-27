@@ -17,19 +17,23 @@
 //!
 //!  - `DenseSolver`         — faer partial-pivot LU.  Best for ≤ ~50 nodes
 //!    where the sparse setup cost dominates.
-//!  - `FaerSparseSolver`    — faer sparse LU (`SparseColMat::sp_lu`).  Pure
-//!    Rust, no C deps; default at larger N.  Cache
-//!    handle saves the dense→CSC conversion but
-//!    still runs full LU each refactor (faer 0.24
-//!    does not expose a separate refactor path).
+//!  - `FaerSparseSolver`    — faer sparse LU.  Pure Rust, no C deps; default
+//!    at larger N.  Given a structural pattern (see
+//!    `mna::Pattern`) the cache handle keeps both the
+//!    CSC structure and the symbolic LU, so a refactor
+//!    is a value refill plus
+//!    `Lu::try_new_with_symbolic` — no dense rescan,
+//!    no re-run of the column ordering.
 //!  - `KluSolver`           — SuiteSparse KLU via the `klu` cargo feature.
 //!    Cache handle holds a `KluSymbolic` + reusable
 //!    `KluNumeric`; `refactor_and_solve` calls
 //!    `klu_refactor` — the major perf win.
 
 use faer::{linalg::solvers::Solve, Col, Mat};
+use std::sync::Arc;
 
 use crate::error::SimError;
+use crate::mna::MnaMatrix;
 
 /// Choice of linear-system backend.  Carried on `SimOptions` and propagated
 /// to each analysis loop.
@@ -105,6 +109,14 @@ pub trait LinearSolver: Send + Sync {
         let _ = n; // matrix is used only via the trait's `solve` later
         Ok(Box::new(NoCacheFactorisation::new()))
     }
+
+    /// [`LinearSolver::factorise`] with access to the whole matrix, including
+    /// its structural sparsity pattern when the caller built one.  Sparse
+    /// backends override this to cache the CSC structure and the symbolic LU;
+    /// the default ignores the pattern.
+    fn factorise_mat(&self, mat: &MnaMatrix) -> Result<Box<dyn Factorisation>, SimError> {
+        self.factorise(&mat.a)
+    }
 }
 
 /// Reusable factorisation handle.  Held by the Newton-Raphson and
@@ -121,6 +133,13 @@ pub trait Factorisation: Send {
     /// [`LinearSolver::factorise`] that produced this handle), then solve
     /// `A · x = b`.
     fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError>;
+
+    /// [`Factorisation::refactor_and_solve`] taking the whole matrix, so a
+    /// backend holding a cached CSC structure can refill values by walking the
+    /// pattern instead of rescanning n² dense cells.  Default delegates.
+    fn refactor_and_solve_mat(&mut self, mat: &MnaMatrix) -> Result<Vec<f64>, SimError> {
+        self.refactor_and_solve(&mat.a, &mat.b)
+    }
 
     /// Same, but for `A^T · x = b` (used by adjoint / noise paths).
     /// Default falls back to building an explicit transpose and calling
@@ -265,20 +284,192 @@ impl LinearSolver for FaerSparseSolver {
     }
 
     fn factorise(&self, _a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
-        // faer 0.24 has no refactor-only primitive — every solve runs full
-        // symbolic + numeric LU.  Caching the sparsity pattern would only
-        // save the O(n²) → O(nnz) dense→CSC conversion, and it's unsound
-        // unless we also verify that no new structural entries appear
-        // each iteration (photonic devices at x=0 stamp zeros that become
-        // non-zero at the operating point — see the WDM DC OP regression).
-        // Until faer exposes a refactor primitive, the safe behaviour is
-        // to fall back to one-shot solves; the per-iteration overhead is
-        // dominated by `sp_lu` itself, not the dense-scan.
+        // Without a structural pattern there is nothing sound to cache:
+        // discovering the pattern from values on iteration 0 misses cells that
+        // are zero at x=0 and non-zero at the solution, which photonic devices
+        // do stamp (see the WDM DC OP regression).  Callers that want the fast
+        // path hand over a pattern via `factorise_mat`.
         Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
             FaerSparseSolver {
                 zero_threshold: self.zero_threshold,
             },
         ))))
+    }
+
+    fn factorise_mat(&self, mat: &MnaMatrix) -> Result<Box<dyn Factorisation>, SimError> {
+        match mat.pattern() {
+            Some(p) => Ok(Box::new(FaerSparseFactorisation::new(
+                Arc::clone(p),
+                self.zero_threshold,
+            ))),
+            None => self.factorise(&mat.a),
+        }
+    }
+}
+
+/// faer-sparse with a cached CSC structure and a cached symbolic LU.
+///
+/// Two costs disappear versus one-shot `solve`: the O(n²) dense scan that built
+/// triplets every iteration, and the column ordering (colamd), which was re-run
+/// every iteration even though the pattern never changes.
+///
+/// The structure is the *numerically* non-zero subset of the structural
+/// pattern, not the pattern itself — a structural superset would hand extra
+/// explicit zeros to the ordering and pay for the fill-in.  Narrowing is safe
+/// because growth is detectable in O(nnz): the refill walk visits every
+/// structural cell, so a cell that turns non-zero later is seen on the
+/// iteration it happens and triggers one rebuild.
+struct FaerSparseFactorisation {
+    pattern: Arc<crate::mna::Pattern>,
+    zero_threshold: f64,
+    /// CSC column pointers / row indices of the active set.
+    col_ptr: Vec<usize>,
+    row_idx: Vec<usize>,
+    /// Where in `values` each active `(row, col)` lives, indexed the same way
+    /// the refill walk visits them: row-major over `pattern.cols`.
+    slot: Vec<u32>,
+    values: Vec<f64>,
+    symbolic: Option<faer::sparse::linalg::solvers::SymbolicLu<usize>>,
+}
+
+/// `slot` entry for a structural cell that is not in the active set.
+const NO_SLOT: u32 = u32::MAX;
+
+impl FaerSparseFactorisation {
+    fn new(pattern: Arc<crate::mna::Pattern>, zero_threshold: f64) -> Self {
+        FaerSparseFactorisation {
+            pattern,
+            zero_threshold,
+            col_ptr: Vec::new(),
+            row_idx: Vec::new(),
+            slot: Vec::new(),
+            values: Vec::new(),
+            symbolic: None,
+        }
+    }
+
+    /// Rebuild the CSC structure and symbolic LU from the cells of `a` that are
+    /// currently non-zero.  Runs on the first solve and again only if a new
+    /// cell inside the structural pattern turns non-zero.
+    fn rebuild(&mut self, a: &[Vec<f64>]) -> Result<(), SimError> {
+        use faer::sparse::linalg::solvers::SymbolicLu;
+        use faer::sparse::SymbolicSparseColMatRef;
+
+        let n = a.len();
+        let thr = self.zero_threshold;
+        // Count per column first so the CSC arrays can be filled in one pass.
+        let mut col_count = vec![0usize; n];
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            for &j in cols {
+                if a[i][j as usize].abs() > thr {
+                    col_count[j as usize] += 1;
+                }
+            }
+        }
+        let mut col_ptr = vec![0usize; n + 1];
+        for j in 0..n {
+            col_ptr[j + 1] = col_ptr[j] + col_count[j];
+        }
+        let nnz = col_ptr[n];
+        let mut row_idx = vec![0usize; nnz];
+        let mut values = vec![0.0_f64; nnz];
+        let mut fill = col_ptr.clone();
+        // Row-major walk keeps `row_idx` ascending within each column, which is
+        // what `new_checked` requires of a sorted CSC.
+        let mut slot: Vec<u32> = Vec::with_capacity(self.pattern.nnz);
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            for &j in cols {
+                let v = a[i][j as usize];
+                if v.abs() > thr {
+                    let k = fill[j as usize];
+                    row_idx[k] = i;
+                    values[k] = v;
+                    fill[j as usize] += 1;
+                    slot.push(k as u32);
+                } else {
+                    slot.push(NO_SLOT);
+                }
+            }
+        }
+        let sym = SymbolicSparseColMatRef::new_checked(n, n, &col_ptr, None, &row_idx);
+        self.symbolic = Some(SymbolicLu::try_new(sym).map_err(|_| SimError::SingularMatrix)?);
+        self.col_ptr = col_ptr;
+        self.row_idx = row_idx;
+        self.slot = slot;
+        self.values = values;
+        Ok(())
+    }
+
+    /// Copy current values into the cached CSC.  Returns true if a structural
+    /// cell outside the active set has become non-zero, meaning the caller must
+    /// rebuild before factorising.
+    fn refill(&mut self, a: &[Vec<f64>]) -> bool {
+        let thr = self.zero_threshold;
+        let mut grew = false;
+        let mut k = 0usize;
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            let row = &a[i];
+            for &j in cols {
+                let v = row[j as usize];
+                let s = self.slot[k];
+                if s == NO_SLOT {
+                    grew |= v.abs() > thr;
+                } else {
+                    self.values[s as usize] = v;
+                }
+                k += 1;
+            }
+        }
+        grew
+    }
+
+    fn solve_cached(&self, b: &[f64]) -> Result<Vec<f64>, SimError> {
+        use faer::sparse::linalg::solvers::Lu;
+        use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
+
+        let n = b.len();
+        let symbolic = self.symbolic.as_ref().ok_or(SimError::SingularMatrix)?;
+        let sym = SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
+        let mat = SparseColMatRef::<usize, f64>::new(sym, &self.values);
+        let lu = Lu::try_new_with_symbolic(symbolic.clone(), mat)
+            .map_err(|_| SimError::SingularMatrix)?;
+        let b_col = Col::<f64>::from_fn(n, |i| b[i]);
+        let x_col = lu.solve(b_col.as_ref());
+        let x: Vec<f64> = (0..n).map(|i| x_col[i]).collect();
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(SimError::SingularMatrix);
+        }
+        Ok(x)
+    }
+}
+
+impl Factorisation for FaerSparseFactorisation {
+    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        // `refill` indexes the cached slot map, so it is only valid once
+        // `rebuild` has run; short-circuit ordering matters here.
+        if self.symbolic.is_none() || self.refill(a) {
+            self.rebuild(a)?;
+        }
+        self.solve_cached(b)
+    }
+
+    fn refactor_and_solve_transpose(
+        &mut self,
+        a: &[Vec<f64>],
+        b: &[f64],
+    ) -> Result<Vec<f64>, SimError> {
+        // Adjoint paths are cold; the explicit transpose keeps this simple.
+        let n = b.len();
+        let mut at = vec![vec![0.0_f64; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                at[i][j] = a[j][i];
+            }
+        }
+        FaerSparseSolver {
+            zero_threshold: self.zero_threshold,
+        }
+        .solve(&at, b)
     }
 }
 

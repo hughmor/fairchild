@@ -16,7 +16,7 @@ use crate::mna::{
     ind_companion, ind_companion_be_to_tr, ind_companion_gear2, ind_companion_tr_advance,
     stamp_netlist, CircuitTopology, MnaMatrix,
 };
-use crate::newton::{build_devices, dc_op_nr_with_registry_opts};
+use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::solver::lu_solve;
 
@@ -614,7 +614,8 @@ pub fn tran_nr_with_registry_opts(
     };
     let mut topo = topo;
 
-    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let (mut devices, footprints) =
+        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     // After build_devices, topo.size is final.  Pad the initial x vector
     // to match — when we came via UIC, x was sized to the pre-allocation
     // topology; OSDI internal nodes get a zero initial guess.
@@ -622,6 +623,9 @@ pub fn tran_nr_with_registry_opts(
     // Topology is fixed across the whole transient — build the linear
     // solver once and reuse for every NR iter.
     let solver = opts.linear_solver(topo.size);
+    // Structural sparsity pattern: same for every timestep and every NR
+    // iteration within them, so build it once here.
+    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
 
     // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
     // history is defined before the first step.
@@ -668,7 +672,7 @@ pub fn tran_nr_with_registry_opts(
     // One MnaMatrix reused across every NR iteration of every timestep —
     // for a 10 k-step transient with ~3 NR iters each this skips 30 k ×
     // (N+1) heap allocations.
-    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+    let mut mat = crate::mna::MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
 
     let mut t = step;
     let mut first_tr = true;
@@ -680,7 +684,15 @@ pub fn tran_nr_with_registry_opts(
         ctx.time_s = t;
         let mut step_converged = false;
         for _iter in 0..opts.itl4 {
-            crate::mna::stamp_netlist_in_place(&mut mat, &topo, netlist, t, &cap_state, &ind_state);
+            crate::mna::stamp_netlist_in_place(
+                &mut mat,
+                &topo,
+                netlist,
+                t,
+                &cap_state,
+                &ind_state,
+                Some(&plan),
+            );
 
             for dev in &mut devices {
                 dev.set_source_scale(1.0);
@@ -697,10 +709,10 @@ pub fn tran_nr_with_registry_opts(
             topo.stamp_gmin(&mut mat.a, opts.gmin);
 
             let x_new = if let Some(f) = fact.as_mut() {
-                f.refactor_and_solve(&mat.a, &mat.b)?
+                f.refactor_and_solve_mat(&mat)?
             } else {
-                let mut f = solver.factorise(&mat.a)?;
-                let r = f.refactor_and_solve(&mat.a, &mat.b)?;
+                let mut f = solver.factorise_mat(&mat)?;
+                let r = f.refactor_and_solve_mat(&mat)?;
                 fact = Some(f);
                 r
             };
@@ -851,10 +863,14 @@ pub fn tran_nr_with_registry_var_opts(
         (dc.topo, dc.x)
     };
     let mut topo = topo;
-    let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    let (mut devices, footprints) =
+        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     // Pad x for any OSDI internal-node rows allocated by build_devices.
     x.resize(topo.size, 0.0);
     let solver = opts.linear_solver(topo.size);
+    // Structural sparsity pattern: same for every timestep and every NR
+    // iteration within them, so build it once here.
+    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
@@ -950,7 +966,7 @@ pub fn tran_nr_with_registry_var_opts(
     let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
 
     // Reusable MnaMatrix — see fixed-step path for rationale.
-    let mut mat = crate::mna::MnaMatrix::zeros(topo.size);
+    let mut mat = crate::mna::MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
 
     'outer: loop {
         if t >= stop {
@@ -1064,7 +1080,13 @@ pub fn tran_nr_with_registry_var_opts(
 
         for _iter in 0..opts.itl4 {
             crate::mna::stamp_netlist_in_place(
-                &mut mat, &topo, netlist, t_next, &cap_state, &ind_state,
+                &mut mat,
+                &topo,
+                netlist,
+                t_next,
+                &cap_state,
+                &ind_state,
+                Some(&plan),
             );
 
             for dev in devices.iter_mut() {
@@ -1077,10 +1099,10 @@ pub fn tran_nr_with_registry_var_opts(
             topo.stamp_gmin(&mut mat.a, opts.gmin);
 
             let x_new = if let Some(f) = fact.as_mut() {
-                f.refactor_and_solve(&mat.a, &mat.b)?
+                f.refactor_and_solve_mat(&mat)?
             } else {
-                let mut f = solver.factorise(&mat.a)?;
-                let r = f.refactor_and_solve(&mat.a, &mat.b)?;
+                let mut f = solver.factorise_mat(&mat)?;
+                let r = f.refactor_and_solve_mat(&mat)?;
                 fact = Some(f);
                 r
             };

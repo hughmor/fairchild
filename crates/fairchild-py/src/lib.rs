@@ -586,7 +586,12 @@ impl Circuit {
     ///   Unrecognised kwargs raise `RuntimeError` immediately.
     #[pyo3(signature = (analysis, **kwargs))]
     #[allow(clippy::useless_conversion)]
-    pub fn run(&self, analysis: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+    pub fn run(
+        &self,
+        py: Python<'_>,
+        analysis: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<SimResult> {
         let netlist = self
             .netlist
             .as_ref()
@@ -632,10 +637,17 @@ impl Circuit {
                 .nested
                 .as_ref()
                 .map(|(s, a, b, st)| (s.as_str(), *a, *b, *st));
-            let result = dc_sweep_with_registry_opts(
-                &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts,
-            )
-            .map_err(sim_err)?;
+            // GIL released around every solve: they touch no Python objects,
+            // and holding it serialises Python threads that want to run
+            // independent simulations concurrently (a finite-difference
+            // Jacobian over bias points, a corner sweep).
+            let result = py
+                .allow_threads(|| {
+                    dc_sweep_with_registry_opts(
+                        &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts,
+                    )
+                })
+                .map_err(sim_err)?;
             return Ok(SimResult {
                 inner: SimResultInner::DcSweep(result),
                 measurements: Vec::new(),
@@ -644,7 +656,9 @@ impl Circuit {
 
         match analysis_lc.as_str() {
             "op" | "dc" => {
-                let result = dc_op_nr_with_registry_opts(&nl, &registry, &opts).map_err(sim_err)?;
+                let result = py
+                    .allow_threads(|| dc_op_nr_with_registry_opts(&nl, &registry, &opts))
+                    .map_err(sim_err)?;
                 Ok(SimResult {
                     inner: SimResultInner::Dc(result),
                     measurements: Vec::new(),
@@ -652,12 +666,15 @@ impl Circuit {
             }
             "tran" | "transient" => {
                 let (stop, step) = parse_tran_kwargs(kwargs)?;
-                let result = if opts.variable_step {
-                    tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
-                } else {
-                    tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                }
-                .map_err(sim_err)?;
+                let result = py
+                    .allow_threads(|| {
+                        if opts.variable_step {
+                            tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
+                        } else {
+                            tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
+                        }
+                    })
+                    .map_err(sim_err)?;
                 let measurements = evaluate_measurements(&nl.measurements, &result)
                     .into_iter()
                     .map(|m| (m.name, m.value))
@@ -669,7 +686,10 @@ impl Circuit {
             }
             "ac" => {
                 let (freqs, src) = parse_ac_kwargs(kwargs)?;
-                let result = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
+                let result = py
+                    .allow_threads(|| {
+                        ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
+                    })
                     .map_err(sim_err)?;
                 Ok(SimResult {
                     inner: SimResultInner::Ac(result),
@@ -678,10 +698,13 @@ impl Circuit {
             }
             "noise" => {
                 let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(kwargs)?;
-                let result = fairchild_core::noise_analysis(
-                    &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
-                )
-                .map_err(sim_err)?;
+                let result = py
+                    .allow_threads(|| {
+                        fairchild_core::noise_analysis(
+                            &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
+                        )
+                    })
+                    .map_err(sim_err)?;
                 Ok(SimResult {
                     inner: SimResultInner::Noise(result),
                     measurements: Vec::new(),

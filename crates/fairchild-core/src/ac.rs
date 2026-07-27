@@ -192,10 +192,7 @@ pub fn ac_analysis_opts(
         // `small_signal_reactances()`.
         dev.eval(&x0, EvalFlags::tran(), &ctx);
         // Use a temporary MnaMatrix to collect resistive Jacobian entries.
-        let mut tmp = crate::mna::MnaMatrix {
-            a: vec![vec![0.0; size]; size],
-            b: vec![0.0; size],
-        };
+        let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
             for (g, t) in g_row.iter_mut().zip(t_row.iter()) {

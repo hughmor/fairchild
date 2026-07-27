@@ -30,10 +30,7 @@ fn mock_path() -> PathBuf {
 
 // MnaMatrix::new is private; this helper mirrors its layout for tests.
 fn make_mat(size: usize) -> MnaMatrix {
-    MnaMatrix {
-        a: vec![vec![0.0f64; size]; size],
-        b: vec![0.0f64; size],
-    }
+    MnaMatrix::zeros(size)
 }
 
 #[test]

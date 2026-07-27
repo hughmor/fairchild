@@ -172,6 +172,26 @@ impl Device for BehavioralDevice {
     fn setup_model(&mut self, _ctx: &SimContext) {}
     fn setup_instance(&mut self, _terminals: &[NodeId], _ctx: &SimContext) {}
 
+    /// A B-element is the one device that stamps outside its own terminals:
+    /// the Jacobian row picks up a column for every `V(node)` / `I(vsrc)` the
+    /// expression references.  `build_devices` never sees those, so report the
+    /// whole footprint here — terminals, aux row, and every referenced coord.
+    fn extra_stamp_rows(&self) -> Vec<usize> {
+        let n_nodes = self.topo.n_nodes();
+        let mut rows: Vec<usize> = self.pos.into_iter().chain(self.neg).collect();
+        if let Some(vi) = self.vi {
+            rows.push(n_nodes + vi);
+        }
+        for r in &self.refs {
+            match r {
+                RefKind::NodeV(Some(i)) => rows.push(*i),
+                RefKind::BranchI(i) => rows.push(n_nodes + *i),
+                RefKind::NodeV(None) | RefKind::Time => {}
+            }
+        }
+        rows
+    }
+
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         self.value = self.eval_value(x, self.t);
 
