@@ -54,10 +54,10 @@ X1 in_re in_im in_wl out_re out_im out_wl fc_grating_coupler alpha=0.5
     );
 }
 
-/// Grating coupler on a 2-channel WDM bundle: parser replicates per channel,
-/// each channel sees the same attenuation.
+/// Grating coupler on a 2-channel WDM bundle: one bundle-aware instance
+/// carries both channels, and each sees the same attenuation.
 #[test]
-fn grating_coupler_wdm_replicates_per_channel() {
+fn grating_coupler_wdm_handles_both_channels_in_one_instance() {
     let netlist = "\
 .optical_port ch0
 .optical_port ch1

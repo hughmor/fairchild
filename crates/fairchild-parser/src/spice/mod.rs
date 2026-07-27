@@ -1048,42 +1048,51 @@ mod tests {
         }
     }
 
+    /// An unrecognised model on a multi-channel bundle is refused, not
+    /// replicated.  Replication silently duplicated any electrical port N times
+    /// onto the same nodes; nothing in the tree wanted it.
     #[test]
-    fn optical_port_wdm_replicates_per_channel() {
-        let net = parse_spice(
+    fn unknown_model_on_a_wdm_bundle_is_refused() {
+        let err = parse_spice(
             "* WDM port test\n\
              .optical_port bus_in 4\n\
              .optical_port bus_out 4\n\
              Xwg bus_in bus_out some_model L_um=100\n.end\n",
         )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("no WDM semantics"), "{msg}");
+        assert!(msg.contains("bundle_arity_for"), "{msg}");
+    }
+
+    /// The same instance on 1-channel bundles expands in place — the case where
+    /// replication and flattening always agreed.
+    #[test]
+    fn unknown_model_on_single_channel_bundles_expands_in_place() {
+        let net = parse_spice(
+            "* single channel\n\
+             .optical_port bus_in\n\
+             .optical_port bus_out\n\
+             Xwg bus_in bus_out some_model L_um=100\n.end\n",
+        )
         .unwrap();
-        assert_eq!(net.bundle_ports[0].channels, 4);
-        // 4 channels → 4 device instances.
-        assert_eq!(net.elements.len(), 4);
-        for ch in 0..4 {
-            match &net.elements[ch] {
-                Element::XOsdi {
-                    name,
+        assert_eq!(net.elements.len(), 1);
+        match &net.elements[0] {
+            Element::XOsdi { name, nets, .. } => {
+                assert_eq!(name, "xwg");
+                assert_eq!(
                     nets,
-                    model_name,
-                    ..
-                } => {
-                    assert_eq!(name, &format!("xwg_ch{ch}"));
-                    assert_eq!(model_name, "some_model");
-                    assert_eq!(
-                        nets,
-                        &vec![
-                            format!("bus_in_re_{ch}"),
-                            format!("bus_in_im_{ch}"),
-                            format!("bus_in_wl_{ch}"),
-                            format!("bus_out_re_{ch}"),
-                            format!("bus_out_im_{ch}"),
-                            format!("bus_out_wl_{ch}"),
-                        ]
-                    );
-                }
-                _ => panic!("expected XOsdi"),
+                    &vec![
+                        "bus_in_re_0".to_string(),
+                        "bus_in_im_0".to_string(),
+                        "bus_in_wl_0".to_string(),
+                        "bus_out_re_0".to_string(),
+                        "bus_out_im_0".to_string(),
+                        "bus_out_wl_0".to_string(),
+                    ]
+                );
             }
+            _ => panic!("expected XOsdi"),
         }
     }
 

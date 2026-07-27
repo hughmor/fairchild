@@ -22,9 +22,9 @@ What this exercises that a flat netlist can't:
     instance's own parameters, so every ring can differ
   * `{…}` parameter arithmetic — the ring's arc length is `{pi*radius}`, so
     radius is the knob a designer actually wants
-  * a subcircuit taking a whole WDM bus (source_bank, one instance for 8
-    channels) *and* one taking a single channel (mrm, instanced per ring) —
-    the parser picks by the subckt's declared port count
+  * two subcircuits that each take a whole WDM bus — source_bank (8 lasers,
+    8 MZMs, a mux) and mrm_wdm8 (one ring, one junction, one heater, all 8
+    wavelengths) — matched to the bus by their declared port count
 
 Run:      .venv/bin/python examples/photonic/native_pcell_link.py
 Selftest: same, with --selftest (asserts the physics, no plotting)
@@ -119,7 +119,7 @@ def deck(*, ring_bias=None, heater_mA=None, drive=None, analysis=".op") -> str:
 
     L = [f"* hierarchical PCell link, {N_CH} channels",
          f".include {PCELLS / 'source_bank.sp'}",
-         f".include {PCELLS / 'mrm.sp'}",
+         f".include {PCELLS / 'mrm_wdm8.sp'}",
          f".optical_port bus {N_CH}"]
     # One bus segment per ring, plus the add/drop ports of each ring.
     for i in range(N_CH + 1):
@@ -134,12 +134,15 @@ def deck(*, ring_bias=None, heater_mA=None, drive=None, analysis=".op") -> str:
     for k in range(N_CH):
         L.append(f"Vd{k + 1} d{k + 1} 0 DC {drive[k]:.6g}")
 
-    # ── the ring bank: one MRM PCell per channel, each trimmed to its λ ─────
-    # Separate instances (not one replicated line) precisely because each ring
-    # carries different parameters — that is what a PCell is for.
+    # ── the ring bank: one WDM MRM PCell per ring, each trimmed to its λ ────
+    # Separate instances because each ring carries different parameters — that
+    # is what a PCell is for. Each instance is the 8-channel cell: one junction
+    # and one heater serving the whole bus, which is what a ring on a WDM bus
+    # physically is. (The single-channel mrm.sp on an 8-channel bundle would
+    # describe eight rings sharing two electrical nodes; the parser rejects it.)
     for k in range(N_CH):
         L.append(
-            f"Xr{k} seg{k} seg{k + 1} add{k} drp{k} vpn{k} 0 hc{k} 0 mrm"
+            f"Xr{k} seg{k} seg{k + 1} add{k} drp{k} vpn{k} 0 hc{k} 0 mrm_wdm8"
             f" radius={RADIUS_M:.6g} n_eff={trims()[k]:.9f}"
         )
         L.append(f"Vpn{k} vpn{k} 0 DC {ring_bias[k]:.6g}")
@@ -200,9 +203,11 @@ def selftest() -> int:
 
     # 4. Heater on ring 5 detunes ring 5 — per-instance electrical control
     #    through the PCell's own heater terminals. r_heater is per arc and the
-    #    arcs are in series, so 12 mA puts I²·2R = 53 mW across a 26.4 mW p_pi:
-    #    about two π of phase, i.e. a full FSR of detuning.
-    r_ht = run(heater_mA=[0, 0, 0, 0, 0, 12.0, 0, 0])
+    #    arcs are in series, so I²·2R is the whole-ring power against a 26.4 mW
+    #    p_pi: 4 mA gives ~5.9 mW, comfortably past the half-FSR point where the
+    #    ring has walked off its channel. Do NOT reach for a bigger current —
+    #    12 mA is ~2π and brings the ring back ON resonance.
+    r_ht = run(heater_mA=[0, 0, 0, 0, 0, 4.0, 0, 0])
     assert r_ht["drops"][5, 5] < 0.2 * drops[5, 5], (
         f"heater did not detune ring 5: {r_ht['drops'][5, 5]:.4f} vs "
         f"{drops[5, 5]:.4f} mW")

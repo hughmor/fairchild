@@ -5,10 +5,9 @@
 //! two channels MUST show different transmission profiles — that's the
 //! whole demonstration: same modulator, different per-wavelength response.
 //!
-//! The bundle-port mechanism gives this for free: every photonic device
-//! on the bus replicates per channel, but `vmod` is a plain net so both
-//! ring instances share it.  No multiplexer or demultiplexer device is
-//! involved.
+//! The bundle-port mechanism gives this for free: every photonic device on the
+//! bus is bundle-aware, so one instance propagates both channels independently
+//! off one shared `vmod`.  No multiplexer or demultiplexer device is involved.
 
 use fairchild_core::{
     dc_op_nr_with_registry, options::SimOptions, tran::IntegratorMode,

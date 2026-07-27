@@ -1,4 +1,4 @@
-use super::stamp_potential_eq;
+use super::{stamp_potential_eq, LambdaSelect};
 use crate::delay::DelayLine;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
@@ -127,6 +127,7 @@ pub struct NativeOptical2x2 {
     branches: Vec<Option<usize>>,
     delay: DelayLine,
     delayed: Vec<f64>,
+    lam_src: LambdaSelect,
 }
 
 /// Branch rows per channel: thru_re, thru_im, drop_re, drop_im, thru_λ, drop_λ.
@@ -161,6 +162,7 @@ impl NativeOptical2x2 {
             branches: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
+            lam_src: LambdaSelect::default(),
         }
     }
 
@@ -273,6 +275,13 @@ impl NativeOptical2x2 {
     /// Node ids for channel `k`: (in1_re, in1_im, in1_λ, in2_re, in2_im,
     /// thru_re, thru_im, thru_λ, drop_re, drop_im, drop_λ).
     #[allow(clippy::type_complexity)]
+    /// The second input port's λ wire — `channel_nodes` skips it because the
+    /// transfer matrix never needs it, but λ selection does.
+    fn channel_lambda_in2(&self, k: usize) -> NodeId {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        self.nodes[wpc * n + wpc * k + wpc - 1]
+    }
+
     fn channel_nodes(
         &self,
         k: usize,
@@ -341,6 +350,7 @@ impl Device for NativeOptical2x2 {
         self.n_channels = n;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; BRANCHES_PER_CHANNEL * n];
+        self.lam_src.resize(n);
         // Size the per-channel state, then replay params captured before N was
         // known (parameters are set on the model card, ahead of instancing).
         self.w0 = vec![0.0; n];
@@ -408,6 +418,12 @@ impl Device for NativeOptical2x2 {
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
+        // Latch which input port carries the λ tag; see LambdaSelect.
+        for k in 0..self.n_channels {
+            let (_, _, in1_l, ..) = self.channel_nodes(k);
+            let in2_l = self.channel_lambda_in2(k);
+            self.lam_src.observe(k, in1_l, in2_l, x);
+        }
         // Passivity guard, once, on the first eval — the registry applies
         // instance params *after* setup_instance, so this is the earliest point
         // at which the matrix is final. Weight mode is unitary by construction
@@ -528,11 +544,14 @@ impl Device for NativeOptical2x2 {
                     stamp_potential_eq(mat, &self.branches, slot, out, &ins);
                 }
             }
-            // λ labels pass through from in1 (a wavelength tag is not delayed);
-            // mirroring in1 on both outputs also prevents a bind-loop on drop_λ
-            // in closed-loop topologies, same as fc_dcoupler.
-            stamp_potential_eq(mat, &self.branches, base + 4, t_l, &[(in1_l, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, base + 5, d_l, &[(in1_l, -1.0)]);
+            // λ labels pass through from whichever input is lit — in1 when
+            // both are (a wavelength tag is not delayed).  Latched, so a
+            // closed loop keeps one driver and drop_λ never binds to itself.
+            // Same rule as fc_dcoupler; see LambdaSelect.
+            let in2_l = self.channel_lambda_in2(k);
+            let src_l = self.lam_src.pick(k, in1_l, in2_l);
+            stamp_potential_eq(mat, &self.branches, base + 4, t_l, &[(src_l, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, base + 5, d_l, &[(src_l, -1.0)]);
         }
     }
 

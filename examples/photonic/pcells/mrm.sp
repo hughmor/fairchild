@@ -9,12 +9,13 @@
 *   Xr1 in_re in_im in_wl  th_re th_im th_wl  ad_re ad_im ad_wl  dr_re dr_im dr_wl
 *   +   vpn 0  heat 0  mrm  radius=8e-6 kappa_l=0.183 dn_dv=-3.62e-5
 *
-* SINGLE CHANNEL by design. Hand the instance a multi-channel .optical_port and
-* the parser replicates it once per wavelength (12 optical ports = one channel's
-* worth), which is the right thing for a ring bank: pair it with an
-* .electrical_port so each ring also gets its own drive wire. What you must NOT
-* do is expect one instance to serve N wavelengths off one junction — that is
-* what fc_optical_2x2 is for.
+* SINGLE CHANNEL by design: 12 optical ports = one channel's worth. Hand the
+* instance a multi-channel .optical_port and the parser rejects it, because one
+* instance cannot serve N wavelengths off one junction. (It used to replicate
+* the line silently, which described N rings sharing two electrical nodes and
+* drew N times the terminal current.) For a ring on a WDM bus use the
+* bundle-aware sibling mrm_wdm8.sp; for a programmable N-channel 2x2, use
+* fc_optical_2x2.
 *
 * Topology — add-drop, two couplers with the ring split into two arcs, exactly
 * the form the parameters were fitted against (experiments/giona/ringfit.py):

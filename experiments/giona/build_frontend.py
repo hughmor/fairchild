@@ -227,10 +227,11 @@ def frontend(trims: list[float]) -> str:
             add(f"Xwd{i} dout{i + 1} ain{i} fc_waveguide l_m={{pitch}}"
                 f" n_g={{n_g}} alpha_dB_cm={{wg_loss}}")
     add("")
-    add("* Dark end of the add/drop bus: a zero-power laser per channel is the")
-    add("* cheapest way to drive an unused optical INPUT (fc_cw_laser is scalar,")
-    add("* so one line replicates across all 8 channels).")
-    add(f"Xdark_add ain{N_CH} fc_cw_laser power_mW=0 wavelength_nm=1550")
+    add(f"* Dark end of the add/drop bus: ain{N_CH} is left undriven. It used to")
+    add("* carry a zero-power laser, which relied on one scalar line replicating")
+    add("* across all 8 channels — the parser refuses that now, and it was never")
+    add("* needed: gmin floors the undriven re/im wires at zero, and the drop")
+    add("* coupler takes its wavelength tag from the lit ring side.")
     add(f"* drop-bus readout is dout1; bus output is bout{N_CH}.")
     add("")
 
@@ -260,9 +261,12 @@ def frontend(trims: list[float]) -> str:
     add("* wires then the shared return. w=0 dw_dv=1 makes V(Wij) the weight.")
     for i in range(1, N_CH + 1):
         ctl = " ".join(f"W{i}{j}" for j in range(1, N_CH + 1))
+        # dark{i} — the block's unused second input — is left undriven. The
+        # zero-power laser that used to sit here relied on one scalar line
+        # replicating across 8 channels; it is also unnecessary, since the
+        # block takes its wavelength tag from the lit in1 side.
         add(f"Xw{i} win{i} dark{i} wthru{i} wdrop{i} {ctl} 0 fc_optical_2x2"
             f" w=0 dw_dv=1")
-        add(f"Xdark_w{i} dark{i} fc_cw_laser power_mW=0 wavelength_nm=1550")
         for j in range(1, N_CH + 1):
             add(f"VW{i}{j} W{i}{j} 0 DC 0")
     add("")

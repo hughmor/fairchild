@@ -117,8 +117,8 @@ fn mrm_pcell_instances_carry_independent_models() {
     );
 }
 
-/// The source bank: one instance carries the whole 8-channel bus (the parser
-/// chose flatten over replicate from the port count), each channel gets its own
+/// The source bank: one instance carries the whole 8-channel bus (its declared
+/// port count matches the flattened width), each channel gets its own
 /// wavelength, its laser power gates it, and its MZM drive gates it too.
 #[test]
 fn source_bank_pcell_drives_eight_channels() {
@@ -153,11 +153,11 @@ fn source_bank_pcell_drives_eight_channels() {
     }
 }
 
-/// A subckt whose port count matches neither the flattened nor the per-channel
-/// width is a port-count error naming both candidates, not a confusing failure
-/// after expansion.
+/// A subckt whose port count matches neither the flattened bus width nor a
+/// single channel is a port-count error naming the width it would need, not a
+/// confusing failure after expansion.
 #[test]
-fn subckt_bundle_width_mismatch_names_both_options() {
+fn subckt_bundle_width_mismatch_names_the_required_width() {
     let err = parse_spice(
         "* wrong width\n\
          .subckt two_wires a b\n\
@@ -170,6 +170,53 @@ fn subckt_bundle_width_mismatch_names_both_options() {
     .unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("declares 2 ports"), "{msg}");
-    assert!(msg.contains("one channel per instance"), "{msg}");
+    assert!(msg.contains("expand to 12 wires"), "{msg}");
     assert!(msg.contains("whole 4-channel bus"), "{msg}");
+}
+
+/// A single-channel subckt on a multi-channel bundle is refused.
+///
+/// This is the regression that motivated dropping replication: the parser used
+/// to emit four copies of the cell, so the four copies' electrical ports all
+/// landed on the same two nodes and drew four times the current, silently.
+#[test]
+fn single_channel_subckt_on_a_wide_bundle_is_refused() {
+    let err = parse_spice(
+        "* would have been replicated\n\
+         .subckt cell oi_re oi_im oi_l anode cathode\n\
+         R1 anode cathode 1k\n\
+         .ends\n\
+         .optical_port bus 4\n\
+         X1 bus a k cell\n\
+         .op\n.end\n",
+    )
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("no WDM semantics"), "{msg}");
+    assert!(msg.contains("bus(4 ch)"), "{msg}");
+    assert!(msg.contains("fc_demux"), "{msg}");
+}
+
+/// The same cell on a 1-channel bundle still works — that is the case where
+/// replication and flattening always agreed.
+#[test]
+fn single_channel_subckt_on_a_one_channel_bundle_still_expands() {
+    let net = parse_spice(
+        "* one channel\n\
+         .subckt cell oi_re oi_im oi_l anode cathode\n\
+         R1 anode cathode 1k\n\
+         .ends\n\
+         .optical_port bus 1\n\
+         X1 bus a k cell\n\
+         V1 a 0 DC 1\n\
+         R2 k 0 1k\n\
+         .op\n.end\n",
+    )
+    .expect("1-channel bundle should expand");
+    // The cell's 1k in series with the external 1k across 1 V.
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let r = dc_op_nr_with_registry(&net, &registry).expect("solve");
+    let vk = r.node_voltage("k").unwrap();
+    assert!((vk - 0.5).abs() < 1e-6, "V(k) = {vk}, want 0.5");
 }
