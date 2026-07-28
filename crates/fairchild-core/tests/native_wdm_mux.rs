@@ -259,3 +259,85 @@ R3 v3 bias 1k
         );
     }
 }
+
+// ── Optional per-channel spectral response ─────────────────────────────────
+//
+// `fc_mux` / `fc_demux` gained an opt-in diagonal filter: insertion loss and a
+// per-channel passband, so an off-grid laser pays the skirt penalty. Off by
+// default — the tests above are the proof that the identity route is untouched.
+
+/// Flat insertion loss, no passband: every channel scaled by the same field
+/// factor, λ labels untouched.
+#[test]
+fn mux_insertion_loss_scales_every_channel() {
+    let netlist = "* lossy mux\n\
+V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC 1.55e-6\n\
+V1r c1_re 0 DC 2.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC 1.5492e-6\n\
+Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
+      c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux il_db=3\n\
+.op\n.end\n";
+    let net = fairchild_parser::parse_spice(netlist).unwrap();
+    let r = fairchild_core::newton::dc_op_nr_with_registry(
+        &net,
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .unwrap();
+    let il = 10f64.powf(-3.0 / 20.0);
+    assert!((r.node_voltage("b0_re").unwrap() - il).abs() < 1e-9);
+    assert!((r.node_voltage("b1_re").unwrap() - 2.0 * il).abs() < 1e-9);
+    // A wavelength label is not a power, so it is never attenuated.
+    assert!((r.node_voltage("b0_wl").unwrap() - 1.55e-6).abs() < 1e-15);
+}
+
+/// With a passband declared, a laser sitting half a FWHM off its channel centre
+/// loses 3 dB — the detuning penalty that the old identity route could not show.
+#[test]
+fn mux_passband_penalises_a_detuned_laser() {
+    const C: f64 = 299_792_458.0;
+    let f0 = C / 1550e-9;
+    let on = C / f0;
+    // Channel 1 sits at f0 + 100 GHz; put its laser half a 40 GHz FWHM above that.
+    let off = C / (f0 + 120e9);
+    let netlist = format!(
+        "* detuned into a mux\n\
+V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC {on:e}\n\
+V1r c1_re 0 DC 1.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC {off:e}\n\
+Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
+      c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux fwhm_ghz=40 df_ghz=100\n\
+.op\n.end\n"
+    );
+    let net = fairchild_parser::parse_spice(&netlist).unwrap();
+    let r = fairchild_core::newton::dc_op_nr_with_registry(
+        &net,
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .unwrap();
+    // Channel 0 is on its centre; channel 1's laser is 20 GHz off channel 1's
+    // centre (100 GHz up), so it lands on the −3 dB point.
+    assert!((r.node_voltage("b0_re").unwrap() - 1.0).abs() < 1e-9);
+    let detuned = r.node_voltage("b1_re").unwrap();
+    assert!(
+        (detuned - 0.5f64.sqrt()).abs() < 1e-9,
+        "half-FWHM detuning costs 3 dB: got {detuned}"
+    );
+}
+
+/// The demux applies the same diagonal response on the way out.
+#[test]
+fn demux_applies_the_same_per_channel_response() {
+    let netlist = "* lossy demux\n\
+V0r b0_re 0 DC 1.0\nV0i b0_im 0 DC 0.0\nV0w b0_wl 0 DC 1.55e-6\n\
+V1r b1_re 0 DC 1.0\nV1i b1_im 0 DC 0.0\nV1w b1_wl 0 DC 1.5492e-6\n\
+Xdm b0_re b0_im b0_wl b1_re b1_im b1_wl \
+     d0_re d0_im d0_wl d1_re d1_im d1_wl fc_demux il_db=6\n\
+.op\n.end\n";
+    let net = fairchild_parser::parse_spice(netlist).unwrap();
+    let r = fairchild_core::newton::dc_op_nr_with_registry(
+        &net,
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .unwrap();
+    let il = 10f64.powf(-6.0 / 20.0);
+    assert!((r.node_voltage("d0_re").unwrap() - il).abs() < 1e-9);
+    assert!((r.node_voltage("d1_re").unwrap() - il).abs() < 1e-9);
+}

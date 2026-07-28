@@ -1,6 +1,132 @@
-use super::stamp_potential_eq;
+use super::spectrum::{AwgSpectrum, ChannelGrid};
+use super::{stamp_potential_eq, C0};
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+
+/// Optional per-channel spectral response shared by `fc_mux` and `fc_demux`.
+///
+/// Both devices default to a lossless identity route, so an existing netlist is
+/// unaffected. Setting any parameter turns on a **diagonal** filter: channel `k`
+/// is multiplied by its own passband, evaluated at whatever wavelength that
+/// channel actually carries.
+///
+/// Diagonal is the whole story for a mux, and deliberately incomplete for a
+/// demux:
+///
+/// - A **mux** combines N inputs onto one fibre. Each input lands in its own
+///   channel slot, so there is nowhere for cross-channel leakage to *go* — the
+///   only imperfections are per-channel insertion loss and the penalty a
+///   detuned laser pays on the skirt. Both are modelled here.
+/// - A **demux** physically does leak channel `k` into output port `j ≠ k`, and
+///   that is **not** modelled here, because it cannot be: an output port of
+///   `fc_demux` is a single channel, and representing the leak would mean
+///   summing two different carriers into one complex envelope. For a demux with
+///   crosstalk, use [`NativeAwgr`](super::NativeAwgr) with `N−1` input ports
+///   left dark — physically the same device, and its output ports are N-channel
+///   buses with somewhere for the leakage to live.
+///
+/// Parameters (all optional): `il_db`, `lambda0_nm`, `df_ghz`, `fwhm_ghz`,
+/// `shape_p`, `dlambda_dt_pm_per_k`, `t_nom_k`. With only `il_db` set the loss
+/// is flat across the band; adding `fwhm_ghz` gives each channel a passband.
+#[derive(Clone)]
+struct ChannelFilter {
+    lambda0_m: f64,
+    df_hz: f64,
+    fwhm_hz: Option<f64>,
+    shape_p: f64,
+    il_db: f64,
+    dlambda_dt_m_per_k: f64,
+    t_nom_k: f64,
+    /// Stays false until a parameter is set, which keeps the default identity
+    /// route bit-for-bit rather than merely numerically close.
+    active: bool,
+}
+
+impl ChannelFilter {
+    fn new() -> Self {
+        Self {
+            lambda0_m: 1.55e-6,
+            df_hz: 100e9,
+            fwhm_hz: None,
+            shape_p: 1.0,
+            il_db: 0.0,
+            dlambda_dt_m_per_k: 0.0,
+            t_nom_k: 300.15,
+            active: false,
+        }
+    }
+
+    fn set(&mut self, name: &str, value: f64) -> bool {
+        let hit = match name {
+            "il_db" => {
+                self.il_db = value;
+                true
+            }
+            "lambda0_nm" => {
+                self.lambda0_m = value * 1e-9;
+                true
+            }
+            "df_ghz" | "spacing_ghz" => {
+                self.df_hz = value * 1e9;
+                true
+            }
+            "fwhm_ghz" | "bw_ghz" => {
+                self.fwhm_hz = Some(value * 1e9);
+                true
+            }
+            "shape_p" => {
+                self.shape_p = value.max(0.1);
+                true
+            }
+            "dlambda_dt_pm_per_k" => {
+                self.dlambda_dt_m_per_k = value * 1e-12;
+                true
+            }
+            "t_nom_k" => {
+                self.t_nom_k = value;
+                true
+            }
+            _ => false,
+        };
+        self.active |= hit;
+        hit
+    }
+
+    /// Field transmission for channel `k` of an `n`-channel bundle at `lambda`.
+    /// Exactly 1.0 while no parameter has been set.
+    fn amp(&self, lambda: f64, k: usize, n: usize, t_k: f64) -> f64 {
+        if !self.active {
+            return 1.0;
+        }
+        let il = 10f64.powf(-self.il_db / 20.0);
+        let Some(fwhm_hz) = self.fwhm_hz else {
+            return il; // flat loss, no passband
+        };
+        let spec = AwgSpectrum {
+            grid: ChannelGrid {
+                f0_hz: if self.lambda0_m > 0.0 {
+                    C0 / self.lambda0_m
+                } else {
+                    0.0
+                },
+                df_hz: self.df_hz,
+                // A mux/demux is a one-shot filter bank, not a cyclic router,
+                // so it has no FSR to fold into. Zero means aperiodic; the
+                // out-of-band guard then uses the grid span instead.
+                fsr_hz: 0.0,
+                fwhm_hz,
+                shape_p: self.shape_p,
+                dlambda_dt_m_per_k: self.dlambda_dt_m_per_k,
+                t_nom_k: self.t_nom_k,
+            },
+            xt_adj: 0.0,
+            xt_bg: 0.0,
+            il_peak: 1.0,
+            il_tilt: 1.0,
+        };
+        il * spec.power(lambda, k, n, t_k).sqrt()
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Native WDM multiplexer / demultiplexer
@@ -36,6 +162,10 @@ pub struct NativeMux {
     wpc: usize,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
+    filter: ChannelFilter,
+    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// All ones until a `ChannelFilter` parameter is set.
+    amp: Vec<f64>,
 }
 
 impl Default for NativeMux {
@@ -45,12 +175,18 @@ impl Default for NativeMux {
 }
 
 impl NativeMux {
+    /// Which wire block carries the *input* λ tags, in units of `wpc·n`. A mux
+    /// reads from the per-channel block (second), a demux from the bus (first).
+    const LAMBDA_BASE: usize = 1;
+
     pub fn new() -> Self {
         Self {
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
             branches: Vec::new(),
+            filter: ChannelFilter::new(),
+            amp: Vec::new(),
         }
     }
 }
@@ -62,6 +198,7 @@ impl Device for NativeMux {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
+        self.filter.lambda0_m = ctx.lambda_center_m;
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
@@ -78,6 +215,7 @@ impl Device for NativeMux {
         self.n_channels = n;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc * n];
+        self.amp = vec![1.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -90,7 +228,26 @@ impl Device for NativeMux {
         }
     }
 
-    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        self.filter.set(&name.to_lowercase(), value)
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+        if !self.filter.active {
+            return;
+        }
+        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        for k in 0..n {
+            // Read the λ this channel actually carries, from whichever side is
+            // the input; both layouts put the bus block first, so the channel
+            // block starts at wpc·n.
+            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
+                Some(i) if x[i].abs() > 1e-9 => x[i],
+                _ => self.filter.lambda0_m,
+            };
+            self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);
+        }
+    }
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
@@ -101,8 +258,10 @@ impl Device for NativeMux {
             for w in 0..wpc {
                 let bus_w = self.nodes[wpc * k + w];
                 let ch_w = self.nodes[wpc * (n + k) + w];
-                // Identity-route every wire (fw, bw, λ) — bus reads from channel.
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w, &[(ch_w, -1.0)]);
+                // Route every wire from channel to bus. Field wires carry the
+                // channel's transmission; the λ label is never attenuated.
+                let g = if w == wpc - 1 { 1.0 } else { self.amp[k] };
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w, &[(ch_w, -g)]);
             }
         }
     }
@@ -122,6 +281,10 @@ pub struct NativeDemux {
     wpc: usize,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
+    filter: ChannelFilter,
+    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// All ones until a `ChannelFilter` parameter is set.
+    amp: Vec<f64>,
 }
 
 impl Default for NativeDemux {
@@ -131,12 +294,17 @@ impl Default for NativeDemux {
 }
 
 impl NativeDemux {
+    /// See [`NativeMux::LAMBDA_BASE`]. A demux is fed by the bus block.
+    const LAMBDA_BASE: usize = 0;
+
     pub fn new() -> Self {
         Self {
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
             branches: Vec::new(),
+            filter: ChannelFilter::new(),
+            amp: Vec::new(),
         }
     }
 }
@@ -148,6 +316,7 @@ impl Device for NativeDemux {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         self.wpc = ctx.wires_per_channel();
+        self.filter.lambda0_m = ctx.lambda_center_m;
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
@@ -164,6 +333,7 @@ impl Device for NativeDemux {
         self.n_channels = n;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc * n];
+        self.amp = vec![1.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -176,7 +346,26 @@ impl Device for NativeDemux {
         }
     }
 
-    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        self.filter.set(&name.to_lowercase(), value)
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+        if !self.filter.active {
+            return;
+        }
+        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        for k in 0..n {
+            // Read the λ this channel actually carries, from whichever side is
+            // the input; both layouts put the bus block first, so the channel
+            // block starts at wpc·n.
+            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
+                Some(i) if x[i].abs() > 1e-9 => x[i],
+                _ => self.filter.lambda0_m,
+            };
+            self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);
+        }
+    }
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
@@ -187,8 +376,9 @@ impl Device for NativeDemux {
             for w in 0..wpc {
                 let bus_w = self.nodes[wpc * k + w];
                 let ch_w = self.nodes[wpc * (n + k) + w];
-                // Channels drive FROM bus.
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w, &[(bus_w, -1.0)]);
+                // Channels drive FROM bus, through the channel's passband.
+                let g = if w == wpc - 1 { 1.0 } else { self.amp[k] };
+                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w, &[(bus_w, -g)]);
             }
         }
     }

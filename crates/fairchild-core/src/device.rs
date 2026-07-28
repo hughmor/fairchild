@@ -279,4 +279,24 @@ pub trait Device: Send + Sync {
     fn extra_stamp_rows(&self) -> Vec<usize> {
         Vec::new()
     }
+
+    /// The exact `(row, col)` cells this device stamps, when it knows them.
+    ///
+    /// By default `mna::Pattern` takes a **clique** over every row a device
+    /// owns, because a stamper handed a set of rows may couple any of them to
+    /// any other. That is the tightest footprint derivable without asking, and
+    /// it is fine for a two-terminal device — but it costs `O(rows²)` and some
+    /// photonic devices own a great many rows for a structurally sparse stamp.
+    /// An N×N `fc_awgr` owns `9N²` rows: at N = 8 the clique is 332 k cells
+    /// standing in for a true footprint of 6 k, and it grows as `N⁴` where the
+    /// device is `N³`.
+    ///
+    /// Return `Some(pairs)` to declare the footprint exactly; anything stamped
+    /// outside it is silently dropped by the sparse solve, so a device that
+    /// implements this must keep it in sync with its stamping (debug builds
+    /// catch a violation via `MnaMatrix::debug_assert_covers`). `None` — the
+    /// default — keeps the conservative clique.
+    fn stamp_pairs(&self) -> Option<Vec<(usize, usize)>> {
+        None
+    }
 }

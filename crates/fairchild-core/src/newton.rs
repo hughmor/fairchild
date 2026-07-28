@@ -9,7 +9,7 @@ use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::{DeviceRegistry, ParamSet};
 use crate::error::SimError;
-use crate::mna::{stamp_netlist_scaled, CircuitTopology};
+use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint};
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
 
@@ -141,7 +141,7 @@ pub fn build_devices(
 /// stamp into.
 fn push_device(
     devices: &mut Vec<Box<dyn Device>>,
-    foot: &mut Vec<Vec<usize>>,
+    foot: &mut Vec<Footprint>,
     topo: &mut CircuitTopology,
     terminals: &[NodeId],
     mut dev: Box<dyn Device>,
@@ -156,12 +156,16 @@ fn push_device(
     rows.extend(dev.extra_stamp_rows());
     rows.sort_unstable();
     rows.dedup();
-    foot.push(rows);
+    // Asked only after the extra rows are bound, so a device can name them.
+    foot.push(match dev.stamp_pairs() {
+        Some(pairs) => Footprint::Pairs(pairs),
+        None => Footprint::Clique(rows),
+    });
     devices.push(dev);
 }
 
 /// A device list paired with each device's structural MNA footprint.
-pub type DevicesWithFootprints = (Vec<Box<dyn Device>>, Vec<Vec<usize>>);
+pub type DevicesWithFootprints = (Vec<Box<dyn Device>>, Vec<Footprint>);
 
 /// [`build_devices`] plus each device's structural footprint, in device order.
 /// The hot NR / transient loops need the footprints to build a sparsity
@@ -173,7 +177,7 @@ pub fn build_devices_with_footprints(
     registry: &DeviceRegistry,
 ) -> Result<DevicesWithFootprints, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
-    let mut foot: Vec<Vec<usize>> = Vec::new();
+    let mut foot: Vec<Footprint> = Vec::new();
     let topo_arc = Arc::new(topo.clone());
     for el in &netlist.elements {
         match el {
