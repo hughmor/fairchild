@@ -9,6 +9,12 @@ members = [
 ]
 resolver = "2"
 
+# One version for the whole workspace: crates inherit it with
+# `version.workspace = true`, and pyproject.toml takes it from fairchild-py via
+# `dynamic = ["version"]`. Releasing is bumping this line, then tagging v<that>.
+[workspace.package]
+version = "0.1.0"
+
 [workspace.dependencies]
 fairchild-core   = { path = "crates/fairchild-core" }
 fairchild-parser = { path = "crates/fairchild-parser" }
