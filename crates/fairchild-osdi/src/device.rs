@@ -41,8 +41,9 @@ pub struct OsdiDevice {
     mna_nodes: Vec<NodeId>,
     /// Solution vector from the last eval() call; used as prev_solve in eval.
     x_cache: Vec<f64>,
-    /// Solution at the last committed (accepted) timestep; used as prev_solve in
-    /// load_spice_rhs_tran so reactive history is pinned to the accepted state.
+    /// Solution at the last committed (accepted) timestep.  Supplies the
+    /// reactive history term in `load_residual_tran` — never the point the
+    /// resistive residual is linearised about, which is always `x_cache`.
     /// Empty until commit_timestep() is first called.
     x_tprev: Vec<f64>,
 }
@@ -150,6 +151,46 @@ impl OsdiDevice {
             }
         }
         None
+    }
+
+    /// Accumulate `scale * load_spice_rhs_{dc,tran}(prev_solve)` into `b`.
+    ///
+    /// OpenVAF's `load_spice_rhs_dc` writes `J_resist · prev_solve − f_resist`;
+    /// `load_spice_rhs_tran` writes that *plus* `alpha · J_react · prev_solve`
+    /// (it calls the DC body first — see `osdi/src/load.rs::load_spice_rhs`).
+    /// `prev_solve` names the vector the linearisation is taken about, which is
+    /// the current Newton iterate — not the previous timestep.
+    fn accumulate_spice_rhs(&self, b: &mut [f64], x: &[f64], alpha: Option<f64>, scale: f64) {
+        // Padded dst buffer: pass ptr+1 so OSDI's dst[-1] write (ground
+        // sentinel index -1 from ldpsw) lands in temp[0] not heap metadata.
+        let mut temp = vec![0.0f64; b.len() + 1];
+        let prev = unsafe { x.as_ptr().add(1) as *mut f64 };
+        unsafe {
+            match alpha {
+                Some(a) => match self.desc().load_spice_rhs_tran {
+                    Some(f) => f(
+                        self.inst_ptr(),
+                        self.model_ptr(),
+                        temp.as_mut_ptr().add(1),
+                        prev,
+                        a,
+                    ),
+                    None => return,
+                },
+                None => match self.desc().load_spice_rhs_dc {
+                    Some(f) => f(
+                        self.inst_ptr(),
+                        self.model_ptr(),
+                        temp.as_mut_ptr().add(1),
+                        prev,
+                    ),
+                    None => return,
+                },
+            }
+        }
+        for i in 0..b.len() {
+            b[i] += scale * temp[i + 1];
+        }
     }
 }
 
@@ -296,23 +337,7 @@ impl Device for OsdiDevice {
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        if let Some(f) = self.desc().load_spice_rhs_dc {
-            // Padded dst buffer: pass ptr+1 so OSDI's dst[-1] write (ground
-            // sentinel index -1 from ldpsw) lands in temp[0] not heap metadata.
-            let mut temp = vec![0.0f64; b.len() + 1];
-            let prev = unsafe { self.x_cache.as_ptr().add(1) as *mut f64 };
-            unsafe {
-                f(
-                    self.inst_ptr(),
-                    self.model_ptr(),
-                    temp.as_mut_ptr().add(1),
-                    prev,
-                );
-            }
-            for i in 0..b.len() {
-                b[i] += temp[i + 1];
-            }
-        }
+        self.accumulate_spice_rhs(b, &self.x_cache, None, 1.0);
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
@@ -353,32 +378,36 @@ impl Device for OsdiDevice {
     }
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
-        if let Some(f) = self.desc().load_spice_rhs_tran {
-            let mut temp = vec![0.0f64; b.len() + 1];
-            // Use x_tprev (previous accepted timestep) as the reactive history term.
-            // Fall back to x_cache (current iterate) when x_tprev is not yet populated
-            // (i.e., before the first commit_timestep call in the fixed-step path).
-            let prev_src = if self.x_tprev.is_empty() {
-                &self.x_cache
-            } else {
-                &self.x_tprev
-            };
-            let prev = unsafe { prev_src.as_ptr().add(1) as *mut f64 };
-            unsafe {
-                f(
-                    self.inst_ptr(),
-                    self.model_ptr(),
-                    temp.as_mut_ptr().add(1),
-                    prev,
-                    alpha,
-                );
-            }
-            for i in 0..b.len() {
-                b[i] += temp[i + 1];
-            }
-        } else {
+        if self.desc().load_spice_rhs_tran.is_none() {
             self.load_residual(b);
+            return;
         }
+        // Backward-Euler companion in SPICE RHS form:
+        //
+        //   rhs = [J_r·x_k − f_r(x_k)]        resistive, about the current iterate
+        //       + alpha · J_q · x_{n−1}       reactive history, previous timestep
+        //
+        // OSDI hands us the two combinations `dc(x) = J_r·x − f_r(x)` and
+        // `tran(x) = dc(x) + alpha·J_q·x`, so the history term is the
+        // difference of the two evaluated at x_{n−1}.
+        //
+        // Evaluating the resistive part about x_{n−1} instead (which is what
+        // this used to do, by passing x_tprev straight to `tran`) leaves the
+        // Newton linearisation inconsistent for any nonlinear model: it
+        // converged only while the operating point sat still, and diverged on
+        // the first moving source.
+        //
+        // ponytail: three O(n) scratch buffers per device per NR iteration
+        // (one per call).  Hand OSDI a shared scratch buffer if OSDI devices
+        // ever outnumber native ones in a large netlist.
+        let hist = if self.x_tprev.is_empty() {
+            &self.x_cache
+        } else {
+            &self.x_tprev
+        };
+        self.accumulate_spice_rhs(b, &self.x_cache, None, 1.0);
+        self.accumulate_spice_rhs(b, hist, Some(alpha), 1.0);
+        self.accumulate_spice_rhs(b, hist, None, -1.0);
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {

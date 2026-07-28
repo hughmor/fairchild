@@ -1,0 +1,87 @@
+// va_eam — electro-absorption modulator.
+//
+// A reverse-biased III-V / SiGe EAM: the applied field broadens the absorption
+// edge (Franz-Keldysh / QCSE), so reverse bias attenuates the guided mode and
+// shifts its phase slightly.  fairchild has no native EAM, which is the point
+// of the example — this is the shape a real one takes in Verilog-A.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   in_re  in_im  in_wl      input field  + carrier wavelength
+//   out_re out_im out_wl     output field + carrier wavelength
+//   anode  cathode           electrical drive
+//
+// Physics
+//   vr        = reverse bias, clamped at 0 (forward bias does not modulate)
+//   t_il      = 10^(-il_dB/20)                  passive insertion loss
+//   t_ea      = 10^(-er_dB*(vr/v_full)^2/20)    electro-absorption
+//   dphi      = 2*pi * dn_dv * vr * L / lambda  index pulled by the field
+//   A_out     = t_il * t_ea * A_in * exp(-j*(phi_prop + dphi))
+//
+// Both losses are POWER dB, so the amplitude divisor is 20 — the same
+// convention the native devices use since commit 0f689cb.  (The unmaintained
+// models under legacy/va-models/ predate that fix and are a factor of two out
+// in dB; see the README.)
+//
+// Only the electro-absorbed light becomes photocurrent — the insertion loss is
+// scattering and coupling, which leaves no carriers behind.  So the drive
+// network sees zero photocurrent at 0 V and a growing load as the modulator
+// closes: the native circuit and the optical state are coupled both ways.
+// `g_shunt` is a small dark leakage that keeps the anode from floating at DC.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_eam(in_re, in_im, in_wl, out_re, out_im, out_wl, anode, cathode);
+    inout in_re, in_im, in_wl, out_re, out_im, out_wl, anode, cathode;
+    optical_field  in_re, in_im, out_re, out_im;
+    optical_lambda in_wl, out_wl;
+    electrical     anode, cathode;
+
+    parameter real L_um          = 100.0  from (0:inf);  // active length (um)
+    parameter real n_g           = 3.6    from (0:inf);  // group index
+    parameter real il_dB         = 3.0    from [0:inf);  // insertion loss at 0 V (dB)
+    parameter real er_dB         = 10.0   from [0:inf);  // extra loss at v_full (dB)
+    parameter real v_full        = 2.0    from (0:inf);  // bias giving er_dB (V)
+    parameter real dn_dv         = 1e-4   from [0:inf);  // index change per volt (1/V)
+    parameter real responsivity  = 0.8    from [0:inf);  // photocurrent per absorbed W
+    parameter real g_shunt       = 1e-9   from (0:inf);  // dark leakage (S)
+    parameter real wavelength_nm = 1550.0 from (0:inf);  // lambda bootstrap (nm)
+
+    real wl_m, vr, x, t_il, t_ea, t_amp, beta, phi, c_phi, s_phi;
+    real p_guided;
+
+    analog begin
+        // The lambda wire is undriven until the upstream source has been
+        // evaluated; fall back to the design wavelength on those iterations.
+        wl_m = OWL(in_wl);
+        if (wl_m < wavelength_nm * 1e-9 * 0.5) wl_m = wavelength_nm * 1e-9;
+
+        // Reverse bias only.  Capped at 2*v_full so a Newton overshoot cannot
+        // ask for an absurd absorption (there is no OSDI limiting here).
+        vr = -V(anode, cathode);
+        if (vr < 0.0)          vr = 0.0;
+        if (vr > 2.0 * v_full) vr = 2.0 * v_full;
+        x = vr / v_full;
+
+        t_il  = pow(10.0, -il_dB / 20.0);
+        t_ea  = pow(10.0, -er_dB * x * x / 20.0);
+        t_amp = t_il * t_ea;
+
+        beta  = 2.0 * `M_PI * n_g / wl_m;
+        phi   = beta * (L_um * 1e-6)
+              + 2.0 * `M_PI * dn_dv * vr * (L_um * 1e-6) / wl_m;
+        c_phi = cos(phi);
+        s_phi = sin(phi);
+
+        OF(out_re)  <+ t_amp * ( OF(in_re) * c_phi + OF(in_im) * s_phi);
+        OF(out_im)  <+ t_amp * (-OF(in_re) * s_phi + OF(in_im) * c_phi);
+        OWL(out_wl) <+ wl_m;
+
+        // Electro-absorbed power -> photocurrent, flowing cathode->anode as it
+        // does in any reverse-biased junction.  Zero at 0 V by construction.
+        p_guided = t_il * t_il * (OF(in_re) * OF(in_re) + OF(in_im) * OF(in_im));
+        I(anode, cathode) <+ -responsivity * p_guided * (1.0 - t_ea * t_ea);
+        I(anode, cathode) <+ g_shunt * V(anode, cathode);
+    end
+endmodule

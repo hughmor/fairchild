@@ -1,0 +1,54 @@
+// va_diode — Shockley diode with series resistance and junction capacitance.
+//
+// Written for the fairchild OSDI runtime.  Deliberately exercises three
+// things the runtime has to get right:
+//
+//   1. a nonlinear resistive branch          -> write_jacobian_array_resist
+//   2. an internal node (the series R)       -> num_nodes > num_terminals
+//   3. a `ddt` charge branch                 -> write_jacobian_array_react
+//
+// Convergence note: fairchild's OSDI runtime does not call the OSDI limiting
+// hooks (load_limit_rhs_resist / load_limit_rhs_react), and OpenVAF 23.5 does
+// not implement `$limexp` at all — it is a compile error, not a silent
+// no-op.  A bare exp() is nonetheless fine here (checked to a 500 V drive):
+// the plain Armijo line search in fairchild's Newton loop carries it.  Clamp
+// the exponent in the model if you ever do hit an overflow; there is no
+// simulator-side limiter to fall back on.
+
+`include "disciplines.vams"
+`include "constants.vams"
+
+module va_diode(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    electrical internal;            // between the series R and the junction
+
+    parameter real Is    = 1e-14 from (0:inf);   // saturation current (A)
+    parameter real N     = 1.0   from (0:inf);   // ideality factor
+    parameter real Rs    = 0.1   from (0:inf);   // series resistance (ohm)
+    parameter real Cj0   = 1e-12 from [0:inf);   // zero-bias junction cap (F)
+    parameter real Vj    = 0.7   from (0:inf);   // built-in potential (V)
+    parameter real M     = 0.5   from (0:1);     // grading coefficient
+    parameter real Tnom  = 300.15 from (0:inf);  // temperature (K)
+
+    real Vt, Vd, Id, Cj, qd;
+
+    analog begin
+        Vt = N * `P_K * Tnom / `P_Q;
+        Vd = V(internal, cathode);
+
+        Id = Is * (exp(Vd / Vt) - 1.0);
+
+        // Depletion capacitance, frozen above 0.5*Vj (the usual SPICE dodge
+        // around the (1 - V/Vj)^-M singularity at V -> Vj).
+        if (Vd < 0.5 * Vj)
+            Cj = Cj0 * pow(1.0 - Vd / Vj, -M);
+        else
+            Cj = Cj0 * pow(0.5, -M) * (1.0 + M * (Vd / Vj - 0.5) / 0.5);
+        qd = Cj * Vd;
+
+        I(internal, cathode) <+ Id;
+        I(internal, cathode) <+ ddt(qd);
+        I(anode, internal)   <+ V(anode, internal) / Rs;
+    end
+endmodule
