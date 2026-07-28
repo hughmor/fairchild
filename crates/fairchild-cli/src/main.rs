@@ -413,6 +413,9 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
             let lib = Arc::new(lib);
             lib.register_into(&mut registry);
         }
+        // `.model <card> <module> (...)` cards naming a descriptor we just
+        // loaded.  After the libraries, so the descriptors exist to alias.
+        registry.register_loaded_model_cards(&netlist.models);
     }
 
     #[cfg(not(feature = "osdi"))]

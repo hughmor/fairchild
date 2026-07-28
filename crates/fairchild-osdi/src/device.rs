@@ -294,7 +294,7 @@ impl Device for OsdiDevice {
         self.refresh_instance();
     }
 
-    fn eval(&mut self, x: &[f64], flags: EvalFlags, _ctx: &SimContext) {
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         // Prepend a 0.0 guard element so OSDI's ldpsw sign-extension of the
         // ground sentinel (UINT32_MAX → -1 as i64) reads x_cache[0] = 0.0
         // (ground voltage) instead of whatever is 8 bytes before the buffer.
@@ -317,7 +317,10 @@ impl Device for OsdiDevice {
             }
             let mut info = OsdiSimInfo {
                 paras: null_sim_paras(),
-                abstime: 0.0,
+                // `$abstime`.  SimContext::time_s is the transient clock the
+                // solver advances; it stays 0 for DC/AC, which is what
+                // Verilog-A expects there.
+                abstime: ctx.time_s,
                 // Pass ptr+1: x_cache[1..] mirrors x[0..], and x_cache[0]=0.0
                 // acts as a guard for OSDI's out-of-bounds index -1 (ground).
                 prev_solve: unsafe { self.x_cache.as_ptr().add(1) as *mut f64 },

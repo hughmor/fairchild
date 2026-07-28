@@ -4,15 +4,16 @@
 //! All function pointers are implemented with a simple linear 1 mS conductance:
 //!   - setup_model: writes gd = 1e-3 S into model memory
 //!   - setup_instance: no-op (node mapping is written by the simulator)
-//!   - eval: no-op (linear element, nothing to linearise)
+//!   - eval: records OsdiSimInfo.abstime (what `$abstime` reads) and returns 0
 //!   - load_spice_rhs_dc: no-op (Jeq = 0 for a linear element)
 //!   - write_jacobian_array_resist: writes [+gd, -gd, -gd, +gd] for the 4 entries
 //!
 //! Instance memory layout (instance_size = 8):
 //!   bytes 0-7: node_mapping[2] (two u32 MNA indices) at node_mapping_offset = 0
 //!
-//! Model memory layout (model_size = 8):
-//!   bytes 0-7: gd (f64, conductance in siemens)
+//! Model memory layout (model_size = 16):
+//!   bytes 0-7:  gd (f64, conductance in siemens)
+//!   bytes 8-15: abstime seen by the last eval (f64) — test observability only
 //!
 //! Jacobian entries (4 resistive, representing G between OSDI nodes 0 and 1):
 //!   [0] (0,0) → +gd,  [1] (0,1) → -gd,  [2] (1,0) → -gd,  [3] (1,1) → +gd
@@ -50,12 +51,22 @@ unsafe extern "C" fn setup_instance_impl(
     // No instance-local initialisation needed for a linear conductance.
 }
 
+/// Byte offset of the abstime slot in model memory (after `gd`).
+pub const ABSTIME_OFFSET: usize = 8;
+
 unsafe extern "C" fn eval_impl(
     _handle: *mut c_void,
     _inst: *mut c_void,
-    _model: *mut c_void,
-    _info: *mut OsdiSimInfo,
+    model: *mut c_void,
+    info: *mut OsdiSimInfo,
 ) -> u32 {
+    // Record what a Verilog-A `$abstime` would have read, so a test can assert
+    // the simulator passes real transient time rather than a hardcoded 0.0.
+    // Model memory, not a Rust static: the mock is dlopen'd, so a static in
+    // the loaded copy is not the one a test linking the rlib would observe.
+    if !info.is_null() && !model.is_null() {
+        *((model as *mut u8).add(ABSTIME_OFFSET) as *mut f64) = (*info).abstime;
+    }
     0 // success; no voltage-limiting flag set
 }
 
@@ -166,7 +177,7 @@ pub static OSDI_DESCRIPTORS: [OsdiDescriptor; 1] = [OsdiDescriptor {
     state_idx_off: 0,
     bound_step_offset: 0,
     instance_size: 8, // 2 × u32 = 8 bytes
-    model_size: 8,    // 1 × f64 = 8 bytes
+    model_size: 16,   // gd + the recorded abstime = 2 × f64
 
     access: None,
     setup_model: Some(setup_model_impl),

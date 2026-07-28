@@ -185,6 +185,7 @@ pub fn build_devices_with_footprints(
                 anode,
                 cathode,
                 model_name,
+                params,
                 ..
             } => {
                 let factory = registry
@@ -192,7 +193,7 @@ pub fn build_devices_with_footprints(
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                let dev = factory(&[pos, neg], &ParamSet::empty(), ctx);
+                let dev = factory(&[pos, neg], &ParamSet::new(params), ctx);
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
             Element::Mosfet {

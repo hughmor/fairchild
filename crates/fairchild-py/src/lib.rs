@@ -773,6 +773,10 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
         let lib = Arc::new(lib);
         lib.register_into(&mut registry);
     }
+    // `.model <card> <module> (...)` cards naming a descriptor we just loaded.
+    // After the libraries, so the descriptors exist to alias.
+    #[cfg(feature = "osdi")]
+    registry.register_loaded_model_cards(&netlist.models);
 
     #[cfg(not(feature = "osdi"))]
     if !netlist.osdi_paths.is_empty() {
