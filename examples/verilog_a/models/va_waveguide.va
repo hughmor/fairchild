@@ -1,0 +1,60 @@
+// va_waveguide — straight optical waveguide: propagation loss + phase.
+//
+// Promoted from legacy/va-models/photonic/waveguide.va, with the loss
+// convention corrected (see below).  Agrees with the native `fc_waveguide` to
+// machine precision — `check.py` asserts it.
+//
+// Ports (3 wires each, forward-only):
+//   in_re,  in_im,  in_wl
+//   out_re, out_im, out_wl
+//
+// Physics:  A_out = A_in · 10^(−α·L/20) · exp(−j·β·L),  β = 2π·n_g/λ
+//
+// WAVELENGTH COMES FROM THE PARAMETER, NOT THE WIRE — see the note in
+// optical.vams.  φ = 2π·n_g·L/λ is thousands of radians, so ∂φ/∂λ = φ/λ is of
+// order 1e9 per metre; letting OpenVAF differentiate that against the λ
+// unknown puts an entry that size in the Jacobian and Newton simply does not
+// converge.  The wire is still passed through unchanged so the model composes
+// with native devices; `wavelength_nm` must agree with whatever drives it.
+//
+// LOSS CONVENTION.  `alpha_dB_cm` is POWER dB per cm, so the amplitude
+// factor divides by 20.  The legacy model converted to nepers with
+// `α·1e2/8.6859` (8.6859 = 20/ln10, the *amplitude* neper constant) and then
+// halved again in `exp(−α_lin·L/2)` — counting the factor of two twice.  A
+// 1 mm guide at 3 dB/cm should pass 10^(−0.03) = 0.9333 of its power; the
+// legacy model passes 0.9661.  Native fairchild had the same bug until commit
+// 0f689cb.  Anything still under legacy/ predates that fix.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_waveguide(in_re, in_im, in_wl, out_re, out_im, out_wl);
+    inout in_re, in_im, in_wl, out_re, out_im, out_wl;
+    optical_field  in_re, in_im, out_re, out_im;
+    optical_lambda in_wl, out_wl;
+
+    parameter real L_um          = 100.0  from (0:inf);  // length (um)
+    parameter real n_g           = 4.2    from (0:inf);  // group index
+    parameter real alpha_dB_cm   = 2.0    from [0:inf);  // power loss (dB/cm)
+    parameter real wavelength_nm = 1550.0 from (0:inf);  // operating lambda (nm)
+
+    real wl_m, l_m, beta, phi, t_amp, c_phi, s_phi;
+
+    analog begin
+        wl_m  = wavelength_nm * 1e-9;
+        l_m   = L_um * 1e-6;
+        beta  = 2.0 * `M_PI * n_g / wl_m;
+        phi   = beta * l_m;
+        t_amp = pow(10.0, -alpha_dB_cm * (l_m * 1e2) / 20.0);
+
+        c_phi = cos(phi);
+        s_phi = sin(phi);
+
+        OF(out_re) <+ t_amp * ( OF(in_re) * c_phi + OF(in_im) * s_phi);
+        OF(out_im) <+ t_amp * (-OF(in_re) * s_phi + OF(in_im) * c_phi);
+        // Pass the wire through untouched, so a chain mixing native and
+        // Verilog-A devices keeps one consistent wavelength.
+        OWL(out_wl) <+ OWL(in_wl);
+    end
+endmodule

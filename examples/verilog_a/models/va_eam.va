@@ -46,16 +46,15 @@ module va_eam(in_re, in_im, in_wl, out_re, out_im, out_wl, anode, cathode);
     parameter real dn_dv         = 1e-4   from [0:inf);  // index change per volt (1/V)
     parameter real responsivity  = 0.8    from [0:inf);  // photocurrent per absorbed W
     parameter real g_shunt       = 1e-9   from (0:inf);  // dark leakage (S)
-    parameter real wavelength_nm = 1550.0 from (0:inf);  // lambda bootstrap (nm)
+    parameter real wavelength_nm = 1550.0 from (0:inf);  // operating lambda (nm)
 
     real wl_m, vr, x, t_il, t_ea, t_amp, beta, phi, c_phi, s_phi;
     real p_guided;
 
     analog begin
-        // The lambda wire is undriven until the upstream source has been
-        // evaluated; fall back to the design wavelength on those iterations.
-        wl_m = OWL(in_wl);
-        if (wl_m < wavelength_nm * 1e-9 * 0.5) wl_m = wavelength_nm * 1e-9;
+        // Wavelength from the parameter, never differentiated off the wire —
+        // see optical.vams.
+        wl_m = wavelength_nm * 1e-9;
 
         // Reverse bias only.  Capped at 2*v_full so a Newton overshoot cannot
         // ask for an absurd absorption (there is no OSDI limiting here).
@@ -76,7 +75,7 @@ module va_eam(in_re, in_im, in_wl, out_re, out_im, out_wl, anode, cathode);
 
         OF(out_re)  <+ t_amp * ( OF(in_re) * c_phi + OF(in_im) * s_phi);
         OF(out_im)  <+ t_amp * (-OF(in_re) * s_phi + OF(in_im) * c_phi);
-        OWL(out_wl) <+ wl_m;
+        OWL(out_wl) <+ OWL(in_wl);
 
         // Electro-absorbed power -> photocurrent, flowing cathode->anode as it
         // does in any reverse-biased junction.  Zero at 0 V by construction.

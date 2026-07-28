@@ -17,6 +17,24 @@
 // writes its output field directly (`OF(out_re) <+ ...`) rather than driving a
 // Norton-equivalent source, and passes the wavelength through unchanged.
 //
+// ── TAKE λ FROM A PARAMETER, NEVER FROM THE WIRE ────────────────────────────
+//
+// The λ wire exists so a chain stays self-consistent and so native devices can
+// read it.  Do NOT use `OWL(...)` inside an expression you contribute from.
+//
+// Propagation phase is φ = 2π·n_g·L/λ — thousands of radians for any real
+// waveguide (400 µm at n_g = 4.2 is ~6800 rad).  OpenVAF differentiates
+// everything you write, so reading λ off the wire puts ∂φ/∂λ = φ/λ ≈ 1e9 per
+// metre into the Jacobian, against an unknown whose scale is 1e-6.  Newton
+// does not converge; it fails at some wavelengths and not others, which reads
+// like a physics bug and is not one.
+//
+// fairchild's native devices dodge this by freezing λ at the previous Newton
+// iterate — a "don't differentiate this" that Verilog-A has no way to express.
+// So: `wavelength_nm` is a parameter, physics uses it, and the wire is passed
+// straight through (`OWL(out_wl) <+ OWL(in_wl)`).  Sweep wavelength with
+// `--param Xlaser.wavelength_nm=…` / `set_param`, not by driving the wire.
+//
 // OpenVAF 23.5 panics in `intern_node_strs` on a discipline that declares only
 // a potential, so each one below carries an unused placeholder flow nature.
 // Model bodies must never reference `_of_flow` / `_owl_flow`.

@@ -15,7 +15,7 @@ export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/opt/llvm@18/lib}"
 
 mkdir -p build
 
-for src in models/va_diode.va models/va_eam.va; do
+for src in models/*.va; do
     name="$(basename "$src" .va)"
     echo "  $src -> build/$name.osdi"
     # -I models/ so `include "optical.vams"` resolves.
