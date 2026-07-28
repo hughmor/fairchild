@@ -1,22 +1,29 @@
 //! OSDI v0.4 mock library for integration testing.
 //!
-//! Exports one model named "test_conductance" with two terminals.
-//! All function pointers are implemented with a simple linear 1 mS conductance:
-//!   - setup_model: writes gd = 1e-3 S into model memory
+//! Exports one model named "test_conductance" with two terminals: a linear
+//! 1 mS conductance in parallel with a linear 1 nF capacitance.  The
+//! capacitance is what gives the reactive-Jacobian path (transient companion
+//! and the `.ac` / `.noise` susceptance block) any CI coverage at all — every
+//! other reactive OSDI model in the tree needs OpenVAF to build.
+//!   - setup_model: writes gd = 1e-3 S and c = 1e-9 F into model memory
 //!   - setup_instance: no-op (node mapping is written by the simulator)
 //!   - eval: records OsdiSimInfo.abstime (what `$abstime` reads) and returns 0
 //!   - load_spice_rhs_dc: no-op (Jeq = 0 for a linear element)
 //!   - write_jacobian_array_resist: writes [+gd, -gd, -gd, +gd] for the 4 entries
+//!   - write_jacobian_array_react:   writes [+c,  -c,  -c,  +c ] for the same 4
 //!
 //! Instance memory layout (instance_size = 8):
 //!   bytes 0-7: node_mapping[2] (two u32 MNA indices) at node_mapping_offset = 0
 //!
-//! Model memory layout (model_size = 16):
-//!   bytes 0-7:  gd (f64, conductance in siemens)
-//!   bytes 8-15: abstime seen by the last eval (f64) — test observability only
+//! Model memory layout (model_size = 24):
+//!   bytes 0-7:   gd (f64, conductance in siemens)
+//!   bytes 8-15:  abstime seen by the last eval (f64) — test observability only
+//!   bytes 16-23: c (f64, capacitance in farads)
 //!
-//! Jacobian entries (4 resistive, representing G between OSDI nodes 0 and 1):
-//!   [0] (0,0) → +gd,  [1] (0,1) → -gd,  [2] (1,0) → -gd,  [3] (1,1) → +gd
+//! Jacobian entries (4, between OSDI nodes 0 and 1; a parallel G and C share
+//! the same sparsity, so the same 4 entries carry both):
+//!   [0] (0,0) → +gd/+c,  [1] (0,1) → -gd/-c,
+//!   [2] (1,0) → -gd/-c,  [3] (1,1) → +gd/+c
 
 use std::ffi::c_char;
 use std::os::raw::c_void;
@@ -36,6 +43,7 @@ unsafe extern "C" fn setup_model_impl(
     _res: *mut OsdiInitInfo,
 ) {
     *(model as *mut f64) = 1e-3; // gd = 1 mS
+    *((model as *mut u8).add(CAP_OFFSET) as *mut f64) = 1e-9; // c = 1 nF
 }
 
 unsafe extern "C" fn setup_instance_impl(
@@ -53,6 +61,12 @@ unsafe extern "C" fn setup_instance_impl(
 
 /// Byte offset of the abstime slot in model memory (after `gd`).
 pub const ABSTIME_OFFSET: usize = 8;
+/// Byte offset of the capacitance in model memory.
+pub const CAP_OFFSET: usize = 16;
+/// The conductance this mock stamps, in siemens.
+pub const MOCK_GD: f64 = 1e-3;
+/// The capacitance this mock stamps, in farads.
+pub const MOCK_C: f64 = 1e-9;
 
 unsafe extern "C" fn eval_impl(
     _handle: *mut c_void,
@@ -91,6 +105,19 @@ unsafe extern "C" fn write_jacobian_array_resist_impl(
     *destination.add(1) = -gd; // ∂F[0]/∂V[1] = -gd
     *destination.add(2) = -gd; // ∂F[1]/∂V[0] = -gd
     *destination.add(3) = gd; // ∂F[1]/∂V[1] = +gd
+}
+
+unsafe extern "C" fn write_jacobian_array_react_impl(
+    _inst: *mut c_void,
+    model: *mut c_void,
+    destination: *mut f64,
+) {
+    let c = *((model as *const u8).add(CAP_OFFSET) as *const f64);
+    // Same 4 entries, same order as the resistive write.
+    *destination.add(0) = c;
+    *destination.add(1) = -c;
+    *destination.add(2) = -c;
+    *destination.add(3) = c;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +204,7 @@ pub static OSDI_DESCRIPTORS: [OsdiDescriptor; 1] = [OsdiDescriptor {
     state_idx_off: 0,
     bound_step_offset: 0,
     instance_size: 8, // 2 × u32 = 8 bytes
-    model_size: 16,   // gd + the recorded abstime = 2 × f64
+    model_size: 24,   // gd + the recorded abstime + c = 3 × f64
 
     access: None,
     setup_model: Some(setup_model_impl),
@@ -197,9 +224,9 @@ pub static OSDI_DESCRIPTORS: [OsdiDescriptor; 1] = [OsdiDescriptor {
     given_flag_model: None,
     given_flag_instance: None,
     num_resistive_jacobian_entries: 4,
-    num_reactive_jacobian_entries: 0,
+    num_reactive_jacobian_entries: 4,
     write_jacobian_array_resist: Some(write_jacobian_array_resist_impl),
-    write_jacobian_array_react: None,
+    write_jacobian_array_react: Some(write_jacobian_array_react_impl),
     num_inputs: 0,
     inputs: std::ptr::null_mut(),
     load_jacobian_with_offset_resist: None,

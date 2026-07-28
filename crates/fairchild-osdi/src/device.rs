@@ -153,6 +153,53 @@ impl OsdiDevice {
         None
     }
 
+    /// Call `f(mna_row, mna_col, dq/dx)` for every reactive Jacobian entry.
+    ///
+    /// `write_jacobian_array_react` writes `num_reactive_jacobian_entries`
+    /// values in the traversal order of `jacobian_entries` filtered to those
+    /// with `react_ptr_off != u32::MAX`; this walks that same order. Entries
+    /// touching ground are dropped, as in the resistive path.
+    ///
+    /// Shared by the transient and frequency-domain stamps so the two cannot
+    /// drift apart — they differ only in the factor applied (α vs ω).
+    fn for_each_react_entry(&self, mut f: impl FnMut(usize, usize, f64)) {
+        let desc = self.desc();
+        let n_react = desc.num_reactive_jacobian_entries as usize;
+        if n_react == 0 {
+            return;
+        }
+        let Some(write) = desc.write_jacobian_array_react else {
+            return;
+        };
+
+        let mut jac_buf = vec![0.0f64; n_react];
+        unsafe {
+            write(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
+        }
+
+        let n_total = desc.num_jacobian_entries as usize;
+        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
+
+        let mut react_idx = 0;
+        for entry in entries.iter() {
+            if entry.react_ptr_off == u32::MAX {
+                continue;
+            }
+            if react_idx >= n_react {
+                break;
+            }
+            let osdi_r = entry.nodes.node_1 as usize;
+            let osdi_c = entry.nodes.node_2 as usize;
+            if let (Some(mr), Some(mc)) = (
+                self.mna_nodes.get(osdi_r).copied().flatten(),
+                self.mna_nodes.get(osdi_c).copied().flatten(),
+            ) {
+                f(mr, mc, jac_buf[react_idx]);
+            }
+            react_idx += 1;
+        }
+    }
+
     /// Accumulate `scale * load_spice_rhs_{dc,tran}(prev_solve)` into `b`.
     ///
     /// OpenVAF's `load_spice_rhs_dc` writes `J_resist · prev_solve − f_resist`;
@@ -416,48 +463,21 @@ impl Device for OsdiDevice {
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
         // Resistive part (same as DC).
         self.load_jacobian(mat);
+        // Reactive part: alpha * dq/dx.
+        self.for_each_react_entry(|r, c, v| mat.a[r][c] += alpha * v);
+    }
 
-        // Reactive part: stamp alpha * C entries.
-        // write_jacobian_array_react writes n_react values in the traversal order of
-        // jacobian_entries where react_ptr_off != u32::MAX. We match that order.
-        let desc = self.desc();
-        let n_react = desc.num_reactive_jacobian_entries as usize;
-        if n_react == 0 {
-            return;
-        }
-        let f = match desc.write_jacobian_array_react {
-            Some(f) => f,
-            None => return,
-        };
-
-        let mut jac_buf = vec![0.0f64; n_react];
-        unsafe {
-            f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
-        }
-
-        let n_total = desc.num_jacobian_entries as usize;
-        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
-
-        // Walk all entries; for each one with a reactive pointer (react_ptr_off != MAX),
-        // consume the next value from jac_buf in order.
-        let mut react_idx = 0;
-        for entry in entries.iter() {
-            if entry.react_ptr_off == u32::MAX {
-                continue;
-            }
-            if react_idx >= n_react {
-                break;
-            }
-            let osdi_r = entry.nodes.node_1 as usize;
-            let osdi_c = entry.nodes.node_2 as usize;
-            if let (Some(mr), Some(mc)) = (
-                self.mna_nodes.get(osdi_r).copied().flatten(),
-                self.mna_nodes.get(osdi_c).copied().flatten(),
-            ) {
-                mat.a[mr][mc] += alpha * jac_buf[react_idx];
-            }
-            react_idx += 1;
-        }
+    /// `.ac` / `.noise` counterpart of the reactive half of
+    /// `load_jacobian_tran`: the same dq/dx entries in the same positions, for
+    /// the caller to scale by ω instead of α.
+    ///
+    /// This is why `OsdiDevice` deliberately does not implement
+    /// `small_signal_reactances` — a Verilog-A charge is a general matrix, and
+    /// squeezing it into reciprocal two-terminal branches would silently drop
+    /// transcapacitance (∂q_d/∂v_g ≠ ∂q_g/∂v_d), which is exactly what a
+    /// BSIM-class model is made of.
+    fn load_reactive_jacobian(&self, c_mat: &mut [Vec<f64>]) {
+        self.for_each_react_entry(|r, c, v| c_mat[r][c] += v);
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {

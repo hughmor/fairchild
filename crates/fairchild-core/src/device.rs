@@ -211,6 +211,25 @@ pub trait Device: Send + Sync {
         self.reactive_branches()
     }
 
+    /// Stamp this device's reactive Jacobian ∂q/∂x directly into the
+    /// small-signal capacitance matrix, for devices whose reactance is a
+    /// general matrix rather than a set of two-terminal branches.
+    ///
+    /// `.ac` and `.noise` form their susceptance block as `ω·C − L/ω`, so what
+    /// lands here is the frequency-domain twin of the `α·J_react` that
+    /// [`Device::load_jacobian_tran`] stamps: same entries, same positions,
+    /// α → jω. Indices are MNA rows/columns, as for
+    /// [`Device::load_jacobian`].
+    ///
+    /// Default is a no-op. Override this **instead of**
+    /// [`Device::small_signal_reactances`], not as well — whatever both report
+    /// gets stamped, so a device answering to both double-counts. Native
+    /// devices report two-terminal branches and are fine as they are; this
+    /// exists for OSDI/Verilog-A, where ∂q_i/∂v_j need not equal ∂q_j/∂v_i
+    /// (transcapacitance) and so cannot be expressed as reciprocal branches at
+    /// all.
+    fn load_reactive_jacobian(&self, _c_mat: &mut [Vec<f64>]) {}
+
     /// Set a named real-valued parameter on this device instance.
     ///
     /// Returns `true` if the parameter was found and set; `false` if not supported
