@@ -1248,6 +1248,19 @@ pub fn tran_nr_with_registry_var_opts(
             // Update raw companion state from accepted solution.
             // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
             // prev value so the next step has a valid two-step window.
+            //
+            // KNOWN BUG: the inductor update below uses the standalone
+            // `i = G_eq·v + I_hist`, which is wrong for a coupled pair — the
+            // mutual term is missing.  `advance_companions` has a K-element
+            // post-pass for exactly this; this path never got one, so `ind_i`
+            // drifts and Newton then fails to converge.  Verified: `K1 L1 L2 0`
+            // runs, `K1 L1 L2 0.1` returns NoConvergence, while the same netlist
+            // is fine under fixed-step.  Any non-zero coupling + variable_step
+            // is currently a hard failure.
+            //
+            // ponytail: the fix is the same post-pass, but the real fix is one
+            // integrator instead of two — see the module note on raw (v, i_C)
+            // history.  Don't add a third copy of the K correction.
             for el in &netlist.elements {
                 match el {
                     Element::Capacitor { name, pos, neg, .. } => {
