@@ -436,6 +436,16 @@ fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a
 /// For each device, queries `reactive_branches()` once and computes the
 /// initial (G_eq, I_hist) using the DC-OP voltage across the branch's
 /// (pos, neg) terminals.  Returned as `[dev_idx][branch_idx] -> (G_eq, I_hist)`.
+/// Voltage across a device-declared reactive branch, read from a solution vector.
+pub(crate) fn branch_voltage(br: &crate::device::ReactiveBranchSpec, x: &[f64]) -> f64 {
+    match (br.pos, br.neg) {
+        (Some(p), Some(n)) => x[p] - x[n],
+        (Some(p), None) => x[p],
+        (None, Some(n)) => -x[n],
+        (None, None) => 0.0,
+    }
+}
+
 pub(crate) fn init_device_reactive_state(
     devices: &[Box<dyn Device>],
     x: &[f64],
@@ -447,12 +457,7 @@ pub(crate) fn init_device_reactive_state(
         let branches = dev.reactive_branches();
         let mut dev_states = Vec::with_capacity(branches.len());
         for br in &branches {
-            let v = match (br.pos, br.neg) {
-                (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None) => x[p],
-                (None, Some(n)) => -x[n],
-                (None, None) => 0.0,
-            };
+            let v = branch_voltage(br, x);
             // TR always begins with a BE step for stability at discontinuities
             // — mirrors the built-in Element::Capacitor handling.
             let companion = match br.kind {
@@ -524,12 +529,7 @@ pub(crate) fn advance_device_reactive_state(
     for (dev_idx, dev) in devices.iter().enumerate() {
         let branches = dev.reactive_branches();
         for (br_idx, br) in branches.iter().enumerate() {
-            let v = match (br.pos, br.neg) {
-                (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None) => x[p],
-                (None, Some(n)) => -x[n],
-                (None, None) => 0.0,
-            };
+            let v = branch_voltage(br, x);
             let next = match br.kind {
                 ReactiveKind::Capacitor => cap_companion(br.value, step, v),
                 ReactiveKind::Inductor => {
@@ -772,6 +772,32 @@ pub fn tran_nr_with_registry_var_opts(
             _ => {}
         }
     }
+
+    // Same, for device-internal reactive branches (depletion / diffusion C on a
+    // PN phase shifter, parasitics on a PD, …).  Indexed `[device][branch]`,
+    // parallel to that device's `reactive_branches()` order.
+    //
+    // Raw state, NOT the `(G_eq, I_hist)` pair the fixed-step path carries: `h`
+    // changes every step here, so the companion has to be rebuilt from physical
+    // state for each trial `h` — exactly as `cap_v` / `ind_i` above.  Each entry
+    // is `(state, value)`: V_C or I_L, and the branch's C or L, both as of the
+    // last ACCEPTED timepoint.  Storing the value alongside matters because it is
+    // bias-dependent: after a rejected step the device's cached value reflects
+    // the rejected iterate, so re-reading it then would corrupt the history term.
+    let mut dev_br_raw: Vec<Vec<(f64, f64)>> = devices
+        .iter()
+        .map(|dev| {
+            dev.reactive_branches()
+                .iter()
+                .map(|br| match br.kind {
+                    // Inductors start from zero current, matching the built-in
+                    // `ind_i` seeding and `init_device_reactive_state`.
+                    ReactiveKind::Inductor => (0.0, br.value),
+                    ReactiveKind::Capacitor => (branch_voltage(br, &x), br.value),
+                })
+                .collect()
+        })
+        .collect();
     // Track previous accepted timestep for non-uniform BDF-2 (h_prev_accepted
     // is the step that took us from t_{n-1} to t_n; distinct from h_prev which
     // is the trial step for predictor extrapolation).
@@ -927,6 +953,29 @@ pub fn tran_nr_with_registry_var_opts(
             x.clone()
         };
 
+        // Companion state for every device-internal reactive branch at this
+        // trial `h`, from the last accepted raw state.  Only `I_hist` is
+        // consumed downstream: `stamp_device_reactive_companions` re-derives
+        // `G_eq` from the device's fresh per-NR-iteration value, which is the
+        // same quasi-linear contract the fixed-step path uses.
+        let dev_reactive_state: Vec<Vec<(f64, f64)>> = devices
+            .iter()
+            .enumerate()
+            .map(|(d, dev)| {
+                dev.reactive_branches()
+                    .iter()
+                    .enumerate()
+                    .map(|(b, br)| {
+                        let (state, value) = dev_br_raw[d][b];
+                        match br.kind {
+                            ReactiveKind::Capacitor => cap_companion(value, h_actual, state),
+                            ReactiveKind::Inductor => ind_companion(value, h_actual, state),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
         // NR corrector starting from x_pred.
         let alpha = 1.0 / h_actual;
         let mut x_try = x_pred.clone();
@@ -949,6 +998,8 @@ pub fn tran_nr_with_registry_var_opts(
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
+            // Device-declared reactive branches, at the trial step size.
+            stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, h_actual);
 
             topo.stamp_gmin(&mut mat.a, opts.gmin);
 
@@ -1076,6 +1127,24 @@ pub fn tran_nr_with_registry_var_opts(
 
             for dev in &mut devices {
                 dev.commit_timestep(&x);
+            }
+
+            // Roll device-branch raw state forward.  Written ONLY here, on
+            // acceptance, so a rejected step's retry re-derives from the same
+            // accepted history — the property `cap_v` / `ind_i` already rely on.
+            for (d, dev) in devices.iter().enumerate() {
+                for (b, br) in dev.reactive_branches().iter().enumerate() {
+                    let v = branch_voltage(br, &x);
+                    dev_br_raw[d][b] = match br.kind {
+                        ReactiveKind::Capacitor => (v, br.value),
+                        ReactiveKind::Inductor => {
+                            // Closed-form current update: i = G_eq·v + I_hist,
+                            // using the companion we actually stamped.
+                            let (g_eq, i_hist) = dev_reactive_state[d][b];
+                            (g_eq * v + i_hist, br.value)
+                        }
+                    };
+                }
             }
 
             push_timepoint(&mut result, t, &topo, &x);
@@ -1279,6 +1348,67 @@ mod tests {
             (v_fixed - v_var).abs() < 1e-3,
             "fixed={v_fixed:.6}  var={v_var:.6}"
         );
+    }
+
+    /// The variable-step path used to drop every device-internal reactive
+    /// branch: it never called init/stamp/advance_device_reactive_state, so a
+    /// PN phase shifter's depletion C_j simply wasn't in the matrix.  The
+    /// junction then settled within one timestep instead of over its RC, and
+    /// nothing warned.
+    ///
+    /// Driven through 10 k with a near-open junction (g_pn = 1e-9), the ONLY
+    /// thing setting the settling time is the device's own C_j: with c_j0 = 10 pF
+    /// and a 1 V reverse step, tau ~ 100 ns at zero bias.  Both integrators must
+    /// show that lag; an integrator that drops C_j jumps straight to the final
+    /// value.
+    #[test]
+    fn var_step_includes_device_internal_capacitance() {
+        let src = "* device-internal C_j\n\
+             .optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps_cap L_um=500 V_pi_L=2e-3 g_pn=1e-9 \
+             c_j0=10p v_bi=0.917\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\n\
+             RS src a 10k\n\
+             .tran 5n 400n\n.end\n";
+        let netlist = parse_spice(src).unwrap();
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&netlist.models);
+        let opts = SimOptions::from_netlist(&netlist);
+
+        let fixed = tran_nr_with_registry_opts(&netlist, 5e-9, 400e-9, &registry, &opts).unwrap();
+        let var = tran_nr_with_registry_var_opts(&netlist, 5e-9, 400e-9, &registry, &opts).unwrap();
+
+        // 25 ns after the edge — well inside one tau — the junction must still be
+        // far from its final value in BOTH runs.
+        let vf = fixed.voltage_at("a", 45e-9).unwrap();
+        let vv = var.voltage_at("a", 45e-9).unwrap();
+        let settled = fixed.voltage_at("a", 390e-9).unwrap();
+        // Not exactly -1 V: g_pn plus the diagonal gmin form a slight divider.
+        assert!(
+            (settled + 1.0).abs() < 0.01,
+            "fixed-step should reach essentially the full -1 V eventually, got {settled}"
+        );
+        assert!(
+            vf / settled < 0.5,
+            "fixed-step should be mid-slew at 45 ns, got {vf} of {settled}"
+        );
+        assert!(
+            vv / settled < 0.5,
+            "variable-step dropped the device's C_j: {vv} of {settled} at 45 ns \
+             (fixed-step has {vf}) — the junction settled instantly"
+        );
+        // And the two integrators should agree closely across the whole edge.
+        for &t in &[30e-9, 45e-9, 70e-9, 120e-9, 250e-9] {
+            let (a, b) = (
+                fixed.voltage_at("a", t).unwrap(),
+                var.voltage_at("a", t).unwrap(),
+            );
+            assert!(
+                (a - b).abs() < 0.05,
+                "t={t:e}: fixed={a:.6} var={b:.6} differ by more than 50 mV"
+            );
+        }
     }
 
     #[test]
