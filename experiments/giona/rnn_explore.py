@@ -14,6 +14,8 @@ Stages, each runnable on its own:
   --space       Explore the activation space the way the chip is wired: the
                 real 2k/10k bias network, heater current for detuning, and a
                 signed input photocurrent.
+  --insitu      Neuron transconductance vs bias, measured in the full 8-neuron
+                deck rather than on a single-ring bench.
   --bias        Derive the DC bias each neuron needs to sit at a chosen
                 operating point, in the recurrent case.
   --osc         Two-neuron oscillator: W = [[1,-1],[1,1]], transient.
@@ -517,7 +519,7 @@ def stage_plots(radii):
     import matplotlib.pyplot as plt
     RESULTS.mkdir(exist_ok=True)
 
-    fig, ax = plt.subplots(2, 4, figsize=(21, 9))
+    fig, ax = plt.subplots(2, 3, figsize=(16, 9))
 
     # (0,0) resonance comb after radius calibration
     wl = np.linspace(1545.6, 1552.3, 400)
@@ -619,6 +621,29 @@ def insitu_transfer(pd_b: float, power_mW=30.0, ws=(0.0, 0.10, 0.20, 0.30)):
     return {"v_rest": v0, "i_in": i_in, "p_bus": p_bus, "slope": abs(slope)}
 
 
+def stage_insitu(power_mW=30.0,
+                 biases=(-5.0, -8.0, -10.0, -13.4, -17.8, -22.0)):
+    """Does the bench measurement hold in the real circuit?
+
+    Same transconductance question asked of the full 8-neuron deck at its real
+    laser power. This is what confirmed the rest-point choice.
+    """
+    print(f"\n── in situ, full deck at {power_mW:.0f} mW/channel "
+          "(neuron 1's own weight swept) ──")
+    print("    PD_B    V_rest    |dP_bus/dI_in|   I_in at w=0.3")
+    ins = {}
+    for pb in biases:
+        d = ins[pb] = insitu_transfer(pb, power_mW=power_mW)
+        print(f"   {pb:6.1f}  {d['v_rest']:+8.5f}   {d['slope']:11.5f}   "
+              f"{d['i_in'][-1]:7.1f} µA")
+    ref = ins.get(-13.4, {"slope": float("nan")})["slope"]
+    best = max(biases, key=lambda pb: ins[pb]["slope"])
+    print(f"\n  → best at PD_B = {best:.1f} V: "
+          f"{ins[best]['slope'] / ref:.1f}× the transconductance of the "
+          f"-13.4 V the WTA runs used.")
+    return ins
+
+
 def stage_space():
     """Explore the activation space the way the chip is actually wired.
 
@@ -636,8 +661,17 @@ def stage_space():
     RESULTS.mkdir(exist_ok=True)
 
     pd_ref = -13.4                      # the bias the WTA runs at
-    heaters = [0.0, 1.5e-3, 2.0e-3, 2.5e-3, 3.0e-3, 3.5e-3]
+    # Four biases across the top row. Six on the bottom row, where the panels
+    # are one point per bias and can afford the extra resolution.
+    top_biases = [-5.0, -8.0, -13.4, -22.0]
     biases = [-5.0, -8.0, -10.0, -13.4, -17.8, -22.0]
+    # Heater window relative to each bias's own centring current. Absolute
+    # values would not be comparable across panels: the injection that comes
+    # with the bias already blue-shifts the ring, so -5 V needs ~0.5 mA to hold
+    # its channel and -22 V needs ~3.5 mA (that is finding 3 below).
+    # Spanned rather than offset, so clamping at 0 mA still leaves four distinct
+    # curves instead of two coincident ones.
+    HT_BELOW, HT_ABOVE, HT_N = 1.0e-3, 0.5e-3, 4
 
     print("\n── activation space, real bias network ──")
     rest = bias_probe(0.0, pd_b=pd_ref)
@@ -646,44 +680,71 @@ def stage_space():
     print(f"  small-signal shunt (2k ‖ 10k ‖ 2×17.05k) = {R_SHUNT_AC:.0f} Ω")
 
     fig, ax = plt.subplots(2, 4, figsize=(21, 9))
+    # Top row shares y: the peak height genuinely falls as the bias rises, and
+    # per-panel autoscale would hide exactly that.
+    for c in range(1, 4):
+        ax[0, c].sharey(ax[0, 0])
 
-    # (0,0)/(0,1) both ports vs signal current, family over heater current.
-    curves = {ih: {sh: activation_curve(ih, pd_ref, shape=sh)
-                   for sh in SHAPES} for ih in heaters}
-    for col, sh in enumerate(("peak", "notch")):
+    # Top row: one panel per bias. Both lineshapes together — solid for the peak
+    # port (add→thru, ReLU-like), dotted for the notch port (in→thru,
+    # sigmoid-like) — since they are the same ring read two ways and the useful
+    # comparison is between them at a given operating point.
+    print("\n  top row: heater currents used, relative to each bias's centring "
+          "current")
+    for col, pb in enumerate(top_biases):
+        ih_c = centre_heater(pb)
+        hts = list(np.linspace(max(0.0, ih_c - HT_BELOW), ih_c + HT_ABOVE, HT_N))
+        print(f"    PD_B = {pb:6.1f} V: centring {ih_c * 1e3:.2f} mA, using "
+              + ", ".join(f"{h * 1e3:.2f}" for h in hts) + " mA")
         a = ax[0, col]
-        for ih in heaters:
-            a.plot(I_SIG * 1e6, curves[ih][sh][0], lw=1.4,
-                   label=f"{ih * 1e3:.1f} mA")
+        for i, ih in enumerate(hts):
+            c = f"C{i}"
+            for sh, ls in (("peak", "-"), ("notch", ":")):
+                t = activation_curve(ih, pb, shape=sh)[0]
+                a.plot(I_SIG * 1e6, t, ls, color=c, lw=1.5,
+                       label=f"{ih * 1e3:.2f} mA" if sh == "peak" else None)
         a.axvline(0, color="k", lw=0.5, ls=":")
         a.set_xlabel("signal photocurrent I_sig (µA)   → activating")
-        a.set_ylabel("transmission (mW)")
-        a.set_title(SHAPES[sh][2] + f"\nheater family at PD_B = {pd_ref} V",
-                    fontsize=10)
+        if col == 0:
+            a.set_ylabel("transmission (mW)")
+        a.set_title(f"PD_B = {pb:.1f} V   (rest "
+                    f"{bias_probe(0.0, pd_b=pb)['i_j'] * 1e6:.0f} µA)\n"
+                    "solid: add→thru (peak/ReLU)   dotted: in→thru "
+                    "(notch/sigmoid)", fontsize=9)
         a.legend(fontsize=7, title="heater", title_fontsize=7)
         a.grid(alpha=0.3)
 
-    # (0,2) what the heater knob does: threshold position and peak height.
-    thr = [I_SIG[int(np.argmax(curves[ih]["peak"][0]))] * 1e6 for ih in heaters]
-    pk = [curves[ih]["peak"][0].max() for ih in heaters]
-    a = ax[0, 2]
-    a.plot(np.array(heaters) * 1e3, thr, "o-", color="C0")
-    a.set_xlabel("heater current (mA)")
-    a.set_ylabel("threshold: I_sig at peak (µA)", color="C0")
-    a.tick_params(axis="y", labelcolor="C0")
-    a.axhline(0, color="k", lw=0.5, ls=":")
-    a2 = a.twinx()
-    a2.plot(np.array(heaters) * 1e3, pk, "s--", color="C3")
-    a2.set_ylabel("peak transmission (mW)", color="C3")
-    a2.tick_params(axis="y", labelcolor="C3")
-    a.set_title("The heater is the threshold knob\n"
-                "…but a threshold at higher injection costs contrast", fontsize=10)
-    a.grid(alpha=0.3)
+    # Removed from the figure but kept for reference: what the heater knob does
+    # on its own — threshold position and peak height versus heater current, at
+    # one bias. Superseded by the top row, which shows the same translation
+    # happening inside each panel.
+    #
+    # To bring it back, widen the grid — ax[0, 2] now holds a bias panel.
+    #
+    # curves = {ih: {sh: activation_curve(ih, pd_ref, shape=sh)
+    #                for sh in SHAPES} for ih in [0.0, 1.5e-3, 2.0e-3, 2.5e-3,
+    #                                             3.0e-3, 3.5e-3]}
+    # thr = [I_SIG[int(np.argmax(curves[ih]["peak"][0]))] * 1e6 for ih in curves]
+    # pk = [curves[ih]["peak"][0].max() for ih in curves]
+    # a = ax[0, 2]
+    # a.plot(np.array(list(curves)) * 1e3, thr, "o-", color="C0")
+    # a.set_xlabel("heater current (mA)")
+    # a.set_ylabel("threshold: I_sig at peak (µA)", color="C0")
+    # a.tick_params(axis="y", labelcolor="C0")
+    # a.axhline(0, color="k", lw=0.5, ls=":")
+    # a2 = a.twinx()
+    # a2.plot(np.array(list(curves)) * 1e3, pk, "s--", color="C3")
+    # a2.set_ylabel("peak transmission (mW)", color="C3")
+    # a2.tick_params(axis="y", labelcolor="C3")
+    # a.set_title("The heater is the threshold knob\n"
+    #             "…but a threshold at higher injection costs contrast",
+    #             fontsize=10)
+    # a.grid(alpha=0.3)
 
     # (0,3)/(1,0) the node itself: the diode clamps the voltage, so the loop
     # variable is current — and only part of I_sig gets past the shunts.
     node = {pb: activation_curve(0.0, pb, shape="peak") for pb in biases}
-    a = ax[0, 3]
+    a = ax[1, 0]
     for pb in biases:
         a.plot(I_SIG * 1e6, node[pb][1] * 1e3, lw=1.3, label=f"{pb:.1f} V")
     a.set_xlabel("signal photocurrent I_sig (µA)")
@@ -692,7 +753,7 @@ def stage_space():
                 "so current, not voltage, is the loop variable", fontsize=10)
     a.legend(fontsize=7, title="PD_B", title_fontsize=7); a.grid(alpha=0.3)
 
-    a = ax[1, 0]
+    a = ax[1, 1]
     for pb in biases:
         a.plot(I_SIG * 1e6, node[pb][2] * 1e6, lw=1.3, label=f"{pb:.1f} V")
     a.plot(I_SIG * 1e6, I_SIG * 1e6, "k:", lw=0.8, label="slope 1 (no loss)")
@@ -702,8 +763,8 @@ def stage_space():
                 "the rest leaks into 2 kΩ ‖ 10 kΩ ‖ 2×17 kΩ", fontsize=10)
     a.legend(fontsize=7, title="PD_B", title_fontsize=7); a.grid(alpha=0.3)
 
-    # (1,1) coupling efficiency vs rest current: measured against the divider.
-    a = ax[1, 1]
+    # coupling efficiency vs rest current: measured against the divider.
+    a = ax[1, 2]
     meas = [eta_measured(pb) for pb in biases]
     ir = np.array([m[0] for m in meas]) * 1e6
     et = np.array([m[1] for m in meas])
@@ -726,7 +787,7 @@ def stage_space():
     # the steepest flank — not the peak — sits at I_sig = 0, then ask what that
     # operating point is worth. dT/dI_sig is the number that closes the loop: it
     # already contains the shunt loss, since it is per unit input photocurrent.
-    a = ax[1, 2]
+    a = ax[1, 3]
     rows = []
     for pb in biases:
         ih, at_edge = flank_heater(pb)
@@ -762,30 +823,24 @@ def stage_space():
                 fontsize=10)
     a.legend(fontsize=7, loc="lower left"); a.grid(alpha=0.3, which="both")
 
-    # (1,3) does the bench measurement hold in the real circuit? Same question
-    # asked of the full 8-neuron deck at its actual laser power.
-    a = ax[1, 3]
-    ins = {pb: insitu_transfer(pb) for pb in biases}
-    for pb in biases:
-        d = ins[pb]
-        a.plot(d["i_in"], d["p_bus"], "o-", lw=1.3,
-               label=f"{pb:.1f} V  ({d['slope']:.4f})")
-    a.set_xlabel("input photocurrent to neuron 1 (µA)")
-    a.set_ylabel("ring 1's channel on the bus output (mW)")
-    a.set_title("In situ: full 8-neuron deck at 30 mW/channel\n"
-                "legend shows |dP/dI_in| in mW/µA", fontsize=10)
-    a.legend(fontsize=6.5, title="PD_B", title_fontsize=6.5); a.grid(alpha=0.3)
-    print("\n  in situ, full deck at 30 mW/channel (neuron 1's own weight swept):")
-    print("    PD_B    V_rest    |dP_bus/dI_in|   I_in at w=0.3")
-    for pb in biases:
-        d = ins[pb]
-        print(f"   {pb:6.1f}  {d['v_rest']:+8.5f}   {d['slope']:11.5f}   "
-              f"{d['i_in'][-1]:7.1f} µA")
-    ref = ins[-13.4]["slope"]
-    bst = max(biases, key=lambda pb: ins[pb]["slope"])
-    print(f"\n  → best in situ at PD_B = {bst:.1f} V: "
-          f"{ins[bst]['slope'] / ref:.1f}× the transconductance of the "
-          f"-13.4 V the WTA runs used.")
+    # Removed from the figure but kept for reference: the same question asked of
+    # the full 8-neuron deck at its real laser power, which is what confirmed
+    # the rest-point choice (-8 V gave 9.3x the transconductance of -13.4 V).
+    # Still runnable on its own — `rnn_explore.py --insitu` prints the table.
+    #
+    # To bring it back, widen the grid — ax[1, 3] now holds the rest-point panel.
+    #
+    # a = ax[1, 3]
+    # ins = {pb: insitu_transfer(pb) for pb in biases}
+    # for pb in biases:
+    #     d = ins[pb]
+    #     a.plot(d["i_in"], d["p_bus"], "o-", lw=1.3,
+    #            label=f"{pb:.1f} V  ({d['slope']:.4f})")
+    # a.set_xlabel("input photocurrent to neuron 1 (µA)")
+    # a.set_ylabel("ring 1's channel on the bus output (mW)")
+    # a.set_title("In situ: full 8-neuron deck at 30 mW/channel\n"
+    #             "legend shows |dP/dI_in| in mW/µA", fontsize=10)
+    # a.legend(fontsize=6.5, title="PD_B", title_fontsize=6.5); a.grid(alpha=0.3)
 
     fig.suptitle("giona ring activation — swept through the real bias network "
                  "(2 kΩ on-chip ‖ 10 kΩ off-chip, heater detuning, signed input)")
@@ -837,10 +892,14 @@ def main() -> int:
     ap.add_argument("--plots", action="store_true")
     ap.add_argument("--space", action="store_true",
                     help="activation space through the real bias network")
+    ap.add_argument("--insitu", action="store_true",
+                    help="transconductance vs bias measured on the full deck")
     args = ap.parse_args()
 
     if args.space:
         stage_space()
+    if args.insitu:
+        stage_insitu()
 
     if args.radii or args.activation or args.plots:
         radii = stage_radii(verbose=args.radii or args.activation)
