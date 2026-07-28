@@ -107,7 +107,7 @@ impl Expr {
         let e = p.parse_expr()?;
         if p.pos != p.tokens.len() {
             return Err(ExprError::UnexpectedToken(
-                format!("{:?}", &p.tokens[p.pos]),
+                format!("{:?}", p.tokens[p.pos]),
                 p.pos,
             ));
         }
