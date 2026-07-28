@@ -19,6 +19,7 @@ use crate::mna::{
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::solver::lu_solve;
+use crate::tran_step::TranStepper;
 
 /// Transient integration method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,13 +219,13 @@ fn run_tran_mode(
 // ---------------------------------------------------------------------------
 
 /// Companion state maps for capacitors and inductors: (Geq, Ieq) per element name.
-type CompanionStatePair = (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>);
+pub(crate) type CompanionStatePair = (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>);
 
 /// Initialise capacitor and inductor companion state from a solution vector.
 ///
 /// For capacitors: V_C_init = V(pos) - V(neg) from the provided x (typically the DC OP).
 /// For inductors: I_L_init = 0 (inductors are open-circuit in the DC solver).
-fn init_companions(
+pub(crate) fn init_companions(
     netlist: &Netlist,
     topo: &CircuitTopology,
     step: f64,
@@ -262,7 +263,7 @@ fn init_companions(
 ///
 /// `first_tr` — true only on the first advance when mode is TR; performs the BE→TR
 /// transition that seeds the TR with correct initial capacitor/inductor currents.
-fn advance_companions(
+pub(crate) fn advance_companions(
     netlist: &Netlist,
     topo: &CircuitTopology,
     step: f64,
@@ -435,7 +436,7 @@ fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a
 /// For each device, queries `reactive_branches()` once and computes the
 /// initial (G_eq, I_hist) using the DC-OP voltage across the branch's
 /// (pos, neg) terminals.  Returned as `[dev_idx][branch_idx] -> (G_eq, I_hist)`.
-fn init_device_reactive_state(
+pub(crate) fn init_device_reactive_state(
     devices: &[Box<dyn Device>],
     x: &[f64],
     step: f64,
@@ -469,7 +470,7 @@ fn init_device_reactive_state(
 /// reactive branch into `mat`.  Called inside the NR loop, AFTER each
 /// device's `load_jacobian_tran` (so the device's eval cache reflects the
 /// current iterate before the integrator re-queries the value).
-fn stamp_device_reactive_companions(
+pub(crate) fn stamp_device_reactive_companions(
     devices: &[Box<dyn Device>],
     state: &[Vec<(f64, f64)>],
     mat: &mut MnaMatrix,
@@ -514,7 +515,7 @@ fn stamp_device_reactive_companions(
 /// timestep.  Reads V_C / I_L from the converged `x` and computes the next
 /// (G_eq, I_hist) using the device's reported value at the new operating
 /// point (already updated via `commit_timestep` + the next NR loop's eval).
-fn advance_device_reactive_state(
+pub(crate) fn advance_device_reactive_state(
     devices: &[Box<dyn Device>],
     x: &[f64],
     state: &mut [Vec<(f64, f64)>],
@@ -544,7 +545,7 @@ fn advance_device_reactive_state(
 }
 
 /// Append one time-point to a TranResult.
-fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
+pub(crate) fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
     result.time.push(t);
     for (name, &idx) in &topo.node_index {
         result.node_voltages.get_mut(name).unwrap().push(x[idx]);
@@ -578,6 +579,9 @@ pub fn tran_nr_with_registry(
 /// The integration method (`BackwardEuler` or `Trapezoidal`) comes from
 /// `opts.method`.  Tolerances, max NR iterations, gmin, vmax, etc. all read
 /// from `opts`.
+///
+/// This is a driver over [`TranStepper`] — the integrator itself lives there so
+/// that batch runs and host-driven mixed-signal stepping cannot drift apart.
 pub fn tran_nr_with_registry_opts(
     netlist: &Netlist,
     step: f64,
@@ -585,66 +589,13 @@ pub fn tran_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
-    // Sanity check fires here when UIC bypasses DC OP; the non-UIC path
-    // gets it via the dc_op call below (and the check is cheap enough
-    // that we don't bother de-duplicating).
-    if opts.sanity_check && opts.uic {
-        crate::sanity::check_netlist_sanity(netlist);
-    }
-    crate::connectivity::check_connectivity(netlist)?;
-    let mut ctx = opts.sim_context();
-    let mode = opts.method;
-
-    // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
-    // Without UIC (the default): use DC OP as t=0 condition.
-    let (topo, mut x) = if opts.uic {
-        let topo = CircuitTopology::build(netlist);
-        let mut x = vec![0.0f64; topo.size];
-        for (name, value) in &netlist.ic {
-            if let Some(&i) = topo.node_index.get(name) {
-                x[i] = *value;
-            }
-        }
-        (topo, x)
-    } else {
-        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-        // DC OP already allocated extras; reuse its topology so the row
-        // layout (and matrix size) stays consistent through the transient.
-        (dc.topo, dc.x)
-    };
-    let mut topo = topo;
-
-    let (mut devices, footprints) =
-        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
-    // After build_devices, topo.size is final.  Pad the initial x vector
-    // to match — when we came via UIC, x was sized to the pre-allocation
-    // topology; OSDI internal nodes get a zero initial guess.
-    x.resize(topo.size, 0.0);
-    // Topology is fixed across the whole transient — build the linear
-    // solver once and reuse for every NR iter.
-    let solver = opts.linear_solver(topo.size);
-    // Structural sparsity pattern: same for every timestep and every NR
-    // iteration within them, so build it once here.
-    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
-
-    // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
-    // history is defined before the first step.
-    for dev in &mut devices {
-        dev.commit_timestep(&x);
-    }
-
-    // Honour opts.max_step as an upper bound on the step size.
-    let step = step.min(opts.max_step);
-
-    // Reactive companion state seeded from the DC OP.
-    let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x, mode);
-    // Device-internal reactive branches (e.g., bias-dependent C_j on a
-    // depletion-mode PN-PS).  One companion-state pair per device per
-    // declared branch.  Indexed as dev_reactive_state[dev_idx][branch_idx].
-    let mut dev_reactive_state: Vec<Vec<(f64, f64)>> =
-        init_device_reactive_state(&devices, &x, step, mode);
+    // The stepper owns its netlist so it can rewrite source waveforms between
+    // steps.  One clone per transient run, against thousands of timesteps.
+    let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
+    let step = st.step_size();
 
     let n_steps = ((stop / step).ceil() as usize) + 2;
+    let topo = st.topology();
     let mut result = TranResult {
         time: Vec::with_capacity(n_steps),
         node_voltages: topo
@@ -660,118 +611,21 @@ pub fn tran_nr_with_registry_opts(
     };
 
     // Store t = 0 from DC OP.
-    push_timepoint(&mut result, 0.0, &topo, &x);
+    push_timepoint(&mut result, 0.0, st.topology(), st.solution());
 
-    // Cached factorisation: in transient, the sparsity pattern is fixed
-    // across the entire run (devices don't appear / disappear, timestep
-    // changes only scale values via `α = 1/h`).  One symbolic factor-
-    // isation up front, `klu_refactor` (or faer-sparse value-only
-    // rebuild) on every NR iteration of every timestep.
-    let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
-
-    // One MnaMatrix reused across every NR iteration of every timestep —
-    // for a 10 k-step transient with ~3 NR iters each this skips 30 k ×
-    // (N+1) heap allocations.
-    let mut mat = crate::mna::MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
-
-    let mut t = step;
-    let mut first_tr = true;
+    // The first timepoint is `step` even when that overshoots `stop` (a
+    // stop < step run still produces one solved point); every later one is
+    // clamped so the run lands exactly on `stop`.
+    let mut t_next = step;
     loop {
-        // --- NR loop for this time step ---
-        let alpha = 1.0 / step;
-        // Expose the absolute time of this step to devices (delay lines look up
-        // historical port values at `time_s − τ`).
-        ctx.time_s = t;
-        let mut step_converged = false;
-        for _iter in 0..opts.itl4 {
-            crate::mna::stamp_netlist_in_place(
-                &mut mat,
-                &topo,
-                netlist,
-                t,
-                &cap_state,
-                &ind_state,
-                Some(&plan),
-            );
-
-            for dev in &mut devices {
-                dev.set_source_scale(1.0);
-                dev.eval(&x, EvalFlags::tran(), &ctx);
-                dev.load_residual_tran(&mut mat.b, alpha);
-                dev.load_jacobian_tran(&mut mat, alpha);
-            }
-            // Stamp integrator-managed reactive companions for every
-            // device-declared linear reactive branch (uses the device's
-            // current bias-dependent value AND the history from the
-            // previous accepted timestep).
-            stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, step);
-
-            topo.stamp_gmin(&mut mat.a, opts.gmin);
-
-            let x_new = if let Some(f) = fact.as_mut() {
-                f.refactor_and_solve_mat(&mat)?
-            } else {
-                let mut f = solver.factorise_mat(&mat)?;
-                let r = f.refactor_and_solve_mat(&mat)?;
-                fact = Some(f);
-                r
-            };
-
-            let max_dv = x_new
-                .iter()
-                .zip(x.iter())
-                .take(topo.n_nodes())
-                .map(|(n, o)| (n - o).abs())
-                .fold(0.0f64, f64::max);
-
-            let x_next: Vec<f64> = if max_dv > opts.vmax {
-                let scale = opts.vmax / max_dv;
-                x.iter()
-                    .zip(x_new.iter())
-                    .map(|(o, n)| o + scale * (n - o))
-                    .collect()
-            } else {
-                x_new
-            };
-
-            let converged = x_next
-                .iter()
-                .zip(x.iter())
-                .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
-
-            x = x_next;
-            if converged {
-                step_converged = true;
-                break;
-            }
-        }
-
-        if !step_converged {
-            return Err(SimError::NoConvergence { iters: opts.itl4 });
-        }
-
-        push_timepoint(&mut result, t, &topo, &x);
-
-        for dev in &mut devices {
-            dev.commit_timestep(&x);
-        }
-
-        if t >= stop {
+        st.solve_at(t_next)?;
+        st.commit(t_next);
+        push_timepoint(&mut result, st.time(), st.topology(), st.solution());
+        if st.time() >= stop {
             break;
         }
-        advance_companions(
-            netlist,
-            &topo,
-            step,
-            &x,
-            &mut cap_state,
-            &mut ind_state,
-            mode,
-            first_tr,
-        );
-        advance_device_reactive_state(&devices, &x, &mut dev_reactive_state, step);
-        first_tr = false;
-        t = (t + step).min(stop);
+        st.advance_history();
+        t_next = (st.time() + step).min(stop);
     }
 
     Ok(result)

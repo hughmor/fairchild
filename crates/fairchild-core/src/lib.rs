@@ -9,12 +9,14 @@ pub mod error;
 pub mod measure;
 pub mod mna;
 pub mod models;
+pub mod netlist_edit;
 pub mod newton;
 pub mod noise;
 pub mod options;
 pub mod sanity;
 pub mod solver;
 pub mod tran;
+pub mod tran_step;
 
 pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, AcResult};
 pub use connectivity::check_connectivity;
@@ -26,6 +28,7 @@ pub use error::SimError;
 pub use measure::{evaluate_measurements, MeasureResult};
 pub use mna::CircuitTopology;
 pub use models::{GummelPoonBjt, Mosfet1, ShockleyDiode};
+pub use netlist_edit::{set_element_param, set_source_pwl};
 pub use newton::{
     build_devices, dc_op_nr, dc_op_nr_opts, dc_op_nr_with_devices, dc_op_nr_with_devices_opts,
     dc_op_nr_with_registry, dc_op_nr_with_registry_opts, NrResult,
@@ -39,3 +42,4 @@ pub use tran::{
     tran_nr_with_registry_opts, tran_nr_with_registry_tr, tran_nr_with_registry_var,
     tran_nr_with_registry_var_opts, IntegratorMode, TranResult,
 };
+pub use tran_step::TranStepper;

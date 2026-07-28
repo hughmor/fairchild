@@ -3,6 +3,7 @@ members = [
     "crates/fairchild-core",
     "crates/fairchild-parser",
     "crates/fairchild-cli",
+    "crates/fairchild-c",
     "crates/fairchild-osdi",
     "crates/fairchild-klu",
     "crates/fairchild-py",

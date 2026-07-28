@@ -23,7 +23,7 @@ use fairchild_core::{
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
-use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Element, Netlist, Waveform};
+use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Netlist};
 
 // ---------------------------------------------------------------------------
 // Error conversion
@@ -43,71 +43,9 @@ fn parse_err(e: fairchild_parser::ParseError) -> PyErr {
 
 fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
     for (key, &value) in overrides {
-        let dot = match key.find('.') {
-            Some(i) => i,
-            None => continue,
-        };
-        let el_name = key[..dot].to_lowercase();
-        let param_name = key[dot + 1..].to_lowercase();
-
-        for el in &mut netlist.elements {
-            match el {
-                Element::Resistor {
-                    name, resistance, ..
-                } if name.to_lowercase() == el_name
-                    && (param_name == "resistance" || param_name == "value") =>
-                {
-                    *resistance = value;
-                }
-                Element::Capacitor {
-                    name, capacitance, ..
-                } if name.to_lowercase() == el_name
-                    && (param_name == "capacitance" || param_name == "value") =>
-                {
-                    *capacitance = value;
-                }
-                Element::Inductor {
-                    name, inductance, ..
-                } if name.to_lowercase() == el_name
-                    && (param_name == "inductance" || param_name == "value") =>
-                {
-                    *inductance = value;
-                }
-                Element::VoltageSource { name, waveform, .. }
-                    if name.to_lowercase() == el_name
-                        && (param_name == "dc" || param_name == "value" || param_name == "v") =>
-                {
-                    *waveform = Waveform::Dc(value);
-                }
-                Element::CurrentSource { name, waveform, .. }
-                    if name.to_lowercase() == el_name
-                        && (param_name == "dc" || param_name == "value" || param_name == "i") =>
-                {
-                    *waveform = Waveform::Dc(value);
-                }
-                Element::XOsdi { name, params, .. } if name.to_lowercase() == el_name => {
-                    if let Some(entry) = params
-                        .iter_mut()
-                        .find(|(k, _)| k.to_lowercase() == param_name)
-                    {
-                        entry.1 = value;
-                    } else {
-                        params.push((key[dot + 1..].to_string(), value));
-                    }
-                }
-                Element::Mosfet { name, params, .. } if name.to_lowercase() == el_name => {
-                    if let Some(entry) = params
-                        .iter_mut()
-                        .find(|(k, _)| k.to_lowercase() == param_name)
-                    {
-                        entry.1 = value;
-                    } else {
-                        params.push((key[dot + 1..].to_string(), value));
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Keys arrive as "element.param" from `Circuit.set_param`.
+        let Some(dot) = key.find('.') else { continue };
+        fairchild_core::set_element_param(netlist, &key[..dot], &key[dot + 1..], value);
     }
 }
 
@@ -804,25 +742,7 @@ impl Circuit {
 
 fn apply_source_overrides(netlist: &mut Netlist, overrides: &HashMap<String, Vec<(f64, f64)>>) {
     for (name_lc, points) in overrides {
-        for el in &mut netlist.elements {
-            match el {
-                Element::VoltageSource { name, waveform, .. }
-                    if name.to_lowercase() == *name_lc =>
-                {
-                    *waveform = Waveform::Pwl {
-                        points: points.clone(),
-                    };
-                }
-                Element::CurrentSource { name, waveform, .. }
-                    if name.to_lowercase() == *name_lc =>
-                {
-                    *waveform = Waveform::Pwl {
-                        points: points.clone(),
-                    };
-                }
-                _ => {}
-            }
-        }
+        fairchild_core::set_source_pwl(netlist, name_lc, points.clone());
     }
 }
 
