@@ -42,6 +42,13 @@ def run(netlist, probe, extra=()):
     return cols
 
 
+if not sorted((HERE / "build").glob("*.osdi")):
+    sys.exit(
+        "no compiled models in build/ — run ./build.sh first.\n"
+        "It needs OpenVAF-Reloaded:  OPENVAF=/path/to/openvaf-r ./build.sh"
+    )
+
+
 def close(a, b, tol, what):
     assert abs(a - b) <= tol, f"{what}: {a:.6g} != {b:.6g} (tol {tol:g})"
     print(f"  ok  {what}: {a:.6g}")
