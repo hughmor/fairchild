@@ -105,6 +105,14 @@ cd crates/fairchild-py
 maturin develop --release
 ```
 
+The Rust toolchain is pinned by `rust-toolchain.toml`, so rustup installs the
+matching version on the first build. Enable the pre-commit hook once per clone —
+it runs the same `cargo fmt` and `cargo clippy -D warnings` that CI fails on:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ### Run a simulation
 
 ```bash

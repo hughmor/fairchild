@@ -1,0 +1,10 @@
+# Pinned so local and CI run the same clippy. Without this, CI installs whatever
+# stable is current while a dev machine keeps whatever it last updated to, and a
+# new default-on lint fails the build with no local warning — which is exactly
+# how clippy::useless_borrows_in_formatting (added after 1.95) reached master.
+#
+# Bumping is a deliberate commit: rustup update, edit this channel, fix whatever
+# new lints fire, push that as its own change.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

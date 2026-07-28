@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
+#
+# Enable once per clone (worktrees inherit it):  git config core.hooksPath .githooks
+# Bypass for one commit:                        git commit --no-verify
+#
+# Only a real gate because rust-toolchain.toml pins the clippy CI runs. On a
+# floating toolchain this passes locally and fails in CI on lints the local
+# clippy has never heard of.
+#
+# Lints the working tree, not the staged index — staging a subset still checks
+# everything. Stashing to isolate the index is how hooks eat people's work.
 set -e
 
-echo "→ cargo fmt --check"
-cargo fmt --check
+# Nothing here can change fmt/clippy output → skip the wait.
+if ! git diff --cached --name-only --diff-filter=ACMR |
+    grep -qE '\.rs$|(^|/)(Cargo|rust-toolchain|clippy)\.(toml|lock)$'; then
+    exit 0
+fi
 
+echo "→ cargo fmt --check"
+cargo fmt --all --check
+
+# Default features only; --features klu needs SuiteSparse, which not every
+# machine has. CI covers both feature sets.
 echo "→ cargo clippy -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
