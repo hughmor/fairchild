@@ -245,6 +245,11 @@ impl TranStepper {
                 &self.dev_reactive_state,
                 &mut self.mat,
                 self.step,
+                self.mode,
+                // BDF-2 needs two-timepoint history, which only the
+                // variable-step integrator carries; GEAR demotes to BE here,
+                // as it always has for the built-in C/L on this path too.
+                None,
             );
 
             self.topo.stamp_gmin(&mut self.mat.a, self.opts.gmin);
@@ -319,6 +324,8 @@ impl TranStepper {
             &self.x,
             &mut self.dev_reactive_state,
             self.step,
+            self.mode,
+            self.first_tr,
         );
         self.first_tr = false;
     }

@@ -259,6 +259,135 @@ pub(crate) fn init_companions(
     (cap_state, ind_state)
 }
 
+/// Raw physical history of one device-declared reactive branch.
+///
+/// The variable-step integrator rebuilds companions from this for every trial
+/// `h`, so it must hold *physical* state rather than a `(G_eq, I_hist)` pair —
+/// the same reason the built-in path keeps `cap_v` / `ind_i`.
+#[derive(Clone, Copy)]
+pub(crate) struct BranchHistory {
+    /// V_C (capacitor) or I_L (inductor) at the last accepted timepoint.
+    pub state: f64,
+    /// The same one timepoint further back.  `None` until two steps have been
+    /// accepted, which is what gates BDF-2 for this branch.
+    pub state_prev2: Option<f64>,
+    /// C or L as of the last accepted timepoint.  Stored rather than re-read
+    /// because it is bias-dependent: after a rejected step the device's cache
+    /// reflects the rejected iterate, which would corrupt the history term.
+    pub value: f64,
+}
+
+/// Norton conductance of a reactive branch's companion — the single place that
+/// decides what an integration method means for `G_eq`.
+///
+/// `gear2_h_prev` is `Some(h_prev)` only when BDF-2 is active for this step
+/// (two accepted timepoints of history, mode is GEAR, no recent rejection).
+/// Otherwise GEAR demotes to BE, which is standard order control.
+///
+/// Only device-declared branches need this: their `value` is bias-dependent and
+/// re-queried every NR iteration, so `G_eq` must be recomputed rather than read
+/// from stored state (a netlist C/L carries a constant `G_eq` in its state pair).
+pub(crate) fn companion_conductance(
+    kind: ReactiveKind,
+    mode: IntegratorMode,
+    value: f64,
+    h: f64,
+    gear2_h_prev: Option<f64>,
+) -> f64 {
+    let v = value.max(1e-30);
+    // Both GEAR-2 companions are linear in the branch value, so the BDF-2
+    // coefficient factors out of `cap_companion_gear2` / `ind_companion_gear2`
+    // exactly.  Keeping that here means the stamp never has to know which
+    // formula produced the history it is pairing with.
+    if let (IntegratorMode::Gear, Some(h_prev)) = (mode, gear2_h_prev) {
+        let rho = h / h_prev;
+        return match kind {
+            ReactiveKind::Capacitor => v * (1.0 + 2.0 * rho) / (h * (1.0 + rho)),
+            ReactiveKind::Inductor => h * (1.0 + rho) / (v * (1.0 + 2.0 * rho)),
+        };
+    }
+    match (kind, mode) {
+        (ReactiveKind::Capacitor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => v / h,
+        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) => 2.0 * v / h,
+        (ReactiveKind::Inductor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => h / v,
+        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) => h / (2.0 * v),
+    }
+}
+
+/// Companion for one device-declared branch at a trial step size, from raw
+/// history.  BE / TR are not offered here: their state is only valid while `h`
+/// is constant, and this exists for the integrator that rescales `h`.
+pub(crate) fn companion_from_history(
+    kind: ReactiveKind,
+    hist: BranchHistory,
+    h: f64,
+    gear2_h_prev: Option<f64>,
+) -> (f64, f64) {
+    match (kind, gear2_h_prev, hist.state_prev2) {
+        (ReactiveKind::Capacitor, Some(h_prev), Some(prev2)) => {
+            cap_companion_gear2(hist.value, h, h_prev, hist.state, prev2)
+        }
+        (ReactiveKind::Inductor, Some(h_prev), Some(prev2)) => {
+            ind_companion_gear2(hist.value, h, h_prev, hist.state, prev2)
+        }
+        (ReactiveKind::Capacitor, _, _) => cap_companion(hist.value, h, hist.state),
+        (ReactiveKind::Inductor, _, _) => ind_companion(hist.value, h, hist.state),
+    }
+}
+
+/// Advance one reactive branch's companion past a solved timestep — the single
+/// place that decides what `mode` means for a companion model.
+///
+/// `prev` is the `(G_eq, I_hist)` that was stamped for the step just solved,
+/// `value` the branch's C or L at the new operating point, and `across` the
+/// branch voltage from the converged solution.
+///
+/// Shared by netlist C/L and device-declared branches.  For a netlist element
+/// `value` is constant, so `companion_conductance` reproduces `prev.0` exactly
+/// and this is bit-for-bit what the hand-written match used to do.  For a
+/// device branch with bias-dependent C it generalises correctly: the TR
+/// recursion `I_hist' = 2·G'·v − I_hist` needs the conductance of the step
+/// being *entered*, which is not `prev.0` once C moves.
+pub(crate) fn advance_companion(
+    kind: ReactiveKind,
+    mode: IntegratorMode,
+    first_tr: bool,
+    value: f64,
+    h: f64,
+    prev: (f64, f64),
+    across: f64,
+) -> (f64, f64) {
+    let (g_prev, i_hist) = prev;
+    match (kind, mode) {
+        (ReactiveKind::Capacitor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => {
+            cap_companion(value, h, across)
+        }
+        // The BE→TR transition recovers i_C from the BE companion; afterwards the
+        // TR recursion carries it.
+        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) if first_tr => {
+            cap_companion_be_to_tr(g_prev, i_hist, across)
+        }
+        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) => cap_companion_tr_advance(
+            companion_conductance(kind, mode, value, h, None),
+            i_hist,
+            across,
+        ),
+        (ReactiveKind::Inductor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => {
+            // Closed-form current update from the companion we stamped.
+            let il = g_prev * across + i_hist;
+            ind_companion(value, h, il)
+        }
+        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) if first_tr => {
+            ind_companion_be_to_tr(g_prev, i_hist, across)
+        }
+        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) => ind_companion_tr_advance(
+            companion_conductance(kind, mode, value, h, None),
+            i_hist,
+            across,
+        ),
+    }
+}
+
 /// Advance companion state: read post-step voltages/currents from x, update state maps.
 ///
 /// `first_tr` — true only on the first advance when mode is TR; performs the BE→TR
@@ -291,19 +420,15 @@ pub(crate) fn advance_companions(
             } => {
                 let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = match mode {
-                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
-                        cap_companion(*capacitance, step, vc)
-                    }
-                    IntegratorMode::Trapezoidal if first_tr => {
-                        let (g_eq_be, i_hist_be) = cap_state[name];
-                        cap_companion_be_to_tr(g_eq_be, i_hist_be, vc)
-                    }
-                    IntegratorMode::Trapezoidal => {
-                        let (g_eq, i_hist_old) = cap_state[name];
-                        cap_companion_tr_advance(g_eq, i_hist_old, vc)
-                    }
-                };
+                let next = advance_companion(
+                    ReactiveKind::Capacitor,
+                    mode,
+                    first_tr,
+                    *capacitance,
+                    step,
+                    cap_state[name],
+                    vc,
+                );
                 cap_state.insert(name.clone(), next);
             }
             Element::Inductor {
@@ -312,19 +437,17 @@ pub(crate) fn advance_companions(
                 neg,
                 inductance,
             } => {
-                let (g_eq, i_hist) = ind_state[name];
                 let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
                     - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = match mode {
-                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
-                        let il = g_eq * vl + i_hist;
-                        ind_companion(*inductance, step, il)
-                    }
-                    IntegratorMode::Trapezoidal if first_tr => {
-                        ind_companion_be_to_tr(g_eq, i_hist, vl)
-                    }
-                    IntegratorMode::Trapezoidal => ind_companion_tr_advance(g_eq, i_hist, vl),
-                };
+                let next = advance_companion(
+                    ReactiveKind::Inductor,
+                    mode,
+                    first_tr,
+                    *inductance,
+                    step,
+                    ind_state[name],
+                    vl,
+                );
                 ind_state.insert(name.clone(), next);
             }
             _ => {}
@@ -480,17 +603,17 @@ pub(crate) fn stamp_device_reactive_companions(
     state: &[Vec<(f64, f64)>],
     mat: &mut MnaMatrix,
     step: f64,
+    mode: IntegratorMode,
+    gear2_h_prev: Option<f64>,
 ) {
     for (dev_idx, dev) in devices.iter().enumerate() {
         let branches = dev.reactive_branches();
         for (br_idx, br) in branches.iter().enumerate() {
-            // Re-compute companion params using the CURRENT (per-NR-iter)
-            // device value, but reuse I_hist from the previous timestep.
+            // Re-compute G_eq using the CURRENT (per-NR-iter) device value, but
+            // reuse I_hist from the previous timestep.  With a bias-dependent C
+            // that is the charge-conserving form: i_C = C_new·v_new/h − C_old·v_old/h.
             let (_g_old, i_hist) = state[dev_idx][br_idx];
-            let g_eq = match br.kind {
-                ReactiveKind::Capacitor => br.value / step,
-                ReactiveKind::Inductor => step / br.value.max(1e-30),
-            };
+            let g_eq = companion_conductance(br.kind, mode, br.value, step, gear2_h_prev);
             // Stamp G_eq between pos and neg (resistor pattern) and inject
             // ±I_hist into the corresponding KCL rows.  For an inductor the
             // current is i = G_eq · v + I_hist (history adds, doesn't subtract).
@@ -520,26 +643,31 @@ pub(crate) fn stamp_device_reactive_companions(
 /// timestep.  Reads V_C / I_L from the converged `x` and computes the next
 /// (G_eq, I_hist) using the device's reported value at the new operating
 /// point (already updated via `commit_timestep` + the next NR loop's eval).
+///
+/// Goes through the same [`advance_companion`] as netlist C/L, so a device's
+/// internal capacitance is integrated with the method the user asked for
+/// instead of always Backward Euler.
 pub(crate) fn advance_device_reactive_state(
     devices: &[Box<dyn Device>],
     x: &[f64],
     state: &mut [Vec<(f64, f64)>],
     step: f64,
+    mode: IntegratorMode,
+    first_tr: bool,
 ) {
     for (dev_idx, dev) in devices.iter().enumerate() {
         let branches = dev.reactive_branches();
         for (br_idx, br) in branches.iter().enumerate() {
             let v = branch_voltage(br, x);
-            let next = match br.kind {
-                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor => {
-                    // i_L = G_eq · v_L + I_hist (history), then form next companion.
-                    let (g_eq, i_hist) = state[dev_idx][br_idx];
-                    let i_l = g_eq * v + i_hist;
-                    ind_companion(br.value, step, i_l)
-                }
-            };
-            state[dev_idx][br_idx] = next;
+            state[dev_idx][br_idx] = advance_companion(
+                br.kind,
+                mode,
+                first_tr,
+                br.value,
+                step,
+                state[dev_idx][br_idx],
+                v,
+            );
         }
     }
 }
@@ -779,21 +907,21 @@ pub fn tran_nr_with_registry_var_opts(
     //
     // Raw state, NOT the `(G_eq, I_hist)` pair the fixed-step path carries: `h`
     // changes every step here, so the companion has to be rebuilt from physical
-    // state for each trial `h` — exactly as `cap_v` / `ind_i` above.  Each entry
-    // is `(state, value)`: V_C or I_L, and the branch's C or L, both as of the
-    // last ACCEPTED timepoint.  Storing the value alongside matters because it is
-    // bias-dependent: after a rejected step the device's cached value reflects
-    // the rejected iterate, so re-reading it then would corrupt the history term.
-    let mut dev_br_raw: Vec<Vec<(f64, f64)>> = devices
+    // state for each trial `h` — exactly as `cap_v` / `ind_i` above.
+    let mut dev_br_raw: Vec<Vec<BranchHistory>> = devices
         .iter()
         .map(|dev| {
             dev.reactive_branches()
                 .iter()
-                .map(|br| match br.kind {
+                .map(|br| BranchHistory {
                     // Inductors start from zero current, matching the built-in
                     // `ind_i` seeding and `init_device_reactive_state`.
-                    ReactiveKind::Inductor => (0.0, br.value),
-                    ReactiveKind::Capacitor => (branch_voltage(br, &x), br.value),
+                    state: match br.kind {
+                        ReactiveKind::Inductor => 0.0,
+                        ReactiveKind::Capacitor => branch_voltage(br, &x),
+                    },
+                    state_prev2: None,
+                    value: br.value,
                 })
                 .collect()
         })
@@ -953,6 +1081,19 @@ pub fn tran_nr_with_registry_var_opts(
             x.clone()
         };
 
+        // BDF-2 for device branches on the same terms as the built-in C/L above,
+        // plus this path's own readiness condition: every branch needs two
+        // accepted timepoints of history.
+        let dev_gear2 = if use_gear2
+            && dev_br_raw
+                .iter()
+                .all(|d| d.iter().all(|h| h.state_prev2.is_some()))
+        {
+            Some(h_prev_accepted)
+        } else {
+            None
+        };
+
         // Companion state for every device-internal reactive branch at this
         // trial `h`, from the last accepted raw state.  Only `I_hist` is
         // consumed downstream: `stamp_device_reactive_companions` re-derives
@@ -966,11 +1107,7 @@ pub fn tran_nr_with_registry_var_opts(
                     .iter()
                     .enumerate()
                     .map(|(b, br)| {
-                        let (state, value) = dev_br_raw[d][b];
-                        match br.kind {
-                            ReactiveKind::Capacitor => cap_companion(value, h_actual, state),
-                            ReactiveKind::Inductor => ind_companion(value, h_actual, state),
-                        }
+                        companion_from_history(br.kind, dev_br_raw[d][b], h_actual, dev_gear2)
                     })
                     .collect()
             })
@@ -998,8 +1135,28 @@ pub fn tran_nr_with_registry_var_opts(
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
-            // Device-declared reactive branches, at the trial step size.
-            stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, h_actual);
+            // Device-declared reactive branches, at the trial step size, with the
+            // same order control the built-in C/L rebuild above uses.
+            //
+            // `method=tr` maps to BE here, deliberately and for both: the
+            // incremental TR state (`I_hist' = 2·G·v − I_hist`) carries an
+            // h-dependent history term, so it is only valid while `h` is
+            // constant and cannot be used by an integrator that rescales `h`.
+            // Offering real TR here needs raw (v, i_C) history instead of
+            // (G_eq, I_hist) — the prerequisite for merging the two integrators.
+            let dev_mode = if dev_gear2.is_some() {
+                IntegratorMode::Gear
+            } else {
+                IntegratorMode::BackwardEuler
+            };
+            stamp_device_reactive_companions(
+                &devices,
+                &dev_reactive_state,
+                &mut mat,
+                h_actual,
+                dev_mode,
+                dev_gear2,
+            );
 
             topo.stamp_gmin(&mut mat.a, opts.gmin);
 
@@ -1135,14 +1292,21 @@ pub fn tran_nr_with_registry_var_opts(
             for (d, dev) in devices.iter().enumerate() {
                 for (b, br) in dev.reactive_branches().iter().enumerate() {
                     let v = branch_voltage(br, &x);
-                    dev_br_raw[d][b] = match br.kind {
-                        ReactiveKind::Capacitor => (v, br.value),
+                    let state = match br.kind {
+                        ReactiveKind::Capacitor => v,
                         ReactiveKind::Inductor => {
                             // Closed-form current update: i = G_eq·v + I_hist,
                             // using the companion we actually stamped.
                             let (g_eq, i_hist) = dev_reactive_state[d][b];
-                            (g_eq * v + i_hist, br.value)
+                            g_eq * v + i_hist
                         }
+                    };
+                    let prev = dev_br_raw[d][b];
+                    dev_br_raw[d][b] = BranchHistory {
+                        state,
+                        // Shift the BDF-2 window: prev2 <- prev, before overwriting.
+                        state_prev2: Some(prev.state),
+                        value: br.value,
                     };
                 }
             }
@@ -1408,6 +1572,79 @@ mod tests {
                 (a - b).abs() < 0.05,
                 "t={t:e}: fixed={a:.6} var={b:.6} differ by more than 50 mV"
             );
+        }
+    }
+
+    /// A device-internal reactive branch and an equivalent netlist element are
+    /// the same circuit, so every integrator must produce the same numbers to
+    /// round-off — under every method.
+    ///
+    /// `m_j = 0` makes the PN phase shifter's C_j bias-independent, so
+    /// `fc_pn_ps_cap` with `c_j0 = C` is exactly `fc_pn_ps` (no cap) plus a
+    /// discrete `C` across the same nodes.  This is the strongest statement of
+    /// what device-declared branches are supposed to mean, and it caught two
+    /// real bugs: the variable-step path dropping them entirely, and the
+    /// fixed-step path integrating them with Backward Euler no matter what
+    /// `opts.method` said (a 23 mV, O(h) error on the *default* TR setting).
+    #[test]
+    fn device_branch_equals_equivalent_netlist_element() {
+        const C: &str = "10p";
+        let common = "L_um=500 V_pi_L=2e-3 g_pn=1e-9";
+        let dev = format!(
+            "* device-internal C_j\n.optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps_cap {common} c_j0={C} v_bi=0.917 m_j=0\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\n.tran 5n 300n\n.end\n"
+        );
+        let refr = format!(
+            "* explicit C\n.optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps {common}\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\nC1 a 0 {C}\n\
+             .tran 5n 300n\n.end\n"
+        );
+        let (nd, nr) = (parse_spice(&dev).unwrap(), parse_spice(&refr).unwrap());
+
+        for mode in [
+            IntegratorMode::BackwardEuler,
+            IntegratorMode::Trapezoidal,
+            IntegratorMode::Gear,
+        ] {
+            let mut opts = SimOptions::from_netlist(&nd);
+            opts.method = mode;
+            let reg = DeviceRegistry::new();
+
+            for variable_step in [false, true] {
+                let run = |n: &Netlist| {
+                    if variable_step {
+                        tran_nr_with_registry_var_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                    } else {
+                        tran_nr_with_registry_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                    }
+                };
+                let (rd, rr) = (run(&nd), run(&nr));
+                for &t in &[25e-9, 45e-9, 70e-9, 120e-9, 200e-9, 290e-9] {
+                    let (a, b) = (
+                        rd.voltage_at("a", t).unwrap(),
+                        rr.voltage_at("a", t).unwrap(),
+                    );
+                    assert!(
+                        (a - b).abs() < 1e-9,
+                        "{mode:?} variable_step={variable_step} t={t:e}: \
+                         device-internal C gives {a:.9}, explicit C gives {b:.9} — \
+                         the integrator is not treating them as the same circuit"
+                    );
+                }
+                // Sanity: the capacitance is actually doing something, so the
+                // assertion above is not passing on two identical flat lines.
+                let mid = rd.voltage_at("a", 45e-9).unwrap();
+                let end = rd.voltage_at("a", 290e-9).unwrap();
+                assert!(
+                    mid / end < 0.6,
+                    "{mode:?} variable_step={variable_step}: expected an RC lag, \
+                     got {mid} at 45 ns vs {end} settled"
+                );
+            }
         }
     }
 
