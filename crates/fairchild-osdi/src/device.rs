@@ -20,10 +20,13 @@ use std::sync::Arc;
 use fairchild_core::device::{Device, EvalFlags, NodeId, SimContext};
 use fairchild_core::mna::MnaMatrix;
 
+use fairchild_core::device::Discretisation;
+use fairchild_core::reactive::charge_current;
+
 use crate::ffi::{
     OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas, ANALYSIS_DC,
     ANALYSIS_TRAN, CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL, CALC_RESIST_JACOBIAN,
-    CALC_RESIST_RESIDUAL, PARA_KIND_INST, PARA_KIND_MODEL,
+    CALC_RESIST_RESIDUAL, ENABLE_LIM, INIT_LIM, PARA_KIND_INST, PARA_KIND_MODEL,
 };
 use crate::loader::OsdiLibrary;
 
@@ -41,10 +44,40 @@ pub struct OsdiDevice {
     mna_nodes: Vec<NodeId>,
     /// Solution vector from the last eval() call; used as prev_solve in eval.
     x_cache: Vec<f64>,
-    /// Solution at the last committed (accepted) timestep; used as prev_solve in
-    /// load_spice_rhs_tran so reactive history is pinned to the accepted state.
+    /// Solution at the last committed (accepted) timestep.  Supplies the
+    /// reactive history term in `load_residual_tran` — never the point the
+    /// resistive residual is linearised about, which is always `x_cache`.
     /// Empty until commit_timestep() is first called.
     x_tprev: Vec<f64>,
+    /// `$limit()` state, `descriptor.num_states` long each.  `eval` writes
+    /// `next`; the following `eval` limits against it as `prev`, so the two
+    /// swap after every call.
+    ///
+    /// These MUST be non-null whenever the model declares states: OpenVAF
+    /// emits the state write unconditionally, so passing null segfaults on any
+    /// model that calls `$limit` — which is every foundry compact model.
+    lim_state_prev: Vec<f64>,
+    lim_state_next: Vec<f64>,
+    /// Cleared until the first `eval`, which runs with `INIT_LIM` to seed the
+    /// state rather than limit against uninitialised memory.
+    lim_initialised: bool,
+    /// Reactive charge `q` at the last accepted timepoint, one slot per OSDI
+    /// node. Read back through `load_residual_react`, which is the only
+    /// sanctioned way to see a Verilog-A `ddt` contribution as a charge rather
+    /// than as a Jacobian.
+    ///
+    /// Kept per *node* rather than per MNA row: the device has a handful of
+    /// nodes and the circuit may have thousands of rows.
+    q_prev: Vec<f64>,
+    /// `q` one timepoint further back. `None` until two steps have been
+    /// accepted, which is what gates BDF-2 for this device.
+    q_prev2: Option<Vec<f64>>,
+    /// Reactive current at the last accepted timepoint. Only Trapezoidal reads
+    /// it; zero from a DC operating point, where the charge is static.
+    i_react_prev: Vec<f64>,
+    /// The integrator's discretisation, captured during `eval` because
+    /// `load_*_tran` receives only `alpha`.
+    disc: Option<Discretisation>,
 }
 
 // SAFETY: descriptor is read-only after construction; Vec storage is thread-safe.
@@ -71,6 +104,13 @@ impl OsdiDevice {
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
             x_tprev: Vec::new(),
+            lim_state_prev: vec![0.0; desc.num_states as usize],
+            lim_state_next: vec![0.0; desc.num_states as usize],
+            lim_initialised: false,
+            q_prev: vec![0.0; desc.num_nodes as usize],
+            q_prev2: None,
+            i_react_prev: vec![0.0; desc.num_nodes as usize],
+            disc: None,
         }
     }
 
@@ -93,6 +133,13 @@ impl OsdiDevice {
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
             x_tprev: Vec::new(),
+            lim_state_prev: vec![0.0; desc.num_states as usize],
+            lim_state_next: vec![0.0; desc.num_states as usize],
+            lim_initialised: false,
+            q_prev: vec![0.0; desc.num_nodes as usize],
+            q_prev2: None,
+            i_react_prev: vec![0.0; desc.num_nodes as usize],
+            disc: None,
         })
     }
 
@@ -150,6 +197,173 @@ impl OsdiDevice {
             }
         }
         None
+    }
+
+    /// Write this instance's `$limit()` state indices into instance memory.
+    ///
+    /// The model reads `state_idx[k]` from `inst + state_idx_off` and then
+    /// indexes `prev_state[state_idx[k]]` / `next_state[…]`. OSDI is written
+    /// for a simulator holding one global state array and giving each instance
+    /// a slice of it; we give each device its own two buffers instead, so the
+    /// indices are just 0..num_states. Same contract, no shared allocation.
+    ///
+    /// Must be re-run whenever the node mapping is (see `refresh_instance`) —
+    /// both live in the same instance struct that `setup_instance` reads.
+    fn write_state_indices(&mut self) {
+        let num_states = self.desc().num_states as usize;
+        if num_states == 0 {
+            return;
+        }
+        let off = self.desc().state_idx_off as usize;
+        // i32: OpenVAF types state_idx with its generic `int` (LLVMInt32).
+        let ptr = unsafe { (self.instance.as_mut_ptr() as *mut u8).add(off) as *mut i32 };
+        for k in 0..num_states {
+            unsafe { *ptr.add(k) = k as i32 };
+        }
+    }
+
+    /// Call `f(mna_row, mna_col, dq/dx)` for every reactive Jacobian entry.
+    ///
+    /// `write_jacobian_array_react` writes `num_reactive_jacobian_entries`
+    /// values in the traversal order of `jacobian_entries` filtered to those
+    /// with `react_ptr_off != u32::MAX`; this walks that same order. Entries
+    /// touching ground are dropped, as in the resistive path.
+    ///
+    /// Shared by the transient and frequency-domain stamps so the two cannot
+    /// drift apart — they differ only in the factor applied (α vs ω).
+    fn for_each_react_entry(&self, mut f: impl FnMut(usize, usize, f64)) {
+        let desc = self.desc();
+        let n_react = desc.num_reactive_jacobian_entries as usize;
+        if n_react == 0 {
+            return;
+        }
+        let Some(write) = desc.write_jacobian_array_react else {
+            return;
+        };
+
+        let mut jac_buf = vec![0.0f64; n_react];
+        unsafe {
+            write(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
+        }
+
+        let n_total = desc.num_jacobian_entries as usize;
+        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
+
+        let mut react_idx = 0;
+        for entry in entries.iter() {
+            if entry.react_ptr_off == u32::MAX {
+                continue;
+            }
+            if react_idx >= n_react {
+                break;
+            }
+            let osdi_r = entry.nodes.node_1 as usize;
+            let osdi_c = entry.nodes.node_2 as usize;
+            if let (Some(mr), Some(mc)) = (
+                self.mna_nodes.get(osdi_r).copied().flatten(),
+                self.mna_nodes.get(osdi_c).copied().flatten(),
+            ) {
+                f(mr, mc, jac_buf[react_idx]);
+            }
+            react_idx += 1;
+        }
+    }
+
+    /// Whether this model lets us build a charge-based companion — it declares
+    /// reactive Jacobian entries *and* exposes the charge behind them.
+    ///
+    /// Both stamps consult this so they cannot disagree: stamping `scale·∂q/∂x`
+    /// without the matching history is a companion with no history term, which
+    /// is simply a wrong circuit. OpenVAF always emits both, so the `false` arm
+    /// is for hand-written or partial libraries.
+    fn has_charge_history(&self) -> bool {
+        self.desc().num_reactive_jacobian_entries > 0 && self.desc().load_residual_react.is_some()
+    }
+
+    /// Read the device's reactive charge per OSDI node, via
+    /// `load_residual_react`.
+    ///
+    /// `mna_len` is the MNA row count: OSDI writes into a solution-shaped
+    /// buffer (same convention and same ground-sentinel guard as
+    /// `load_spice_rhs_*`), so we gather from it into per-node slots.
+    ///
+    /// `None` when the model declares no reactive contribution, which is the
+    /// common case and worth not allocating for.
+    fn charge_per_node(&self, mna_len: usize) -> Option<Vec<f64>> {
+        let f = self.desc().load_residual_react?;
+        if self.desc().num_reactive_jacobian_entries == 0 {
+            return None;
+        }
+        let mut dst = vec![0.0f64; mna_len + 1];
+        unsafe {
+            f(self.inst_ptr(), self.model_ptr(), dst.as_mut_ptr().add(1));
+        }
+        Some(
+            self.mna_nodes
+                .iter()
+                .map(|n| n.map_or(0.0, |row| dst[row + 1]))
+                .collect(),
+        )
+    }
+
+    /// `Σ_j ∂q_row/∂x_j · x_j` per OSDI node, at the vector `x` currently
+    /// cached by `eval`.
+    ///
+    /// This is what turns the charge companion into a SPICE-form RHS: the
+    /// stamped Jacobian is `scale · ∂q/∂x`, so the row's linearisation
+    /// contributes `scale · (∂q/∂x · x_k)` and the residual subtracts the
+    /// actual current.
+    fn react_jacobian_times(&self, x_padded: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0f64; self.mna_nodes.len()];
+        // MNA row -> OSDI node, for scattering the row-indexed walk back.
+        self.for_each_react_entry(|r, c, v| {
+            for (node, slot) in self.mna_nodes.iter().enumerate() {
+                if *slot == Some(r) {
+                    out[node] += v * x_padded[c + 1];
+                }
+            }
+        });
+        out
+    }
+
+    /// Accumulate `scale * load_spice_rhs_{dc,tran}(prev_solve)` into `b`.
+    ///
+    /// OpenVAF's `load_spice_rhs_dc` writes `J_resist · prev_solve − f_resist`;
+    /// `load_spice_rhs_tran` writes that *plus* `alpha · J_react · prev_solve`
+    /// (it calls the DC body first — see `osdi/src/load.rs::load_spice_rhs`).
+    /// `prev_solve` names the vector the linearisation is taken about, which is
+    /// the current Newton iterate — not the previous timestep.
+    fn accumulate_spice_rhs(&self, b: &mut [f64], x: &[f64], alpha: Option<f64>, scale: f64) {
+        // Padded dst buffer: pass ptr+1 so OSDI's dst[-1] write (ground
+        // sentinel index -1 from ldpsw) lands in temp[0] not heap metadata.
+        let mut temp = vec![0.0f64; b.len() + 1];
+        let prev = unsafe { x.as_ptr().add(1) as *mut f64 };
+        unsafe {
+            match alpha {
+                Some(a) => match self.desc().load_spice_rhs_tran {
+                    Some(f) => f(
+                        self.inst_ptr(),
+                        self.model_ptr(),
+                        temp.as_mut_ptr().add(1),
+                        prev,
+                        a,
+                    ),
+                    None => return,
+                },
+                None => match self.desc().load_spice_rhs_dc {
+                    Some(f) => f(
+                        self.inst_ptr(),
+                        self.model_ptr(),
+                        temp.as_mut_ptr().add(1),
+                        prev,
+                    ),
+                    None => return,
+                },
+            }
+        }
+        for i in 0..b.len() {
+            b[i] += scale * temp[i + 1];
+        }
     }
 }
 
@@ -214,6 +428,7 @@ impl Device for OsdiDevice {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }
         }
+        self.write_state_indices();
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
@@ -253,7 +468,10 @@ impl Device for OsdiDevice {
         self.refresh_instance();
     }
 
-    fn eval(&mut self, x: &[f64], flags: EvalFlags, _ctx: &SimContext) {
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
+        // `load_*_tran` gets only `alpha`, which cannot express Trapezoidal or
+        // BDF-2; the method comes through the context instead.
+        self.disc = ctx.discretisation;
         // Prepend a 0.0 guard element so OSDI's ldpsw sign-extension of the
         // ground sentinel (UINT32_MAX → -1 as i64) reads x_cache[0] = 0.0
         // (ground voltage) instead of whatever is 8 bytes before the buffer.
@@ -274,14 +492,28 @@ impl Device for OsdiDevice {
             if flags.transient {
                 osdi_flags |= CALC_REACT_RESIDUAL | CALC_REACT_JACOBIAN;
             }
+            // `$limit()` limiting.  The state buffers must be real pointers
+            // whenever the model declares states — OpenVAF emits the state
+            // write unconditionally, so null segfaults.  INIT_LIM on the first
+            // call seeds the state; after that we limit against the previous
+            // iterate.
+            if self.desc().num_states > 0 {
+                osdi_flags |= ENABLE_LIM;
+                if !self.lim_initialised {
+                    osdi_flags |= INIT_LIM;
+                }
+            }
             let mut info = OsdiSimInfo {
                 paras: null_sim_paras(),
-                abstime: 0.0,
+                // `$abstime`.  SimContext::time_s is the transient clock the
+                // solver advances; it stays 0 for DC/AC, which is what
+                // Verilog-A expects there.
+                abstime: ctx.time_s,
                 // Pass ptr+1: x_cache[1..] mirrors x[0..], and x_cache[0]=0.0
                 // acts as a guard for OSDI's out-of-bounds index -1 (ground).
                 prev_solve: unsafe { self.x_cache.as_ptr().add(1) as *mut f64 },
-                prev_state: std::ptr::null_mut(),
-                next_state: std::ptr::null_mut(),
+                prev_state: self.lim_state_prev.as_mut_ptr(),
+                next_state: self.lim_state_next.as_mut_ptr(),
                 flags: osdi_flags,
             };
             unsafe {
@@ -292,27 +524,15 @@ impl Device for OsdiDevice {
                     &mut info,
                 );
             }
+            // What this eval limited to becomes what the next one limits
+            // against.
+            std::mem::swap(&mut self.lim_state_prev, &mut self.lim_state_next);
+            self.lim_initialised = true;
         }
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        if let Some(f) = self.desc().load_spice_rhs_dc {
-            // Padded dst buffer: pass ptr+1 so OSDI's dst[-1] write (ground
-            // sentinel index -1 from ldpsw) lands in temp[0] not heap metadata.
-            let mut temp = vec![0.0f64; b.len() + 1];
-            let prev = unsafe { self.x_cache.as_ptr().add(1) as *mut f64 };
-            unsafe {
-                f(
-                    self.inst_ptr(),
-                    self.model_ptr(),
-                    temp.as_mut_ptr().add(1),
-                    prev,
-                );
-            }
-            for i in 0..b.len() {
-                b[i] += temp[i + 1];
-            }
-        }
+        self.accumulate_spice_rhs(b, &self.x_cache, None, 1.0);
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
@@ -353,79 +573,94 @@ impl Device for OsdiDevice {
     }
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
-        if let Some(f) = self.desc().load_spice_rhs_tran {
-            let mut temp = vec![0.0f64; b.len() + 1];
-            // Use x_tprev (previous accepted timestep) as the reactive history term.
-            // Fall back to x_cache (current iterate) when x_tprev is not yet populated
-            // (i.e., before the first commit_timestep call in the fixed-step path).
-            let prev_src = if self.x_tprev.is_empty() {
-                &self.x_cache
-            } else {
-                &self.x_tprev
-            };
-            let prev = unsafe { prev_src.as_ptr().add(1) as *mut f64 };
-            unsafe {
-                f(
-                    self.inst_ptr(),
-                    self.model_ptr(),
-                    temp.as_mut_ptr().add(1),
-                    prev,
-                    alpha,
-                );
-            }
-            for i in 0..b.len() {
-                b[i] += temp[i + 1];
-            }
-        } else {
+        if self.desc().load_spice_rhs_dc.is_none() {
             self.load_residual(b);
+            return;
+        }
+        // Resistive part: J_r·x_k − f_r(x_k), about the current iterate.
+        //
+        // Evaluating it about x_{n−1} instead (which this once did, by handing
+        // OSDI's `tran` entry point x_tprev) leaves the Newton linearisation
+        // inconsistent for any nonlinear model: it converged only while the
+        // operating point sat still, and diverged on the first moving source.
+        self.accumulate_spice_rhs(b, &self.x_cache, None, 1.0);
+
+        // Reactive part, per node:  scale·(∂q/∂x · x_k) − i_n
+        //
+        // `charge_current` interprets the integration method — the same
+        // function the native branch stamper uses, so a Verilog-A `ddt` and a
+        // discrete C are integrated identically. Falling back to `alpha`
+        // (Backward Euler) only when no discretisation reached us, which means
+        // a caller outside the transient loop.
+        if !self.has_charge_history() {
+            // No charge to build a companion from. Fall back to the legacy
+            // form, which derives the history from `load_spice_rhs_tran` and is
+            // Backward Euler only — but is at least self-consistent with the
+            // `alpha` the Jacobian stamp uses in the same situation.
+            if self.desc().num_reactive_jacobian_entries > 0 {
+                let hist = if self.x_tprev.is_empty() {
+                    &self.x_cache
+                } else {
+                    &self.x_tprev
+                };
+                self.accumulate_spice_rhs(b, hist, Some(alpha), 1.0);
+                self.accumulate_spice_rhs(b, hist, None, -1.0);
+            }
+            return;
+        }
+        let Some(q_new) = self.charge_per_node(b.len()) else {
+            return;
+        };
+        let jq_x = self.react_jacobian_times(&self.x_cache);
+        for (node, row) in self.mna_nodes.iter().enumerate() {
+            let Some(row) = *row else { continue };
+            let (i_n, scale) = match self.disc {
+                Some(d) => charge_current(
+                    d.mode,
+                    d.h,
+                    d.gear2_h_prev,
+                    q_new[node],
+                    self.q_prev[node],
+                    self.q_prev2.as_ref().map(|q| q[node]),
+                    self.i_react_prev[node],
+                ),
+                None => (alpha * (q_new[node] - self.q_prev[node]), alpha),
+            };
+            b[row] += scale * jq_x[node] - i_n;
         }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
         // Resistive part (same as DC).
         self.load_jacobian(mat);
-
-        // Reactive part: stamp alpha * C entries.
-        // write_jacobian_array_react writes n_react values in the traversal order of
-        // jacobian_entries where react_ptr_off != u32::MAX. We match that order.
-        let desc = self.desc();
-        let n_react = desc.num_reactive_jacobian_entries as usize;
-        if n_react == 0 {
-            return;
-        }
-        let f = match desc.write_jacobian_array_react {
-            Some(f) => f,
-            None => return,
+        // Reactive part: the method's coefficient times ∂q/∂x. `conductance`
+        // is linear in the branch value, so evaluating it at 1.0 gives exactly
+        // the scalar a matrix-valued charge needs — and keeps the Jacobian in
+        // step with the residual above by construction.
+        let scale = match self.disc.filter(|_| self.has_charge_history()) {
+            Some(d) => fairchild_core::reactive::conductance(
+                fairchild_core::device::ReactiveKind::Capacitor,
+                1.0,
+                d.mode,
+                d.h,
+                d.gear2_h_prev,
+            ),
+            None => alpha,
         };
+        self.for_each_react_entry(|r, c, v| mat.a[r][c] += scale * v);
+    }
 
-        let mut jac_buf = vec![0.0f64; n_react];
-        unsafe {
-            f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
-        }
-
-        let n_total = desc.num_jacobian_entries as usize;
-        let entries = unsafe { std::slice::from_raw_parts(desc.jacobian_entries, n_total) };
-
-        // Walk all entries; for each one with a reactive pointer (react_ptr_off != MAX),
-        // consume the next value from jac_buf in order.
-        let mut react_idx = 0;
-        for entry in entries.iter() {
-            if entry.react_ptr_off == u32::MAX {
-                continue;
-            }
-            if react_idx >= n_react {
-                break;
-            }
-            let osdi_r = entry.nodes.node_1 as usize;
-            let osdi_c = entry.nodes.node_2 as usize;
-            if let (Some(mr), Some(mc)) = (
-                self.mna_nodes.get(osdi_r).copied().flatten(),
-                self.mna_nodes.get(osdi_c).copied().flatten(),
-            ) {
-                mat.a[mr][mc] += alpha * jac_buf[react_idx];
-            }
-            react_idx += 1;
-        }
+    /// `.ac` / `.noise` counterpart of the reactive half of
+    /// `load_jacobian_tran`: the same dq/dx entries in the same positions, for
+    /// the caller to scale by ω instead of α.
+    ///
+    /// This is why `OsdiDevice` deliberately does not implement
+    /// `small_signal_reactances` — a Verilog-A charge is a general matrix, and
+    /// squeezing it into reciprocal two-terminal branches would silently drop
+    /// transcapacitance (∂q_d/∂v_g ≠ ∂q_g/∂v_d), which is exactly what a
+    /// BSIM-class model is made of.
+    fn load_reactive_jacobian(&self, c_mat: &mut [Vec<f64>]) {
+        self.for_each_react_entry(|r, c, v| c_mat[r][c] += v);
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
@@ -434,6 +669,47 @@ impl Device for OsdiDevice {
         self.x_tprev.resize(x.len() + 1, 0.0);
         self.x_tprev[0] = 0.0;
         self.x_tprev[1..].copy_from_slice(x);
+
+        // Roll the charge history.
+        //
+        // The cached charge is from the last `eval`, which is one NR iterate
+        // behind the converged solution — within `reltol`, but `reltol` is 1e-3
+        // by default and this history feeds every later step. So correct it to
+        // the converged point with the reactive Jacobian we already have:
+        //
+        //   q(x) ≈ q(x_eval) + ∂q/∂x · (x − x_eval)
+        //
+        // Exact for a linear charge (which is what makes a Verilog-A
+        // `ddt(C*V)` match a discrete C bit-for-bit), first-order otherwise.
+        // The native diode gets the same effect for free by recomputing its
+        // charge analytically from the converged solution.
+        let Some(mut q_now) = self.charge_per_node(x.len()) else {
+            return;
+        };
+        let mut delta = vec![0.0f64; x.len() + 1];
+        for (i, xi) in x.iter().enumerate() {
+            delta[i + 1] = xi - self.x_cache.get(i + 1).copied().unwrap_or(0.0);
+        }
+        for (q, dq) in q_now.iter_mut().zip(self.react_jacobian_times(&delta)) {
+            *q += dq;
+        }
+        // The current *entering* this accepted step becomes Trapezoidal's
+        // history for the next one. Computed before q_prev is overwritten.
+        if let Some(d) = self.disc {
+            for node in 0..q_now.len() {
+                let (i_n, _) = charge_current(
+                    d.mode,
+                    d.h,
+                    d.gear2_h_prev,
+                    q_now[node],
+                    self.q_prev[node],
+                    self.q_prev2.as_ref().map(|q| q[node]),
+                    self.i_react_prev[node],
+                );
+                self.i_react_prev[node] = i_n;
+            }
+        }
+        self.q_prev2 = Some(std::mem::replace(&mut self.q_prev, q_now));
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -522,6 +798,7 @@ impl OsdiDevice {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }
         }
+        self.write_state_indices();
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();

@@ -1,33 +1,39 @@
 //! `fairchild-osdi` — OSDI (OpenVAF-compiled Verilog-A) runtime.
 //!
-//! # Status (2026-05-30: un-deprecated for electrical models)
+//! # Status
 //!
-//! OSDI is the **supported path for electrical device models distributed as
-//! Verilog-A** — most importantly the foundry transistor models (BSIM, PSP,
-//! HiCUM, …) that the industry ships as compiled `.osdi` shared objects via
-//! OpenVAF. fairchild will not hand-write BSIM in Rust; the OSDI loader is how
-//! those models are consumed. The loader is exercised in CI by the `osdi-mock`
-//! fixture (a tiny conductance model) — keep it: it is the only proof the
-//! `dlopen`/FFI/stamp path works end-to-end, and removing it would leave this
-//! crate with zero coverage.
+//! OSDI is the **supported path for device models distributed as Verilog-A** —
+//! most importantly the foundry transistor models (BSIM, PSP, HiCUM, …) that
+//! the industry ships as compiled `.osdi` shared objects via OpenVAF.
+//! fairchild will not hand-write BSIM in Rust; this loader is how those models
+//! are consumed. It is exercised in CI by the `osdi-mock` fixture (1 mS in
+//! parallel with 1 nF) — keep it: it is the only proof the `dlopen`/FFI/stamp
+//! path works end-to-end, for both the resistive and the reactive Jacobian,
+//! and removing it would leave this crate with zero coverage.
 //!
-//! **Division of labour (the deliberate architecture):**
+//! **Optical models work too.** fairchild carries a complex envelope on three
+//! ordinary real MNA unknowns per channel (`re`, `im`, `wl`), so a custom
+//! `optical_field` / `optical_lambda` discipline is metadata OSDI passes
+//! through untouched — no compiler fork, and exact interoperation with the
+//! native devices, which use the same wires and units. (OpenVAF 23.5 does
+//! panic on a discipline declaring only a potential; the fix is a one-line
+//! unused placeholder flow nature, not a fork. See
+//! `examples/verilog_a/models/optical.vams`.)
 //!
-//! - *Electrical / mixed-signal* (transistors, foundry PDKs): **OSDI**. The
-//!   Verilog-A → OpenVAF → `.osdi` flow is the right delegation; it reaches
-//!   models we could never maintain by hand.
-//! - *Photonic* (waveguides, couplers, phase shifters, detectors, …): **native
-//!   Rust** `Device` impls in `fairchild_core::models::photonic`. OSDI/Verilog-A
-//!   cannot express fairchild's optical abstractions (complex-envelope bundle
-//!   ports, centre wavelength, bidirectional wires), and OpenVAF 23.5 has a
-//!   codegen bug on potential-only optical disciplines. So photonics stay
-//!   native; the two paths coexist, which is exactly what a real EPDA tool
-//!   needs.
+//! **Division of labour.** What a Verilog-A optical model cannot reach is the
+//! rest of the abstraction layer: WDM bundle awareness, bidirectional
+//! propagation, `crate::delay::DelayLine` group delay, and
+//! `PhotonicActiveModel` composition. It is single-channel and forward-only.
+//! So photonics needing those stay as native `Device` impls in
+//! `fairchild_core::models::photonic`; anything else can go either way. The
+//! two paths coexist, which is what a real EPDA tool needs.
 //!
-//! It also loads clear-text third-party Verilog-A models the user has already
-//! compiled (it cannot compile IEEE-1735 / Cadence-encrypted PDKs — neither can
-//! OpenVAF). Authoring a *new photonic* model is still a native Rust `Device`
-//! impl; see `models/photonic.rs`.
+//! Clear-text third-party Verilog-A the user has already compiled loads fine;
+//! IEEE-1735 / Cadence-encrypted PDKs do not, and cannot — that is upstream of
+//! OpenVAF, not a fairchild limitation.
+//!
+//! Authoring guide and worked examples: `docs/user-guide.md` §14 and
+//! `examples/verilog_a/`.
 
 pub mod device;
 pub mod error;

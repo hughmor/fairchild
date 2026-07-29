@@ -510,6 +510,8 @@ pub enum Element {
         anode: NodeName,
         cathode: NodeName,
         model_name: String,
+        /// Trailing `key=value` instance params, as on `M` and `Q`.
+        params: Vec<(String, f64)>,
     },
     Mosfet {
         name: String,

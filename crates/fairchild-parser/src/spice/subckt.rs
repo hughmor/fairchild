@@ -328,11 +328,13 @@ pub(super) fn remap_element_nodes(
             anode,
             cathode,
             model_name,
+            params,
         } => Element::Diode {
             name: format!("{prefix}.{name}"),
             anode: rn(&anode),
             cathode: rn(&cathode),
             model_name,
+            params,
         },
         Element::Mosfet {
             name,

@@ -217,6 +217,15 @@ impl TranStepper {
         // that any step size can consume — see `crate::reactive`.
         let mode = self.step_mode();
         self.reactive.build(&self.devices, mode, self.step, None);
+        // Devices that stamp their own reactance (OSDI/Verilog-A `ddt`) need the
+        // method, not just `alpha`, which can only express Backward Euler. Same
+        // `mode` and the same absent BDF-2 history as the branch stamper below,
+        // so one decision still reaches everything.
+        self.ctx.discretisation = Some(crate::device::Discretisation {
+            mode,
+            h: self.step,
+            gear2_h_prev: None,
+        });
         // Solve into a scratch vector so a non-converging step leaves the last
         // accepted solution intact for the caller to inspect or retry from.
         let mut x_try = self.x.clone();

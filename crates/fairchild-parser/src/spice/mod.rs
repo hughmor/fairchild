@@ -597,6 +597,7 @@ mod tests {
             anode,
             cathode,
             model_name,
+            ..
         } = &netlist.elements[0]
         {
             assert_eq!(name, "d1");
@@ -606,6 +607,23 @@ mod tests {
         } else {
             panic!("expected Diode element");
         }
+    }
+
+    /// `D` used to stop reading at the model name, so trailing `key=value`
+    /// pairs were dropped at parse time — silently, and with no way to
+    /// parameterise an OSDI model instantiated as a diode.  `M` and `Q`
+    /// always kept theirs.
+    #[test]
+    fn parse_diode_instance_params() {
+        let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let Element::Diode { params, .. } = &netlist.elements[0] else {
+            panic!("expected Diode element");
+        };
+        assert_eq!(
+            params,
+            &[("is".to_string(), 1e-12), ("rs".to_string(), 0.5)]
+        );
     }
 
     #[test]
