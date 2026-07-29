@@ -126,11 +126,6 @@ under `legacy/` predates the `0f689cb` fix and is a factor of two out.
 
 All measured, not inferred:
 
-- **OSDI reactive branches always integrate with Backward Euler**, whatever
-  `.options method` says. Under `--method be` a Verilog-A `ddt(C*V)` matches a
-  native `C` bit-for-bit; under `tr` it lags ~0.6 % on a 0.45 τ RC step. Pin
-  `method=be` when a model carries charge and you care. (This is not
-  OSDI-specific — every device-internal reactance in fairchild is BE.)
 - **`pnjlim` is the only limiting function implemented.** `$limit` names are
   not a fixed vocabulary — OpenVAF forwards whatever string the model wrote —
   so anything else gets an identity limiter and a warning: that call runs
@@ -146,4 +141,5 @@ All measured, not inferred:
 
 Fixed while writing these, so no longer limitations: `.model` cards resolving
 to OSDI descriptors, `D`-element instance parameters, `$abstime` reading the
-transient clock, and `ddt` reaching `.ac` / `.noise`.
+transient clock, `ddt` reaching `.ac` / `.noise`, and `ddt` honouring
+`.options method` instead of always using Backward Euler.

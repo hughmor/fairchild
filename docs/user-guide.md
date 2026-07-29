@@ -1982,10 +1982,15 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
 | `$strobe`, `$finish` | no | |
 
-`ddt` is integrated with **Backward Euler** whatever `.options method` says.
-Under `--method be` a Verilog-A `ddt(C*V)` matches a native `C` bit-for-bit;
-under `tr` it lags by about 0.6 % on a 0.45 τ RC step. Pin `method=be` when a
-model carries charge and the difference matters.
+`ddt` is integrated with whatever `.options method` selects, through the same
+`crate::reactive` engine as a discrete `C`. A Verilog-A `ddt(C*V)` and a
+netlist `C` of the same value are the same circuit element to machine
+precision, under `be`, `tr` and `gear`, fixed step and variable step alike.
+
+That requires the charge itself, not just its Jacobian, so a model must expose
+`load_residual_react` — OpenVAF always emits it. A hand-written library that
+declares reactive Jacobian entries without it falls back to Backward Euler
+rather than stamping a companion with no history behind it.
 
 Junction limiting works the way a compact model expects:
 

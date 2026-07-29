@@ -34,6 +34,33 @@ pub struct SimContext {
     /// lines can look up historical port values at `time_s - τ`.  Zero during
     /// DC operating-point and AC analyses.
     pub time_s: f64,
+    /// How the integrator is discretising the current timestep, for devices
+    /// that stamp their own reactive companion rather than declaring
+    /// [`Device::reactive_branches`].
+    ///
+    /// `None` outside transient. Set immediately before each `eval`, which such
+    /// a device is already required to have called before `load_*_tran`.
+    pub discretisation: Option<Discretisation>,
+}
+
+/// The integrator's discretisation of one timestep.
+///
+/// The `alpha` handed to [`Device::load_residual_tran`] cannot express anything
+/// but Backward Euler: Trapezoidal and BDF-2 need history terms there is no room
+/// for in a single scalar. A device that stamps its own reactance therefore
+/// needs the method itself, and gets it here rather than through 18 changed
+/// signatures.
+///
+/// Feed it to [`crate::reactive::charge_current`] — the one place a method is
+/// interpreted for charge-based reactance.
+#[derive(Clone, Copy, Debug)]
+pub struct Discretisation {
+    pub mode: crate::tran::IntegratorMode,
+    /// The step being taken, in seconds.
+    pub h: f64,
+    /// `Some(h_prev)` only when BDF-2 is permitted this step — GEAR, no recent
+    /// rejection, sane step ratio. Absent, GEAR demotes to BE.
+    pub gear2_h_prev: Option<f64>,
 }
 
 impl Default for SimContext {
@@ -46,6 +73,7 @@ impl Default for SimContext {
             bidirectional_propagation: false,
             waveguide_delay: false,
             time_s: 0.0,
+            discretisation: None,
         }
     }
 }

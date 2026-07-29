@@ -596,6 +596,15 @@ pub fn tran_nr_with_registry_var_opts(
 
         // NR corrector starting from x_pred.
         let alpha = 1.0 / h_actual;
+        // Devices that stamp their own reactance (OSDI/Verilog-A `ddt`) need the
+        // method, not just `alpha` — which can only express Backward Euler.
+        // Same `step_mode` and `gear2` the branch stamper below uses, so one
+        // decision still reaches everything.
+        ctx.discretisation = Some(crate::device::Discretisation {
+            mode: step_mode,
+            h: h_actual,
+            gear2_h_prev: gear2,
+        });
         let mut x_try = x_pred.clone();
         let mut nr_converged = false;
 

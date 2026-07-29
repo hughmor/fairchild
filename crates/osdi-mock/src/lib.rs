@@ -11,6 +11,7 @@
 //!   - load_spice_rhs_dc: no-op (Jeq = 0 for a linear element)
 //!   - write_jacobian_array_resist: writes [+gd, -gd, -gd, +gd] for the 4 entries
 //!   - write_jacobian_array_react:   writes [+c,  -c,  -c,  +c ] for the same 4
+//!   - load_residual_react: the charge q = c·V(n0,n1) behind those entries
 //!
 //! Instance memory layout (instance_size = 8):
 //!   bytes 0-7: node_mapping[2] (two u32 MNA indices) at node_mapping_offset = 0
@@ -69,6 +70,13 @@ pub const MOCK_GD: f64 = 1e-3;
 /// The capacitance this mock stamps, in farads.
 pub const MOCK_C: f64 = 1e-9;
 
+thread_local! {
+    /// `prev_solve` from the last `eval`. A compiled model caches the voltages
+    /// it needs inside its instance struct; this mock has no room, so it keeps
+    /// the pointer the simulator handed it.
+    static LAST_SOLVE: std::cell::Cell<*const f64> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
 unsafe extern "C" fn eval_impl(
     _handle: *mut c_void,
     _inst: *mut c_void,
@@ -81,6 +89,7 @@ unsafe extern "C" fn eval_impl(
     // the loaded copy is not the one a test linking the rlib would observe.
     if !info.is_null() && !model.is_null() {
         *((model as *mut u8).add(ABSTIME_OFFSET) as *mut f64) = (*info).abstime;
+        LAST_SOLVE.with(|s| s.set((*info).prev_solve));
     }
     0 // success; no voltage-limiting flag set
 }
@@ -106,6 +115,38 @@ unsafe extern "C" fn write_jacobian_array_resist_impl(
     *destination.add(1) = -gd; // ∂F[0]/∂V[1] = -gd
     *destination.add(2) = -gd; // ∂F[1]/∂V[0] = -gd
     *destination.add(3) = gd; // ∂F[1]/∂V[1] = +gd
+}
+
+/// Charge on each node: `q = c · V(node0, node1)`, written into a
+/// solution-shaped `dst` exactly as `load_spice_rhs_*` does (the ground
+/// sentinel lands one slot before the buffer, which the caller guards).
+///
+/// A model declaring reactive Jacobian entries must also provide this — a
+/// Jacobian with no charge behind it gives the simulator a companion it cannot
+/// build history for. OpenVAF always emits both.
+unsafe extern "C" fn load_residual_react_impl(
+    inst: *mut c_void,
+    model: *mut c_void,
+    dst: *mut f64,
+) {
+    let c = *((model as *const u8).add(CAP_OFFSET) as *const f64);
+    let map = inst as *const u32; // node_mapping_offset = 0
+    let prev = LAST_SOLVE.with(|s| s.get());
+    let v = |i: usize| -> f64 {
+        let row = *map.add(i);
+        if row == u32::MAX || prev.is_null() {
+            0.0
+        } else {
+            *prev.add(row as usize)
+        }
+    };
+    let q = c * (v(0) - v(1));
+    for (i, sign) in [(0usize, 1.0f64), (1, -1.0)] {
+        let row = *map.add(i);
+        if row != u32::MAX {
+            *dst.add(row as usize) = sign * q;
+        }
+    }
 }
 
 unsafe extern "C" fn write_jacobian_array_react_impl(
@@ -252,7 +293,7 @@ pub static OSDI_DESCRIPTORS: [OsdiDescriptor; 1] = [OsdiDescriptor {
     eval: Some(eval_impl),
     load_noise: None,
     load_residual_resist: None,
-    load_residual_react: None,
+    load_residual_react: Some(load_residual_react_impl),
     load_limit_rhs_resist: None,
     load_limit_rhs_react: None,
     load_spice_rhs_dc: Some(load_spice_rhs_dc_impl),

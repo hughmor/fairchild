@@ -48,8 +48,10 @@ Vdrv  drv   0     PULSE(0 -2 200p 50p 50p 800p 2n)
 Rdrv  drv   eam_a 200
 Cpar  eam_a 0     1p
 
-* OSDI reactive branches integrate with Backward Euler regardless of this
-* setting, so pin the native devices to BE too and keep one scheme.
+* Backward Euler here is a choice, not a workaround: the modulator's response
+* is quasi-static over a 200 ps RC, so first order is plenty and it keeps the
+* waveform free of trapezoidal ringing at the pulse edges.  Verilog-A `ddt`
+* honours whichever method you pick.
 .options method=be
 .tran 5p 4n
 .end
