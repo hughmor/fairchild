@@ -512,31 +512,67 @@ pub(crate) fn advance_companions(
                         - topo.node_voltage(neg2, x).unwrap_or(0.0)
                 };
 
-                let k = *coupling;
-                let m = k * (val1 * val2).sqrt();
-                let det = val1 * val2 - m * m;
-                if det.abs() < 1e-40 {
-                    continue;
-                }
-
-                // h = g_eq * L  (g_eq = h/L)
-                let h = g_eq1 * val1;
-                let g11 = h * val2 / det;
-                let g22 = h * val1 / det;
-                let g12 = -h * m / det;
-
-                let il1 = g11 * vl1 + g12 * vl2 + i_hist1;
-                let il2 = g12 * vl1 + g22 * vl2 + i_hist2;
+                let _ = g_eq2; // both inductors share the step; g_eq1 sets the scale
+                let Some((il1, il2)) = coupled_inductor_currents(
+                    val1,
+                    val2,
+                    *coupling,
+                    g_eq1 * val1, // conductance scale the stamp used
+                    vl1,
+                    vl2,
+                    i_hist1,
+                    i_hist2,
+                ) else {
+                    continue; // k ≈ 1: degenerate, matches the stamper
+                };
 
                 // Overwrite with corrected currents.
                 ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
                 ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
-
-                // Suppress unused variable warnings for g_eq2.
-                let _ = g_eq2;
             }
         }
     } // end if BackwardEuler | Gear
+}
+
+/// Currents through a coupled inductor pair after a solved step.
+///
+/// The standalone update `i = G_eq·v + I_hist` misses the mutual term, so using
+/// it on a coupled pair lets the stored current drift from what was actually
+/// stamped.  The mutual form is
+///
+/// ```text
+///   I_L1 = G11·V_L1 + G12·V_L2 + I_hist1
+///   I_L2 = G12·V_L1 + G22·V_L2 + I_hist2
+/// ```
+///
+/// `scale` is the conductance scale the standalone companions used — `G_eq · L`,
+/// which is `h` under BE and `1/α` under BDF-2, so the same expression covers
+/// both.  `i_hist` are the history terms that were *stamped* for this step, so
+/// whatever method produced them is already folded in.
+///
+/// Returns `None` for a degenerate pair (k → 1), which the stamper also skips.
+pub(crate) fn coupled_inductor_currents(
+    l1_value: f64,
+    l2_value: f64,
+    coupling: f64,
+    scale: f64,
+    vl1: f64,
+    vl2: f64,
+    i_hist1: f64,
+    i_hist2: f64,
+) -> Option<(f64, f64)> {
+    let m = coupling * (l1_value * l2_value).sqrt();
+    let det = l1_value * l2_value - m * m; // = L1·L2·(1−k²)
+    if det.abs() < 1e-40 {
+        return None;
+    }
+    let g11 = scale * l2_value / det;
+    let g22 = scale * l1_value / det;
+    let g12 = -scale * m / det;
+    Some((
+        g11 * vl1 + g12 * vl2 + i_hist1,
+        g12 * vl1 + g22 * vl2 + i_hist2,
+    ))
 }
 
 /// Find the (pos, neg) terminal names for a named inductor — tran.rs variant.
@@ -900,6 +936,17 @@ pub fn tran_nr_with_registry_var_opts(
             _ => {}
         }
     }
+    // Inductance lookup for the coupled-pair post-pass.
+    let ind_l: IndexMap<String, f64> = netlist
+        .elements
+        .iter()
+        .filter_map(|el| match el {
+            Element::Inductor {
+                name, inductance, ..
+            } => Some((name.clone(), *inductance)),
+            _ => None,
+        })
+        .collect();
 
     // Same, for device-internal reactive branches (depletion / diffusion C on a
     // PN phase shifter, parasitics on a PD, …).  Indexed `[device][branch]`,
@@ -1249,18 +1296,11 @@ pub fn tran_nr_with_registry_var_opts(
             // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
             // prev value so the next step has a valid two-step window.
             //
-            // KNOWN BUG: the inductor update below uses the standalone
-            // `i = G_eq·v + I_hist`, which is wrong for a coupled pair — the
-            // mutual term is missing.  `advance_companions` has a K-element
-            // post-pass for exactly this; this path never got one, so `ind_i`
-            // drifts and Newton then fails to converge.  Verified: `K1 L1 L2 0`
-            // runs, `K1 L1 L2 0.1` returns NoConvergence, while the same netlist
-            // is fine under fixed-step.  Any non-zero coupling + variable_step
-            // is currently a hard failure.
             //
-            // ponytail: the fix is the same post-pass, but the real fix is one
-            // integrator instead of two — see the module note on raw (v, i_C)
-            // history.  Don't add a third copy of the K correction.
+            // The inductor arm uses the standalone `i = G_eq·v + I_hist`, which
+            // is wrong for a coupled pair — the mutual term is missing.  The
+            // K post-pass below corrects it; without that, `ind_i` drifted and
+            // Newton stopped converging on any transformer.
             for el in &netlist.elements {
                 match el {
                     Element::Capacitor { name, pos, neg, .. } => {
@@ -1291,6 +1331,44 @@ pub fn tran_nr_with_registry_var_opts(
                         ind_i.insert(name.clone(), il_new);
                     }
                     _ => {}
+                }
+            }
+
+            // K post-pass: replace the standalone currents of every coupled pair
+            // with the mutual form, from the companion that was actually stamped.
+            // Same correction `advance_companions` applies on the fixed-step path.
+            for el in &netlist.elements {
+                let Element::CoupledInductors {
+                    l1, l2, coupling, ..
+                } = el
+                else {
+                    continue;
+                };
+                let (Some(&(g_eq1, i_hist1)), Some(&(_, i_hist2))) =
+                    (ind_state.get(l1), ind_state.get(l2))
+                else {
+                    continue;
+                };
+                let (Some(&val1), Some(&val2)) = (ind_l.get(l1), ind_l.get(l2)) else {
+                    continue;
+                };
+                let vl = |name: &str| {
+                    let (p, n) = find_inductor_terminals_by_name(netlist, name);
+                    topo.node_voltage(p, &x).unwrap_or(0.0)
+                        - topo.node_voltage(n, &x).unwrap_or(0.0)
+                };
+                if let Some((il1, il2)) = coupled_inductor_currents(
+                    val1,
+                    val2,
+                    *coupling,
+                    g_eq1 * val1, // conductance scale the stamp used
+                    vl(l1),
+                    vl(l2),
+                    i_hist1,
+                    i_hist2,
+                ) {
+                    ind_i.insert(l1.clone(), il1);
+                    ind_i.insert(l2.clone(), il2);
                 }
             }
             h_prev_accepted = h_actual;
@@ -1658,6 +1736,56 @@ mod tests {
                      got {mid} at 45 ns vs {end} settled"
                 );
             }
+        }
+    }
+
+    /// Any non-zero `K` coupling used to make the variable-step integrator fail
+    /// outright — `NoConvergence` after 150 iterations — because its inductor
+    /// history update used the standalone `i = G_eq·v + I_hist` and dropped the
+    /// mutual term, so the stored current drifted from what was stamped.
+    /// `K=0` ran, `K=0.1` did not, and the same netlist was fine fixed-step.
+    #[test]
+    fn var_step_handles_coupled_inductors() {
+        // L/R = 10 µs on each winding.  Primary is pulsed; the secondary sees
+        // energy only through the mutual term, so it is a direct probe of it.
+        let netlist_for = |k: &str| {
+            parse_spice(&format!(
+                "* transformer\nV1 a1 0 PULSE(0 1 0 1n 1n 1 2)\n\
+                 R1 a1 b1 100\nL1 b1 0 1m\nR2 a2 b2 100\nL2 b2 0 1m\n\
+                 K1 L1 L2 {k}\n.options method=be\n.tran 1u 200u\n.end\n"
+            ))
+            .unwrap()
+        };
+
+        for k in ["0.1", "0.5", "0.8", "0.95"] {
+            let net = netlist_for(k);
+            let reg = DeviceRegistry::new();
+            let opts = SimOptions::from_netlist(&net);
+
+            // Must run at all — this is what regressed.
+            let var = tran_nr_with_registry_var_opts(&net, 1e-6, 200e-6, &reg, &opts)
+                .unwrap_or_else(|e| panic!("k={k} failed under variable-step: {e:?}"));
+            // A fine fixed-step run is the reference; BE is first order, so 200 ns
+            // on a 10 µs tau is ~20x better resolved than the variable-step start.
+            let refr = tran_nr_with_registry_opts(&net, 200e-9, 200e-6, &reg, &opts).unwrap();
+
+            for &t in &[2e-6, 10e-6, 30e-6, 50e-6] {
+                let (a, b) = (
+                    var.voltage_at("b2", t).unwrap(),
+                    refr.voltage_at("b2", t).unwrap(),
+                );
+                assert!(
+                    (a - b).abs() < 0.02,
+                    "k={k} t={t:e}: variable-step V(b2)={a:.6}, fine fixed-step={b:.6}"
+                );
+            }
+            // Not vacuous: the mutual term must actually deliver something.
+            let peak = var.voltage_at("b2", 2e-6).unwrap();
+            let expected = k.parse::<f64>().unwrap() * 0.8; // rough, k-proportional
+            assert!(
+                peak > 0.5 * expected,
+                "k={k}: secondary saw {peak:.6}, expected coupling-proportional transfer"
+            );
         }
     }
 
