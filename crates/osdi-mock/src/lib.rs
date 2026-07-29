@@ -164,20 +164,40 @@ static JACOBIAN_ENTRIES: [OsdiJacobianEntry; 4] = [
 // Limiting table
 // ---------------------------------------------------------------------------
 
-/// A `$limit(..., "pnjlim", ...)` request, exported exactly as OpenVAF does:
-/// `func_ptr` starts null and the simulator is expected to install its own
-/// implementation before any `eval`. This mock never calls it — the point is
-/// that a test can check the loader filled it in, because a null here is a
-/// jump to address 0 in a real compiled model.
+/// `$limit()` requests, exported exactly as OpenVAF does: every `func_ptr`
+/// starts null and the simulator is expected to install its own implementation
+/// before any `eval`. This mock never calls them — the point is that a test can
+/// check the loader filled every one in, because a null here is a jump to
+/// address 0 in a real compiled model.
+///
+/// Three entries on purpose, covering each branch of the installer:
+///   [0] a limiter fairchild implements, at the arity it implements it
+///   [1] a name fairchild does not implement          -> identity fallback
+///   [2] a name it does implement, at the wrong arity -> identity fallback
+///
+/// OpenVAF does not validate these names at all — it forwards whatever string
+/// literal the model wrote — so [1] is not a hypothetical.
 #[no_mangle]
-pub static mut OSDI_LIM_TABLE: [OsdiLimFunction; 1] = [OsdiLimFunction {
-    name: c"pnjlim".as_ptr().cast_mut(),
-    num_args: 2,
-    func_ptr: std::ptr::null_mut(),
-}];
+pub static mut OSDI_LIM_TABLE: [OsdiLimFunction; 3] = [
+    OsdiLimFunction {
+        name: c"pnjlim".as_ptr().cast_mut(),
+        num_args: 2,
+        func_ptr: std::ptr::null_mut(),
+    },
+    OsdiLimFunction {
+        name: c"not_a_real_limiter".as_ptr().cast_mut(),
+        num_args: 1,
+        func_ptr: std::ptr::null_mut(),
+    },
+    OsdiLimFunction {
+        name: c"pnjlim".as_ptr().cast_mut(),
+        num_args: 4,
+        func_ptr: std::ptr::null_mut(),
+    },
+];
 
 #[no_mangle]
-pub static OSDI_LIM_TABLE_LEN: u32 = 1;
+pub static OSDI_LIM_TABLE_LEN: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // OSDI exports

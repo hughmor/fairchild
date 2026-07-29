@@ -1977,8 +1977,8 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | `$abstime` | yes | reads the transient clock; 0 in DC and AC |
 | `$temperature` | yes | from `.options temp` |
 | custom disciplines | yes | OSDI treats them as metadata — see §14.3 |
-| `$limit(v, "pnjlim", …)` | yes | fairchild installs `pnjlim` into the library's `OSDI_LIM_TABLE` at load |
-| other `$limit` functions | no | warns at load; only `pnjlim` is implemented |
+| `$limit(v, "pnjlim", …)` | yes | installed into the library's `OSDI_LIM_TABLE` at load |
+| other `$limit` functions | degrades | identity limiter + a warning; runs unlimited, never crashes |
 | `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
 | `$strobe`, `$finish` | no | |
 
@@ -1995,10 +1995,21 @@ Vd    = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
 ```
 
 OpenVAF compiles that into a call through the library's exported
-`OSDI_LIM_TABLE`, whose entries ship **null** for the simulator to fill in;
-fairchild installs its `pnjlim` when the library loads. A limiting function it
-does not implement keeps a null pointer and would crash on evaluation, so the
-loader warns about those by name at load time.
+`OSDI_LIM_TABLE`, whose entries ship **null** for the simulator to fill in.
+fairchild fills every one of them at load time.
+
+The limiter name is not a fixed vocabulary — OpenVAF does not validate it,
+it forwards whatever string literal the model wrote — so no simulator can
+implement them all. fairchild implements `pnjlim`; anything else (or `pnjlim`
+called with an unexpected number of arguments, which would be an ABI mismatch)
+gets an **identity limiter** and a warning naming it. That model then runs
+*without* limiting for that call: convergence may be slower or need a smaller
+step, but the answer is unaffected and the process does not die. Adding a
+limiter is one row in `LIMITERS` (`fairchild-osdi/src/loader.rs`).
+
+Limiting changes the Newton path, not the solution: the `$limit` diode in
+`examples/verilog_a/` converges to 0.6333213 V against 0.6333214 V for the same
+model without it.
 
 A bare `exp()` is fine too — the Newton loop's Armijo line search carries it,
 checked to a 500 V drive — but limiting is what scales to stiffer circuits.

@@ -131,12 +131,15 @@ All measured, not inferred:
   native `C` bit-for-bit; under `tr` it lags ~0.6 % on a 0.45 τ RC step. Pin
   `method=be` when a model carries charge and you care. (This is not
   OSDI-specific — every device-internal reactance in fairchild is BE.)
+- **`pnjlim` is the only limiting function implemented.** `$limit` names are
+  not a fixed vocabulary — OpenVAF forwards whatever string the model wrote —
+  so anything else gets an identity limiter and a warning: that call runs
+  unlimited (slower convergence, same answer) rather than crashing. One row in
+  `LIMITERS` in `fairchild-osdi/src/loader.rs` adds another.
 - **`$limexp` is unavailable** — OpenVAF 23.5 rejects it outright, as a compile
-  error rather than a silent no-op. Use `$limit(v, "pnjlim", vt, vcrit)`, which
-  fairchild does support (`va_diode.va` uses it); or rely on the Newton loop's
-  Armijo line search, which carries a bare `exp()` fine in practice.
-  `pnjlim` is the only limiting function implemented — anything else warns at
-  load time rather than crashing.
+  error rather than a silent no-op. Use `$limit(v, "pnjlim", vt, vcrit)`
+  instead (`va_diode.va` does), or rely on the Newton loop's Armijo line
+  search, which carries a bare `exp()` fine in practice.
 - **`--param` only reaches `X`, `R`, `C`, `L` elements**, so a Verilog-A
   transistor's parameters cannot be swept from the CLI. Use the Python
   bindings' `set_param`, or a `.param` in the netlist.
