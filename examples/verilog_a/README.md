@@ -131,13 +131,12 @@ All measured, not inferred:
   native `C` bit-for-bit; under `tr` it lags ~0.6 % on a 0.45 τ RC step. Pin
   `method=be` when a model carries charge and you care. (This is not
   OSDI-specific — every device-internal reactance in fairchild is BE.)
-- **No limiting.** fairchild never calls `load_limit_rhs_resist` /
-  `load_limit_rhs_react`, and OpenVAF 23.5 rejects `$limexp` outright — it is a
-  compile error, not a silent no-op. In practice the Newton loop's Armijo line
-  search carries a bare `exp()`; `va_diode.va` was checked to a 500 V drive.
-  Clamp the exponent in the model if you do hit an overflow.
-- **`prev_state` / `next_state` are null**, so state-carrying Verilog-A
-  constructs are unavailable.
+- **`$limexp` is unavailable** — OpenVAF 23.5 rejects it outright, as a compile
+  error rather than a silent no-op. Use `$limit(v, "pnjlim", vt, vcrit)`, which
+  fairchild does support (`va_diode.va` uses it); or rely on the Newton loop's
+  Armijo line search, which carries a bare `exp()` fine in practice.
+  `pnjlim` is the only limiting function implemented — anything else warns at
+  load time rather than crashing.
 - **`--param` only reaches `X`, `R`, `C`, `L` elements**, so a Verilog-A
   transistor's parameters cannot be swept from the CLI. Use the Python
   bindings' `set_param`, or a `.param` in the netlist.

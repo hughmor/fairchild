@@ -1977,19 +1977,31 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | `$abstime` | yes | reads the transient clock; 0 in DC and AC |
 | `$temperature` | yes | from `.options temp` |
 | custom disciplines | yes | OSDI treats them as metadata — see §14.3 |
-| `$limexp`, `$limit` | **no** | OpenVAF 23.5 rejects `$limexp` outright; fairchild calls no limiting hook |
+| `$limit(v, "pnjlim", …)` | yes | fairchild installs `pnjlim` into the library's `OSDI_LIM_TABLE` at load |
+| other `$limit` functions | no | warns at load; only `pnjlim` is implemented |
+| `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
 | `$strobe`, `$finish` | no | |
-| state (`prev_state`) | no | passed as null |
 
 `ddt` is integrated with **Backward Euler** whatever `.options method` says.
 Under `--method be` a Verilog-A `ddt(C*V)` matches a native `C` bit-for-bit;
 under `tr` it lags by about 0.6 % on a 0.45 τ RC step. Pin `method=be` when a
 model carries charge and the difference matters.
 
-There is no junction limiter for a Verilog-A model — no `pnjlim` equivalent —
-so a bare `exp()` has only the Newton loop's Armijo line search behind it. In
-practice that is enough (`examples/verilog_a/models/va_diode.va` was checked to
-a 500 V drive); clamp the exponent in the model if you ever do overflow.
+Junction limiting works the way a compact model expects:
+
+```verilog
+Vcrit = Vt * ln(Vt / (sqrt(2.0) * Is));
+Vd    = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
+```
+
+OpenVAF compiles that into a call through the library's exported
+`OSDI_LIM_TABLE`, whose entries ship **null** for the simulator to fill in;
+fairchild installs its `pnjlim` when the library loads. A limiting function it
+does not implement keeps a null pointer and would crash on evaluation, so the
+loader warns about those by name at load time.
+
+A bare `exp()` is fine too — the Newton loop's Armijo line search carries it,
+checked to a 500 V drive — but limiting is what scales to stiffer circuits.
 
 ### 14.2 Compiling
 

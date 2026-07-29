@@ -29,7 +29,8 @@ use std::ffi::c_char;
 use std::os::raw::c_void;
 
 use fairchild_osdi::ffi::{
-    OsdiDescriptor, OsdiInitInfo, OsdiJacobianEntry, OsdiNodePair, OsdiSimInfo, OsdiSimParas,
+    OsdiDescriptor, OsdiInitInfo, OsdiJacobianEntry, OsdiLimFunction, OsdiNodePair, OsdiSimInfo,
+    OsdiSimParas,
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +159,25 @@ static JACOBIAN_ENTRIES: [OsdiJacobianEntry; 4] = [
         flags: 0,
     },
 ];
+
+// ---------------------------------------------------------------------------
+// Limiting table
+// ---------------------------------------------------------------------------
+
+/// A `$limit(..., "pnjlim", ...)` request, exported exactly as OpenVAF does:
+/// `func_ptr` starts null and the simulator is expected to install its own
+/// implementation before any `eval`. This mock never calls it — the point is
+/// that a test can check the loader filled it in, because a null here is a
+/// jump to address 0 in a real compiled model.
+#[no_mangle]
+pub static mut OSDI_LIM_TABLE: [OsdiLimFunction; 1] = [OsdiLimFunction {
+    name: c"pnjlim".as_ptr().cast_mut(),
+    num_args: 2,
+    func_ptr: std::ptr::null_mut(),
+}];
+
+#[no_mangle]
+pub static OSDI_LIM_TABLE_LEN: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // OSDI exports

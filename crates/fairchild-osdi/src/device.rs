@@ -23,7 +23,7 @@ use fairchild_core::mna::MnaMatrix;
 use crate::ffi::{
     OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas, ANALYSIS_DC,
     ANALYSIS_TRAN, CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL, CALC_RESIST_JACOBIAN,
-    CALC_RESIST_RESIDUAL, PARA_KIND_INST, PARA_KIND_MODEL,
+    CALC_RESIST_RESIDUAL, ENABLE_LIM, INIT_LIM, PARA_KIND_INST, PARA_KIND_MODEL,
 };
 use crate::loader::OsdiLibrary;
 
@@ -46,6 +46,18 @@ pub struct OsdiDevice {
     /// resistive residual is linearised about, which is always `x_cache`.
     /// Empty until commit_timestep() is first called.
     x_tprev: Vec<f64>,
+    /// `$limit()` state, `descriptor.num_states` long each.  `eval` writes
+    /// `next`; the following `eval` limits against it as `prev`, so the two
+    /// swap after every call.
+    ///
+    /// These MUST be non-null whenever the model declares states: OpenVAF
+    /// emits the state write unconditionally, so passing null segfaults on any
+    /// model that calls `$limit` — which is every foundry compact model.
+    lim_state_prev: Vec<f64>,
+    lim_state_next: Vec<f64>,
+    /// Cleared until the first `eval`, which runs with `INIT_LIM` to seed the
+    /// state rather than limit against uninitialised memory.
+    lim_initialised: bool,
 }
 
 // SAFETY: descriptor is read-only after construction; Vec storage is thread-safe.
@@ -72,6 +84,9 @@ impl OsdiDevice {
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
             x_tprev: Vec::new(),
+            lim_state_prev: vec![0.0; desc.num_states as usize],
+            lim_state_next: vec![0.0; desc.num_states as usize],
+            lim_initialised: false,
         }
     }
 
@@ -94,6 +109,9 @@ impl OsdiDevice {
             mna_nodes: Vec::new(),
             x_cache: Vec::new(),
             x_tprev: Vec::new(),
+            lim_state_prev: vec![0.0; desc.num_states as usize],
+            lim_state_next: vec![0.0; desc.num_states as usize],
+            lim_initialised: false,
         })
     }
 
@@ -151,6 +169,29 @@ impl OsdiDevice {
             }
         }
         None
+    }
+
+    /// Write this instance's `$limit()` state indices into instance memory.
+    ///
+    /// The model reads `state_idx[k]` from `inst + state_idx_off` and then
+    /// indexes `prev_state[state_idx[k]]` / `next_state[…]`. OSDI is written
+    /// for a simulator holding one global state array and giving each instance
+    /// a slice of it; we give each device its own two buffers instead, so the
+    /// indices are just 0..num_states. Same contract, no shared allocation.
+    ///
+    /// Must be re-run whenever the node mapping is (see `refresh_instance`) —
+    /// both live in the same instance struct that `setup_instance` reads.
+    fn write_state_indices(&mut self) {
+        let num_states = self.desc().num_states as usize;
+        if num_states == 0 {
+            return;
+        }
+        let off = self.desc().state_idx_off as usize;
+        // i32: OpenVAF types state_idx with its generic `int` (LLVMInt32).
+        let ptr = unsafe { (self.instance.as_mut_ptr() as *mut u8).add(off) as *mut i32 };
+        for k in 0..num_states {
+            unsafe { *ptr.add(k) = k as i32 };
+        }
     }
 
     /// Call `f(mna_row, mna_col, dq/dx)` for every reactive Jacobian entry.
@@ -302,6 +343,7 @@ impl Device for OsdiDevice {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }
         }
+        self.write_state_indices();
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
@@ -362,6 +404,17 @@ impl Device for OsdiDevice {
             if flags.transient {
                 osdi_flags |= CALC_REACT_RESIDUAL | CALC_REACT_JACOBIAN;
             }
+            // `$limit()` limiting.  The state buffers must be real pointers
+            // whenever the model declares states — OpenVAF emits the state
+            // write unconditionally, so null segfaults.  INIT_LIM on the first
+            // call seeds the state; after that we limit against the previous
+            // iterate.
+            if self.desc().num_states > 0 {
+                osdi_flags |= ENABLE_LIM;
+                if !self.lim_initialised {
+                    osdi_flags |= INIT_LIM;
+                }
+            }
             let mut info = OsdiSimInfo {
                 paras: null_sim_paras(),
                 // `$abstime`.  SimContext::time_s is the transient clock the
@@ -371,8 +424,8 @@ impl Device for OsdiDevice {
                 // Pass ptr+1: x_cache[1..] mirrors x[0..], and x_cache[0]=0.0
                 // acts as a guard for OSDI's out-of-bounds index -1 (ground).
                 prev_solve: unsafe { self.x_cache.as_ptr().add(1) as *mut f64 },
-                prev_state: std::ptr::null_mut(),
-                next_state: std::ptr::null_mut(),
+                prev_state: self.lim_state_prev.as_mut_ptr(),
+                next_state: self.lim_state_next.as_mut_ptr(),
                 flags: osdi_flags,
             };
             unsafe {
@@ -383,6 +436,10 @@ impl Device for OsdiDevice {
                     &mut info,
                 );
             }
+            // What this eval limited to becomes what the next one limits
+            // against.
+            std::mem::swap(&mut self.lim_state_prev, &mut self.lim_state_next);
+            self.lim_initialised = true;
         }
     }
 
@@ -574,6 +631,7 @@ impl OsdiDevice {
                 *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
             }
         }
+        self.write_state_indices();
 
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();

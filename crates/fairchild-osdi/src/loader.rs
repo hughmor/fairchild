@@ -7,7 +7,7 @@ use fairchild_core::Device;
 
 use crate::device::OsdiDevice;
 use crate::error::OsdiError;
-use crate::ffi::OsdiDescriptor;
+use crate::ffi::{FnPnjlim, OsdiDescriptor, OsdiLimFunction};
 
 /// A loaded `.osdi` shared library (RAII wrapper around dlopen).
 ///
@@ -82,6 +82,8 @@ impl OsdiLibrary {
 
         // dlsym returns the address of the first element of OSDI_DESCRIPTORS.
         let descriptors_base = dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
+
+        install_lim_table(handle);
 
         Ok(Self {
             handle,
@@ -169,5 +171,81 @@ unsafe fn dlsym_or_err(
         })
     } else {
         Ok(ptr)
+    }
+}
+
+// ── $limit() support ────────────────────────────────────────────────────────
+
+/// Install fairchild's limiting functions into a freshly-loaded library's
+/// `OSDI_LIM_TABLE`.
+///
+/// A library that uses `$limit()` exports the table with every `func_ptr`
+/// null, expecting the simulator to fill in the ones it implements. OpenVAF
+/// emits the call unconditionally, so skipping this is not "limiting is
+/// disabled" — it is a jump to address 0 on the first `eval`. Every foundry
+/// compact model uses `$limit`, so that was a segfault on the whole class.
+///
+/// A name we do not implement keeps its null pointer, which would crash the
+/// same way; warn loudly rather than let it look like it worked.
+unsafe fn install_lim_table(handle: *mut libc::c_void) {
+    let table = libc::dlsym(handle, c"OSDI_LIM_TABLE".as_ptr()) as *mut OsdiLimFunction;
+    let len_ptr = libc::dlsym(handle, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32;
+    if table.is_null() || len_ptr.is_null() {
+        return; // model uses no limiting functions
+    }
+    let table = std::slice::from_raw_parts_mut(table, *len_ptr as usize);
+    for entry in table {
+        let name = CStr::from_ptr(entry.name).to_str().unwrap_or("");
+        match name {
+            "pnjlim" => {
+                debug_assert_eq!(entry.num_args, 2, "pnjlim takes vt and vcrit");
+                entry.func_ptr = osdi_pnjlim as FnPnjlim as *mut libc::c_void;
+            }
+            other => {
+                eprintln!(
+                    "warning: OSDI model requests limiting function '{other}', which fairchild \
+                     does not implement — evaluating it would jump through a null pointer. \
+                     Rewrite the model without $limit(\"{other}\", …), or add it to \
+                     install_lim_table."
+                );
+            }
+        }
+    }
+}
+
+/// SPICE `pnjlim`, in the shape OSDI calls it.
+///
+/// Same logarithmic step compression as `models::diode::ShockleyDiode::pnjlim`
+/// — kept here rather than shared because that one is a method on a device
+/// carrying its own `vcrit`, while OSDI passes `vcrit` per call.
+unsafe extern "C" fn osdi_pnjlim(
+    init: bool,
+    check: *mut bool,
+    vnew: f64,
+    vold: f64,
+    vt: f64,
+    vcrit: f64,
+) -> f64 {
+    // `check` tells the solver the iterate was modified, so it must not
+    // declare convergence on this step.
+    let limited = |v: f64| {
+        if !check.is_null() {
+            *check = true;
+        }
+        v
+    };
+    if init {
+        // First evaluation: no meaningful previous iterate to limit against,
+        // so start at the critical voltage.
+        return limited(vcrit);
+    }
+    if vnew > vcrit && (vnew - vold).abs() > 2.0 * vt {
+        if vnew > vold {
+            limited(vold + vt * ((vnew - vold) / vt + 1.0).ln())
+        } else {
+            limited(vold - vt * ((vold - vnew) / vt + 1.0).ln())
+        }
+    } else {
+        vnew
     }
 }

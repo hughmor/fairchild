@@ -7,13 +7,16 @@
 //   2. an internal node (the series R)       -> num_nodes > num_terminals
 //   3. a `ddt` charge branch                 -> write_jacobian_array_react
 //
-// Convergence note: fairchild's OSDI runtime does not call the OSDI limiting
-// hooks (load_limit_rhs_resist / load_limit_rhs_react), and OpenVAF 23.5 does
-// not implement `$limexp` at all — it is a compile error, not a silent
-// no-op.  A bare exp() is nonetheless fine here (checked to a 500 V drive):
-// the plain Armijo line search in fairchild's Newton loop carries it.  Clamp
-// the exponent in the model if you ever do hit an overflow; there is no
-// simulator-side limiter to fall back on.
+// Convergence: the junction voltage goes through `$limit(..., "pnjlim", ...)`,
+// which is what a real compact model does and what fairchild's own native
+// diode does internally.  OpenVAF compiles that into a call through the
+// library's `OSDI_LIM_TABLE`, and fairchild installs its `pnjlim` there when
+// the library loads.  `$limexp` is NOT available — OpenVAF 23.5 rejects it
+// outright, as a compile error rather than a silent no-op.
+//
+// A bare `exp(V(...))` also works here — the Newton loop's Armijo line search
+// carries it, checked to a 500 V drive — but limiting is what scales to
+// stiffer circuits, and it costs one line.
 
 `include "disciplines.vams"
 `include "constants.vams"
@@ -31,11 +34,14 @@ module va_diode(anode, cathode);
     parameter real M     = 0.5   from (0:1);     // grading coefficient
     parameter real Tnom  = 300.15 from (0:inf);  // temperature (K)
 
-    real Vt, Vd, Id, Cj, qd;
+    real Vt, Vcrit, Vd, Id, Cj, qd;
 
     analog begin
         Vt = N * `P_K * Tnom / `P_Q;
-        Vd = V(internal, cathode);
+        // The usual SPICE critical voltage: the knee beyond which an
+        // unlimited Newton step overshoots by orders of magnitude.
+        Vcrit = Vt * ln(Vt / (sqrt(2.0) * Is));
+        Vd = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
 
         Id = Is * (exp(Vd / Vt) - 1.0);
 
