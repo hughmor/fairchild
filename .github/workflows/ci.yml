@@ -97,3 +97,14 @@ jobs:
           assert 0.60 < v.max() < 0.66, v.max()
           print(f"ok: {len(v)} points, vmax={v.max():.4f}")
           PY
+
+      # The C header is hand-written, so nothing in the Rust tests catches it
+      # drifting from the exported signatures.  Compiling a real C consumer
+      # against it does, and running it proves the library links and steps.
+      - name: C API — compile and run the example against the header
+        run: |
+          cargo build -p fairchild-c --release
+          cc -O2 -Wall -Wextra -Werror \
+            -o /tmp/mixed_signal crates/fairchild-c/examples/mixed_signal.c \
+            -I crates/fairchild-c/include -L target/release -lfairchild_c
+          LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release /tmp/mixed_signal

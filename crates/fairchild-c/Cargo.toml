@@ -1,0 +1,23 @@
+[package]
+name = "fairchild-c"
+version.workspace = true
+edition = "2021"
+
+[lib]
+# NOT "fairchild": fairchild-py's extension module already claims that name, and
+# two crates emitting libfairchild.dylib into the same target dir clobber each
+# other (cargo only warns).  Package installers are free to rename or symlink.
+name = "fairchild_c"
+# cdylib for dlopen / -lfairchild_c; staticlib for embedding without a runtime
+# dependency.  No Python runtime is linked — pyo3 lives only in fairchild-py.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+fairchild-core   = { path = "../fairchild-core" }
+fairchild-parser = { path = "../fairchild-parser" }
+fairchild-osdi   = { path = "../fairchild-osdi", optional = true }
+
+[features]
+default = ["osdi"]
+osdi = ["dep:fairchild-osdi"]
+klu = ["fairchild-core/klu"]
