@@ -8,17 +8,14 @@ use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, ReactiveKind};
+use crate::device::{Device, EvalFlags};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{
-    cap_companion, cap_companion_be_to_tr, cap_companion_gear2, cap_companion_tr_advance,
-    ind_companion, ind_companion_be_to_tr, ind_companion_gear2, ind_companion_tr_advance,
-    stamp_netlist, CircuitTopology, MnaMatrix,
-};
+use crate::mna::{stamp_netlist, CircuitTopology};
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::solver::lu_solve;
+use crate::tran_step::TranStepper;
 
 /// Transient integration method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +25,12 @@ pub enum IntegratorMode {
     /// Trapezoidal Rule (TR / BDF-2-like): second-order, A-stable, minimal overhead.
     Trapezoidal,
     /// GEAR / BDF-2: second-order, L-stable, two-step history.  First step and
-    /// the step after any rejection demote to BE (order control 1↔2).  Applies
-    /// to linear L/C companions; device-internal reactive terms remain BDF-1.
+    /// the step after any rejection demote to BE (order control 1↔2).
+    ///
+    /// Applies uniformly to netlist L/C and device-declared branches — every
+    /// method does, since `crate::reactive` interprets `mode` in one place.
+    /// Only the variable-step integrator carries the two-timepoint history
+    /// BDF-2 needs, so the fixed-step path demotes GEAR to BE throughout.
     Gear,
 }
 
@@ -183,30 +184,30 @@ fn run_tran_mode(
     // Store the true IC at t=0 before any integration.
     push_timepoint(&mut result, 0.0, &topo, &x0);
 
-    // Initialize companion state from IC.
-    let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x0, mode);
+    // No devices on this path — it is the linear-only integrator — but the
+    // reactive history is the same shared machinery the nonlinear ones use.
+    let no_devices: Vec<Box<dyn Device>> = Vec::new();
+    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &no_devices, &x0);
 
     let mut t = step;
     let mut x;
-    let mut first_tr = true;
+    let mut first_step = true;
     loop {
-        let mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
+        // TR takes its first step with BE, for stability across t=0.
+        let step_mode = if first_step && matches!(mode, IntegratorMode::Trapezoidal) {
+            IntegratorMode::BackwardEuler
+        } else {
+            mode
+        };
+        reactive.build(&no_devices, step_mode, step, None);
+        let mat = stamp_netlist(&topo, netlist, t, &reactive.cap_state, &reactive.ind_state);
         x = lu_solve(&mat.a, &mat.b)?;
         push_timepoint(&mut result, t, &topo, &x);
         if t >= stop {
             break;
         }
-        advance_companions(
-            netlist,
-            &topo,
-            step,
-            &x,
-            &mut cap_state,
-            &mut ind_state,
-            mode,
-            first_tr,
-        );
-        first_tr = false;
+        reactive.accept(&no_devices, &x);
+        first_step = false;
         t = (t + step).min(stop);
     }
 
@@ -217,334 +218,49 @@ fn run_tran_mode(
 // Helpers shared by run_tran and tran_nr
 // ---------------------------------------------------------------------------
 
-/// Companion state maps for capacitors and inductors: (Geq, Ieq) per element name.
-type CompanionStatePair = (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>);
-
-/// Initialise capacitor and inductor companion state from a solution vector.
+/// Currents through a coupled inductor pair after a solved step.
 ///
-/// For capacitors: V_C_init = V(pos) - V(neg) from the provided x (typically the DC OP).
-/// For inductors: I_L_init = 0 (inductors are open-circuit in the DC solver).
-fn init_companions(
-    netlist: &Netlist,
-    topo: &CircuitTopology,
-    step: f64,
-    x: &[f64],
-    _mode: IntegratorMode,
-) -> CompanionStatePair {
-    let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor {
-                name,
-                pos,
-                neg,
-                capacitance,
-            } => {
-                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                // TR always begins with a BE step for stability at discontinuities.
-                cap_state.insert(name.clone(), cap_companion(*capacitance, step, vc));
-            }
-            Element::Inductor {
-                name, inductance, ..
-            } => {
-                // TR always begins with a BE step for stability at discontinuities.
-                ind_state.insert(name.clone(), ind_companion(*inductance, step, 0.0));
-            }
-            _ => {}
-        }
-    }
-    (cap_state, ind_state)
-}
-
-/// Advance companion state: read post-step voltages/currents from x, update state maps.
+/// The standalone update `i = G_eq·v + I_hist` misses the mutual term, so using
+/// it on a coupled pair lets the stored current drift from what was actually
+/// stamped.  The mutual form is
 ///
-/// `first_tr` — true only on the first advance when mode is TR; performs the BE→TR
-/// transition that seeds the TR with correct initial capacitor/inductor currents.
-fn advance_companions(
-    netlist: &Netlist,
-    topo: &CircuitTopology,
-    step: f64,
-    x: &[f64],
-    cap_state: &mut IndexMap<String, (f64, f64)>,
-    ind_state: &mut IndexMap<String, (f64, f64)>,
-    mode: IntegratorMode,
-    first_tr: bool,
-) {
-    // Snapshot i_hist values BEFORE the main loop advances them.
-    // Needed by the K-element post-pass which must read old history.
-    use std::collections::HashMap;
-    let i_hist_snapshot: HashMap<String, f64> = ind_state
-        .iter()
-        .map(|(k, &(_, ih))| (k.clone(), ih))
-        .collect();
-
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor {
-                name,
-                pos,
-                neg,
-                capacitance,
-            } => {
-                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = match mode {
-                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
-                        cap_companion(*capacitance, step, vc)
-                    }
-                    IntegratorMode::Trapezoidal if first_tr => {
-                        let (g_eq_be, i_hist_be) = cap_state[name];
-                        cap_companion_be_to_tr(g_eq_be, i_hist_be, vc)
-                    }
-                    IntegratorMode::Trapezoidal => {
-                        let (g_eq, i_hist_old) = cap_state[name];
-                        cap_companion_tr_advance(g_eq, i_hist_old, vc)
-                    }
-                };
-                cap_state.insert(name.clone(), next);
-            }
-            Element::Inductor {
-                name,
-                pos,
-                neg,
-                inductance,
-            } => {
-                let (g_eq, i_hist) = ind_state[name];
-                let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = match mode {
-                    IntegratorMode::BackwardEuler | IntegratorMode::Gear => {
-                        let il = g_eq * vl + i_hist;
-                        ind_companion(*inductance, step, il)
-                    }
-                    IntegratorMode::Trapezoidal if first_tr => {
-                        ind_companion_be_to_tr(g_eq, i_hist, vl)
-                    }
-                    IntegratorMode::Trapezoidal => ind_companion_tr_advance(g_eq, i_hist, vl),
-                };
-                ind_state.insert(name.clone(), next);
-            }
-            _ => {}
-        }
-    }
-
-    // Post-pass: correct ind_state for coupled inductor pairs (K elements).
-    //
-    // The main loop above used the standalone formula IL = G_eq*VL + I_hist.
-    // For coupled pairs we need:
-    //   IL1 = G11*VL1 + G12*VL2 + I_hist1_old
-    //   IL2 = G12*VL1 + G22*VL2 + I_hist2_old
-    //
-    // We use i_hist_snapshot (old values) to avoid reading partially-updated state.
-    //
-    // K correction is only valid for BE/Gear.  In TR mode the companion update
-    // uses the trapezoidal formula (ind_companion_tr_advance) whose state is
-    // incompatible with the BE-derived G11/G22/G12 stamps.  Silently skipping
-    // avoids wrong numbers; a proper TR K correction is a future TODO.
-    if matches!(mode, IntegratorMode::BackwardEuler | IntegratorMode::Gear) {
-        let mut ind_vals_local: HashMap<String, f64> = HashMap::new();
-        for el in &netlist.elements {
-            if let Element::Inductor {
-                name, inductance, ..
-            } = el
-            {
-                ind_vals_local.insert(name.clone(), *inductance);
-            }
-        }
-
-        for el in &netlist.elements {
-            if let Element::CoupledInductors {
-                l1, l2, coupling, ..
-            } = el
-            {
-                let Some(&val1) = ind_vals_local.get(l1) else {
-                    continue;
-                };
-                let Some(&val2) = ind_vals_local.get(l2) else {
-                    continue;
-                };
-                // g_eq1 after the main loop advance = h/val1 (unchanged by the main loop
-                // since ind_companion preserves the g_eq formula).
-                let Some(&(g_eq1, _)) = ind_state.get(l1) else {
-                    continue;
-                };
-                let Some(&(g_eq2, _)) = ind_state.get(l2) else {
-                    continue;
-                };
-                let i_hist1 = i_hist_snapshot.get(l1).copied().unwrap_or(0.0);
-                let i_hist2 = i_hist_snapshot.get(l2).copied().unwrap_or(0.0);
-
-                // Find terminal nodes for voltage lookup.
-                let vl1 = {
-                    let (pos1, neg1) = find_inductor_terminals_by_name(netlist, l1);
-                    topo.node_voltage(pos1, x).unwrap_or(0.0)
-                        - topo.node_voltage(neg1, x).unwrap_or(0.0)
-                };
-                let vl2 = {
-                    let (pos2, neg2) = find_inductor_terminals_by_name(netlist, l2);
-                    topo.node_voltage(pos2, x).unwrap_or(0.0)
-                        - topo.node_voltage(neg2, x).unwrap_or(0.0)
-                };
-
-                let k = *coupling;
-                let m = k * (val1 * val2).sqrt();
-                let det = val1 * val2 - m * m;
-                if det.abs() < 1e-40 {
-                    continue;
-                }
-
-                // h = g_eq * L  (g_eq = h/L)
-                let h = g_eq1 * val1;
-                let g11 = h * val2 / det;
-                let g22 = h * val1 / det;
-                let g12 = -h * m / det;
-
-                let il1 = g11 * vl1 + g12 * vl2 + i_hist1;
-                let il2 = g12 * vl1 + g22 * vl2 + i_hist2;
-
-                // Overwrite with corrected currents.
-                ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
-                ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
-
-                // Suppress unused variable warnings for g_eq2.
-                let _ = g_eq2;
-            }
-        }
-    } // end if BackwardEuler | Gear
-}
-
-/// Find the (pos, neg) terminal names for a named inductor — tran.rs variant.
-fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a str, &'a str) {
-    for el in &netlist.elements {
-        if let Element::Inductor {
-            name: n, pos, neg, ..
-        } = el
-        {
-            if n == name {
-                return (pos, neg);
-            }
-        }
-    }
-    panic!("coupled inductor '{name}' not found in netlist")
-}
-
-/// Seed device-internal reactive-branch companion state from the DC OP.
+/// ```text
+///   I_L1 = G11·V_L1 + G12·V_L2 + I_hist1
+///   I_L2 = G12·V_L1 + G22·V_L2 + I_hist2
+/// ```
 ///
-/// For each device, queries `reactive_branches()` once and computes the
-/// initial (G_eq, I_hist) using the DC-OP voltage across the branch's
-/// (pos, neg) terminals.  Returned as `[dev_idx][branch_idx] -> (G_eq, I_hist)`.
-fn init_device_reactive_state(
-    devices: &[Box<dyn Device>],
-    x: &[f64],
-    step: f64,
-    _mode: IntegratorMode,
-) -> Vec<Vec<(f64, f64)>> {
-    let mut out = Vec::with_capacity(devices.len());
-    for dev in devices {
-        let branches = dev.reactive_branches();
-        let mut dev_states = Vec::with_capacity(branches.len());
-        for br in &branches {
-            let v = match (br.pos, br.neg) {
-                (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None) => x[p],
-                (None, Some(n)) => -x[n],
-                (None, None) => 0.0,
-            };
-            // TR always begins with a BE step for stability at discontinuities
-            // — mirrors the built-in Element::Capacitor handling.
-            let companion = match br.kind {
-                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor => ind_companion(br.value, step, 0.0),
-            };
-            dev_states.push(companion);
-        }
-        out.push(dev_states);
+/// `scale` is the conductance scale the standalone companions used — `G_eq · L`,
+/// which is `h` under BE and `1/α` under BDF-2, so the same expression covers
+/// both.  `i_hist` are the history terms that were *stamped* for this step, so
+/// whatever method produced them is already folded in.
+///
+/// Returns `None` for a degenerate pair (k → 1), which the stamper also skips.
+pub(crate) fn coupled_inductor_currents(
+    l1_value: f64,
+    l2_value: f64,
+    coupling: f64,
+    scale: f64,
+    vl1: f64,
+    vl2: f64,
+    i_hist1: f64,
+    i_hist2: f64,
+) -> Option<(f64, f64)> {
+    let m = coupling * (l1_value * l2_value).sqrt();
+    let det = l1_value * l2_value - m * m; // = L1·L2·(1−k²)
+    if det.abs() < 1e-40 {
+        return None;
     }
-    out
-}
-
-/// Stamp the companion-model contributions of every device-internal
-/// reactive branch into `mat`.  Called inside the NR loop, AFTER each
-/// device's `load_jacobian_tran` (so the device's eval cache reflects the
-/// current iterate before the integrator re-queries the value).
-fn stamp_device_reactive_companions(
-    devices: &[Box<dyn Device>],
-    state: &[Vec<(f64, f64)>],
-    mat: &mut MnaMatrix,
-    step: f64,
-) {
-    for (dev_idx, dev) in devices.iter().enumerate() {
-        let branches = dev.reactive_branches();
-        for (br_idx, br) in branches.iter().enumerate() {
-            // Re-compute companion params using the CURRENT (per-NR-iter)
-            // device value, but reuse I_hist from the previous timestep.
-            let (_g_old, i_hist) = state[dev_idx][br_idx];
-            let g_eq = match br.kind {
-                ReactiveKind::Capacitor => br.value / step,
-                ReactiveKind::Inductor => step / br.value.max(1e-30),
-            };
-            // Stamp G_eq between pos and neg (resistor pattern) and inject
-            // ±I_hist into the corresponding KCL rows.  For an inductor the
-            // current is i = G_eq · v + I_hist (history adds, doesn't subtract).
-            let i_sign = match br.kind {
-                ReactiveKind::Capacitor => 1.0,
-                ReactiveKind::Inductor => -1.0,
-            };
-            if let Some(p) = br.pos {
-                mat.a[p][p] += g_eq;
-                if let Some(n) = br.neg {
-                    mat.a[p][n] -= g_eq;
-                }
-                mat.b[p] += i_sign * i_hist;
-            }
-            if let Some(n) = br.neg {
-                mat.a[n][n] += g_eq;
-                if let Some(p) = br.pos {
-                    mat.a[n][p] -= g_eq;
-                }
-                mat.b[n] -= i_sign * i_hist;
-            }
-        }
-    }
-}
-
-/// Advance the device-internal reactive companion state after a successful
-/// timestep.  Reads V_C / I_L from the converged `x` and computes the next
-/// (G_eq, I_hist) using the device's reported value at the new operating
-/// point (already updated via `commit_timestep` + the next NR loop's eval).
-fn advance_device_reactive_state(
-    devices: &[Box<dyn Device>],
-    x: &[f64],
-    state: &mut [Vec<(f64, f64)>],
-    step: f64,
-) {
-    for (dev_idx, dev) in devices.iter().enumerate() {
-        let branches = dev.reactive_branches();
-        for (br_idx, br) in branches.iter().enumerate() {
-            let v = match (br.pos, br.neg) {
-                (Some(p), Some(n)) => x[p] - x[n],
-                (Some(p), None) => x[p],
-                (None, Some(n)) => -x[n],
-                (None, None) => 0.0,
-            };
-            let next = match br.kind {
-                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor => {
-                    // i_L = G_eq · v_L + I_hist (history), then form next companion.
-                    let (g_eq, i_hist) = state[dev_idx][br_idx];
-                    let i_l = g_eq * v + i_hist;
-                    ind_companion(br.value, step, i_l)
-                }
-            };
-            state[dev_idx][br_idx] = next;
-        }
-    }
+    let g11 = scale * l2_value / det;
+    let g22 = scale * l1_value / det;
+    let g12 = -scale * m / det;
+    Some((
+        g11 * vl1 + g12 * vl2 + i_hist1,
+        g12 * vl1 + g22 * vl2 + i_hist2,
+    ))
 }
 
 /// Append one time-point to a TranResult.
-fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
+pub(crate) fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
     result.time.push(t);
     for (name, &idx) in &topo.node_index {
         result.node_voltages.get_mut(name).unwrap().push(x[idx]);
@@ -578,6 +294,9 @@ pub fn tran_nr_with_registry(
 /// The integration method (`BackwardEuler` or `Trapezoidal`) comes from
 /// `opts.method`.  Tolerances, max NR iterations, gmin, vmax, etc. all read
 /// from `opts`.
+///
+/// This is a driver over [`TranStepper`] — the integrator itself lives there so
+/// that batch runs and host-driven mixed-signal stepping cannot drift apart.
 pub fn tran_nr_with_registry_opts(
     netlist: &Netlist,
     step: f64,
@@ -585,66 +304,13 @@ pub fn tran_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
-    // Sanity check fires here when UIC bypasses DC OP; the non-UIC path
-    // gets it via the dc_op call below (and the check is cheap enough
-    // that we don't bother de-duplicating).
-    if opts.sanity_check && opts.uic {
-        crate::sanity::check_netlist_sanity(netlist);
-    }
-    crate::connectivity::check_connectivity(netlist)?;
-    let mut ctx = opts.sim_context();
-    let mode = opts.method;
-
-    // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
-    // Without UIC (the default): use DC OP as t=0 condition.
-    let (topo, mut x) = if opts.uic {
-        let topo = CircuitTopology::build(netlist);
-        let mut x = vec![0.0f64; topo.size];
-        for (name, value) in &netlist.ic {
-            if let Some(&i) = topo.node_index.get(name) {
-                x[i] = *value;
-            }
-        }
-        (topo, x)
-    } else {
-        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-        // DC OP already allocated extras; reuse its topology so the row
-        // layout (and matrix size) stays consistent through the transient.
-        (dc.topo, dc.x)
-    };
-    let mut topo = topo;
-
-    let (mut devices, footprints) =
-        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
-    // After build_devices, topo.size is final.  Pad the initial x vector
-    // to match — when we came via UIC, x was sized to the pre-allocation
-    // topology; OSDI internal nodes get a zero initial guess.
-    x.resize(topo.size, 0.0);
-    // Topology is fixed across the whole transient — build the linear
-    // solver once and reuse for every NR iter.
-    let solver = opts.linear_solver(topo.size);
-    // Structural sparsity pattern: same for every timestep and every NR
-    // iteration within them, so build it once here.
-    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
-
-    // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
-    // history is defined before the first step.
-    for dev in &mut devices {
-        dev.commit_timestep(&x);
-    }
-
-    // Honour opts.max_step as an upper bound on the step size.
-    let step = step.min(opts.max_step);
-
-    // Reactive companion state seeded from the DC OP.
-    let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x, mode);
-    // Device-internal reactive branches (e.g., bias-dependent C_j on a
-    // depletion-mode PN-PS).  One companion-state pair per device per
-    // declared branch.  Indexed as dev_reactive_state[dev_idx][branch_idx].
-    let mut dev_reactive_state: Vec<Vec<(f64, f64)>> =
-        init_device_reactive_state(&devices, &x, step, mode);
+    // The stepper owns its netlist so it can rewrite source waveforms between
+    // steps.  One clone per transient run, against thousands of timesteps.
+    let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
+    let step = st.step_size();
 
     let n_steps = ((stop / step).ceil() as usize) + 2;
+    let topo = st.topology();
     let mut result = TranResult {
         time: Vec::with_capacity(n_steps),
         node_voltages: topo
@@ -660,118 +326,21 @@ pub fn tran_nr_with_registry_opts(
     };
 
     // Store t = 0 from DC OP.
-    push_timepoint(&mut result, 0.0, &topo, &x);
+    push_timepoint(&mut result, 0.0, st.topology(), st.solution());
 
-    // Cached factorisation: in transient, the sparsity pattern is fixed
-    // across the entire run (devices don't appear / disappear, timestep
-    // changes only scale values via `α = 1/h`).  One symbolic factor-
-    // isation up front, `klu_refactor` (or faer-sparse value-only
-    // rebuild) on every NR iteration of every timestep.
-    let mut fact: Option<Box<dyn crate::solver::Factorisation>> = None;
-
-    // One MnaMatrix reused across every NR iteration of every timestep —
-    // for a 10 k-step transient with ~3 NR iters each this skips 30 k ×
-    // (N+1) heap allocations.
-    let mut mat = crate::mna::MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
-
-    let mut t = step;
-    let mut first_tr = true;
+    // The first timepoint is `step` even when that overshoots `stop` (a
+    // stop < step run still produces one solved point); every later one is
+    // clamped so the run lands exactly on `stop`.
+    let mut t_next = step;
     loop {
-        // --- NR loop for this time step ---
-        let alpha = 1.0 / step;
-        // Expose the absolute time of this step to devices (delay lines look up
-        // historical port values at `time_s − τ`).
-        ctx.time_s = t;
-        let mut step_converged = false;
-        for _iter in 0..opts.itl4 {
-            crate::mna::stamp_netlist_in_place(
-                &mut mat,
-                &topo,
-                netlist,
-                t,
-                &cap_state,
-                &ind_state,
-                Some(&plan),
-            );
-
-            for dev in &mut devices {
-                dev.set_source_scale(1.0);
-                dev.eval(&x, EvalFlags::tran(), &ctx);
-                dev.load_residual_tran(&mut mat.b, alpha);
-                dev.load_jacobian_tran(&mut mat, alpha);
-            }
-            // Stamp integrator-managed reactive companions for every
-            // device-declared linear reactive branch (uses the device's
-            // current bias-dependent value AND the history from the
-            // previous accepted timestep).
-            stamp_device_reactive_companions(&devices, &dev_reactive_state, &mut mat, step);
-
-            topo.stamp_gmin(&mut mat.a, opts.gmin);
-
-            let x_new = if let Some(f) = fact.as_mut() {
-                f.refactor_and_solve_mat(&mat)?
-            } else {
-                let mut f = solver.factorise_mat(&mat)?;
-                let r = f.refactor_and_solve_mat(&mat)?;
-                fact = Some(f);
-                r
-            };
-
-            let max_dv = x_new
-                .iter()
-                .zip(x.iter())
-                .take(topo.n_nodes())
-                .map(|(n, o)| (n - o).abs())
-                .fold(0.0f64, f64::max);
-
-            let x_next: Vec<f64> = if max_dv > opts.vmax {
-                let scale = opts.vmax / max_dv;
-                x.iter()
-                    .zip(x_new.iter())
-                    .map(|(o, n)| o + scale * (n - o))
-                    .collect()
-            } else {
-                x_new
-            };
-
-            let converged = x_next
-                .iter()
-                .zip(x.iter())
-                .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
-
-            x = x_next;
-            if converged {
-                step_converged = true;
-                break;
-            }
-        }
-
-        if !step_converged {
-            return Err(SimError::NoConvergence { iters: opts.itl4 });
-        }
-
-        push_timepoint(&mut result, t, &topo, &x);
-
-        for dev in &mut devices {
-            dev.commit_timestep(&x);
-        }
-
-        if t >= stop {
+        st.solve_at(t_next)?;
+        st.commit(t_next);
+        push_timepoint(&mut result, st.time(), st.topology(), st.solution());
+        if st.time() >= stop {
             break;
         }
-        advance_companions(
-            netlist,
-            &topo,
-            step,
-            &x,
-            &mut cap_state,
-            &mut ind_state,
-            mode,
-            first_tr,
-        );
-        advance_device_reactive_state(&devices, &x, &mut dev_reactive_state, step);
-        first_tr = false;
-        t = (t + step).min(stop);
+        st.advance_history();
+        t_next = (st.time() + step).min(stop);
     }
 
     Ok(result)
@@ -898,26 +467,10 @@ pub fn tran_nr_with_registry_var_opts(
         dev.commit_timestep(&x);
     }
 
-    // Raw physical state: cap voltage and inductor current seeded from DC OP.
-    // `cap_v_prev2` / `ind_i_prev2` hold the state two timesteps back (only
-    // populated once at least one step has been accepted) for GEAR-2.
-    let mut cap_v: IndexMap<String, f64> = IndexMap::new();
-    let mut cap_v_prev2: IndexMap<String, f64> = IndexMap::new();
-    let mut ind_i: IndexMap<String, f64> = IndexMap::new();
-    let mut ind_i_prev2: IndexMap<String, f64> = IndexMap::new();
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor { name, pos, neg, .. } => {
-                let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                cap_v.insert(name.clone(), vc);
-            }
-            Element::Inductor { name, .. } => {
-                ind_i.insert(name.clone(), 0.0);
-            }
-            _ => {}
-        }
-    }
+    // All reactive history — netlist C/L and device-declared branches alike —
+    // in the one representation `crate::reactive` owns.  Physical state, so the
+    // companion can be rebuilt for whatever `h` this step turns out to use.
+    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &devices, &x);
     // Track previous accepted timestep for non-uniform BDF-2 (h_prev_accepted
     // is the step that took us from t_{n-1} to t_n; distinct from h_prev which
     // is the trial step for predictor extrapolation).
@@ -999,66 +552,34 @@ pub fn tran_nr_with_registry_var_opts(
         // Order control: GEAR-2 needs two accepted steps of history.  Demote
         // to BE on the first two steps, after any rejection (history stale),
         // and on extreme step ratios where BDF-2 would amplify noise.
-        let history_ready = h_prev_accepted > 0.0
-            && cap_v.keys().all(|n| cap_v_prev2.contains_key(n))
-            && ind_i.keys().all(|n| ind_i_prev2.contains_key(n));
         let step_ratio = if h_prev_accepted > 0.0 {
             h_actual / h_prev_accepted
         } else {
             1.0
         };
         let use_gear2 = matches!(opts.method, IntegratorMode::Gear)
-            && history_ready
+            && h_prev_accepted > 0.0
+            && reactive.gear2_ready()
             && consecutive_rejects == 0
             && step_ratio > 0.25
             && step_ratio < 4.0;
+        let gear2 = if use_gear2 {
+            Some(h_prev_accepted)
+        } else {
+            None
+        };
+        // Trapezoidal takes its first step with Backward Euler, matching the
+        // fixed-step path — and available here at all only because history is
+        // physical rather than companion-shaped.
+        let step_mode =
+            if h_prev_accepted == 0.0 && matches!(opts.method, IntegratorMode::Trapezoidal) {
+                IntegratorMode::BackwardEuler
+            } else {
+                opts.method
+            };
 
-        // Build companion maps for h_actual from the stored raw state.
-        let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-        let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-        for el in &netlist.elements {
-            match el {
-                Element::Capacitor {
-                    name, capacitance, ..
-                } => {
-                    if let Some(&vc) = cap_v.get(name) {
-                        let stamp = if use_gear2 {
-                            let vc_prev2 = cap_v_prev2.get(name).copied().unwrap_or(vc);
-                            cap_companion_gear2(
-                                *capacitance,
-                                h_actual,
-                                h_prev_accepted,
-                                vc,
-                                vc_prev2,
-                            )
-                        } else {
-                            cap_companion(*capacitance, h_actual, vc)
-                        };
-                        cap_state.insert(name.clone(), stamp);
-                    }
-                }
-                Element::Inductor {
-                    name, inductance, ..
-                } => {
-                    if let Some(&il) = ind_i.get(name) {
-                        let stamp = if use_gear2 {
-                            let il_prev2 = ind_i_prev2.get(name).copied().unwrap_or(il);
-                            ind_companion_gear2(
-                                *inductance,
-                                h_actual,
-                                h_prev_accepted,
-                                il,
-                                il_prev2,
-                            )
-                        } else {
-                            ind_companion(*inductance, h_actual, il)
-                        };
-                        ind_state.insert(name.clone(), stamp);
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Companions for this trial `h`, for every reactive branch at once.
+        reactive.build(&devices, step_mode, h_actual, gear2);
 
         // Predictor: linear extrapolation. Zero-order on the first step
         // (no history) and immediately after crossing a waveform
@@ -1084,8 +605,8 @@ pub fn tran_nr_with_registry_var_opts(
                 &topo,
                 netlist,
                 t_next,
-                &cap_state,
-                &ind_state,
+                &reactive.cap_state,
+                &reactive.ind_state,
                 Some(&plan),
             );
 
@@ -1095,6 +616,16 @@ pub fn tran_nr_with_registry_var_opts(
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
+            // Device-declared reactive branches, same method and order control
+            // as the netlist C/L above — one decision, applied to everything.
+            crate::reactive::stamp_device_branches(
+                &devices,
+                &reactive.dev_state,
+                &mut mat,
+                h_actual,
+                step_mode,
+                gear2,
+            );
 
             topo.stamp_gmin(&mut mat.a, opts.gmin);
 
@@ -1183,46 +714,17 @@ pub fn tran_nr_with_registry_var_opts(
                 None => false,
             };
 
-            // Update raw companion state from accepted solution.
-            // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
-            // prev value so the next step has a valid two-step window.
-            for el in &netlist.elements {
-                match el {
-                    Element::Capacitor { name, pos, neg, .. } => {
-                        if let Some(&vc_prev) = cap_v.get(name) {
-                            cap_v_prev2.insert(name.clone(), vc_prev);
-                        }
-                        let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                        cap_v.insert(name.clone(), vc);
-                    }
-                    Element::Inductor {
-                        name,
-                        pos,
-                        neg,
-                        inductance,
-                    } => {
-                        let vl = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                        let il_prev = ind_i.get(name).copied().unwrap_or(0.0);
-                        // Closed-form current update: i_new = G_eq·v_new + I_hist
-                        // where (G_eq, I_hist) is the companion we just stamped.
-                        let il_new = if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
-                            g_eq * vl + i_hist
-                        } else {
-                            il_prev + (h_actual / inductance) * vl
-                        };
-                        ind_i_prev2.insert(name.clone(), il_prev);
-                        ind_i.insert(name.clone(), il_new);
-                    }
-                    _ => {}
-                }
-            }
             h_prev_accepted = h_actual;
 
             for dev in &mut devices {
                 dev.commit_timestep(&x);
             }
+
+            // Roll every reactive branch's history forward — netlist C/L, the
+            // coupled-pair mutual correction, and device branches, in one call.
+            // Needs neither the method nor `h`: the companions it reads are the
+            // ones that were stamped, so all of that is already folded in.
+            reactive.accept(&devices, &x);
 
             push_timepoint(&mut result, t, &topo, &x);
 
@@ -1425,6 +927,190 @@ mod tests {
             (v_fixed - v_var).abs() < 1e-3,
             "fixed={v_fixed:.6}  var={v_var:.6}"
         );
+    }
+
+    /// The variable-step path used to drop every device-internal reactive
+    /// branch: it never called init/stamp/advance_device_reactive_state, so a
+    /// PN phase shifter's depletion C_j simply wasn't in the matrix.  The
+    /// junction then settled within one timestep instead of over its RC, and
+    /// nothing warned.
+    ///
+    /// Driven through 10 k with a near-open junction (g_pn = 1e-9), the ONLY
+    /// thing setting the settling time is the device's own C_j: with c_j0 = 10 pF
+    /// and a 1 V reverse step, tau ~ 100 ns at zero bias.  Both integrators must
+    /// show that lag; an integrator that drops C_j jumps straight to the final
+    /// value.
+    #[test]
+    fn var_step_includes_device_internal_capacitance() {
+        let src = "* device-internal C_j\n\
+             .optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps_cap L_um=500 V_pi_L=2e-3 g_pn=1e-9 \
+             c_j0=10p v_bi=0.917\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\n\
+             RS src a 10k\n\
+             .tran 5n 400n\n.end\n";
+        let netlist = parse_spice(src).unwrap();
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&netlist.models);
+        let opts = SimOptions::from_netlist(&netlist);
+
+        let fixed = tran_nr_with_registry_opts(&netlist, 5e-9, 400e-9, &registry, &opts).unwrap();
+        let var = tran_nr_with_registry_var_opts(&netlist, 5e-9, 400e-9, &registry, &opts).unwrap();
+
+        // 25 ns after the edge — well inside one tau — the junction must still be
+        // far from its final value in BOTH runs.
+        let vf = fixed.voltage_at("a", 45e-9).unwrap();
+        let vv = var.voltage_at("a", 45e-9).unwrap();
+        let settled = fixed.voltage_at("a", 390e-9).unwrap();
+        // Not exactly -1 V: g_pn plus the diagonal gmin form a slight divider.
+        assert!(
+            (settled + 1.0).abs() < 0.01,
+            "fixed-step should reach essentially the full -1 V eventually, got {settled}"
+        );
+        assert!(
+            vf / settled < 0.5,
+            "fixed-step should be mid-slew at 45 ns, got {vf} of {settled}"
+        );
+        assert!(
+            vv / settled < 0.5,
+            "variable-step dropped the device's C_j: {vv} of {settled} at 45 ns \
+             (fixed-step has {vf}) — the junction settled instantly"
+        );
+        // And the two integrators should agree closely across the whole edge.
+        for &t in &[30e-9, 45e-9, 70e-9, 120e-9, 250e-9] {
+            let (a, b) = (
+                fixed.voltage_at("a", t).unwrap(),
+                var.voltage_at("a", t).unwrap(),
+            );
+            assert!(
+                (a - b).abs() < 0.05,
+                "t={t:e}: fixed={a:.6} var={b:.6} differ by more than 50 mV"
+            );
+        }
+    }
+
+    /// A device-internal reactive branch and an equivalent netlist element are
+    /// the same circuit, so every integrator must produce the same numbers to
+    /// round-off — under every method.
+    ///
+    /// `m_j = 0` makes the PN phase shifter's C_j bias-independent, so
+    /// `fc_pn_ps_cap` with `c_j0 = C` is exactly `fc_pn_ps` (no cap) plus a
+    /// discrete `C` across the same nodes.  This is the strongest statement of
+    /// what device-declared branches are supposed to mean, and it caught two
+    /// real bugs: the variable-step path dropping them entirely, and the
+    /// fixed-step path integrating them with Backward Euler no matter what
+    /// `opts.method` said (a 23 mV, O(h) error on the *default* TR setting).
+    #[test]
+    fn device_branch_equals_equivalent_netlist_element() {
+        const C: &str = "10p";
+        let common = "L_um=500 V_pi_L=2e-3 g_pn=1e-9";
+        let dev = format!(
+            "* device-internal C_j\n.optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps_cap {common} c_j0={C} v_bi=0.917 m_j=0\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\n.tran 5n 300n\n.end\n"
+        );
+        let refr = format!(
+            "* explicit C\n.optical_port lam\n.optical_port psout\n\
+             Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xps lam psout a 0 fc_pn_ps {common}\n\
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\nC1 a 0 {C}\n\
+             .tran 5n 300n\n.end\n"
+        );
+        let (nd, nr) = (parse_spice(&dev).unwrap(), parse_spice(&refr).unwrap());
+
+        for mode in [
+            IntegratorMode::BackwardEuler,
+            IntegratorMode::Trapezoidal,
+            IntegratorMode::Gear,
+        ] {
+            let mut opts = SimOptions::from_netlist(&nd);
+            opts.method = mode;
+            let reg = DeviceRegistry::new();
+
+            for variable_step in [false, true] {
+                let run = |n: &Netlist| {
+                    if variable_step {
+                        tran_nr_with_registry_var_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                    } else {
+                        tran_nr_with_registry_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                    }
+                };
+                let (rd, rr) = (run(&nd), run(&nr));
+                for &t in &[25e-9, 45e-9, 70e-9, 120e-9, 200e-9, 290e-9] {
+                    let (a, b) = (
+                        rd.voltage_at("a", t).unwrap(),
+                        rr.voltage_at("a", t).unwrap(),
+                    );
+                    assert!(
+                        (a - b).abs() < 1e-9,
+                        "{mode:?} variable_step={variable_step} t={t:e}: \
+                         device-internal C gives {a:.9}, explicit C gives {b:.9} — \
+                         the integrator is not treating them as the same circuit"
+                    );
+                }
+                // Sanity: the capacitance is actually doing something, so the
+                // assertion above is not passing on two identical flat lines.
+                let mid = rd.voltage_at("a", 45e-9).unwrap();
+                let end = rd.voltage_at("a", 290e-9).unwrap();
+                assert!(
+                    mid / end < 0.6,
+                    "{mode:?} variable_step={variable_step}: expected an RC lag, \
+                     got {mid} at 45 ns vs {end} settled"
+                );
+            }
+        }
+    }
+
+    /// Any non-zero `K` coupling used to make the variable-step integrator fail
+    /// outright — `NoConvergence` after 150 iterations — because its inductor
+    /// history update used the standalone `i = G_eq·v + I_hist` and dropped the
+    /// mutual term, so the stored current drifted from what was stamped.
+    /// `K=0` ran, `K=0.1` did not, and the same netlist was fine fixed-step.
+    #[test]
+    fn var_step_handles_coupled_inductors() {
+        // L/R = 10 µs on each winding.  Primary is pulsed; the secondary sees
+        // energy only through the mutual term, so it is a direct probe of it.
+        let netlist_for = |k: &str| {
+            parse_spice(&format!(
+                "* transformer\nV1 a1 0 PULSE(0 1 0 1n 1n 1 2)\n\
+                 R1 a1 b1 100\nL1 b1 0 1m\nR2 a2 b2 100\nL2 b2 0 1m\n\
+                 K1 L1 L2 {k}\n.options method=be\n.tran 1u 200u\n.end\n"
+            ))
+            .unwrap()
+        };
+
+        for k in ["0.1", "0.5", "0.8", "0.95"] {
+            let net = netlist_for(k);
+            let reg = DeviceRegistry::new();
+            let opts = SimOptions::from_netlist(&net);
+
+            // Must run at all — this is what regressed.
+            let var = tran_nr_with_registry_var_opts(&net, 1e-6, 200e-6, &reg, &opts)
+                .unwrap_or_else(|e| panic!("k={k} failed under variable-step: {e:?}"));
+            // A fine fixed-step run is the reference; BE is first order, so 200 ns
+            // on a 10 µs tau is ~20x better resolved than the variable-step start.
+            let refr = tran_nr_with_registry_opts(&net, 200e-9, 200e-6, &reg, &opts).unwrap();
+
+            for &t in &[2e-6, 10e-6, 30e-6, 50e-6] {
+                let (a, b) = (
+                    var.voltage_at("b2", t).unwrap(),
+                    refr.voltage_at("b2", t).unwrap(),
+                );
+                assert!(
+                    (a - b).abs() < 0.02,
+                    "k={k} t={t:e}: variable-step V(b2)={a:.6}, fine fixed-step={b:.6}"
+                );
+            }
+            // Not vacuous: the mutual term must actually deliver something.
+            let peak = var.voltage_at("b2", 2e-6).unwrap();
+            let expected = k.parse::<f64>().unwrap() * 0.8; // rough, k-proportional
+            assert!(
+                peak > 0.5 * expected,
+                "k={k}: secondary saw {peak:.6}, expected coupling-proportional transfer"
+            );
+        }
     }
 
     #[test]
