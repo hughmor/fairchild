@@ -16,6 +16,7 @@
 //! no PDK-specific calibration.
 
 pub mod active;
+pub mod awgr;
 pub mod circulator;
 pub mod coupler;
 pub mod detector;
@@ -23,6 +24,7 @@ pub mod grating;
 pub mod laser;
 pub mod mzm;
 pub mod segment;
+pub mod spectrum;
 pub mod splitter;
 pub mod waveguide;
 pub mod wdm;
@@ -35,6 +37,7 @@ pub use active::{
     thermal_rc_phase_shifter, ActiveOpticalDevice, ExprDrive, FullPnDrive, Heater, HeaterRc,
     Injection, OpticalPerturbation, PhotonicActiveModel, PnDrive, WithHeater,
 };
+pub use awgr::NativeAwgr;
 pub use circulator::NativeCirculator;
 pub use coupler::NativeDirectionalCoupler;
 pub use detector::NativePhotodetector;
@@ -42,6 +45,7 @@ pub use grating::NativeGratingCoupler;
 pub use laser::NativeCwLaser;
 pub use mzm::NativeMzm;
 pub use segment::OpticalSegment;
+pub use spectrum::{AwgSpectrum, ChannelGrid, SpectrumTable};
 pub use splitter::NativeSplitter;
 pub use waveguide::NativeWaveguide;
 pub use wdm::{NativeDemux, NativeMux};

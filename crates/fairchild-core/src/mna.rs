@@ -131,19 +131,30 @@ pub struct Pattern {
     pub nnz: usize,
 }
 
+/// What structural footprint one device contributes to [`Pattern`].
+///
+/// A device that only reports the rows it owns gets the conservative clique;
+/// one that implements [`crate::device::Device::stamp_pairs`] declares the
+/// cells it actually touches, which matters once a device owns enough rows for
+/// `O(rows²)` to hurt. See that method for the numbers.
+#[derive(Clone, Debug)]
+pub enum Footprint {
+    /// Every ordered pair drawn from these rows.
+    Clique(Vec<usize>),
+    /// Exactly these `(row, col)` cells.
+    Pairs(Vec<(usize, usize)>),
+}
+
 impl Pattern {
     /// Structural footprint of a netlist plus its device instances.
     ///
-    /// `device_nodes[k]` is every MNA row/column device `k` may touch: its
-    /// resolved terminals plus any extra rows it was bound.  Devices only ever
-    /// stamp within that set (verified in debug builds by
+    /// `device_nodes[k]` is device `k`'s footprint: either every MNA row/column
+    /// it may touch (its resolved terminals plus any extra rows it was bound),
+    /// which becomes a clique, or the exact cells it declared.  Devices only
+    /// ever stamp within their footprint (verified in debug builds by
     /// [`MnaMatrix::debug_assert_covers`]), except for those that report more
     /// via [`crate::device::Device::extra_stamp_rows`].
-    pub fn build(
-        topo: &CircuitTopology,
-        netlist: &Netlist,
-        device_nodes: &[Vec<usize>],
-    ) -> Pattern {
+    pub fn build(topo: &CircuitTopology, netlist: &Netlist, device_nodes: &[Footprint]) -> Pattern {
         let n = topo.size;
         let mut b = PatternBuilder::new(n);
         // `stamp_gmin` floors the diagonal, and a structurally present diagonal
@@ -173,9 +184,18 @@ impl Pattern {
                 _ => {}
             }
         }
-        for nodes in device_nodes {
-            let ids: Vec<Option<usize>> = nodes.iter().map(|&i| Some(i)).collect();
-            b.clique(&ids);
+        for foot in device_nodes {
+            match foot {
+                Footprint::Clique(nodes) => {
+                    let ids: Vec<Option<usize>> = nodes.iter().map(|&i| Some(i)).collect();
+                    b.clique(&ids);
+                }
+                Footprint::Pairs(pairs) => {
+                    for &(r, c) in pairs {
+                        b.touch(r, c);
+                    }
+                }
+            }
         }
         b.finish()
     }
@@ -365,11 +385,7 @@ pub struct StampPlan {
 }
 
 impl StampPlan {
-    pub fn new(
-        topo: &CircuitTopology,
-        netlist: &Netlist,
-        device_nodes: &[Vec<usize>],
-    ) -> StampPlan {
+    pub fn new(topo: &CircuitTopology, netlist: &Netlist, device_nodes: &[Footprint]) -> StampPlan {
         let n_nodes = topo.n_nodes();
         let mut elem_nodes = Vec::with_capacity(netlist.elements.len());
         let mut elem_vi = Vec::with_capacity(netlist.elements.len());

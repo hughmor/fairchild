@@ -696,7 +696,7 @@ The parser dispatches per the centralised `BundleArity` table in
 
 - **`BundleArity::Aware`** (default for photonics): `fc_waveguide`,
   `fc_splitter`, `fc_dcoupler`, `fc_grating_coupler`, `fc_pn_ps`,
-  `fc_thermal_ps`, `fc_photodetector`, `fc_optical_2x2`. The parser
+  `fc_thermal_ps`, `fc_photodetector`, `fc_optical_2x2`, `fc_awgr`. The parser
   flattens every bundle
   into its underlying wires and emits ONE X-element with the combined
   terminal vector; the device's `setup_instance` derives the channel
@@ -1087,14 +1087,36 @@ X<name>  bus  ch_0  ch_1  ...  ch_{N-1}  fc_mux
 | `bus` | bundle, N-channel optical output |
 | `ch_k` (k = 0..N-1) | bundle, single-channel optical input |
 
-No parameters; channel count `N` is inferred from instance arity (number of
-positional nets minus 1).
+Channel count `N` is inferred from instance arity (number of positional nets
+minus 1). All parameters are optional.
 
-**Physics.** Identity routing per channel: `V(bus_k.re) = V(ch_k.re)`,
-`V(bus_k.im) = V(ch_k.im)`, `V(bus_k.λ) = V(ch_k.λ)` for k = 0..N-1.
-There's no wavelength selectivity — this is a topology marker, not an
-AWG. For wavelength-selective combining you'd write a different device
-that conditionally couples based on input wavelength; not in scope yet.
+**Physics.** By default, identity routing per channel: `V(bus_k.re) =
+V(ch_k.re)`, `V(bus_k.im) = V(ch_k.im)`, `V(bus_k.λ) = V(ch_k.λ)` for
+k = 0..N-1 — a topology marker, not a filter.
+
+Setting any parameter below switches on a **diagonal** spectral response:
+channel `k` is scaled by its own passband, evaluated at the wavelength that
+channel actually carries. λ labels are never attenuated.
+
+| Param | Default | Meaning |
+|---|---|---|
+| `il_db` | 0 | insertion loss (flat, if no `fwhm_ghz`) |
+| `lambda0_nm` | `.options lambda_center_nm` | grid anchor (channel 0's centre) |
+| `df_ghz` | 100 | channel spacing (a **frequency** grid) |
+| `fwhm_ghz` | — | passband FWHM; setting it gives each channel a passband |
+| `shape_p` | 1 | 1 = Gaussian, 2–4 = flat-top |
+| `dlambda_dt_pm_per_k` | 0 | thermal grid drift (silica ≈ 11, SOI ≈ 80) |
+| `t_nom_k` | 300.15 | reference temperature for the drift |
+
+```spice
+Xmux bus ch0 ch1 fc_mux il_db=3 fwhm_ghz=40 df_ghz=100
+```
+
+That gets you insertion loss and the penalty a detuned laser pays on the
+passband skirt. What it deliberately does **not** get you is cross-channel
+crosstalk — and for a mux that is not a limitation: the N inputs land in N
+distinct channel slots, so leakage has nowhere to go. See `fc_demux` for the
+case where it *is* a limitation, and `fc_awgr` for the fix.
 
 The parser special-cases `fc_mux` so that (a) the bus and channel
 bundles can have different channel widths without erroring, and (b)
@@ -1112,8 +1134,20 @@ X<name>  bus  ch_0  ch_1  ...  ch_{N-1}  fc_demux
 | `bus` | bundle, N-channel optical input |
 | `ch_k` (k = 0..N-1) | bundle, single-channel optical output |
 
-Symmetric counterpart to `fc_mux`: `V(ch_k.*) = V(bus_k.*)`. Same
-no-wavelength-selectivity caveat.
+Symmetric counterpart to `fc_mux`: `V(ch_k.*) = V(bus_k.*)`, with the same
+optional diagonal response and the same parameter list.
+
+**Why a demux has no crosstalk parameter.** A real demux does leak channel `k`
+into output port `j ≠ k` — but an `fc_demux` output port carries a *single*
+channel, so representing that leak would mean adding two different carriers
+into one complex envelope. That is not allowed: `|a_j + a_k|²` would contribute
+a static beat term where the physical ~100 GHz beat is filtered out by any real
+photodiode, injecting a spurious DC offset into every downstream detector.
+Fields may only be summed within one channel slot.
+
+For a demux **with** crosstalk, use `fc_awgr` with `N−1` input ports left dark.
+Its output ports are N-channel buses, which is exactly the somewhere the
+leakage needs to live.
 
 Typical WDM topology:
 
@@ -1137,6 +1171,111 @@ Xpd1 d1 v_pd1 0 fc_photodetector responsivity=0.8
 The `bus` and `out_bus` bundles each carry 2 channels; `Xwg` replicates
 into 2 parallel single-channel waveguides automatically because both
 its input and output bundles are 2-channel.
+
+### `fc_awgr` — N×N arrayed-waveguide grating router
+
+```
+X<name>  in_0 … in_{N-1}  out_0 … out_{N-1}  fc_awgr  [params]
+```
+
+| Port | Role |
+|---|---|
+| `in_i` (i = 0..N-1) | bundle, **N-channel** optical input |
+| `out_j` (j = 0..N-1) | bundle, **N-channel** optical output |
+
+Every one of the `2N` ports must be declared with `N` channels, giving
+`2·wpc·N²` terminals (`wpc` = 3, or 5 bidirectional — which is rejected, see
+below). `N` is recovered as `√(len / (2·wpc))` and must come out exact.
+
+**Routing.** Input port `i` channel `k` leaves on output port `(i + k) mod N`,
+still in channel slot `k` — the cyclic wavelength shift that makes an AWGR an
+all-to-all interconnect: every output receives exactly one wavelength from
+every input, with no switching. Taking channel slot index ≡ wavelength index,
+the whole device is one complex matrix per slot:
+
+```
+out_j[k] = Σ_i  t_ij(λ_{i,k}) · in_i[k]
+```
+
+Both crosstalk mechanisms live inside that single form, which is why this
+device can model crosstalk and `fc_demux` cannot: wrong-*port* crosstalk
+arrives at the same wavelength, so it lands in the same slot and coherently
+sums with the wanted signal; wrong-*wavelength* crosstalk lands in its own slot
+and stays separate. Neither path ever mixes carriers.
+
+**Modes**, chosen by which parameters are present rather than a mode string:
+
+- **ideal** — nothing set. The exact cyclic permutation, lossless. Routes by
+  slot index and deliberately does *not* consult the grid, so an off-grid comb
+  still routes rather than going silently dark.
+- **gauss** — `fwhm_ghz > 0`. Super-Gaussian passbands on a periodic frequency
+  grid, floored by the crosstalk spec.
+- **table** — measured `N×N` spectra from CSV, via a `.model` card.
+
+| Param | Default | Meaning |
+|---|---|---|
+| `lambda0_nm` | `.options lambda_center_nm` | grid anchor: centre of the `(j−i) mod N == 0` pairs |
+| `df_ghz` | 100 | channel spacing (a **frequency** grid — an AWG is periodic in f) |
+| `fsr_ghz` | `N·df_ghz` | free spectral range; the default *is* the cyclic condition |
+| `fwhm_ghz` | — | passband FWHM; positive selects gauss mode, 0 stays ideal |
+| `shape_p` | 1 | 1 = Gaussian, 2–4 = flat-top (MMI-input AWGs) |
+| `il_db` | 3 (gauss) / 0 (ideal) | peak insertion loss |
+| `il_tilt_db` | 0 | extra loss at the outermost channel vs the centre one |
+| `xt_adj_db` | −30 | adjacent-channel crosstalk floor |
+| `xt_bg_db` | −40 | non-adjacent crosstalk floor |
+| `dlambda_dt_pm_per_k` | 0 | thermal grid drift (silica ≈ 11, SOI ≈ 80) |
+| `t_nom_k` | 300.15 | reference temperature for the drift |
+| `lambda_src` | 0 | which input port's λ tags the outputs mirror |
+
+The crosstalk floors are not decoration: a pure Gaussian tail three channels
+out is below −1000 dB, whereas a fabricated AWG floors at −25…−35 dB from phase
+errors in the array. `max(gaussian, floor)` reproduces the datasheet shape from
+the two numbers datasheets actually quote.
+
+```spice
+.optical_port in0 8
+* … in1 … in7, out0 … out7 …
+Xr in0 in1 in2 in3 in4 in5 in6 in7  out0 out1 out2 out3 out4 out5 out6 out7
++   fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30
+.options vntol=1e-14 reltol=1e-12
+```
+
+**Set a tight `vntol`.** The λ wires carry ~1.55e-6, so the default
+`vntol = 1e-6` is the same order as the entire quantity: Newton's step test can
+be satisfied while λ is still ~10 pm out, and 10 pm is a real detuning for a
+40 GHz passband. The router then reports the transmission for the wrong
+wavelength with no error. At N ≤ 5 the first step lands accurately enough that
+it never shows, which is what makes it a trap — measured at N = 8, the routed
+output reads 0 instead of 1.109 under defaults. Put `.options vntol=1e-14
+reltol=1e-12` in any deck containing an `fc_awgr`.
+
+**Measured spectra.** The file path is a string and X-line instance params are
+numeric, so a measured router comes in through a `.model` card:
+
+```spice
+.model awg8 fc_awgr sfile="awgr8.csv"
+Xr in0 … in7 out0 … out7 awg8
+```
+
+CSV layout is `wavelength_nm` then `t_<in>_<out>_db` per pair, with optional
+`t_<in>_<out>_deg`; rows may be unordered and missing pairs read as dark.
+
+**Also a mux and a demux.** A demux *is* this device with `N−1` input ports
+left dark; a mux is it with `N−1` output ports left dark. Not a workaround —
+the same star-coupler-plus-array silicon used three ways, which is why an AWG
+is cyclic in the first place. Dark ports contribute nothing regardless of their
+λ tags.
+
+**Modelling scope.** Transmission is a static coefficient evaluated at each
+channel's carrier — the exact narrowband limit, with relative field error
+`≈ 2·ln2·(B/FWHM)²` for modulation bandwidth `B`. Insertion loss, detuning
+penalty, crosstalk (including its coherent accumulation) and thermal drift are
+exact; sideband shaping/ISI, PM→AM off a detuned slope, and channel skew are
+not modelled. Analytic modes are purely real, so crosstalk terms all add in
+phase — the pessimistic bound. Bidirectional propagation and `tau_s` latency
+are rejected/absent. Full discussion, plus the measured cost table, in
+`docs/photonic_awgr.md`; worked example in
+`examples/photonic/native_awgr_router.py`.
 
 ### `fc_thermal_ps` — thermo-optic phase shifter
 

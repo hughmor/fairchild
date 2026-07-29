@@ -8,10 +8,10 @@ use crate::models::{
     expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
     pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
-    thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeCirculator,
-    NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler, NativeMux,
-    NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
-    ShockleyDiode,
+    thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeAwgr,
+    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
+    NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
+    ShockleyDiode, SpectrumTable,
 };
 
 /// The set of instance parameters from an `X…` element line, threaded into a
@@ -317,6 +317,47 @@ impl DeviceRegistry {
         for card in cards {
             let kind = card.kind.to_lowercase();
 
+            // An AWG router backed by measured spectra. The file path is a
+            // string, and an X-line's instance params are numeric only, so a
+            // `.model` card is the only route in:
+            //
+            //   .model awg8 fc_awgr sfile="awgr8.csv"
+            //   Xr in0 … in7 out0 … out7 awg8
+            //
+            // The table is read once here, not per instance.
+            if kind == "fc_awgr" {
+                let path = card
+                    .expr_params
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("sfile"))
+                    .map(|(_, v)| v.clone());
+                let numeric: Vec<(String, f64)> = card.params.clone();
+                let name = card.name.clone();
+                self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
+                    let mut d = NativeAwgr::new();
+                    d.setup_model(ctx);
+                    d.setup_instance(terminals, ctx);
+                    if let Some(p) = &path {
+                        match std::fs::read_to_string(p)
+                            .map_err(|e| e.to_string())
+                            .and_then(|t| SpectrumTable::from_csv(&t, d.n_ports()))
+                        {
+                            Ok(table) => d.set_table(table),
+                            Err(e) => eprintln!(
+                                "warning: fc_awgr model '{name}' could not load sfile=\"{p}\" \
+                                 ({e}); falling back to the analytic response"
+                            ),
+                        }
+                    }
+                    for (k, v) in &numeric {
+                        d.set_real_param(k, *v);
+                    }
+                    ps.apply(&mut d);
+                    Box::new(d) as Box<dyn Device>
+                });
+                continue;
+            }
+
             // Tier-1: a declarative expression-driven phase shifter. The
             // constitutive maps live in the card's expr_params; numeric params
             // (geometry, g_pn) apply on top.
@@ -470,6 +511,7 @@ impl DeviceRegistry {
         self.register_default::<NativeMux>("fc_mux");
         self.register_default::<NativeDemux>("fc_demux");
         self.register_default::<NativeOptical2x2>("fc_optical_2x2");
+        self.register_default::<NativeAwgr>("fc_awgr");
 
         // Active phase shifters (built by constructors → ActiveOpticalDevice).
         self.register_ctor("fc_thermal_ps", thermal_phase_shifter);
