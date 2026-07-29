@@ -43,15 +43,14 @@ use crate::tran::IntegratorMode;
 
 /// A transient analysis paused between timesteps.
 ///
-/// The step size is fixed for the lifetime of the stepper — the reactive
-/// companion models (and the device-internal ones) are built for one `h` and
-/// advanced incrementally from it.
+/// The step size is fixed for the lifetime of the stepper.
 ///
-// ponytail: fixed h only. Landing on an arbitrary externally-chosen event time
-// needs companions rebuilt from raw state for a new h — the machinery is in
-// `tran::tran_nr_with_registry_var_opts` (see its `cap_v` / `ind_i` raw maps).
-// Lift that in if the digital side ever needs off-grid event times; a
-// clock-locked host does not.
+// ponytail: fixed h only — but no longer for any deep reason.  Reactive history
+// is physical now (`crate::reactive`), so companions rebuild correctly for any
+// `h`; landing on an arbitrary externally-chosen event time needs only a
+// `step_to(h)` that varies it, plus a decision about what the LTE controller
+// should do with a host-imposed step.  Add it when a digital side actually
+// needs off-grid event times; a clock-locked host does not.
 pub struct TranStepper {
     /// Owned so `set_source` can rewrite source waveforms between steps.
     netlist: Netlist,

@@ -25,8 +25,12 @@ pub enum IntegratorMode {
     /// Trapezoidal Rule (TR / BDF-2-like): second-order, A-stable, minimal overhead.
     Trapezoidal,
     /// GEAR / BDF-2: second-order, L-stable, two-step history.  First step and
-    /// the step after any rejection demote to BE (order control 1↔2).  Applies
-    /// to linear L/C companions; device-internal reactive terms remain BDF-1.
+    /// the step after any rejection demote to BE (order control 1↔2).
+    ///
+    /// Applies uniformly to netlist L/C and device-declared branches — every
+    /// method does, since `crate::reactive` interprets `mode` in one place.
+    /// Only the variable-step integrator carries the two-timepoint history
+    /// BDF-2 needs, so the fixed-step path demotes GEAR to BE throughout.
     Gear,
 }
 
