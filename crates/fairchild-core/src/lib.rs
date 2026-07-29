@@ -13,6 +13,7 @@ pub mod netlist_edit;
 pub mod newton;
 pub mod noise;
 pub mod options;
+pub mod reactive;
 pub mod sanity;
 pub mod solver;
 pub mod tran;

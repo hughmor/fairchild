@@ -8,14 +8,10 @@ use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, ReactiveKind};
+use crate::device::{Device, EvalFlags};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{
-    cap_companion, cap_companion_be_to_tr, cap_companion_gear2, cap_companion_tr_advance,
-    ind_companion, ind_companion_be_to_tr, ind_companion_gear2, ind_companion_tr_advance,
-    stamp_netlist, CircuitTopology, MnaMatrix,
-};
+use crate::mna::{stamp_netlist, CircuitTopology};
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::solver::lu_solve;
@@ -184,30 +180,30 @@ fn run_tran_mode(
     // Store the true IC at t=0 before any integration.
     push_timepoint(&mut result, 0.0, &topo, &x0);
 
-    // Initialize companion state from IC.
-    let (mut cap_state, mut ind_state) = init_companions(netlist, &topo, step, &x0, mode);
+    // No devices on this path — it is the linear-only integrator — but the
+    // reactive history is the same shared machinery the nonlinear ones use.
+    let no_devices: Vec<Box<dyn Device>> = Vec::new();
+    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &no_devices, &x0);
 
     let mut t = step;
     let mut x;
-    let mut first_tr = true;
+    let mut first_step = true;
     loop {
-        let mat = stamp_netlist(&topo, netlist, t, &cap_state, &ind_state);
+        // TR takes its first step with BE, for stability across t=0.
+        let step_mode = if first_step && matches!(mode, IntegratorMode::Trapezoidal) {
+            IntegratorMode::BackwardEuler
+        } else {
+            mode
+        };
+        reactive.build(&no_devices, step_mode, step, None);
+        let mat = stamp_netlist(&topo, netlist, t, &reactive.cap_state, &reactive.ind_state);
         x = lu_solve(&mat.a, &mat.b)?;
         push_timepoint(&mut result, t, &topo, &x);
         if t >= stop {
             break;
         }
-        advance_companions(
-            netlist,
-            &topo,
-            step,
-            &x,
-            &mut cap_state,
-            &mut ind_state,
-            mode,
-            first_tr,
-        );
-        first_tr = false;
+        reactive.accept(&no_devices, &x);
+        first_step = false;
         t = (t + step).min(stop);
     }
 
@@ -217,322 +213,6 @@ fn run_tran_mode(
 // ---------------------------------------------------------------------------
 // Helpers shared by run_tran and tran_nr
 // ---------------------------------------------------------------------------
-
-/// Companion state maps for capacitors and inductors: (Geq, Ieq) per element name.
-pub(crate) type CompanionStatePair = (IndexMap<String, (f64, f64)>, IndexMap<String, (f64, f64)>);
-
-/// Initialise capacitor and inductor companion state from a solution vector.
-///
-/// For capacitors: V_C_init = V(pos) - V(neg) from the provided x (typically the DC OP).
-/// For inductors: I_L_init = 0 (inductors are open-circuit in the DC solver).
-pub(crate) fn init_companions(
-    netlist: &Netlist,
-    topo: &CircuitTopology,
-    step: f64,
-    x: &[f64],
-    _mode: IntegratorMode,
-) -> CompanionStatePair {
-    let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor {
-                name,
-                pos,
-                neg,
-                capacitance,
-            } => {
-                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                // TR always begins with a BE step for stability at discontinuities.
-                cap_state.insert(name.clone(), cap_companion(*capacitance, step, vc));
-            }
-            Element::Inductor {
-                name, inductance, ..
-            } => {
-                // TR always begins with a BE step for stability at discontinuities.
-                ind_state.insert(name.clone(), ind_companion(*inductance, step, 0.0));
-            }
-            _ => {}
-        }
-    }
-    (cap_state, ind_state)
-}
-
-/// Raw physical history of one device-declared reactive branch.
-///
-/// The variable-step integrator rebuilds companions from this for every trial
-/// `h`, so it must hold *physical* state rather than a `(G_eq, I_hist)` pair —
-/// the same reason the built-in path keeps `cap_v` / `ind_i`.
-#[derive(Clone, Copy)]
-pub(crate) struct BranchHistory {
-    /// V_C (capacitor) or I_L (inductor) at the last accepted timepoint.
-    pub state: f64,
-    /// The same one timepoint further back.  `None` until two steps have been
-    /// accepted, which is what gates BDF-2 for this branch.
-    pub state_prev2: Option<f64>,
-    /// C or L as of the last accepted timepoint.  Stored rather than re-read
-    /// because it is bias-dependent: after a rejected step the device's cache
-    /// reflects the rejected iterate, which would corrupt the history term.
-    pub value: f64,
-}
-
-/// Norton conductance of a reactive branch's companion — the single place that
-/// decides what an integration method means for `G_eq`.
-///
-/// `gear2_h_prev` is `Some(h_prev)` only when BDF-2 is active for this step
-/// (two accepted timepoints of history, mode is GEAR, no recent rejection).
-/// Otherwise GEAR demotes to BE, which is standard order control.
-///
-/// Only device-declared branches need this: their `value` is bias-dependent and
-/// re-queried every NR iteration, so `G_eq` must be recomputed rather than read
-/// from stored state (a netlist C/L carries a constant `G_eq` in its state pair).
-pub(crate) fn companion_conductance(
-    kind: ReactiveKind,
-    mode: IntegratorMode,
-    value: f64,
-    h: f64,
-    gear2_h_prev: Option<f64>,
-) -> f64 {
-    let v = value.max(1e-30);
-    // Both GEAR-2 companions are linear in the branch value, so the BDF-2
-    // coefficient factors out of `cap_companion_gear2` / `ind_companion_gear2`
-    // exactly.  Keeping that here means the stamp never has to know which
-    // formula produced the history it is pairing with.
-    if let (IntegratorMode::Gear, Some(h_prev)) = (mode, gear2_h_prev) {
-        let rho = h / h_prev;
-        return match kind {
-            ReactiveKind::Capacitor => v * (1.0 + 2.0 * rho) / (h * (1.0 + rho)),
-            ReactiveKind::Inductor => h * (1.0 + rho) / (v * (1.0 + 2.0 * rho)),
-        };
-    }
-    match (kind, mode) {
-        (ReactiveKind::Capacitor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => v / h,
-        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) => 2.0 * v / h,
-        (ReactiveKind::Inductor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => h / v,
-        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) => h / (2.0 * v),
-    }
-}
-
-/// Companion for one device-declared branch at a trial step size, from raw
-/// history.  BE / TR are not offered here: their state is only valid while `h`
-/// is constant, and this exists for the integrator that rescales `h`.
-pub(crate) fn companion_from_history(
-    kind: ReactiveKind,
-    hist: BranchHistory,
-    h: f64,
-    gear2_h_prev: Option<f64>,
-) -> (f64, f64) {
-    match (kind, gear2_h_prev, hist.state_prev2) {
-        (ReactiveKind::Capacitor, Some(h_prev), Some(prev2)) => {
-            cap_companion_gear2(hist.value, h, h_prev, hist.state, prev2)
-        }
-        (ReactiveKind::Inductor, Some(h_prev), Some(prev2)) => {
-            ind_companion_gear2(hist.value, h, h_prev, hist.state, prev2)
-        }
-        (ReactiveKind::Capacitor, _, _) => cap_companion(hist.value, h, hist.state),
-        (ReactiveKind::Inductor, _, _) => ind_companion(hist.value, h, hist.state),
-    }
-}
-
-/// Advance one reactive branch's companion past a solved timestep — the single
-/// place that decides what `mode` means for a companion model.
-///
-/// `prev` is the `(G_eq, I_hist)` that was stamped for the step just solved,
-/// `value` the branch's C or L at the new operating point, and `across` the
-/// branch voltage from the converged solution.
-///
-/// Shared by netlist C/L and device-declared branches.  For a netlist element
-/// `value` is constant, so `companion_conductance` reproduces `prev.0` exactly
-/// and this is bit-for-bit what the hand-written match used to do.  For a
-/// device branch with bias-dependent C it generalises correctly: the TR
-/// recursion `I_hist' = 2·G'·v − I_hist` needs the conductance of the step
-/// being *entered*, which is not `prev.0` once C moves.
-pub(crate) fn advance_companion(
-    kind: ReactiveKind,
-    mode: IntegratorMode,
-    first_tr: bool,
-    value: f64,
-    h: f64,
-    prev: (f64, f64),
-    across: f64,
-) -> (f64, f64) {
-    let (g_prev, i_hist) = prev;
-    match (kind, mode) {
-        (ReactiveKind::Capacitor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => {
-            cap_companion(value, h, across)
-        }
-        // The BE→TR transition recovers i_C from the BE companion; afterwards the
-        // TR recursion carries it.
-        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) if first_tr => {
-            cap_companion_be_to_tr(g_prev, i_hist, across)
-        }
-        (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) => cap_companion_tr_advance(
-            companion_conductance(kind, mode, value, h, None),
-            i_hist,
-            across,
-        ),
-        (ReactiveKind::Inductor, IntegratorMode::BackwardEuler | IntegratorMode::Gear) => {
-            // Closed-form current update from the companion we stamped.
-            let il = g_prev * across + i_hist;
-            ind_companion(value, h, il)
-        }
-        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) if first_tr => {
-            ind_companion_be_to_tr(g_prev, i_hist, across)
-        }
-        (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) => ind_companion_tr_advance(
-            companion_conductance(kind, mode, value, h, None),
-            i_hist,
-            across,
-        ),
-    }
-}
-
-/// Advance companion state: read post-step voltages/currents from x, update state maps.
-///
-/// `first_tr` — true only on the first advance when mode is TR; performs the BE→TR
-/// transition that seeds the TR with correct initial capacitor/inductor currents.
-pub(crate) fn advance_companions(
-    netlist: &Netlist,
-    topo: &CircuitTopology,
-    step: f64,
-    x: &[f64],
-    cap_state: &mut IndexMap<String, (f64, f64)>,
-    ind_state: &mut IndexMap<String, (f64, f64)>,
-    mode: IntegratorMode,
-    first_tr: bool,
-) {
-    // Snapshot i_hist values BEFORE the main loop advances them.
-    // Needed by the K-element post-pass which must read old history.
-    use std::collections::HashMap;
-    let i_hist_snapshot: HashMap<String, f64> = ind_state
-        .iter()
-        .map(|(k, &(_, ih))| (k.clone(), ih))
-        .collect();
-
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor {
-                name,
-                pos,
-                neg,
-                capacitance,
-            } => {
-                let vc = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = advance_companion(
-                    ReactiveKind::Capacitor,
-                    mode,
-                    first_tr,
-                    *capacitance,
-                    step,
-                    cap_state[name],
-                    vc,
-                );
-                cap_state.insert(name.clone(), next);
-            }
-            Element::Inductor {
-                name,
-                pos,
-                neg,
-                inductance,
-            } => {
-                let vl = topo.node_voltage(pos, x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, x).unwrap_or(0.0);
-                let next = advance_companion(
-                    ReactiveKind::Inductor,
-                    mode,
-                    first_tr,
-                    *inductance,
-                    step,
-                    ind_state[name],
-                    vl,
-                );
-                ind_state.insert(name.clone(), next);
-            }
-            _ => {}
-        }
-    }
-
-    // Post-pass: correct ind_state for coupled inductor pairs (K elements).
-    //
-    // The main loop above used the standalone formula IL = G_eq*VL + I_hist.
-    // For coupled pairs we need:
-    //   IL1 = G11*VL1 + G12*VL2 + I_hist1_old
-    //   IL2 = G12*VL1 + G22*VL2 + I_hist2_old
-    //
-    // We use i_hist_snapshot (old values) to avoid reading partially-updated state.
-    //
-    // K correction is only valid for BE/Gear.  In TR mode the companion update
-    // uses the trapezoidal formula (ind_companion_tr_advance) whose state is
-    // incompatible with the BE-derived G11/G22/G12 stamps.  Silently skipping
-    // avoids wrong numbers; a proper TR K correction is a future TODO.
-    if matches!(mode, IntegratorMode::BackwardEuler | IntegratorMode::Gear) {
-        let mut ind_vals_local: HashMap<String, f64> = HashMap::new();
-        for el in &netlist.elements {
-            if let Element::Inductor {
-                name, inductance, ..
-            } = el
-            {
-                ind_vals_local.insert(name.clone(), *inductance);
-            }
-        }
-
-        for el in &netlist.elements {
-            if let Element::CoupledInductors {
-                l1, l2, coupling, ..
-            } = el
-            {
-                let Some(&val1) = ind_vals_local.get(l1) else {
-                    continue;
-                };
-                let Some(&val2) = ind_vals_local.get(l2) else {
-                    continue;
-                };
-                // g_eq1 after the main loop advance = h/val1 (unchanged by the main loop
-                // since ind_companion preserves the g_eq formula).
-                let Some(&(g_eq1, _)) = ind_state.get(l1) else {
-                    continue;
-                };
-                let Some(&(g_eq2, _)) = ind_state.get(l2) else {
-                    continue;
-                };
-                let i_hist1 = i_hist_snapshot.get(l1).copied().unwrap_or(0.0);
-                let i_hist2 = i_hist_snapshot.get(l2).copied().unwrap_or(0.0);
-
-                // Find terminal nodes for voltage lookup.
-                let vl1 = {
-                    let (pos1, neg1) = find_inductor_terminals_by_name(netlist, l1);
-                    topo.node_voltage(pos1, x).unwrap_or(0.0)
-                        - topo.node_voltage(neg1, x).unwrap_or(0.0)
-                };
-                let vl2 = {
-                    let (pos2, neg2) = find_inductor_terminals_by_name(netlist, l2);
-                    topo.node_voltage(pos2, x).unwrap_or(0.0)
-                        - topo.node_voltage(neg2, x).unwrap_or(0.0)
-                };
-
-                let _ = g_eq2; // both inductors share the step; g_eq1 sets the scale
-                let Some((il1, il2)) = coupled_inductor_currents(
-                    val1,
-                    val2,
-                    *coupling,
-                    g_eq1 * val1, // conductance scale the stamp used
-                    vl1,
-                    vl2,
-                    i_hist1,
-                    i_hist2,
-                ) else {
-                    continue; // k ≈ 1: degenerate, matches the stamper
-                };
-
-                // Overwrite with corrected currents.
-                ind_state.insert(l1.clone(), ind_companion(val1, step, il1));
-                ind_state.insert(l2.clone(), ind_companion(val2, step, il2));
-            }
-        }
-    } // end if BackwardEuler | Gear
-}
 
 /// Currents through a coupled inductor pair after a solved step.
 ///
@@ -573,139 +253,6 @@ pub(crate) fn coupled_inductor_currents(
         g11 * vl1 + g12 * vl2 + i_hist1,
         g12 * vl1 + g22 * vl2 + i_hist2,
     ))
-}
-
-/// Find the (pos, neg) terminal names for a named inductor — tran.rs variant.
-fn find_inductor_terminals_by_name<'a>(netlist: &'a Netlist, name: &str) -> (&'a str, &'a str) {
-    for el in &netlist.elements {
-        if let Element::Inductor {
-            name: n, pos, neg, ..
-        } = el
-        {
-            if n == name {
-                return (pos, neg);
-            }
-        }
-    }
-    panic!("coupled inductor '{name}' not found in netlist")
-}
-
-/// Seed device-internal reactive-branch companion state from the DC OP.
-///
-/// For each device, queries `reactive_branches()` once and computes the
-/// initial (G_eq, I_hist) using the DC-OP voltage across the branch's
-/// (pos, neg) terminals.  Returned as `[dev_idx][branch_idx] -> (G_eq, I_hist)`.
-/// Voltage across a device-declared reactive branch, read from a solution vector.
-pub(crate) fn branch_voltage(br: &crate::device::ReactiveBranchSpec, x: &[f64]) -> f64 {
-    match (br.pos, br.neg) {
-        (Some(p), Some(n)) => x[p] - x[n],
-        (Some(p), None) => x[p],
-        (None, Some(n)) => -x[n],
-        (None, None) => 0.0,
-    }
-}
-
-pub(crate) fn init_device_reactive_state(
-    devices: &[Box<dyn Device>],
-    x: &[f64],
-    step: f64,
-    _mode: IntegratorMode,
-) -> Vec<Vec<(f64, f64)>> {
-    let mut out = Vec::with_capacity(devices.len());
-    for dev in devices {
-        let branches = dev.reactive_branches();
-        let mut dev_states = Vec::with_capacity(branches.len());
-        for br in &branches {
-            let v = branch_voltage(br, x);
-            // TR always begins with a BE step for stability at discontinuities
-            // — mirrors the built-in Element::Capacitor handling.
-            let companion = match br.kind {
-                ReactiveKind::Capacitor => cap_companion(br.value, step, v),
-                ReactiveKind::Inductor => ind_companion(br.value, step, 0.0),
-            };
-            dev_states.push(companion);
-        }
-        out.push(dev_states);
-    }
-    out
-}
-
-/// Stamp the companion-model contributions of every device-internal
-/// reactive branch into `mat`.  Called inside the NR loop, AFTER each
-/// device's `load_jacobian_tran` (so the device's eval cache reflects the
-/// current iterate before the integrator re-queries the value).
-pub(crate) fn stamp_device_reactive_companions(
-    devices: &[Box<dyn Device>],
-    state: &[Vec<(f64, f64)>],
-    mat: &mut MnaMatrix,
-    step: f64,
-    mode: IntegratorMode,
-    gear2_h_prev: Option<f64>,
-) {
-    for (dev_idx, dev) in devices.iter().enumerate() {
-        let branches = dev.reactive_branches();
-        for (br_idx, br) in branches.iter().enumerate() {
-            // Re-compute G_eq using the CURRENT (per-NR-iter) device value, but
-            // reuse I_hist from the previous timestep.  With a bias-dependent C
-            // that is the charge-conserving form: i_C = C_new·v_new/h − C_old·v_old/h.
-            let (_g_old, i_hist) = state[dev_idx][br_idx];
-            let g_eq = companion_conductance(br.kind, mode, br.value, step, gear2_h_prev);
-            // Stamp G_eq between pos and neg (resistor pattern) and inject
-            // ±I_hist into the corresponding KCL rows.  For an inductor the
-            // current is i = G_eq · v + I_hist (history adds, doesn't subtract).
-            let i_sign = match br.kind {
-                ReactiveKind::Capacitor => 1.0,
-                ReactiveKind::Inductor => -1.0,
-            };
-            if let Some(p) = br.pos {
-                mat.a[p][p] += g_eq;
-                if let Some(n) = br.neg {
-                    mat.a[p][n] -= g_eq;
-                }
-                mat.b[p] += i_sign * i_hist;
-            }
-            if let Some(n) = br.neg {
-                mat.a[n][n] += g_eq;
-                if let Some(p) = br.pos {
-                    mat.a[n][p] -= g_eq;
-                }
-                mat.b[n] -= i_sign * i_hist;
-            }
-        }
-    }
-}
-
-/// Advance the device-internal reactive companion state after a successful
-/// timestep.  Reads V_C / I_L from the converged `x` and computes the next
-/// (G_eq, I_hist) using the device's reported value at the new operating
-/// point (already updated via `commit_timestep` + the next NR loop's eval).
-///
-/// Goes through the same [`advance_companion`] as netlist C/L, so a device's
-/// internal capacitance is integrated with the method the user asked for
-/// instead of always Backward Euler.
-pub(crate) fn advance_device_reactive_state(
-    devices: &[Box<dyn Device>],
-    x: &[f64],
-    state: &mut [Vec<(f64, f64)>],
-    step: f64,
-    mode: IntegratorMode,
-    first_tr: bool,
-) {
-    for (dev_idx, dev) in devices.iter().enumerate() {
-        let branches = dev.reactive_branches();
-        for (br_idx, br) in branches.iter().enumerate() {
-            let v = branch_voltage(br, x);
-            state[dev_idx][br_idx] = advance_companion(
-                br.kind,
-                mode,
-                first_tr,
-                br.value,
-                step,
-                state[dev_idx][br_idx],
-                v,
-            );
-        }
-    }
 }
 
 /// Append one time-point to a TranResult.
@@ -916,63 +463,10 @@ pub fn tran_nr_with_registry_var_opts(
         dev.commit_timestep(&x);
     }
 
-    // Raw physical state: cap voltage and inductor current seeded from DC OP.
-    // `cap_v_prev2` / `ind_i_prev2` hold the state two timesteps back (only
-    // populated once at least one step has been accepted) for GEAR-2.
-    let mut cap_v: IndexMap<String, f64> = IndexMap::new();
-    let mut cap_v_prev2: IndexMap<String, f64> = IndexMap::new();
-    let mut ind_i: IndexMap<String, f64> = IndexMap::new();
-    let mut ind_i_prev2: IndexMap<String, f64> = IndexMap::new();
-    for el in &netlist.elements {
-        match el {
-            Element::Capacitor { name, pos, neg, .. } => {
-                let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                    - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                cap_v.insert(name.clone(), vc);
-            }
-            Element::Inductor { name, .. } => {
-                ind_i.insert(name.clone(), 0.0);
-            }
-            _ => {}
-        }
-    }
-    // Inductance lookup for the coupled-pair post-pass.
-    let ind_l: IndexMap<String, f64> = netlist
-        .elements
-        .iter()
-        .filter_map(|el| match el {
-            Element::Inductor {
-                name, inductance, ..
-            } => Some((name.clone(), *inductance)),
-            _ => None,
-        })
-        .collect();
-
-    // Same, for device-internal reactive branches (depletion / diffusion C on a
-    // PN phase shifter, parasitics on a PD, …).  Indexed `[device][branch]`,
-    // parallel to that device's `reactive_branches()` order.
-    //
-    // Raw state, NOT the `(G_eq, I_hist)` pair the fixed-step path carries: `h`
-    // changes every step here, so the companion has to be rebuilt from physical
-    // state for each trial `h` — exactly as `cap_v` / `ind_i` above.
-    let mut dev_br_raw: Vec<Vec<BranchHistory>> = devices
-        .iter()
-        .map(|dev| {
-            dev.reactive_branches()
-                .iter()
-                .map(|br| BranchHistory {
-                    // Inductors start from zero current, matching the built-in
-                    // `ind_i` seeding and `init_device_reactive_state`.
-                    state: match br.kind {
-                        ReactiveKind::Inductor => 0.0,
-                        ReactiveKind::Capacitor => branch_voltage(br, &x),
-                    },
-                    state_prev2: None,
-                    value: br.value,
-                })
-                .collect()
-        })
-        .collect();
+    // All reactive history — netlist C/L and device-declared branches alike —
+    // in the one representation `crate::reactive` owns.  Physical state, so the
+    // companion can be rebuilt for whatever `h` this step turns out to use.
+    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &devices, &x);
     // Track previous accepted timestep for non-uniform BDF-2 (h_prev_accepted
     // is the step that took us from t_{n-1} to t_n; distinct from h_prev which
     // is the trial step for predictor extrapolation).
@@ -1054,66 +548,34 @@ pub fn tran_nr_with_registry_var_opts(
         // Order control: GEAR-2 needs two accepted steps of history.  Demote
         // to BE on the first two steps, after any rejection (history stale),
         // and on extreme step ratios where BDF-2 would amplify noise.
-        let history_ready = h_prev_accepted > 0.0
-            && cap_v.keys().all(|n| cap_v_prev2.contains_key(n))
-            && ind_i.keys().all(|n| ind_i_prev2.contains_key(n));
         let step_ratio = if h_prev_accepted > 0.0 {
             h_actual / h_prev_accepted
         } else {
             1.0
         };
         let use_gear2 = matches!(opts.method, IntegratorMode::Gear)
-            && history_ready
+            && h_prev_accepted > 0.0
+            && reactive.gear2_ready()
             && consecutive_rejects == 0
             && step_ratio > 0.25
             && step_ratio < 4.0;
+        let gear2 = if use_gear2 {
+            Some(h_prev_accepted)
+        } else {
+            None
+        };
+        // Trapezoidal takes its first step with Backward Euler, matching the
+        // fixed-step path — and available here at all only because history is
+        // physical rather than companion-shaped.
+        let step_mode =
+            if h_prev_accepted == 0.0 && matches!(opts.method, IntegratorMode::Trapezoidal) {
+                IntegratorMode::BackwardEuler
+            } else {
+                opts.method
+            };
 
-        // Build companion maps for h_actual from the stored raw state.
-        let mut cap_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-        let mut ind_state: IndexMap<String, (f64, f64)> = IndexMap::new();
-        for el in &netlist.elements {
-            match el {
-                Element::Capacitor {
-                    name, capacitance, ..
-                } => {
-                    if let Some(&vc) = cap_v.get(name) {
-                        let stamp = if use_gear2 {
-                            let vc_prev2 = cap_v_prev2.get(name).copied().unwrap_or(vc);
-                            cap_companion_gear2(
-                                *capacitance,
-                                h_actual,
-                                h_prev_accepted,
-                                vc,
-                                vc_prev2,
-                            )
-                        } else {
-                            cap_companion(*capacitance, h_actual, vc)
-                        };
-                        cap_state.insert(name.clone(), stamp);
-                    }
-                }
-                Element::Inductor {
-                    name, inductance, ..
-                } => {
-                    if let Some(&il) = ind_i.get(name) {
-                        let stamp = if use_gear2 {
-                            let il_prev2 = ind_i_prev2.get(name).copied().unwrap_or(il);
-                            ind_companion_gear2(
-                                *inductance,
-                                h_actual,
-                                h_prev_accepted,
-                                il,
-                                il_prev2,
-                            )
-                        } else {
-                            ind_companion(*inductance, h_actual, il)
-                        };
-                        ind_state.insert(name.clone(), stamp);
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Companions for this trial `h`, for every reactive branch at once.
+        reactive.build(&devices, step_mode, h_actual, gear2);
 
         // Predictor: linear extrapolation. Zero-order on the first step
         // (no history) and immediately after crossing a waveform
@@ -1128,38 +590,6 @@ pub fn tran_nr_with_registry_var_opts(
             x.clone()
         };
 
-        // BDF-2 for device branches on the same terms as the built-in C/L above,
-        // plus this path's own readiness condition: every branch needs two
-        // accepted timepoints of history.
-        let dev_gear2 = if use_gear2
-            && dev_br_raw
-                .iter()
-                .all(|d| d.iter().all(|h| h.state_prev2.is_some()))
-        {
-            Some(h_prev_accepted)
-        } else {
-            None
-        };
-
-        // Companion state for every device-internal reactive branch at this
-        // trial `h`, from the last accepted raw state.  Only `I_hist` is
-        // consumed downstream: `stamp_device_reactive_companions` re-derives
-        // `G_eq` from the device's fresh per-NR-iteration value, which is the
-        // same quasi-linear contract the fixed-step path uses.
-        let dev_reactive_state: Vec<Vec<(f64, f64)>> = devices
-            .iter()
-            .enumerate()
-            .map(|(d, dev)| {
-                dev.reactive_branches()
-                    .iter()
-                    .enumerate()
-                    .map(|(b, br)| {
-                        companion_from_history(br.kind, dev_br_raw[d][b], h_actual, dev_gear2)
-                    })
-                    .collect()
-            })
-            .collect();
-
         // NR corrector starting from x_pred.
         let alpha = 1.0 / h_actual;
         let mut x_try = x_pred.clone();
@@ -1171,8 +601,8 @@ pub fn tran_nr_with_registry_var_opts(
                 &topo,
                 netlist,
                 t_next,
-                &cap_state,
-                &ind_state,
+                &reactive.cap_state,
+                &reactive.ind_state,
                 Some(&plan),
             );
 
@@ -1182,27 +612,15 @@ pub fn tran_nr_with_registry_var_opts(
                 dev.load_residual_tran(&mut mat.b, alpha);
                 dev.load_jacobian_tran(&mut mat, alpha);
             }
-            // Device-declared reactive branches, at the trial step size, with the
-            // same order control the built-in C/L rebuild above uses.
-            //
-            // `method=tr` maps to BE here, deliberately and for both: the
-            // incremental TR state (`I_hist' = 2·G·v − I_hist`) carries an
-            // h-dependent history term, so it is only valid while `h` is
-            // constant and cannot be used by an integrator that rescales `h`.
-            // Offering real TR here needs raw (v, i_C) history instead of
-            // (G_eq, I_hist) — the prerequisite for merging the two integrators.
-            let dev_mode = if dev_gear2.is_some() {
-                IntegratorMode::Gear
-            } else {
-                IntegratorMode::BackwardEuler
-            };
-            stamp_device_reactive_companions(
+            // Device-declared reactive branches, same method and order control
+            // as the netlist C/L above — one decision, applied to everything.
+            crate::reactive::stamp_device_branches(
                 &devices,
-                &dev_reactive_state,
+                &reactive.dev_state,
                 &mut mat,
                 h_actual,
-                dev_mode,
-                dev_gear2,
+                step_mode,
+                gear2,
             );
 
             topo.stamp_gmin(&mut mat.a, opts.gmin);
@@ -1292,115 +710,17 @@ pub fn tran_nr_with_registry_var_opts(
                 None => false,
             };
 
-            // Update raw companion state from accepted solution.
-            // Shift the BDF-2 history (prev2 ← prev) BEFORE writing the new
-            // prev value so the next step has a valid two-step window.
-            //
-            //
-            // The inductor arm uses the standalone `i = G_eq·v + I_hist`, which
-            // is wrong for a coupled pair — the mutual term is missing.  The
-            // K post-pass below corrects it; without that, `ind_i` drifted and
-            // Newton stopped converging on any transformer.
-            for el in &netlist.elements {
-                match el {
-                    Element::Capacitor { name, pos, neg, .. } => {
-                        if let Some(&vc_prev) = cap_v.get(name) {
-                            cap_v_prev2.insert(name.clone(), vc_prev);
-                        }
-                        let vc = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                        cap_v.insert(name.clone(), vc);
-                    }
-                    Element::Inductor {
-                        name,
-                        pos,
-                        neg,
-                        inductance,
-                    } => {
-                        let vl = topo.node_voltage(pos, &x).unwrap_or(0.0)
-                            - topo.node_voltage(neg, &x).unwrap_or(0.0);
-                        let il_prev = ind_i.get(name).copied().unwrap_or(0.0);
-                        // Closed-form current update: i_new = G_eq·v_new + I_hist
-                        // where (G_eq, I_hist) is the companion we just stamped.
-                        let il_new = if let Some(&(g_eq, i_hist)) = ind_state.get(name) {
-                            g_eq * vl + i_hist
-                        } else {
-                            il_prev + (h_actual / inductance) * vl
-                        };
-                        ind_i_prev2.insert(name.clone(), il_prev);
-                        ind_i.insert(name.clone(), il_new);
-                    }
-                    _ => {}
-                }
-            }
-
-            // K post-pass: replace the standalone currents of every coupled pair
-            // with the mutual form, from the companion that was actually stamped.
-            // Same correction `advance_companions` applies on the fixed-step path.
-            for el in &netlist.elements {
-                let Element::CoupledInductors {
-                    l1, l2, coupling, ..
-                } = el
-                else {
-                    continue;
-                };
-                let (Some(&(g_eq1, i_hist1)), Some(&(_, i_hist2))) =
-                    (ind_state.get(l1), ind_state.get(l2))
-                else {
-                    continue;
-                };
-                let (Some(&val1), Some(&val2)) = (ind_l.get(l1), ind_l.get(l2)) else {
-                    continue;
-                };
-                let vl = |name: &str| {
-                    let (p, n) = find_inductor_terminals_by_name(netlist, name);
-                    topo.node_voltage(p, &x).unwrap_or(0.0)
-                        - topo.node_voltage(n, &x).unwrap_or(0.0)
-                };
-                if let Some((il1, il2)) = coupled_inductor_currents(
-                    val1,
-                    val2,
-                    *coupling,
-                    g_eq1 * val1, // conductance scale the stamp used
-                    vl(l1),
-                    vl(l2),
-                    i_hist1,
-                    i_hist2,
-                ) {
-                    ind_i.insert(l1.clone(), il1);
-                    ind_i.insert(l2.clone(), il2);
-                }
-            }
             h_prev_accepted = h_actual;
 
             for dev in &mut devices {
                 dev.commit_timestep(&x);
             }
 
-            // Roll device-branch raw state forward.  Written ONLY here, on
-            // acceptance, so a rejected step's retry re-derives from the same
-            // accepted history — the property `cap_v` / `ind_i` already rely on.
-            for (d, dev) in devices.iter().enumerate() {
-                for (b, br) in dev.reactive_branches().iter().enumerate() {
-                    let v = branch_voltage(br, &x);
-                    let state = match br.kind {
-                        ReactiveKind::Capacitor => v,
-                        ReactiveKind::Inductor => {
-                            // Closed-form current update: i = G_eq·v + I_hist,
-                            // using the companion we actually stamped.
-                            let (g_eq, i_hist) = dev_reactive_state[d][b];
-                            g_eq * v + i_hist
-                        }
-                    };
-                    let prev = dev_br_raw[d][b];
-                    dev_br_raw[d][b] = BranchHistory {
-                        state,
-                        // Shift the BDF-2 window: prev2 <- prev, before overwriting.
-                        state_prev2: Some(prev.state),
-                        value: br.value,
-                    };
-                }
-            }
+            // Roll every reactive branch's history forward — netlist C/L, the
+            // coupled-pair mutual correction, and device branches, in one call.
+            // Needs neither the method nor `h`: the companions it reads are the
+            // ones that were stamped, so all of that is already folded in.
+            reactive.accept(&devices, &x);
 
             push_timepoint(&mut result, t, &topo, &x);
 

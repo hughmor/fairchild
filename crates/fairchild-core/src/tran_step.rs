@@ -27,7 +27,6 @@
 //! # }
 //! ```
 
-use indexmap::IndexMap;
 use std::collections::HashMap;
 
 use fairchild_parser::{Element, Netlist, Waveform};
@@ -38,11 +37,9 @@ use crate::error::SimError;
 use crate::mna::{CircuitTopology, MnaMatrix, StampPlan};
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
+use crate::reactive::{stamp_device_branches, ReactiveState};
 use crate::solver::{Factorisation, LinearSolver};
-use crate::tran::{
-    advance_companions, advance_device_reactive_state, init_companions, init_device_reactive_state,
-    stamp_device_reactive_companions, IntegratorMode,
-};
+use crate::tran::IntegratorMode;
 
 /// A transient analysis paused between timesteps.
 ///
@@ -68,12 +65,16 @@ pub struct TranStepper {
     solver: Box<dyn LinearSolver>,
     fact: Option<Box<dyn Factorisation>>,
     mat: MnaMatrix,
-    cap_state: IndexMap<String, (f64, f64)>,
-    ind_state: IndexMap<String, (f64, f64)>,
-    dev_reactive_state: Vec<Vec<(f64, f64)>>,
+    /// Every reactive branch's history plus the companions derived from it —
+    /// netlist C/L and device-declared alike, one representation, shared with
+    /// the variable-step integrator.
+    reactive: ReactiveState,
     step: f64,
     t: f64,
-    first_tr: bool,
+    /// Trapezoidal deliberately takes its first step with Backward Euler, for
+    /// stability across the t=0 discontinuity.  Step control, not integration
+    /// method, so it lives here rather than in `ReactiveState`.
+    first_step: bool,
     /// Lower-cased V/I source name → index into `netlist.elements`, so
     /// `set_source` is a lookup rather than a scan of every element.
     sources: HashMap<String, usize>,
@@ -135,8 +136,7 @@ impl TranStepper {
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);
 
-        let (cap_state, ind_state) = init_companions(&netlist, &topo, step, &x, mode);
-        let dev_reactive_state = init_device_reactive_state(&devices, &x, step, mode);
+        let reactive = ReactiveState::new(&netlist, &topo, &devices, &x);
         let mat = MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
 
         // The parser already lower-cases element names, so this is keyed as-is.
@@ -164,12 +164,10 @@ impl TranStepper {
             solver,
             fact: None,
             mat,
-            cap_state,
-            ind_state,
-            dev_reactive_state,
+            reactive,
             step,
             t: 0.0,
-            first_tr: true,
+            first_step: true,
             sources,
         })
     }
@@ -215,6 +213,11 @@ impl TranStepper {
         // Expose the absolute time of this step to devices (delay lines look up
         // historical port values at `time_s − τ`).
         self.ctx.time_s = t_next;
+        // Companions for this step, derived from physical history rather than
+        // advanced in place.  One rebuild per step buys a single representation
+        // that any step size can consume — see `crate::reactive`.
+        let mode = self.step_mode();
+        self.reactive.build(&self.devices, mode, self.step, None);
         // Solve into a scratch vector so a non-converging step leaves the last
         // accepted solution intact for the caller to inspect or retry from.
         let mut x_try = self.x.clone();
@@ -225,8 +228,8 @@ impl TranStepper {
                 &self.topo,
                 &self.netlist,
                 t_next,
-                &self.cap_state,
-                &self.ind_state,
+                &self.reactive.cap_state,
+                &self.reactive.ind_state,
                 Some(&self.plan),
             );
 
@@ -240,15 +243,15 @@ impl TranStepper {
             // device-declared linear reactive branch (uses the device's
             // current bias-dependent value AND the history from the
             // previous accepted timestep).
-            stamp_device_reactive_companions(
+            // BDF-2 needs two-timepoint history, which only the variable-step
+            // integrator carries; GEAR demotes to BE here, as it always has for
+            // the built-in C/L on this path too.
+            stamp_device_branches(
                 &self.devices,
-                &self.dev_reactive_state,
+                &self.reactive.dev_state,
                 &mut self.mat,
                 self.step,
-                self.mode,
-                // BDF-2 needs two-timepoint history, which only the
-                // variable-step integrator carries; GEAR demotes to BE here,
-                // as it always has for the built-in C/L on this path too.
+                mode,
                 None,
             );
 
@@ -309,25 +312,21 @@ impl TranStepper {
     /// Roll the reactive companion history forward so the next step integrates
     /// from the just-accepted solution.
     pub(crate) fn advance_history(&mut self) {
-        advance_companions(
-            &self.netlist,
-            &self.topo,
-            self.step,
-            &self.x,
-            &mut self.cap_state,
-            &mut self.ind_state,
-            self.mode,
-            self.first_tr,
-        );
-        advance_device_reactive_state(
-            &self.devices,
-            &self.x,
-            &mut self.dev_reactive_state,
-            self.step,
-            self.mode,
-            self.first_tr,
-        );
-        self.first_tr = false;
+        self.reactive.accept(&self.devices, &self.x);
+        self.first_step = false;
+    }
+
+    /// The method this step actually integrates with.
+    ///
+    /// Trapezoidal takes its first step with Backward Euler, for stability
+    /// across the t=0 discontinuity; `accept` then records the capacitor current
+    /// that step implied, which is exactly what TR needs to continue.
+    fn step_mode(&self) -> IntegratorMode {
+        if self.first_step && matches!(self.mode, IntegratorMode::Trapezoidal) {
+            IntegratorMode::BackwardEuler
+        } else {
+            self.mode
+        }
     }
 
     // ── reading the analog state ──────────────────────────────────────────
