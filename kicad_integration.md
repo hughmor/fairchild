@@ -7,13 +7,105 @@ electrical primitives (R / L / C / V / I / D / M). The pre-Phase-B path that
 used compiled `.osdi` Verilog-A models is no longer recommended; that file
 lives in git history if you need to refer back to it.
 
-The end-to-end flow:
+There are two flows. **The live IPC flow is the one to use** if you are on
+KiCad 10.99+ (the KiCad 11 development branch); the export flow below it still
+works everywhere and is what to fall back to.
+
+## Live flow (KiCad 10.99+) — no export, no button
+
+```console
+$ .venv/bin/python -i -m fairchild.kicad
+>>> print(sch.report())        # symbols, pins, nets, bundle widths
+>>> ckt = sch.circuit()        # fairchild.Circuit, deck already loaded
+>>> r = ckt.run("op")
+>>> sch.refresh()              # re-pull after editing in KiCad
+```
+
+The REPL dials KiCad's IPC socket and reads the netlist out of the **open**
+document — no file export, no toolbar plugin, no file watching. KiCad only
+injects `KICAD_API_TOKEN` into plugins it launches itself, but an external
+client may send an empty token and adopt whatever KiCad replies with, which is
+what makes this work from a plain shell.
+
+Setup:
+
+1. Preferences → Plugins → enable the IPC API (`enable_server: true` in
+   `kicad_common.json`).
+2. `uv pip install -e '.[kicad]'`
+3. `python/fairchild/kicad/regen_protos.sh [/path/to/kicad/src]` — generate the
+   protobuf bindings **from the same KiCad source commit you run**. The PyPI
+   `kicad-python` package is not a substitute: as of 0.7.1 its schematic
+   wrappers import names its own generated protos don't define, so
+   `import kipy.schematic` raises `ImportError`.
+
+Four seams, all verified against KiCad 10.99.0-1080-g0592edcb29 on a 91-sheet
+design (`giona_fc`: 1189 symbols, 2896 pins):
+
+- **Nets carry item KIIDs, not pin references**, and `GetItemsById` will not
+  resolve a pin KIID — it silently drops them and returns only the wires. The
+  join therefore runs the other way: every pin KIID in
+  `GetItems(KOT_SCH_SYMBOL)` → `definition.items` appears in exactly one net.
+- **`sheet_path` must be cleared for a whole-hierarchy read.**
+  `GetOpenDocuments` hands back a `DocumentSpecifier` whose `sheet_path` is
+  *present but empty*, and `api_handler_sch.cpp` treats `has_sheet_path()` as
+  "filter to this sheet", resolving the empty path to the root. Pass the
+  document through verbatim and you get the root sheet only — 317 symbols
+  instead of 1189, with every pin resolving, so it looks healthy.
+- **Only `(sheet path, KIID)` is unique.** A reused sheet is one `SCH_SYMBOL`
+  packed once per path, so symbol and pin KIIDs repeat across instances:
+  `giona_fc` has 2896 pins over 978 distinct pin KIIDs and 1189 instances over
+  531 symbol KIIDs. A KIID-keyed join silently hands each copy's net to
+  whichever instance was written last. `SchematicNetSheetContents` carries a
+  `path` for exactly this. Note `SheetSymbol.path` is the *container's* path, so
+  an instance path is `path + (own id)`.
+- **Per-instance SYMBOL field overrides are invisible over IPC.**
+  `SCH_SYMBOL::Serialize` fills `definition.items` fields from `m_part` — the
+  *library* symbol — and the proto carries no instance field collection at all,
+  only the five mandatory fields. An instance that overrides `Sim.Params`
+  reports the library default, silently. `fairchild.kicad` reads fields from
+  the saved `.kicad_sch` instead (keyed on symbol UUID, since a reused sheet's
+  references differ per instance) and warns when the two disagree, so unsaved
+  *parameter* edits are not picked up (connectivity still is). The real fix is
+  an upstream patch adding instance fields to `SchematicSymbolInstance`.
+
+## Parameterising a sub-sheet
+
+Put the parameter on the **sheet**, not the symbol. `SheetSymbol.user_fields`
+is per-instance *and* comes over IPC, so it needs no file fallback and is the
+mechanism to reach for. A symbol inside the sheet references it with `${}`:
+
+```
+pn_mrm_mod.kicad_sch, on the phase shifter:
+    Sim.Params = type=X model=fc_pn_th_ps l_m=${RING_HALF_LENGTH} n_g=4.2 …
+
+giona_chip.kicad_sch, on each sheet instance:
+    'PN Modulator 1'  RING_HALF_LENGTH = 26.21u
+    'PN Modulator 2'  RING_HALF_LENGTH = 26.18u
+```
+
+`fairchild.kicad` resolves `${NAME}` from the enclosing sheet chain, innermost
+winning, with project text variables (`GetTextVariables`) as the outermost
+scope, and warns on anything left unresolved. Symbol fields cannot do this: one
+symbol in a reused sheet file has one field value no matter how many instances
+exist.
+
+A KiCad wire carries no channel count, so bundle widths are seeded from
+`fc_mux`/`fc_demux` (N channel pins, one bus pin) and propagated outward to
+every net they reach, stopping at bridges. Without that pass a dangling
+optical pin next to a bus port defaults to one channel and the parser rightly
+refuses the instance. Arity itself is not duplicated in Python — a genuine
+conflict is left for `bundle_arity_for` to reject.
+
+## Export flow (any KiCad 7+)
 
 1. Draw the schematic in KiCad, using fairchild-native symbols.
 2. Export to SPICE: `File → Export → Netlist → SPICE`.
 3. Run `scripts/kicad_to_fairchild.py` to produce a wrapper netlist with
    `.optical_port` declarations and the analysis directive.
 4. Run `fairchild -f run_my_circuit.sp`.
+
+`scripts/kicad_fairchild.py` collapses steps 2–4 into one command via
+`kicad-cli`.
 
 There is no OSDI preamble step, no `.osdi` directives, no 12-pin coupler
 symbol. A directional coupler is a 4-pin symbol, a waveguide is a 2-pin

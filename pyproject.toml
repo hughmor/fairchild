@@ -9,6 +9,12 @@ description = "Open-source time-domain electro-optic circuit simulator"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# Live KiCad schematic capture over the IPC API (fairchild.kicad). grpcio-tools
+# is only needed to run python/fairchild/kicad/regen_protos.sh; pynng and
+# protobuf are needed at runtime.
+kicad = ["pynng", "protobuf", "grpcio-tools"]
 # Taken from crates/fairchild-py/Cargo.toml, which inherits [workspace.package].
 dynamic = ["version"]
 

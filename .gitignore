@@ -45,3 +45,6 @@ __pycache__/
 
 # claude
 .claude/
+
+# Generated from a KiCad source checkout by python/fairchild/kicad/regen_protos.sh
+python/fairchild/kicad/_proto/
