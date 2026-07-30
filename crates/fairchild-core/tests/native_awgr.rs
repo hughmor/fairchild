@@ -430,3 +430,64 @@ fn a_measured_table_overrides_the_analytic_response() {
     );
     std::fs::remove_file(&csv).ok();
 }
+
+/// A transient through the router. This is the path that actually validates
+/// `Device::stamp_pairs`: the transient loop builds a `StampPlan`, so the first
+/// stamp runs `MnaMatrix::debug_assert_covers`, which panics if the device
+/// stamped a cell outside the footprint it declared. The `.op` tests above do
+/// not necessarily exercise that.
+#[test]
+fn a_transient_stays_inside_the_declared_sparsity_footprint() {
+    let n = 4;
+    let lam = grid_nm(n);
+    // Pulse input 0's channel-1 field. Only input 0 is lit, so output 1's
+    // channel-1 slot carries exactly one term and the comparison is exact —
+    // with the other inputs lit, their Gaussian tails also land in that slot
+    // (correctly: that is the coherent accumulation the n=4 gauss test covers).
+    // All four input ports are still wired, so the declared footprint is
+    // exercised in full either way.
+    let mut deck = String::from("* AWGR transient\n");
+    for (k, l) in lam.iter().enumerate() {
+        let amp = if k == 1 {
+            "PULSE(0 1 1n 1n 1n 20n 40n)"
+        } else {
+            "DC 1.0"
+        };
+        deck.push_str(&format!("V0_{k}r in0_{k}_re 0 {amp}\n"));
+        deck.push_str(&format!("V0_{k}i in0_{k}_im 0 DC 0.0\n"));
+        deck.push_str(&format!("V0_{k}w in0_{k}_wl 0 DC {:e}\n", l * 1e-9));
+    }
+    // A 10 GHz passband on a 100 GHz grid puts the tails below 1e-100, so the
+    // routed slot is the drive exactly and no channel can total over unity.
+    deck.push_str(&format!(
+        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=10 il_db=0\n",
+        wires("in", n),
+        wires("out", n)
+    ));
+    deck.push_str(".options vntol=1e-14 reltol=1e-12\n.tran 1n 40n\n.end\n");
+    let net = parse_spice(&deck).expect("parse");
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&net.models);
+    let r = fairchild_core::tran_nr_with_registry(&net, 1e-9, 40e-9, &reg)
+        .expect("transient should converge");
+
+    // Input 0 channel 1 routes to output 1. Its waveform must track the pulse:
+    // low before the edge, high on the plateau.
+    let drive = &r.node_voltages["in0_1_re"];
+    let routed = &r.node_voltages["out1_1_re"];
+    assert_eq!(drive.len(), routed.len());
+    let (mut saw_low, mut saw_high) = (false, false);
+    for (d, o) in drive.iter().zip(routed.iter()) {
+        assert!(
+            (o - d).abs() < 1e-6,
+            "routed output must follow the driven input: {d} vs {o}"
+        );
+        if *d < 0.1 {
+            saw_low = true;
+        }
+        if *d > 0.9 {
+            saw_high = true;
+        }
+    }
+    assert!(saw_low && saw_high, "the pulse should have both levels");
+}
