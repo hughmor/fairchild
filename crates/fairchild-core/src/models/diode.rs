@@ -1,5 +1,6 @@
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+use crate::reactive::ChargeHistory;
 
 /// Small conductance added to every p-n junction for numerical conditioning.
 const GMIN: f64 = 1e-12;
@@ -38,7 +39,11 @@ pub struct ShockleyDiode {
     q_at_vd_j: f64,   // Q_total(Vd_j) at current NR iterate (0.0 when DC)
 
     // Reactive history (updated by commit_timestep, read by load_*_tran)
-    q_tprev: f64, // Q_total at last accepted timestep
+    q_hist: ChargeHistory,
+    /// The integrator's discretisation, captured during `eval` because
+    /// `load_*_tran` receives only `alpha` — which is Backward Euler and
+    /// nothing else. `None` outside the transient loop.
+    disc: Option<Discretisation>,
 }
 
 impl ShockleyDiode {
@@ -64,7 +69,8 @@ impl ShockleyDiode {
             vd_j_eval: 0.0,
             cj_total: 0.0,
             q_at_vd_j: 0.0,
-            q_tprev: 0.0,
+            q_hist: ChargeHistory::default(),
+            disc: None,
         }
     }
 
@@ -225,6 +231,8 @@ impl Device for ShockleyDiode {
         self.gd_eff = self.gd_junction / denom;
         self.jeq_eff = (self.id_junction - self.gd_junction * vd_j) / denom;
 
+        self.disc = ctx.discretisation;
+
         if flags.transient {
             self.cj_total = self.cj_depl(vd_j) + self.tt * self.gd_junction;
             self.q_at_vd_j = self.q_total(vd_j, self.id_junction);
@@ -252,11 +260,20 @@ impl Device for ShockleyDiode {
         if self.cj_total == 0.0 {
             return;
         }
-        // BE companion history current for the nonlinear junction cap.
-        // Derivation (matches linear cap_companion sign convention):
-        //   i_hist_stamp = alpha · (Cj·Vd_j + Q_tprev − Q(Vd_j))
-        //   stamped as current source from cathode → anode (b[anode] += i_hist)
-        let i_hist = alpha * (self.cj_total * self.vd_j_eval + self.q_tprev - self.q_at_vd_j);
+        // Companion history current for the nonlinear junction cap, stamped as
+        // a current source from cathode → anode (`b[anode] += i_hist`).
+        //
+        // The charge is `Q_total(Vd_j)`, so the Jacobian's contribution to the
+        // residual is `scale·Cj·Vd_j` and the history has to cancel it —
+        // `ChargeHistory` does both from one method interpretation. Under
+        // Backward Euler this reduces to the old
+        // `alpha·(Cj·Vd_j + Q_tprev − Q(Vd_j))` exactly.
+        let (i_hist, _) = self.q_hist.companion(
+            self.disc,
+            alpha,
+            self.q_at_vd_j,
+            self.cj_total * self.vd_j_eval,
+        );
         if let Some(a) = self.anode {
             b[a] += i_hist;
         }
@@ -270,7 +287,7 @@ impl Device for ShockleyDiode {
         if self.cj_total == 0.0 {
             return;
         }
-        self.stamp_g(mat, alpha * self.cj_total);
+        self.stamp_g(mat, ChargeHistory::scale(self.disc, alpha) * self.cj_total);
     }
 
     /// Small-signal junction capacitance for `.ac`/`.noise`: the depletion +
@@ -299,7 +316,10 @@ impl Device for ShockleyDiode {
         let vd_j = vd_terminal - self.id_junction * self.rs;
         // Update pnjlim reference so the next timestep's first NR iter starts unlimted.
         self.vd_prev = vd_j;
-        self.q_tprev = self.q_total(vd_j, self.id_junction);
+        // Recomputed analytically from the converged solution rather than reused
+        // from the last `eval`, which is one NR iterate behind it.
+        self.q_hist
+            .advance(self.disc, self.q_total(vd_j, self.id_junction));
     }
 
     /// Shot noise: i_n² = 2·q·|Id| (A²/Hz), between anode and cathode.

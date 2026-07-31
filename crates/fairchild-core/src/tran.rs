@@ -1072,6 +1072,130 @@ mod tests {
         }
     }
 
+    /// The same "two spellings of one circuit" probe, aimed at the devices that
+    /// stamp their own reactance instead of declaring a branch.
+    ///
+    /// `load_residual_tran` receives only `alpha = 1/h`, which is Backward Euler
+    /// and cannot express anything else — so the diode's `Cj` and the MOSFET's
+    /// Meyer caps were integrated with BE under *every* method, while a netlist
+    /// `C` in the same circuit honoured `.options method`. TR is the default, so
+    /// this was the common case: 19.4 mV (diode) and 9.9 mV (MOSFET) on a 2 V
+    /// swing, and exactly 0 under `be`/`gear`, which is what hid it.
+    ///
+    /// Both devices are set up so their internal cap is *exactly* a linear
+    /// capacitor — `m=0` makes the diode's depletion charge `Q = CJO·V` in
+    /// closed form, and with `cox=0` the MOSFET's Meyer caps are pure overlap —
+    /// so any difference is the integrator, not the physics.
+    #[test]
+    fn self_stamped_device_caps_equal_an_equivalent_netlist_c() {
+        const C: &str = "10p";
+        // 10 kΩ · 10 pF = 100 ns, sampled across a 300 ns window.
+        let cases: [(&str, &str, &str); 3] = [
+            (
+                "diode Cj",
+                &format!(
+                    "* device-internal Cj\n\
+                     .model dm D (IS=1e-14 N=1 CJO={C} VJ=0.917 M=0)\n\
+                     V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\nD1 a 0 dm\n\
+                     .tran 5n 300n\n.end\n"
+                ),
+                &format!(
+                    "* explicit C\n\
+                     .model dm D (IS=1e-14 N=1)\n\
+                     V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\nD1 a 0 dm\n\
+                     C1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                ),
+            ),
+            (
+                "MOSFET Cgs",
+                // cgso · W = 1e-6 · 10e-6 = 10 pF, and cox=0 keeps the
+                // region-dependent channel caps out of it.
+                "* device-internal Cgs\n\
+                 .model nm NMOS (VTO=0.7 KP=100u CGSO=1e-6)\n\
+                 VDD dd 0 2\nRD dd d 1k\n\
+                 V1 src 0 PULSE(0 2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
+                 M1 d a 0 0 nm w=10u l=1u\n.tran 5n 300n\n.end\n",
+                &format!(
+                    "* explicit C\n\
+                     .model nm NMOS (VTO=0.7 KP=100u)\n\
+                     VDD dd 0 2\nRD dd d 1k\n\
+                     V1 src 0 PULSE(0 2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
+                     M1 d a 0 0 nm w=10u l=1u\nC1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                ),
+            ),
+            (
+                // MJE=0 makes the B-E depletion charge exactly linear, and TF=0
+                // keeps the transit-time charge out of it. Emitter grounded, so
+                // CJE is precisely a capacitor from the base to 0.
+                "BJT Cje",
+                "* device-internal Cje\n\
+                 .model qm NPN (IS=1e-16 BF=100 CJE=10p VJE=0.75 MJE=0)\n\
+                 VCC cc 0 5\nRC cc c 1k\n\
+                 V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
+                 Q1 c a 0 qm\n.tran 5n 300n\n.end\n",
+                &format!(
+                    "* explicit C\n\
+                     .model qm NPN (IS=1e-16 BF=100)\n\
+                     VCC cc 0 5\nRC cc c 1k\n\
+                     V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
+                     Q1 c a 0 qm\nC1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                ),
+            ),
+        ];
+
+        for (what, dev, refr) in cases {
+            let (nd, nr) = (parse_spice(dev).unwrap(), parse_spice(refr).unwrap());
+
+            for mode in [
+                IntegratorMode::BackwardEuler,
+                IntegratorMode::Trapezoidal,
+                IntegratorMode::Gear,
+            ] {
+                let mut opts = SimOptions::from_netlist(&nd);
+                opts.method = mode;
+
+                for variable_step in [false, true] {
+                    let run = |n: &Netlist| {
+                        // Per netlist: native D/M models reach the builder through
+                        // the registry (`new()` alone gives UnknownModel), and the
+                        // two decks deliberately carry *different* cards.
+                        let mut reg = DeviceRegistry::new();
+                        reg.register_builtin_models(&n.models);
+                        if variable_step {
+                            tran_nr_with_registry_var_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                        } else {
+                            tran_nr_with_registry_opts(n, 5e-9, 300e-9, &reg, &opts).unwrap()
+                        }
+                    };
+                    let (rd, rr) = (run(&nd), run(&nr));
+                    for &t in &[25e-9, 45e-9, 70e-9, 120e-9, 200e-9, 290e-9] {
+                        let (a, b) = (
+                            rd.voltage_at("a", t).unwrap(),
+                            rr.voltage_at("a", t).unwrap(),
+                        );
+                        assert!(
+                            (a - b).abs() < 1e-9,
+                            "{what} {mode:?} variable_step={variable_step} t={t:e}: \
+                             device-internal C gives {a:.9}, explicit C gives {b:.9} — \
+                             the device is not honouring the integration method"
+                        );
+                    }
+                    // Sanity: the capacitance is actually doing something, so the
+                    // assertion above is not passing on two identical flat lines.
+                    let (mid, end) = (
+                        rd.voltage_at("a", 45e-9).unwrap(),
+                        rd.voltage_at("a", 290e-9).unwrap(),
+                    );
+                    assert!(
+                        (mid / end).abs() < 0.6,
+                        "{what} {mode:?} variable_step={variable_step}: expected an RC \
+                         lag, got {mid} at 45 ns vs {end} settled"
+                    );
+                }
+            }
+        }
+    }
+
     /// Any non-zero `K` coupling used to make the variable-step integrator fail
     /// outright — `NoConvergence` after 150 iterations — because its inductor
     /// history update used the standalone `i = G_eq·v + I_hist` and dropped the

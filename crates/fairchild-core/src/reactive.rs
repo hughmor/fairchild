@@ -181,6 +181,100 @@ pub fn charge_current(
     }
 }
 
+/// One charge branch's history, for a device that stamps its own reactance.
+///
+/// [`BranchHistory`] serves devices that *declare* a reactive branch and let
+/// the shared stamper integrate it. A device that stamps its own — the diode's
+/// `Cj + TT·gd`, the MOSFET's Meyer and depletion caps, a Verilog-A `ddt` —
+/// only ever receives `alpha`, which cannot express anything but Backward
+/// Euler. This is the state those devices need to build any other method's
+/// companion, plus the two operations on it, so they cannot each grow their own
+/// answer to "what does `method` mean" — the failure mode this module exists to
+/// prevent.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChargeHistory {
+    q_prev: f64,
+    /// `None` until two timepoints have been accepted; gates BDF-2, exactly as
+    /// [`BranchHistory::state_prev2`] does.
+    q_prev2: Option<f64>,
+    /// Branch current at the last accepted timepoint. Only Trapezoidal reads
+    /// it; zero from a DC operating point, where a capacitor carries none.
+    i_prev: f64,
+}
+
+impl ChargeHistory {
+    /// Companion for this branch at the current Newton iterate.
+    ///
+    /// `q_new` is the branch charge there; `cv` is `C·v` at the same point —
+    /// the term the Jacobian stamp itself contributes to the residual, which
+    /// the history current has to cancel. (For a linear cap the two are equal;
+    /// for a depletion cap they are not, which is the whole reason both are
+    /// arguments.)
+    ///
+    /// Returns `(i_hist, scale)`: the current to stamp from the branch's
+    /// positive node to its negative one, and the factor multiplying `C` in the
+    /// Jacobian. Taking both from one call is what keeps residual and Jacobian
+    /// linearised about the same point.
+    ///
+    /// `disc` is `None` outside the transient loop — a caller with no method to
+    /// offer, where the `alpha` it passes is Backward Euler by definition.
+    pub fn companion(
+        &self,
+        disc: Option<crate::device::Discretisation>,
+        alpha: f64,
+        q_new: f64,
+        cv: f64,
+    ) -> (f64, f64) {
+        let (i_n, scale) = match disc {
+            Some(d) => charge_current(
+                d.mode,
+                d.h,
+                d.gear2_h_prev,
+                q_new,
+                self.q_prev,
+                self.q_prev2,
+                self.i_prev,
+            ),
+            None => (alpha * (q_new - self.q_prev), alpha),
+        };
+        (scale * cv - i_n, scale)
+    }
+
+    /// The Jacobian factor alone, for the stamp that has no charge to hand.
+    ///
+    /// [`conductance`] is linear in the branch value, so evaluating it at 1.0
+    /// gives exactly the scalar — and it is the same quantity
+    /// [`charge_current`] returns as `scale`, so the two stamps cannot drift.
+    pub fn scale(disc: Option<crate::device::Discretisation>, alpha: f64) -> f64 {
+        match disc {
+            Some(d) => conductance(ReactiveKind::Capacitor, 1.0, d.mode, d.h, d.gear2_h_prev),
+            None => alpha,
+        }
+    }
+
+    /// Roll past an accepted step, `q_now` being the branch charge at the
+    /// converged solution.
+    ///
+    /// The current *entering* this step becomes Trapezoidal's history for the
+    /// next one, and must be computed before `q_prev` is overwritten.
+    pub fn advance(&mut self, disc: Option<crate::device::Discretisation>, q_now: f64) {
+        if let Some(d) = disc {
+            let (i_n, _) = charge_current(
+                d.mode,
+                d.h,
+                d.gear2_h_prev,
+                q_now,
+                self.q_prev,
+                self.q_prev2,
+                self.i_prev,
+            );
+            self.i_prev = i_n;
+        }
+        self.q_prev2 = Some(self.q_prev);
+        self.q_prev = q_now;
+    }
+}
+
 /// Conductance alone, for a branch whose `value` is re-queried mid-Newton.
 ///
 /// Device-declared branches have bias-dependent C, so `G_eq` must be recomputed
