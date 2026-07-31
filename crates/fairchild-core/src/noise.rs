@@ -303,6 +303,8 @@ fn run_dc_op(
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
+    // Not every unknown is a volt — see `crate::tolerance`.
+    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
     let mut x = vec![0.0f64; topo.size];
 
     for _ in 0..opts.itl1 {
@@ -329,10 +331,7 @@ fn run_dc_op(
         } else {
             x_new
         };
-        let converged = x_next
-            .iter()
-            .zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
+        let converged = tol.converged(&x_next, &x);
         x = x_next;
         if converged {
             return Ok(x);

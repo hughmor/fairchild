@@ -302,17 +302,21 @@ fn one_input_lit_behaves_as_a_demux_with_crosstalk() {
 }
 
 /// An 8×8 router — the size that actually gets used — must give the right
-/// answer, and needs a tight `vntol` to do it.
+/// answer **on default options**.
 ///
-/// The λ wires carry ~1.55e-6, so SPICE's default absolute voltage tolerance of
-/// 1e-6 is the same order as the entire quantity: Newton's step test is
-/// satisfied while λ is still ~10 pm out, and 10 pm is a real detuning for a
-/// 40 GHz passband. At N ≤ 5 the first step lands accurately enough that this
-/// never shows; at N = 8 it does, and the router silently reports the
-/// transmission for the wrong wavelength. See `docs/photonic_awgr.md`
-/// §"Solver tolerance".
+/// This test used to carry `.options vntol=1e-14 reltol=1e-12`, because λ wires
+/// carry ~1.55e-6 and SPICE's default absolute *voltage* tolerance of 1e-6 is
+/// the same order as the entire quantity: Newton's step test was satisfied
+/// while λ was still ~10 pm out, which is a real detuning for a 40 GHz
+/// passband. At N ≤ 5 the first step lands accurately enough that it never
+/// showed; at N = 8 it did, and the router silently reported the transmission
+/// for the wrong wavelength.
+///
+/// λ rows now carry their own absolute tolerance (`crate::tolerance`), so the
+/// deck no longer needs to know about the solver. **Keep the defaults here** —
+/// running this without the override is the regression.
 #[test]
-fn an_eight_by_eight_router_is_exact_under_a_tight_vntol() {
+fn an_eight_by_eight_router_is_exact_on_default_tolerances() {
     let n = 8;
     let lam = grid_nm(n);
     let mut deck = format!("* 8×8\n{}", sources(n, &lam));
@@ -324,7 +328,7 @@ fn an_eight_by_eight_router_is_exact_under_a_tight_vntol() {
         wires("in", n),
         wires("out", n)
     ));
-    deck.push_str(".options vntol=1e-14 reltol=1e-12\n.op\n.end\n");
+    deck.push_str(".op\n.end\n");
     let r = solve(&deck);
     let il = 10f64.powf(-3.0 / 20.0);
     for i in 0..n {
@@ -412,7 +416,7 @@ fn a_measured_table_overrides_the_analytic_response() {
         csv.to_str().unwrap()
     ));
     deck.push_str(&format!(
-        "Xr{}{} awg2\n.options vntol=1e-14 reltol=1e-12\n.op\n.end\n",
+        "Xr{}{} awg2\n.op\n.end\n",
         wires("in", n),
         wires("out", n)
     ));

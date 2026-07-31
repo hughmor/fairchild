@@ -77,6 +77,10 @@ pub struct TranStepper {
     /// Lower-cased V/I source name → index into `netlist.elements`, so
     /// `set_source` is a lookup rather than a scan of every element.
     sources: HashMap<String, usize>,
+    /// Per-row Newton step tolerances — not every unknown is a volt.  Built
+    /// once here because the netlist and topology cannot change under a
+    /// stepper; `set_source` only rewrites a waveform.  See `crate::tolerance`.
+    tol: crate::tolerance::Tolerances,
 }
 
 impl TranStepper {
@@ -151,6 +155,8 @@ impl TranStepper {
             })
             .collect();
 
+        let tol = crate::tolerance::Tolerances::build(&netlist, &topo, opts);
+
         Ok(TranStepper {
             netlist,
             opts: opts.clone(),
@@ -168,6 +174,7 @@ impl TranStepper {
             t: 0.0,
             first_step: true,
             sources,
+            tol,
         })
     }
 
@@ -292,10 +299,7 @@ impl TranStepper {
                 x_new
             };
 
-            let converged = x_next
-                .iter()
-                .zip(x_try.iter())
-                .all(|(n, o)| (n - o).abs() < self.opts.vntol + self.opts.reltol * n.abs());
+            let converged = self.tol.converged(&x_next, &x_try);
 
             x_try = x_next;
             if converged {

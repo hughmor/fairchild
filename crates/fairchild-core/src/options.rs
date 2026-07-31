@@ -22,10 +22,25 @@ pub struct SimOptions {
     // ── convergence tolerances ─────────────────────────────────────────────
     /// Relative tolerance on Newton update (typical 1e-3).
     pub reltol: f64,
-    /// Absolute current tolerance (A); used by current-domain residuals.
+    /// Absolute current tolerance (A); the convergence floor for
+    /// voltage-source branch-current rows.
     pub abstol: f64,
     /// Absolute node-voltage tolerance (V); convergence floor for voltage NR.
     pub vntol: f64,
+    /// Absolute wavelength tolerance (m); the convergence floor for λ wires.
+    ///
+    /// λ wires carry metres (~1.55e-6), so `vntol` — a *volt* tolerance —
+    /// let Newton stop with λ a micron out, and even a purely relative test at
+    /// `reltol` permits 1.55 nm. Both are enormous next to the features being
+    /// simulated: a 40 GHz passband is ~0.32 nm and a PN depletion tuning is
+    /// ~13 pm/V. The default 1e-13 m (0.1 pm) sits well below either, and costs
+    /// nothing in practice because Newton converges superlinearly near the root.
+    ///
+    /// The relative term is deliberately **not** applied to λ rows: λ is a
+    /// label whose absolute precision is what matters, and `reltol·|λ|` is
+    /// scale-invariant, so no choice of units can make it small enough.
+    /// See `crate::tolerance`.
+    pub lambdatol: f64,
     /// Maximum allowed |Δv| per NR iteration before damping (V).
     pub vmax: f64,
     /// Minimum conductance added to every diagonal entry (S).
@@ -157,6 +172,7 @@ impl Default for SimOptions {
             reltol: 1e-3,
             abstol: 1e-12,
             vntol: 1e-6,
+            lambdatol: 1e-13,
             vmax: 0.5,
             gmin: 1e-12,
             itl1: 150,
@@ -242,6 +258,7 @@ impl SimOptions {
             "reltol" => self.reltol = parse_num(value).unwrap_or(self.reltol),
             "abstol" => self.abstol = parse_num(value).unwrap_or(self.abstol),
             "vntol" => self.vntol = parse_num(value).unwrap_or(self.vntol),
+            "lambdatol" => self.lambdatol = parse_num(value).unwrap_or(self.lambdatol),
             "vmax" => self.vmax = parse_num(value).unwrap_or(self.vmax),
             "gmin" => self.gmin = parse_num(value).unwrap_or(self.gmin),
             "itl1" => self.itl1 = parse_int(value).unwrap_or(self.itl1),
