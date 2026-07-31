@@ -1,0 +1,43 @@
+// PIN photodetector — converts optical power to photocurrent.
+//
+// Direct potential contributions (B1+ discipline scheme).  Optical inputs
+// use the `optical_field` / `optical_lambda` disciplines; reading is
+// `OF(in_re)`, `OF(in_im)`, `OWL(in_lambda)`.  Electrical output side is
+// unchanged.  No Norton-hack high-impedance shunts — the upstream device
+// drives the optical inputs via direct potential contribution.
+//
+// Physics:
+//   P_opt  = |A|² = re² + im²            (W)
+//   I_ph   = responsivity · P_opt + I_dark  (A)
+//   I(anode, cathode) <+ −I_ph + V/R_shunt
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "optical.vams"
+
+module va_photodetector(in_re, in_im, in_lambda, anode, cathode);
+    inout in_re, in_im, in_lambda;
+    inout anode, cathode;
+    optical_field  in_re, in_im;
+    optical_lambda in_lambda;
+    electrical     anode, cathode;
+
+    parameter real responsivity  = 1.0   from (0:inf);
+    parameter real I_dark_A      = 1e-9  from [0:inf);
+    parameter real R_shunt       = 1e6   from (0:inf);
+
+    real P_opt, I_ph, Vj;
+
+    analog begin
+        P_opt = OF(in_re) * OF(in_re) + OF(in_im) * OF(in_im);
+        I_ph  = responsivity * P_opt + I_dark_A;
+
+        Vj = V(anode, cathode);
+
+        // Photocurrent (flows cathode → anode in conventional sense)
+        I(anode, cathode) <+ -I_ph;
+
+        // Shunt resistance across junction
+        I(anode, cathode) <+ Vj / R_shunt;
+    end
+endmodule

@@ -105,6 +105,7 @@ fn diode_parses() {
         anode,
         cathode,
         model_name,
+        ..
     } = &nl.elements[0]
     {
         assert_eq!(name, "d1");

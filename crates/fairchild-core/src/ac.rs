@@ -251,6 +251,9 @@ pub fn ac_analysis_opts(
                 ReactiveKind::Inductor => {}
             }
         }
+        // Devices whose reactance is a general ∂q/∂x matrix rather than a set
+        // of two-terminal branches (OSDI/Verilog-A) stamp it themselves.
+        dev.load_reactive_jacobian(&mut c_mat);
     }
 
     // --- AC excitation vector ---

@@ -75,6 +75,16 @@ impl ParamSet {
         }
     }
 
+    /// Whether `name` is present, **without** marking it consumed.
+    ///
+    /// For deciding whether a model-card default is overridden by an instance
+    /// param: the instance param is applied by the target factory, so counting
+    /// it consumed here as well would be a lie either way round.
+    pub fn contains(&self, name: &str) -> bool {
+        let nl = name.to_lowercase();
+        self.params.iter().any(|(k, _)| *k == nl)
+    }
+
     /// Keys not consumed by `get`/`apply` — i.e. params the device did not
     /// recognise (likely typos). Used to warn the user.
     pub fn unconsumed(&self) -> Vec<String> {
@@ -221,6 +231,63 @@ impl DeviceRegistry {
             target_factory(terminals, &translated, ctx)
         });
         Ok(())
+    }
+
+    /// Register every `.model <card> <kind> (...)` whose `kind` names a factory
+    /// that is already in the registry, as an alias of that factory with the
+    /// card's parameters as defaults.
+    ///
+    /// This is the `.model`-card indirection for **OSDI models**, and it is the
+    /// idiom every foundry PDK ships:
+    ///
+    /// ```spice
+    /// .osdi  bsim4.osdi
+    /// .model nch  bsim4 (tox=3n vth0=0.4 …)
+    /// M1 d g s b nch W=1u L=100n
+    /// ```
+    ///
+    /// Call it *after* `register_builtin_models` and after every `.osdi`
+    /// library has been registered. Cards whose name is already registered are
+    /// skipped, so the native card handlers (which do construction-time work
+    /// this cannot — `LEVEL` dispatch, expression parsing) keep ownership of
+    /// their cards; this only fills the gap they leave.
+    ///
+    /// Card params are applied *after* construction and only for keys the
+    /// instance line did not give, so an instance param always wins. The
+    /// consequence, and the reason this is not the native card path: a device
+    /// that reads params at construction time (via [`ParamSet::get`]) will not
+    /// see these defaults. OSDI models have no construction-time params —
+    /// everything routes through `set_real_param` — so the OSDI case is exact.
+    pub fn register_loaded_model_cards(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let card_name = card.name.to_lowercase();
+            let kind = card.kind.to_lowercase();
+            if card_name == kind || self.factories.contains_key(&card_name) {
+                continue;
+            }
+            let Some(target) = self.factories.get(&kind).cloned() else {
+                continue;
+            };
+            let defaults: Arc<Vec<(String, f64)>> = Arc::new(
+                card.params
+                    .iter()
+                    .map(|(k, v)| (k.to_lowercase(), *v))
+                    .collect(),
+            );
+            let label = card.name.clone();
+            self.register(card_name, move |terminals, params: &ParamSet, ctx| {
+                let mut dev = target(terminals, params, ctx);
+                for (k, v) in defaults.iter() {
+                    if params.contains(k) {
+                        continue; // instance line wins
+                    }
+                    if !dev.set_real_param(k, *v) {
+                        eprintln!("warning: .model '{label}': unknown parameter '{k}' ignored");
+                    }
+                }
+                dev
+            });
+        }
     }
 
     /// Populate the registry from `.model D` cards using the built-in Shockley diode.

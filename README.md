@@ -34,6 +34,7 @@ for accuracy and performance vs ngspice.
 | Solvers | NR with `pnjlim` / `fetlim`; BE, TR, GEAR (BDF-2); dense or sparse LU |
 | Directives | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`/`.endl`, `.include`, `.param`, `.subckt`/`.ends`, `.temp` (sweep), `.alter`, `.model`, `.osdi` |
 | Output | CSV (stdout / file), Nutmeg rawfile (ngspice-compatible) |
+| Verilog-A | compiled to OSDI v0.4 by OpenVAF-Reloaded; `.osdi` + `.model` cards, electrical **and** optical models ([guide](docs/user-guide.md#14-verilog-a-models-osdi)) |
 
 What's not yet supported: switches `S`/`W`, lossy transmission lines
 (lossless `T` is supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
@@ -150,11 +151,16 @@ examples/
 │   ├── nmos_dc_sweep.sp          ← .dc sweep over V_GS
 │   ├── ring_oscillator.sp        ← 5-stage CMOS ring; tests DC + GEAR
 │   └── bjt_ce_amplifier.sp       ← NPN common-emitter amp (BJT GP L1)
-└── photonic/
-    ├── native_mrr_modulator.{sp,py}        ← electro-optic micro-ring
-    ├── native_mrr_wavelength_sweep.py      ← parametric λ sweep
-    ├── native_wdm_mrr_modulator.{sp,py}    ← 2-channel WDM through one ring
-    └── legacy/                              ← archived; OSDI-based examples
+├── photonic/
+│   ├── native_mrr_modulator.{sp,py}        ← electro-optic micro-ring
+│   ├── native_mrr_wavelength_sweep.py      ← parametric λ sweep
+│   ├── native_wdm_mrr_modulator.{sp,py}    ← 2-channel WDM through one ring
+│   └── legacy/                             ← archived early photonic examples
+└── verilog_a/
+    ├── models/*.va                         ← 8 maintained Verilog-A models
+    ├── rectifier.sp, cmos_inverter.sp      ← electrical: VA device + native parts
+    ├── eam_link.sp, va_link.sp             ← optical: VA in a native link, and all-VA
+    └── check.py                            ← runs them all, asserts the physics
 ```
 
 Photonic examples come with a `README.md` describing the topology of each
@@ -224,8 +230,8 @@ crates/
                       + bus vector expansion + `.optical_port` bundles.
   fairchild-cli/      Binary `fairchild`: `-f netlist.sp`, `--format`, `--probe`,
                       `--param`, `--opt key=val`, `--check`, `--list-nodes`.
-  fairchild-osdi/     OSDI v0.4 runtime (compatibility shim — see crate docstring
-                      for deprecation rationale).
+  fairchild-osdi/     OSDI v0.4 runtime: loads Verilog-A compiled by OpenVAF,
+                      electrical (BSIM et al.) and optical alike.
   fairchild-py/       PyO3 Python package: Circuit / SimResult / WaveformSource.
 examples/             Ready-to-run SPICE netlists per discipline (electronic, photonic).
 benchmarks/           Head-to-head comparison circuits + scripts vs ngspice.
@@ -234,7 +240,8 @@ docs/                 user-guide.md, benchmarks.md, pn_phase_shifter_tiers.md,
                       docs/plots/ (generated accuracy + scaling figures).
 scripts/              kicad_to_fairchild.py (KiCad netlist post-processor;
                       native fc_* devices).
-legacy/               Archived Verilog-A photonic models + OSDI examples.
+legacy/               Superseded pre-Phase-B Verilog-A models. Historical only —
+                      see legacy/README.md before reusing any of them.
 ```
 
 ---

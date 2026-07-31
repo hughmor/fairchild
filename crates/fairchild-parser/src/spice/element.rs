@@ -80,11 +80,20 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                     line: lineno,
                 });
             }
+            let mut params = Vec::new();
+            for tok in &tokens[4..] {
+                if let Some((k, v)) = tok.split_once('=') {
+                    if let Ok(val) = parse_value(v, lineno) {
+                        params.push((k.to_lowercase(), val));
+                    }
+                }
+            }
             Ok(Element::Diode {
                 name,
                 anode: canon_node(tokens[1]),
                 cathode: canon_node(tokens[2]),
                 model_name: tokens[3].to_lowercase(),
+                params,
             })
         }
         'b' => {

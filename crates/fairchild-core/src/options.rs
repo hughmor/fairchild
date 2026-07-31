@@ -214,6 +214,8 @@ impl SimOptions {
             bidirectional_propagation: self.bidirectional_propagation,
             waveguide_delay: self.waveguide_delay,
             time_s: 0.0,
+            // Set per step by the transient loops; meaningless in DC/AC.
+            discretisation: None,
         }
     }
 

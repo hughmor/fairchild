@@ -17,7 +17,7 @@
 11. [Solver theory](#11-solver-theory)
 12. [Photonic devices](#12-photonic-devices)
 13. [Writing custom devices](#13-writing-custom-devices)
-14. [OSDI model loading](#14-osdi-model-loading)
+14. [Verilog-A models (OSDI)](#14-verilog-a-models-osdi)
 
 ---
 
@@ -414,15 +414,18 @@ they also share 8 parallel junctions. Give each replica its own drive with an
 `.electrical_port`, or use a bundle-aware device (`fc_optical_2x2`) when one
 electrical interface must serve every channel.
 
-### OSDI
+### OSDI (Verilog-A)
 
 ```
 .osdi  <path/to/model.osdi>
 .model <card_name> <module_name> (<params>)
 ```
 
-Loads a compiled OpenVAF-Reloaded shared library; `.model` names the SPICE
-card and matches the module exported in the library.
+`.osdi` loads a compiled OpenVAF-Reloaded shared library and registers every
+module in it under its own name. The optional `.model` card binds a second
+name to one of those modules with default parameters, which is how foundry
+PDKs are written. Instantiate with `X`, or with `D`/`M`/`Q` for a model of
+matching arity. Full treatment in §14.
 
 ### Bus vectors and optical ports
 
@@ -1612,13 +1615,19 @@ electrical device models distributed as Verilog-A** — foundry transistor model
 `.osdi <path>` and instantiate with an `X` element. The loader is verified in CI
 by the `osdi-mock` fixture.
 
-For *photonics*, prefer the native Rust devices documented in §12 — OSDI/
-Verilog-A cannot express the optical bundle / complex-envelope abstractions. The
-pre-Phase-B photonic Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector)
-remain loadable via `.osdi` for back-compatibility (Norton-equivalent flow
-discipline, 12-pin underlying-wire syntax), but new photonic work should use the
-native devices; the CLI prints a one-shot hint pointing at them when a photonic
-`.osdi` is loaded.
+**Photonics can be written in Verilog-A too** — the complex-envelope
+representation is three ordinary real unknowns per channel, so a custom
+`optical_field` / `optical_lambda` discipline needs no compiler support and
+interoperates exactly with the native devices. See §14.3 and
+`examples/verilog_a/`.
+
+What a Verilog-A optical model *cannot* reach is the rest of the abstraction
+layer in §12: WDM bundle awareness, bidirectional propagation, `DelayLine`
+group delay, and `PhotonicActiveModel` composition. It is single-channel and
+forward-only. So prefer the native devices for anything needing those — and in
+particular do not start from the pre-Phase-B models under `legacy/`, which are
+on the superseded Norton-drive discipline and carry a factor-of-two loss bug
+(see `legacy/README.md`). The CLI prints a one-shot hint when one is loaded.
 
 ---
 
@@ -1943,34 +1952,173 @@ simpler and produces faster code.
 
 ---
 
-## 14. OSDI model loading
+## 14. Verilog-A models (OSDI)
 
-fairchild loads compact models compiled by [OpenVAF-Reloaded][openvaf] as
-OSDI v0.4 shared libraries (`.osdi`).
+fairchild does not parse Verilog-A. You compile it with
+[OpenVAF-Reloaded][openvaf] into an OSDI v0.4 shared library (`.osdi`), and
+`crates/fairchild-osdi` `dlopen`s it and drives it through the OSDI ABI. This
+is the supported route to foundry compact models — BSIM, PSP, HiCUM — which
+fairchild will never hand-write in Rust, and it is equally the route to your
+own models, electrical or optical.
 
-```spice
-.osdi /path/to/bsim4.osdi
-.model nmos_bsim4 nmos4 (tox=3n vth0=0.4 ...)
+Worked examples and eight ready models live in `examples/verilog_a/`.
+
+### 14.1 Writing a model
+
+An ordinary Verilog-A module. What the fairchild runtime supports:
+
+| Verilog-A | supported | notes |
+|---|---|---|
+| `I(a,b) <+ expr` | yes | the resistive branch |
+| `V(a,b) <+ expr` | yes | adds an internal branch unknown |
+| `ddt(q)` | yes | transient **and** `.ac`/`.noise` |
+| internal nodes | yes | `num_nodes > num_terminals`; fairchild allocates the MNA rows |
+| `analog function` | yes | |
+| `$abstime` | yes | reads the transient clock; 0 in DC and AC |
+| `$temperature` | yes | from `.options temp` |
+| custom disciplines | yes | OSDI treats them as metadata — see §14.3 |
+| `$limit(v, "pnjlim", …)` | yes | installed into the library's `OSDI_LIM_TABLE` at load |
+| other `$limit` functions | degrades | identity limiter + a warning; runs unlimited, never crashes |
+| `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
+| `$strobe`, `$finish` | no | |
+
+`ddt` is integrated with whatever `.options method` selects, through the same
+`crate::reactive` engine as a discrete `C`. A Verilog-A `ddt(C*V)` and a
+netlist `C` of the same value are the same circuit element to machine
+precision, under `be`, `tr` and `gear`, fixed step and variable step alike.
+
+That requires the charge itself, not just its Jacobian, so a model must expose
+`load_residual_react` — OpenVAF always emits it. A hand-written library that
+declares reactive Jacobian entries without it falls back to Backward Euler
+rather than stamping a companion with no history behind it.
+
+Junction limiting works the way a compact model expects:
+
+```verilog
+Vcrit = Vt * ln(Vt / (sqrt(2.0) * Is));
+Vd    = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
 ```
 
-The `.osdi` directive loads the shared library; the `.model` second token
-must match the module name exported by the compiled model. Parameter names
-match case-insensitively (VA preserves case; fairchild lowercases).
+OpenVAF compiles that into a call through the library's exported
+`OSDI_LIM_TABLE`, whose entries ship **null** for the simulator to fill in.
+fairchild fills every one of them at load time.
 
-Reactive Jacobian contributions are stamped via the `write_jacobian_array_react`
-copy path with `α = 1/h` scaling. The aliasing path (`load_jacobian_resist`)
-is broken in OpenVAF-Reloaded and not used.
+The limiter name is not a fixed vocabulary — OpenVAF does not validate it,
+it forwards whatever string literal the model wrote — so no simulator can
+implement them all. fairchild implements `pnjlim`; anything else (or `pnjlim`
+called with an unexpected number of arguments, which would be an ABI mismatch)
+gets an **identity limiter** and a warning naming it. That model then runs
+*without* limiting for that call: convergence may be slower or need a smaller
+step, but the answer is unaffected and the process does not die. Adding a
+limiter is one row in `LIMITERS` (`fairchild-osdi/src/loader.rs`).
 
-Encrypted PDK Verilog-A (IEEE-1735 / Cadence NCPROTECT) is fundamentally
-unsupported by OpenVAF — that's an upstream Cadence-key problem, not a
-fairchild limitation.
+Limiting changes the Newton path, not the solution: the `$limit` diode in
+`examples/verilog_a/` converges to 0.6333213 V against 0.6333214 V for the same
+model without it.
+
+A bare `exp()` is fine too — the Newton loop's Armijo line search carries it,
+checked to a 500 V drive — but limiting is what scales to stiffer circuits.
+
+### 14.2 Compiling
 
 ```bash
-# Build
-openvaf bsim4.va -o bsim4.osdi
-
-# Use
-fairchild -f my_circuit.sp
+openvaf-r -I models models/va_diode.va -o build/va_diode.osdi
 ```
+
+`-I` sets the include path for `\`include "optical.vams"`. On macOS
+`openvaf-r` needs LLVM 18 on the loader path:
+
+```bash
+export DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib
+```
+
+`examples/verilog_a/build.sh` wraps both. Compiled `.osdi` files are platform
+binaries and are gitignored.
+
+Encrypted PDK Verilog-A (IEEE-1735 / Cadence NCPROTECT) is unsupported by
+OpenVAF — an upstream Cadence-key problem, not a fairchild limitation.
+
+### 14.3 Optical models
+
+fairchild carries an optical signal on ordinary real-valued MNA unknowns —
+three per channel — so a custom optical discipline needs no compiler support
+at all; OSDI passes it through as metadata.
+
+| wire | carries | units |
+|---|---|---|
+| `<port>_re` | real part of the field envelope | sqrt(W) |
+| `<port>_im` | imaginary part | sqrt(W) |
+| `<port>_wl` | carrier wavelength | m |
+
+Optical power is `re² + im²`. These are exactly the wires a native
+`.optical_port p` expands to (`p_re_0`, `p_im_0`, `p_wl_0`), so a Verilog-A
+model drops straight into a link built from native `fc_*` devices — address the
+underlying wire names on the `X` line. `examples/verilog_a/models/optical.vams`
+is the discipline; `wg_compare.sp` pins a Verilog-A waveguide against the
+native one in a single deck.
+
+Two rules, both of which cost real debugging time to learn:
+
+**Take the wavelength from a parameter, never off the λ wire.** The wire
+exists so a chain stays self-consistent and native devices can read it. Do not
+put `OWL(...)` inside an expression you contribute from. Propagation phase is
+thousands of radians — 400 µm at n_g = 4.2 is about 6800 rad — so OpenVAF
+differentiating it against the λ unknown puts ∂φ/∂λ = φ/λ ≈ 1e9 per metre into
+the Jacobian, and Newton fails to converge at some wavelengths and not others.
+Native devices dodge this by freezing λ at the previous iterate, which
+Verilog-A has no way to express. Sweep wavelength with `--param` or
+`set_param` instead.
+
+**`alpha_dB_cm` is power dB, so the amplitude factor divides by 20** —
+`10^(−dB/20)`. Everything under `legacy/` predates commit `0f689cb` and is a
+factor of two out.
+
+Verilog-A optical models are single-channel and forward-only. WDM bundle
+awareness, bidirectional propagation, `DelayLine` group delay and
+`PhotonicActiveModel` composition are native-Rust features a Verilog-A model
+cannot reach; see §12.
+
+### 14.4 Instantiating
+
+```spice
+.osdi build/va_diode.osdi                  ; relative to the netlist file
+Xd1  a out  va_diode  Is=1e-14 Rs=0.5      ; model name == module name
+```
+
+`.osdi` registers every descriptor in the library under its module name. From
+there it resolves like any other model: `X` takes an arbitrary terminal list,
+and `D`, `M`, `Q` work for two-, four- and three-terminal models respectively.
+All four carry instance parameters.
+
+The foundry idiom puts process parameters on a card and geometry per instance:
+
+```spice
+.osdi  bsim4.osdi
+.model nch  bsim4 (tox=3n vth0=0.4 …)
+M1  d g s b  nch  W=1u L=100n
+```
+
+`.model` binds a card name to a loaded descriptor, with the card's parameters
+as defaults; an instance parameter overrides the card. Parameter names match
+case-insensitively (Verilog-A preserves case, fairchild lowercases). A card
+whose second token names no loaded descriptor and no built-in type is left
+alone, so a typo surfaces as `unknown model` at the element that uses it.
+
+`--param ELEMENT.PARAM=VALUE` reaches `X`, `R`, `C` and `L` elements only; to
+sweep a Verilog-A transistor use the Python bindings' `set_param`, or a
+`.param` in the netlist referenced as `{name}`.
+
+### 14.5 Implementation notes
+
+Reactive Jacobian contributions are stamped through the
+`write_jacobian_array_react` copy path — `α·∂q/∂x` in transient, `ω·∂q/∂x` in
+`.ac` and `.noise`, the same entries in the same positions. The aliasing path
+(`load_jacobian_resist`) is broken in OpenVAF-Reloaded and not used.
+
+`OsdiDevice` deliberately does not report `small_signal_reactances`: a
+Verilog-A charge is a general matrix, and ∂q_i/∂v_j ≠ ∂q_j/∂v_i —
+transcapacitance is exactly what a BSIM-class model is made of, so reciprocal
+two-terminal branches would be silently wrong. It overrides
+`Device::load_reactive_jacobian` instead.
 
 [openvaf]: https://codeberg.org/arpadbuermen/OpenVAF-Reloaded
