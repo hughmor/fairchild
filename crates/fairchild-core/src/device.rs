@@ -380,4 +380,34 @@ pub trait Device: Send + Sync {
     fn stamp_pairs(&self) -> Option<Vec<(usize, usize)>> {
         None
     }
+
+    /// MNA columns whose `∂f/∂x` this device deliberately does **not** stamp.
+    ///
+    /// A device may linearise about a coefficient it freezes at the previous
+    /// Newton iterate rather than differentiating it.  Successive substitution
+    /// reaches the same fixed point, so the converged answer is identical — and
+    /// for a term like `∂φ/∂λ ≈ 2.7e9 rad/m` freezing is the only thing that
+    /// converges at all.  Newton is content with any iteration matrix that
+    /// contracts; it does not need the exact derivative.
+    ///
+    /// The adjoint method does.  `dL/dp = −λᵀ·∂f/∂p` is the total derivative
+    /// only if `Jᵀλ = ∂L/∂x` used the true `J`, so a frozen block does not make
+    /// the gradient approximate — it makes every path through that block
+    /// silently contribute **zero**.  For an electro-optic device that is the
+    /// path the user cares about most.
+    ///
+    /// Report those columns here.  `crate::adjoint` re-derives them numerically
+    /// for the adjoint solve alone and leaves the Newton iteration matrix
+    /// untouched, so declaring a column costs nothing at solve time.
+    ///
+    /// λ wires do not need declaring — the adjoint finds them from the netlist,
+    /// since every optical device freezes those and there is no point making
+    /// fourteen models say so.  Declare the *electrical* columns an optical
+    /// device reads: drive voltages, control wires, thermal nodes.
+    ///
+    /// `crate::adjoint::jacobian_check` is the oracle for this: any mismatch in
+    /// an undeclared column is a missing declaration or a wrong stamp.
+    fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        Vec::new()
+    }
 }

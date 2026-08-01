@@ -92,6 +92,78 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
     hit
 }
 
+/// Read back what [`set_element_param`] would overwrite.
+///
+/// Accepts the same names and aliases, so a caller can perturb a parameter and
+/// restore it without tracking the nominal itself — which is what the adjoint
+/// sensitivity path needs to size its finite-difference step.
+///
+/// Returns `None` when the element or parameter is not found.  For a device
+/// instance that means the parameter is not on the instance line: a `.model`
+/// card default is invisible here, because the card is not the element.
+pub fn get_element_param(netlist: &Netlist, element: &str, param: &str) -> Option<f64> {
+    let el_name = element.to_lowercase();
+    let param_lc = param.to_lowercase();
+
+    for el in &netlist.elements {
+        match el {
+            Element::Resistor {
+                name, resistance, ..
+            } if name.to_lowercase() == el_name
+                && matches!(param_lc.as_str(), "resistance" | "value" | "r") =>
+            {
+                return Some(*resistance);
+            }
+            Element::Capacitor {
+                name, capacitance, ..
+            } if name.to_lowercase() == el_name
+                && matches!(param_lc.as_str(), "capacitance" | "value" | "c") =>
+            {
+                return Some(*capacitance);
+            }
+            Element::Inductor {
+                name, inductance, ..
+            } if name.to_lowercase() == el_name
+                && matches!(param_lc.as_str(), "inductance" | "value" | "l") =>
+            {
+                return Some(*inductance);
+            }
+            Element::VoltageSource { name, waveform, .. }
+                if name.to_lowercase() == el_name
+                    && (param_lc == "dc" || param_lc == "value" || param_lc == "v") =>
+            {
+                return dc_level(waveform);
+            }
+            Element::CurrentSource { name, waveform, .. }
+                if name.to_lowercase() == el_name
+                    && (param_lc == "dc" || param_lc == "value" || param_lc == "i") =>
+            {
+                return dc_level(waveform);
+            }
+            Element::XOsdi { name, params, .. } | Element::Mosfet { name, params, .. }
+                if name.to_lowercase() == el_name =>
+            {
+                return params
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == param_lc)
+                    .map(|(_, v)| *v);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The DC level of a waveform.  `set_element_param` replaces the whole
+/// waveform with a `Dc`, so that is the only shape that round-trips; a
+/// time-varying source has no single value this getter could honestly return.
+fn dc_level(waveform: &Waveform) -> Option<f64> {
+    match waveform {
+        Waveform::Dc(v) => Some(*v),
+        _ => None,
+    }
+}
+
 /// Replace the waveform of voltage or current source `name` with a
 /// piecewise-linear table.  `points` must be sorted by time.
 ///

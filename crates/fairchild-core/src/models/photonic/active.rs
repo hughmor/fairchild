@@ -268,6 +268,14 @@ impl Device for ActiveOpticalDevice {
         self.seg.commit(x);
         self.model.commit(x);
     }
+
+    /// The segment stamps true `∂(out)/∂V` cross-terms whenever its drive model
+    /// supplies `∂perturbation/∂V`, and falls back to a frozen coefficient when
+    /// it does not.  A `PhotonicActiveModel` that reports no derivatives is
+    /// therefore invisible to the adjoint, so say so in exactly that case.
+    fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        self.seg.unstamped_control_columns()
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────

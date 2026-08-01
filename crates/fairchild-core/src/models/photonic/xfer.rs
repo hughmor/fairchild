@@ -563,6 +563,23 @@ impl Device for NativeOptical2x2 {
         self.load_jacobian(mat);
     }
 
+    /// `refresh` rebuilds `self.s[k]` from the control voltage and the stamp
+    /// then treats it as a constant, so nothing carries `∂S/∂v_ctrl` — the
+    /// `dw_dv_<k>` coupling is invisible to the adjoint unless declared.  Only
+    /// the channels that actually take a control voltage: an `explicit[k]`
+    /// channel has a matrix pinned by parameters and no voltage dependence.
+    fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        let ctl_base = 4 * self.wpc * self.n_channels;
+        let mut cols: Vec<usize> = (0..self.n_channels)
+            .filter(|&k| !self.explicit[k] && self.dw_dv[k] != 0.0)
+            .filter_map(|k| self.nodes[ctl_base + k])
+            .collect();
+        if !cols.is_empty() {
+            cols.extend(self.nodes[ctl_base + self.n_channels]);
+        }
+        cols
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         if !self.delay.is_active() {
             return;
