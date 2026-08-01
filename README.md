@@ -28,7 +28,7 @@ for accuracy and performance vs ngspice.
 
 | Category | Coverage |
 |---|---|
-| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), BJT (Gummel-Poon), B (behavioral), X (subckt / OSDI) |
+| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), BJT (Gummel-Poon), B (behavioral), S/W (switches), T (lossless line), X (subckt / OSDI) |
 | Sources | DC, PULSE, PWL, SIN, EXP, SFFM, AM |
 | Analyses | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | Solvers | NR with `pnjlim` / `fetlim`; BE, TR, GEAR (BDF-2); dense or sparse LU |
@@ -36,8 +36,8 @@ for accuracy and performance vs ngspice.
 | Output | CSV (stdout / file), Nutmeg rawfile (ngspice-compatible) |
 | Verilog-A | compiled to OSDI v0.4 by OpenVAF-Reloaded; `.osdi` + `.model` cards, electrical **and** optical models ([guide](docs/user-guide.md#14-verilog-a-models-osdi)) |
 
-What's not yet supported: switches `S`/`W`, lossy transmission lines
-(lossless `T` is supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
+What's not yet supported: lossy transmission lines (lossless `T` and
+`S`/`W` switches are supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
 PSF/FSDB binary output.
 
 ### Electro-optic co-simulation
@@ -256,8 +256,8 @@ The major work ahead, in rough order:
 2. **Real-netlist test corpus on CI** — drop a foundry opamp and a published
    EO transceiver into the regression suite. Every failure becomes a Tier-0
    backlog item.
-3. **Remaining analog elements** — switches `S`/`W`, lossy transmission
-   lines (LTRA; lossless `T` already supported).
+3. **Remaining analog elements** — lossy transmission lines (LTRA; lossless
+   `T` and `S`/`W` switches already supported).
 4. **Adjoint sensitivity** (the original Phase 4 differentiator).
 5. **Tier-2 moats**: envelope-following, S-parameter Touchstone blocks with
    time-domain convolution, harmonic balance / PSS, WDM cross-channel

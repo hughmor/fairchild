@@ -2,6 +2,7 @@ pub mod bjt;
 pub mod diode;
 pub mod mosfet1;
 pub mod photonic;
+pub mod switch;
 pub mod tline;
 pub use bjt::GummelPoonBjt;
 pub use diode::ShockleyDiode;
@@ -14,4 +15,5 @@ pub use photonic::{
     NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler, NativeMux, NativeMzm,
     NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide, SpectrumTable,
 };
+pub use switch::{Switch, SwitchControl};
 pub use tline::NativeTLine;

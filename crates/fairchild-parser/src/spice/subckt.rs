@@ -405,6 +405,40 @@ pub(super) fn remap_element_nodes(
             l2: format!("{prefix}.{l2}"),
             coupling,
         },
+        Element::VoltageSwitch {
+            name,
+            pos,
+            neg,
+            ctrl_pos,
+            ctrl_neg,
+            model_name,
+            initial_on,
+        } => Element::VoltageSwitch {
+            name: format!("{prefix}.{name}"),
+            pos: rn(&pos),
+            neg: rn(&neg),
+            ctrl_pos: rn(&ctrl_pos),
+            ctrl_neg: rn(&ctrl_neg),
+            model_name,
+            initial_on,
+        },
+        // `ctrl_vsrc` is an element name, so it is prefixed like the K
+        // element's inductor references — not remapped like a net.
+        Element::CurrentSwitch {
+            name,
+            pos,
+            neg,
+            ctrl_vsrc,
+            model_name,
+            initial_on,
+        } => Element::CurrentSwitch {
+            name: format!("{prefix}.{name}"),
+            pos: rn(&pos),
+            neg: rn(&neg),
+            ctrl_vsrc: format!("{prefix}.{ctrl_vsrc}"),
+            model_name,
+            initial_on,
+        },
         Element::TransmissionLine {
             name,
             a_pos,
