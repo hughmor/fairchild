@@ -16,6 +16,7 @@ pub mod options;
 pub mod reactive;
 pub mod sanity;
 pub mod solver;
+pub mod tolerance;
 pub mod tran;
 pub mod tran_step;
 

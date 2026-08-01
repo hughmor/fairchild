@@ -443,6 +443,10 @@ pub fn tran_nr_with_registry_var_opts(
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
+    // Not every unknown is a volt — see `crate::tolerance`.  Serves both the NR
+    // step test and the LTE norm below, so the step controller weighs a λ error
+    // on the same scale that decides convergence.
+    let tol = crate::tolerance::Tolerances::build(netlist, &topo, opts);
 
     // Nodes constrained by voltage sources are excluded from LTE: their voltages
     // change due to the source waveform, not integration error.
@@ -665,10 +669,7 @@ pub fn tran_nr_with_registry_var_opts(
                 x_new
             };
 
-            let converged = x_next
-                .iter()
-                .zip(x_try.iter())
-                .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
+            let converged = tol.converged(&x_next, &x_try);
 
             x_try = x_next;
             if converged {
@@ -698,7 +699,7 @@ pub fn tran_nr_with_registry_var_opts(
                 .enumerate()
                 .take(n_nodes)
                 .filter(|(idx, _)| !forced_nodes.contains(idx))
-                .map(|(_, (xc, xp))| (xc - xp).abs() * 0.5 / (opts.vntol + opts.reltol * xc.abs()))
+                .map(|(idx, (xc, xp))| (xc - xp).abs() * 0.5 / tol.bound(idx, *xc))
                 .fold(0.0f64, f64::max)
         } else {
             0.0

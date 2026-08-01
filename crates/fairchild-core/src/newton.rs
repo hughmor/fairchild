@@ -906,6 +906,9 @@ fn nr_inner(
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
+    // Not every unknown is a volt — see `crate::tolerance`.  Built here rather
+    // than per iteration; `topo.size` is settled by the time any solver runs.
+    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
 
     // Sparsity pattern is fixed across this NR loop — devices stamp the
     // same matrix positions each iteration, only the values change.  The
@@ -1085,10 +1088,7 @@ fn nr_inner(
             x_new
         };
 
-        let converged = x_next
-            .iter()
-            .zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
+        let converged = tol.converged(&x_next, &x);
 
         x = x_next;
         if converged {

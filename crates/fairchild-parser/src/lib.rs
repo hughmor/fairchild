@@ -114,6 +114,9 @@ impl BundlePort {
     }
 
     /// Underlying wire names for channel `ch` of this port.
+    ///
+    /// See [`is_lambda_wire`] for the inverse of the `_wl_` half of this
+    /// naming — the solver needs to pick the wavelength wires back out.
     pub fn wires_for_channel(&self, ch: usize) -> Vec<String> {
         match self.kind {
             BundleKind::Optical {
@@ -146,6 +149,29 @@ impl BundlePort {
         }
         out
     }
+}
+
+/// Is `net` a wavelength wire — the `λ` third of an optical channel?
+///
+/// The inverse of the `_wl_` naming in [`BundlePort::wires_for_channel`], and
+/// the one place that convention is decoded. All three ways of declaring
+/// optical nets end up spelling the wavelength wire `<something>_wl_<channel>`:
+/// `.optical_port p 2` generates it, `.optical_bus 2 re im wl` generates
+/// `wl_0`/`wl_1` from the third base name, and `.optical foo_wl[0..1]` names it
+/// by hand. So one rule covers all of them.
+///
+/// The solver needs this because a λ wire carries **metres** (~1.55e-6) while
+/// sitting in the same solution vector as volts, and the Newton step test is
+/// otherwise calibrated for volts — see `crate::tolerance` in `fairchild-core`.
+///
+/// Callers are expected to check `netlist.optical_nets` membership first, so an
+/// electrical net that happens to be named `foo_wl_0` is not affected.
+pub fn is_lambda_wire(net: &str) -> bool {
+    let mut parts = net.rsplit('_');
+    let Some(channel) = parts.next() else {
+        return false;
+    };
+    !channel.is_empty() && channel.bytes().all(|b| b.is_ascii_digit()) && parts.next() == Some("wl")
 }
 
 /// One `.alter <label>` block: name-keyed patches applied to the base netlist
