@@ -1,7 +1,11 @@
 [package]
 name = "fairchild-parser"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "SPICE netlist parser for fairchild, including optical bundle ports and hierarchical PCells."
 
 [dependencies]
 thiserror = { workspace = true }

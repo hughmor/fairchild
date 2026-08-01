@@ -1,7 +1,11 @@
 [package]
 name = "fairchild-c"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "C ABI for fairchild: batch simulation plus host-driven transient stepping for mixed-signal co-simulation."
 
 [lib]
 # NOT "fairchild": fairchild-py's extension module already claims that name, and

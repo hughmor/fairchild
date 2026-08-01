@@ -269,4 +269,6 @@ The major work ahead, in rough order:
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE)
+
+Copyright © 2026 Hugh Morison.
