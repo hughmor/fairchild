@@ -96,6 +96,12 @@ analysis with intended relative phase is wrong.
 an ordinary diode with no breakdown knee. The parameters are accepted so a
 foundry card loads, and a warning names them.
 
+⚠️ **Diode instance parameters are parsed and then dropped.** `D1 a k dm area=2`
+parses, `Element::Diode` carries the list, and nothing reads it —
+`ShockleyDiode` does not implement `Device::set_real_param`, so the default
+(`false`) applies and `ParamSet::apply` consumes nothing. `AREA` in particular
+is not modelled. Nothing warns.
+
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
 
 ---
@@ -124,6 +130,9 @@ matches its unmodelled parameters explicitly and discards them, so nothing is
 printed. A foundry card with `IKF` loads and simulates as though high-injection
 roll-off did not exist. Verified 2026-08-01: a deck with `IKF=10m ISE=1e-14
 KF=1e-15` produces no output on stderr.
+
+⚠️ **BJT instance parameters are parsed and then dropped**, and more thoroughly
+than the diode's: `build_devices`' BJT arm does not even destructure `params`.
 
 `RB` is a constant resistance. The current-dependent base resistance (`RBM`,
 `IRB`) is not modelled.

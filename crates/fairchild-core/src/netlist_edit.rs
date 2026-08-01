@@ -9,10 +9,15 @@ use fairchild_parser::{Element, Netlist, Waveform};
 
 /// Set `param` on the element named `element` to `value`.
 ///
-/// Matching is case-insensitive on both names.  Passives accept `value` or
-/// their physical name (`resistance` / `capacitance` / `inductance`); sources
-/// accept `value`, `dc`, or `v` / `i` and become a DC waveform; MOSFETs and
-/// OSDI instances take any instance parameter, appended if not already present.
+/// Matching is case-insensitive on both names.  Passives accept `value`, their
+/// physical name (`resistance` / `capacitance` / `inductance`), or the bare
+/// element letter (`r` / `c` / `l`); sources accept `value`, `dc`, or `v` / `i`
+/// and become a DC waveform; MOSFET and OSDI instances take any instance
+/// parameter, appended if not already present.
+///
+/// The device-with-params arm is what lets a Verilog-A transistor be swept: a
+/// `.model`-card OSDI device is instantiated as an ordinary `M`/`Q`/`D` line,
+/// so reaching only `X` elements would miss exactly the PDK idiom.
 ///
 /// Returns `false` if no element matched — bindings should surface that rather
 /// than silently ignoring a typo'd name.
@@ -26,7 +31,7 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
             Element::Resistor {
                 name, resistance, ..
             } if name.to_lowercase() == el_name
-                && (param_lc == "resistance" || param_lc == "value") =>
+                && matches!(param_lc.as_str(), "resistance" | "value" | "r") =>
             {
                 *resistance = value;
                 hit = true;
@@ -34,7 +39,7 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
             Element::Capacitor {
                 name, capacitance, ..
             } if name.to_lowercase() == el_name
-                && (param_lc == "capacitance" || param_lc == "value") =>
+                && matches!(param_lc.as_str(), "capacitance" | "value" | "c") =>
             {
                 *capacitance = value;
                 hit = true;
@@ -42,7 +47,7 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
             Element::Inductor {
                 name, inductance, ..
             } if name.to_lowercase() == el_name
-                && (param_lc == "inductance" || param_lc == "value") =>
+                && matches!(param_lc.as_str(), "inductance" | "value" | "l") =>
             {
                 *inductance = value;
                 hit = true;
@@ -61,6 +66,12 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
                 *waveform = Waveform::Dc(value);
                 hit = true;
             }
+            // Deliberately NOT `Diode` or `Bjt`: both carry a `params` list, but
+            // nothing consumes it — neither implements `Device::set_real_param`
+            // (the default returns false) and `build_devices`' BJT arm does not
+            // even destructure `params`. Matching them here would return `true`
+            // for an edit that changes nothing, which is worse than not
+            // matching. See `docs/model_status.md`.
             Element::XOsdi { name, params, .. } | Element::Mosfet { name, params, .. }
                 if name.to_lowercase() == el_name =>
             {
@@ -69,7 +80,9 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
                     .find(|(k, _)| k.to_lowercase() == param_lc)
                 {
                     Some(entry) => entry.1 = value,
-                    None => params.push((param.to_string(), value)),
+                    // Stored lower-cased so a second call with different casing
+                    // updates this entry instead of appending a rival one.
+                    None => params.push((param_lc.clone(), value)),
                 }
                 hit = true;
             }
@@ -130,6 +143,56 @@ mod tests {
         assert!(!set_element_param(&mut n, "c1", "resistance", 1.0));
         assert!(!set_element_param(&mut n, "nosuch", "value", 1.0));
         assert!(set_element_param(&mut n, "c1", "value", 2e-12));
+    }
+
+    /// The gap this function exists to close: a Verilog-A transistor arrives on
+    /// an `M` line via a `.model` card, so reaching only `X` elements misses the
+    /// whole PDK idiom. The CLI's private copy used to do exactly that.
+    #[test]
+    fn mosfet_and_osdi_instance_params_are_reachable() {
+        let mut n = parse_spice(
+            "* m-line\n.model nch NMOS (VTO=0.7 KP=100u)\n\
+             M1 d g 0 0 nch W=10u L=1u\nVg g 0 1\nVd d 0 2\n.op\n.end\n",
+        )
+        .unwrap();
+        assert!(set_element_param(&mut n, "M1", "W", 40e-6));
+        // Existing key is updated, not duplicated — and casing does not matter.
+        assert!(set_element_param(&mut n, "m1", "w", 20e-6));
+        match n
+            .elements
+            .iter()
+            .find(|e| matches!(e, Element::Mosfet { .. }))
+        {
+            Some(Element::Mosfet { params, .. }) => {
+                let w: Vec<_> = params.iter().filter(|(k, _)| k == "w").collect();
+                assert_eq!(w.len(), 1, "duplicate w entries: {params:?}");
+                assert_eq!(w[0].1, 20e-6);
+            }
+            other => panic!("expected M1, got {other:?}"),
+        }
+    }
+
+    /// Diode and BJT instance params are parsed but consumed by nothing, so a
+    /// `true` here would be a lie. Documented in `docs/model_status.md`.
+    #[test]
+    fn diode_and_bjt_instance_params_are_not_claimed() {
+        let mut n = parse_spice(
+            "* d/q\n.model dm D (IS=1e-14)\n.model qm NPN (IS=1e-16)\n\
+             D1 a 0 dm\nQ1 c b 0 qm\nV1 a 0 1\nVb b 0 0.7\nVc c 0 2\n.op\n.end\n",
+        )
+        .unwrap();
+        assert!(!set_element_param(&mut n, "d1", "area", 2.0));
+        assert!(!set_element_param(&mut n, "q1", "area", 2.0));
+    }
+
+    /// The bare element letter, which the CLI accepted and the shared version
+    /// did not — keeping it is why the CLI could adopt this without regressing.
+    #[test]
+    fn bare_element_letter_aliases_work() {
+        let mut n = nl();
+        assert!(set_element_param(&mut n, "r1", "r", 5e3));
+        assert!(set_element_param(&mut n, "c1", "c", 5e-12));
+        assert!(!set_element_param(&mut n, "r1", "c", 1.0), "wrong letter");
     }
 
     #[test]
