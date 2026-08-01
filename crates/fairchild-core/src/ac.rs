@@ -205,6 +205,12 @@ pub fn ac_analysis_opts(
     // GMIN — node rows and device-internal rows (skips vsource aux rows).
     topo.stamp_gmin(&mut g_mat, opts.gmin);
 
+    // ponytail: `.ac` assembles G/C/L and the 2n×2n system densely — O(n²)
+    // memory and O(n²) work per frequency point. The DC/transient matrix went
+    // sparse in a929041 and this did not, because it is not on that hot path.
+    // Upgrade path: emit `SparseRow`s directly (the stamp primitives and
+    // `CircuitTopology::to_csc` already take them); do it when AC on a large
+    // photonic circuit starts hurting. Tracked as task #12.
     // --- Capacitance matrix C (purely imaginary part of Y) ---
     let mut c_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {

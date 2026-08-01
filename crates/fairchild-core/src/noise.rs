@@ -110,6 +110,8 @@ pub fn noise_analysis(
         }
     }
     topo.stamp_gmin(&mut g_mat, opts.gmin);
+    // ponytail: dense G/C/L and a dense 2n×2n adjoint system, same trade-off
+    // and same upgrade path as `ac.rs`. Tracked as task #12.
     let mut c_mat = vec![vec![0.0f64; size]; size];
     let mut l_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {

@@ -128,6 +128,10 @@ impl CircuitTopology {
 
     /// Wrap dense rows as sparse ones, dropping exact zeros.
     ///
+    /// ponytail: exists only to bridge the still-dense `.ac`/`.noise` assembly
+    /// to the sparse solver interface. Delete it when those assemble sparse
+    /// rows directly (task #12) — nothing else should need it.
+    ///
     /// For the `.ac` / `.noise` assemblies, which still build their real
     /// 2n×2n complex-as-real system densely. They allocate three dense n×n
     /// matrices already, so this conversion changes nothing asymptotically —
@@ -148,9 +152,13 @@ impl CircuitTopology {
 
     /// Materialise sparse rows as a dense row-major matrix.
     ///
-    /// For the paths that are inherently O(n²) anyway — dense LU, Ruiz
-    /// equilibration, the condition-number estimate, and the complex assembly
-    /// in `.ac`/`.noise`. Never call it from a Newton iteration.
+    /// For the paths that are inherently O(n²) anyway — dense LU, the
+    /// condition-number estimate, and the one-shot `klu_solve_dense`. Never
+    /// call it from a Newton iteration.
+    ///
+    /// ponytail: dense LU is O(n³) and the condition estimate is a diagnostic,
+    /// so materialising for them is not a corner being cut — it is the right
+    /// representation for those two. This is not on the task-#12 list.
     pub fn to_dense(a: &[SparseRow], n: usize) -> Vec<Vec<f64>> {
         let mut d = vec![vec![0.0f64; n]; n];
         for (i, row) in a.iter().enumerate() {
