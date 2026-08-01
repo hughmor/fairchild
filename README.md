@@ -17,8 +17,10 @@ Photonic discipline rebuilt around 14 native Rust devices, bundle-port
 syntax with WDM as the default, and optional bidirectional propagation.
 KiCad schematic capture wired up around native devices. Python bindings
 cover every analysis the CLI does. See [`docs/user-guide.md`](docs/user-guide.md)
-for the full feature reference and [`docs/benchmarks.md`](docs/benchmarks.md)
-for accuracy and performance vs ngspice.
+for the full feature reference, [`docs/model_status.md`](docs/model_status.md)
+for the per-parameter contract (what is parsed vs actually stamped vs
+validated), and [`docs/benchmarks.md`](docs/benchmarks.md) for accuracy and
+performance vs ngspice.
 
 ---
 

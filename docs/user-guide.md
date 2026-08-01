@@ -46,6 +46,11 @@ C1  out 0  1u
 
 ## 2. Elements reference
 
+> For a per-parameter breakdown of what is actually *stamped* versus merely
+> accepted, and what each is validated against, see
+> [`model_status.md`](model_status.md). Several parameters here are parsed
+> for compatibility and do nothing.
+
 ### Passive elements
 
 ```
