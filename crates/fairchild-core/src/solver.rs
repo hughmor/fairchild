@@ -479,9 +479,22 @@ impl Factorisation for FaerSparseFactorisation {
 
 /// SuiteSparse KLU backend — sparse direct LU with BTF preordering.
 /// One-shot `solve` does fresh analyze + factor + solve per call (same
-/// behaviour as `FaerSparseSolver::solve`).  The `factorise` path is
-/// where KLU's real advantage lives: a `KluSymbolic` analysed once is
-/// reused via `klu_refactor` for every subsequent solve.
+/// behaviour as `FaerSparseSolver::solve`).  The `factorise_mat` path is
+/// where KLU's advantage lives: a `KluSymbolic` analysed once is reused via
+/// `klu_refactor` for every subsequent solve.
+///
+/// That advantage was theoretical until 2026-08-01. The cache reused the
+/// symbolic factorisation correctly, then threw the win away by rebuilding the
+/// CSC arrays from a **full dense O(n²) scan** on every `refactor_and_solve` —
+/// and in column-major order over row-major storage, so it fell out of cache
+/// as well. Measured: 41 ms per call at n=3200, against a ~120 ms total excess
+/// over faer-sparse across ~3 Newton iterations. Net effect, KLU was 4.1×
+/// *slower* than the pure-Rust backend it was supposed to beat.
+///
+/// It now uses the same structural-pattern slot map as
+/// [`FaerSparseFactorisation`], which `d149a26` gave that backend and this one
+/// never received. Measured after: 1.2-1.5× faster than faer-sparse, widening
+/// with size (`cargo bench -p fairchild-core --features klu`).
 #[cfg(feature = "klu")]
 pub struct KluSolver;
 
@@ -491,140 +504,193 @@ impl LinearSolver for KluSolver {
         fairchild_klu::klu_solve_dense(a, b).map_err(|_| SimError::SingularMatrix)
     }
 
-    fn factorise(&self, a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
-        use fairchild_klu::{dense_to_csc, KluCommon, KluNumeric, KluSymbolic};
-        let n = a.len();
-        if n == 0 {
-            return Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
-                KluSolver,
-            ))));
-        }
-        let (mut ap, mut ai, mut ax) = dense_to_csc(a, 1e-30);
-        let mut common = KluCommon::new();
-        // Save the row-index map so refactor_and_solve can pull values
-        // at the exact same CSC positions on subsequent iterations.
-        let pattern: Vec<(i32, i32)> = column_row_pattern(&ap, &ai);
-        let symbolic = KluSymbolic::analyze(n, &mut ap, &mut ai, &mut common)
-            .map_err(|_| SimError::SingularMatrix)?;
-        let numeric = KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut common)
-            .map_err(|_| SimError::SingularMatrix)?;
-        Ok(Box::new(KluFactorisation {
-            common,
-            symbolic,
-            numeric,
-            ap,
-            ai,
-            ax,
-            pattern,
-            n,
-        }))
+    /// Without a structural pattern there is nothing to cache cheaply, so fall
+    /// back to no reuse at all rather than to a dense rescan per iteration.
+    /// Every in-tree caller goes through [`LinearSolver::factorise_mat`].
+    fn factorise(&self, _a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+        Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
+            KluSolver,
+        ))))
     }
-}
 
-/// Helper: turn KLU's column-offset + row-index arrays into a flat
-/// `(col, row)` list in CSC traversal order.  Used so that subsequent
-/// refactor calls can refill `ax` in the same order.
-#[cfg(feature = "klu")]
-fn column_row_pattern(ap: &[i32], ai: &[i32]) -> Vec<(i32, i32)> {
-    let n_cols = ap.len() - 1;
-    let mut out = Vec::with_capacity(ai.len());
-    for j in 0..n_cols {
-        let start = ap[j] as usize;
-        let end = ap[j + 1] as usize;
-        for &row in &ai[start..end] {
-            out.push((j as i32, row));
+    fn factorise_mat(&self, mat: &MnaMatrix) -> Result<Box<dyn Factorisation>, SimError> {
+        let n = mat.a.len();
+        match mat.pattern() {
+            Some(p) if n > 0 => Ok(Box::new(KluFactorisation::new(Arc::clone(p), 1e-30, n))),
+            _ => self.factorise(&mat.a),
         }
     }
-    out
 }
 
 #[cfg(feature = "klu")]
 struct KluFactorisation {
     common: fairchild_klu::KluCommon,
-    symbolic: fairchild_klu::KluSymbolic,
-    numeric: fairchild_klu::KluNumeric,
+    /// `None` until the first `rebuild`.
+    symbolic: Option<fairchild_klu::KluSymbolic>,
+    numeric: Option<fairchild_klu::KluNumeric>,
+    pattern: Arc<crate::mna::Pattern>,
+    zero_threshold: f64,
     ap: Vec<i32>,
     ai: Vec<i32>,
     ax: Vec<f64>,
-    pattern: Vec<(i32, i32)>, // (col, row) per CSC entry
+    /// Where in `ax` each structural cell lives, in the order the refill walk
+    /// visits them (row-major over `pattern.cols`). `NO_SLOT` = not currently
+    /// in the numerically active set.
+    slot: Vec<u32>,
     n: usize,
 }
 
 #[cfg(feature = "klu")]
 impl KluFactorisation {
-    /// Rebuild CSC fresh from the current dense matrix and compare to
-    /// the cached pattern.  Returns `true` if the pattern grew (a new
-    /// structural entry appeared since the symbolic factorisation was
-    /// computed) — devices stamping zero at x=0 produce this on the
-    /// 2nd NR iteration once the operating point activates them.
-    fn refresh_csc(&mut self, a: &[Vec<f64>]) -> bool {
-        use fairchild_klu::dense_to_csc;
-        let (ap_new, ai_new, ax_new) = dense_to_csc(a, 1e-30);
-        let pattern_changed = ap_new != self.ap || ai_new != self.ai;
-        self.ap = ap_new;
-        self.ai = ai_new;
-        self.ax = ax_new;
-        if pattern_changed {
-            // Rebuild the (col, row) traversal so transpose-solve and
-            // future invalidations stay consistent.
-            self.pattern = column_row_pattern(&self.ap, &self.ai);
+    fn new(pattern: Arc<crate::mna::Pattern>, zero_threshold: f64, n: usize) -> Self {
+        KluFactorisation {
+            common: fairchild_klu::KluCommon::new(),
+            symbolic: None,
+            numeric: None,
+            pattern,
+            zero_threshold,
+            ap: Vec::new(),
+            ai: Vec::new(),
+            ax: Vec::new(),
+            slot: Vec::new(),
+            n,
         }
-        pattern_changed
     }
 
-    /// Pattern grew — re-analyze symbolic + factor numeric, dropping the
-    /// previous cached factorisation.  Cheap if it happens once (during
-    /// NR warm-up); expensive if it happens every iteration (which would
-    /// indicate the convergence path is also walking the pattern, a
-    /// pathological case we don't try to defend against here).
-    fn reanalyze(&mut self) -> Result<(), SimError> {
+    /// Build the CSC arrays and the slot map from the currently non-zero cells
+    /// of the structural pattern, then run `klu_analyze` + `klu_factor`.
+    ///
+    /// The same shape as [`FaerSparseFactorisation::rebuild`], and for the same
+    /// reason: the alternative — rebuilding CSC from a full dense scan every
+    /// solve — costs O(n²) with a column-major traversal of row-major storage,
+    /// which measured 41 ms per call at n = 3200 and swamped everything KLU's
+    /// `klu_refactor` fast path was saving.
+    fn rebuild(&mut self, a: &[Vec<f64>]) -> Result<(), SimError> {
         use fairchild_klu::{KluNumeric, KluSymbolic};
         let n = self.n;
-        // Drop old numeric + symbolic before allocating new (Drop runs
+        let thr = self.zero_threshold;
+
+        let mut col_count = vec![0i32; n];
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            for &j in cols {
+                if a[i][j as usize].abs() > thr {
+                    col_count[j as usize] += 1;
+                }
+            }
+        }
+        let mut ap = vec![0i32; n + 1];
+        for j in 0..n {
+            ap[j + 1] = ap[j] + col_count[j];
+        }
+        let nnz = ap[n] as usize;
+        let mut ai = vec![0i32; nnz];
+        let mut ax = vec![0.0f64; nnz];
+        let mut fill: Vec<i32> = ap.clone();
+        // Row-major walk keeps row indices ascending within each column, which
+        // is what KLU expects of a sorted CSC.
+        let mut slot: Vec<u32> = Vec::with_capacity(self.pattern.nnz);
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            for &j in cols {
+                let v = a[i][j as usize];
+                if v.abs() > thr {
+                    let k = fill[j as usize] as usize;
+                    ai[k] = i as i32;
+                    ax[k] = v;
+                    fill[j as usize] += 1;
+                    slot.push(k as u32);
+                } else {
+                    slot.push(NO_SLOT);
+                }
+            }
+        }
+
+        // Drop the old handles before allocating new ones (Drop runs
         // klu_free_numeric / klu_free_symbolic).
-        let new_symbolic = KluSymbolic::analyze(n, &mut self.ap, &mut self.ai, &mut self.common)
+        self.numeric = None;
+        self.symbolic = None;
+        let symbolic = KluSymbolic::analyze(n, &mut ap, &mut ai, &mut self.common)
             .map_err(|_| SimError::SingularMatrix)?;
-        let new_numeric = KluNumeric::factor(
-            &mut self.ap,
-            &mut self.ai,
-            &mut self.ax,
-            &new_symbolic,
-            &mut self.common,
-        )
-        .map_err(|_| SimError::SingularMatrix)?;
-        self.symbolic = new_symbolic;
-        self.numeric = new_numeric;
+        let numeric = KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut self.common)
+            .map_err(|_| SimError::SingularMatrix)?;
+        self.ap = ap;
+        self.ai = ai;
+        self.ax = ax;
+        self.slot = slot;
+        self.symbolic = Some(symbolic);
+        self.numeric = Some(numeric);
         Ok(())
+    }
+
+    /// Copy current values into the cached CSC. Returns true if a structural
+    /// cell outside the active set has turned non-zero, so the caller must
+    /// rebuild before factorising.
+    fn refill(&mut self, a: &[Vec<f64>]) -> bool {
+        let thr = self.zero_threshold;
+        let mut grew = false;
+        let mut k = 0usize;
+        for (i, cols) in self.pattern.cols.iter().enumerate() {
+            let row = &a[i];
+            for &j in cols {
+                let v = row[j as usize];
+                let s = self.slot[k];
+                if s == NO_SLOT {
+                    grew |= v.abs() > thr;
+                } else {
+                    self.ax[s as usize] = v;
+                }
+                k += 1;
+            }
+        }
+        grew
+    }
+
+    /// Numeric refactor on the cached pattern, then solve. `transpose` picks
+    /// `klu_tsolve` for the adjoint path.
+    fn refactor_then(&mut self, b: &[f64], transpose: bool) -> Result<Vec<f64>, SimError> {
+        let symbolic = self.symbolic.as_ref().ok_or(SimError::SingularMatrix)?;
+        let numeric = self.numeric.as_mut().ok_or(SimError::SingularMatrix)?;
+        numeric
+            .refactor(
+                &mut self.ap,
+                &mut self.ai,
+                &mut self.ax,
+                symbolic,
+                &mut self.common,
+            )
+            .map_err(|_| SimError::SingularMatrix)?;
+        let mut x = b.to_vec();
+        // `klu_tsolve` solves Aᵀx = b from A's own factorisation, so the
+        // adjoint path reuses the cache instead of materialising a dense
+        // transpose the way it used to (and the way the faer path still does).
+        let r = if transpose {
+            numeric.solve_transpose(symbolic, &mut x, &mut self.common)
+        } else {
+            numeric.solve(symbolic, &mut x, &mut self.common)
+        };
+        r.map_err(|_| SimError::SingularMatrix)?;
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(SimError::SingularMatrix);
+        }
+        Ok(x)
+    }
+
+    fn solve_with(
+        &mut self,
+        a: &[Vec<f64>],
+        b: &[f64],
+        transpose: bool,
+    ) -> Result<Vec<f64>, SimError> {
+        if self.symbolic.is_none() || self.refill(a) {
+            self.rebuild(a)?;
+        }
+        self.refactor_then(b, transpose)
     }
 }
 
 #[cfg(feature = "klu")]
 impl Factorisation for KluFactorisation {
     fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
-        if self.refresh_csc(a) {
-            // Pattern changed since the cached symbolic factorisation —
-            // re-analyze + factor afresh.  Subsequent iterations with
-            // the same pattern fall back to `klu_refactor`.
-            self.reanalyze()?;
-        } else {
-            self.numeric
-                .refactor(
-                    &mut self.ap,
-                    &mut self.ai,
-                    &mut self.ax,
-                    &self.symbolic,
-                    &mut self.common,
-                )
-                .map_err(|_| SimError::SingularMatrix)?;
-        }
-        let mut x = b.to_vec();
-        self.numeric
-            .solve(&self.symbolic, &mut x, &mut self.common)
-            .map_err(|_| SimError::SingularMatrix)?;
-        if x.iter().any(|v| !v.is_finite()) {
-            return Err(SimError::SingularMatrix);
-        }
-        Ok(x)
+        self.solve_with(a, b, false)
     }
 
     fn refactor_and_solve_transpose(
@@ -632,27 +698,7 @@ impl Factorisation for KluFactorisation {
         a: &[Vec<f64>],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
-        if self.refresh_csc(a) {
-            self.reanalyze()?;
-        } else {
-            self.numeric
-                .refactor(
-                    &mut self.ap,
-                    &mut self.ai,
-                    &mut self.ax,
-                    &self.symbolic,
-                    &mut self.common,
-                )
-                .map_err(|_| SimError::SingularMatrix)?;
-        }
-        let mut x = b.to_vec();
-        self.numeric
-            .solve_transpose(&self.symbolic, &mut x, &mut self.common)
-            .map_err(|_| SimError::SingularMatrix)?;
-        if x.iter().any(|v| !v.is_finite()) {
-            return Err(SimError::SingularMatrix);
-        }
-        Ok(x)
+        self.solve_with(a, b, true)
     }
 }
 
