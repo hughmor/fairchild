@@ -725,9 +725,12 @@ fn stamp_netlist_into(
             | Element::Bjt { .. }
             | Element::XOsdi { .. }
             | Element::Behavioral { .. }
-            | Element::TransmissionLine { .. } => {
+            | Element::TransmissionLine { .. }
+            | Element::VoltageSwitch { .. }
+            | Element::CurrentSwitch { .. } => {
                 // Stamped by the Device trait inside the Newton-Raphson loop
-                // (the T-line carries time-dependent history sources).
+                // (the T-line carries time-dependent history sources; a switch's
+                // conductance depends on the solution).
             }
         }
     }
@@ -867,6 +870,24 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
             Element::CoupledInductors { .. } => {
                 // No new nodes — L1 and L2 terminals already registered by their
                 // Inductor elements.
+            }
+            Element::VoltageSwitch {
+                pos,
+                neg,
+                ctrl_pos,
+                ctrl_neg,
+                ..
+            } => {
+                add_node(&mut node_index, pos);
+                add_node(&mut node_index, neg);
+                add_node(&mut node_index, ctrl_pos);
+                add_node(&mut node_index, ctrl_neg);
+            }
+            Element::CurrentSwitch { pos, neg, .. } => {
+                // The control is a voltage source's branch row, which that
+                // source already registered — no node of its own.
+                add_node(&mut node_index, pos);
+                add_node(&mut node_index, neg);
             }
             Element::TransmissionLine {
                 a_pos,

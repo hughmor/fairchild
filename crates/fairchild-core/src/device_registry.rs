@@ -138,6 +138,12 @@ pub struct DeviceRegistry {
     pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
     /// BJT model cards: model_name → (is_pnp, params).
     pub(crate) bjt_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
+    /// Switch model cards: model_name → (is_current_controlled, params).
+    /// Like the MOSFET/BJT maps, these are consumed by `build_devices` rather
+    /// than by a factory closure: a switch needs its instance's `ON`/`OFF`
+    /// keyword, and a `W` needs a controlling branch row the factory has no
+    /// way to resolve.
+    pub(crate) switch_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
 }
 
 impl DeviceRegistry {
@@ -146,6 +152,7 @@ impl DeviceRegistry {
             factories: HashMap::new(),
             mosfet_cards: HashMap::new(),
             bjt_cards: HashMap::new(),
+            switch_cards: HashMap::new(),
         };
         // Native photonic passives are always available — no .model card or
         // .osdi import required to instantiate `fc_waveguide`, `fc_dcoupler`,
@@ -313,6 +320,34 @@ impl DeviceRegistry {
                 ps.apply(&mut dev);
                 Box::new(dev)
             });
+        }
+    }
+
+    /// Record `.model … SW` / `.model … CSW` cards for `build_devices`.
+    ///
+    /// Unlike diodes there is no factory closure: the element line carries an
+    /// `ON`/`OFF` keyword and, for `W`, a controlling voltage-source name that
+    /// only the builder can turn into an MNA row.
+    pub fn register_builtin_switches(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let is_current = match card.kind.to_lowercase().as_str() {
+                "sw" | "vswitch" => false,
+                "csw" | "iswitch" => true,
+                _ => continue,
+            };
+            // Warn once per card, matching the diode/MOSFET/BJT convention.
+            match crate::models::Switch::from_model_params(is_current, &card.params, false) {
+                Ok((_, unknown)) if !unknown.is_empty() => eprintln!(
+                    "warning: switch model '{}' params not recognised (using defaults): {}",
+                    card.name,
+                    unknown.join(", ")
+                ),
+                // A bad RON/ROFF is reported when the instance is built, where
+                // there is an error path to return it on.
+                Ok(_) | Err(_) => {}
+            }
+            self.switch_cards
+                .insert(card.name.clone(), (is_current, card.params.clone()));
         }
     }
 
@@ -535,6 +570,7 @@ impl DeviceRegistry {
         self.register_builtin_diodes(cards);
         self.register_builtin_mosfets(cards);
         self.register_builtin_bjts(cards);
+        self.register_builtin_switches(cards);
         self.register_photonic_models(cards);
     }
 

@@ -223,7 +223,9 @@ fn element_name(el: &Element) -> String {
         | Element::Bjt { name, .. }
         | Element::XOsdi { name, .. }
         | Element::Behavioral { name, .. }
-        | Element::TransmissionLine { name, .. } => name.to_lowercase(),
+        | Element::TransmissionLine { name, .. }
+        | Element::VoltageSwitch { name, .. }
+        | Element::CurrentSwitch { name, .. } => name.to_lowercase(),
     }
 }
 
@@ -504,6 +506,36 @@ pub enum Element {
         l2: String,
         coupling: f64,
     },
+    /// Voltage-controlled switch: `S<name> N+ N- NC+ NC- <model> [ON|OFF]`
+    ///
+    /// `.model <m> SW (VT= VH= RON= ROFF=)`.  A resistor that is `RON` while
+    /// `V(NC+,NC-)` is above `VT+VH` and `ROFF` below `VT-VH`, holding its
+    /// previous state in between.
+    VoltageSwitch {
+        name: String,
+        pos: NodeName,
+        neg: NodeName,
+        ctrl_pos: NodeName,
+        ctrl_neg: NodeName,
+        model_name: String,
+        /// The `ON`/`OFF` keyword: the state the switch starts in, and the one
+        /// it holds while the control sits inside the hysteresis band.
+        /// Defaults to OFF, as in SPICE.
+        initial_on: bool,
+    },
+    /// Current-controlled switch: `W<name> N+ N- <vsource> <model> [ON|OFF]`
+    ///
+    /// `.model <m> CSW (IT= IH= RON= ROFF=)`.  The `S` element's twin, watching
+    /// the current through a named voltage source instead of a node pair.
+    CurrentSwitch {
+        name: String,
+        pos: NodeName,
+        neg: NodeName,
+        /// Name of the voltage source whose branch current is the control.
+        ctrl_vsrc: String,
+        model_name: String,
+        initial_on: bool,
+    },
     /// Lossless transmission line: `T<name> A+ A- B+ B- Z0=<Ω> TD=<s>`
     ///
     /// Ideal (lossless) two-port delay line modelled by Branin's method: each
@@ -777,6 +809,26 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
                 check(name, a_neg)?;
                 check(name, b_pos)?;
                 check(name, b_neg)?;
+            }
+            Element::VoltageSwitch {
+                name,
+                pos,
+                neg,
+                ctrl_pos,
+                ctrl_neg,
+                ..
+            } => {
+                check(name, pos)?;
+                check(name, neg)?;
+                check(name, ctrl_pos)?;
+                check(name, ctrl_neg)?;
+            }
+            // The control is a voltage-source *name*, not a net; that it
+            // exists is checked when the device is built and the branch row
+            // resolved.
+            Element::CurrentSwitch { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
             }
         }
     }

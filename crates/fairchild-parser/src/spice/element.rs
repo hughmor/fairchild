@@ -244,6 +244,60 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 coupling,
             })
         }
+        's' | 'w' => {
+            // S<name> N+ N- NC+ NC- MODEL [ON|OFF]
+            // W<name> N+ N- VSOURCE  MODEL [ON|OFF]
+            let is_current = letter == 'w';
+            let (min_tokens, expected) = if is_current {
+                (5, "≥5 (Wname n+ n- vsource model [ON|OFF])")
+            } else {
+                (6, "≥6 (Sname n+ n- nc+ nc- model [ON|OFF])")
+            };
+            if tokens.len() < min_tokens {
+                return Err(ParseError::FieldCount {
+                    expected,
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            // The trailing ON/OFF keyword is optional and comes after the
+            // model name; anything else there is a typo worth naming.
+            // W puts the controlling source at 3 and the model at 4; S has
+            // four nets, so its model is at 5.
+            let model_idx = if is_current { 4 } else { 5 };
+            let initial_on = match tokens.get(model_idx + 1) {
+                None => false,
+                Some(t) if t.eq_ignore_ascii_case("on") => true,
+                Some(t) if t.eq_ignore_ascii_case("off") => false,
+                Some(t) => {
+                    return Err(ParseError::Syntax {
+                        line: lineno,
+                        msg: format!("switch {name}: expected ON, OFF or nothing after the model name, got '{t}'"),
+                    })
+                }
+            };
+            let model_name = tokens[model_idx].to_lowercase();
+            if is_current {
+                Ok(Element::CurrentSwitch {
+                    name,
+                    pos: canon_node(tokens[1]),
+                    neg: canon_node(tokens[2]),
+                    ctrl_vsrc: tokens[3].to_lowercase(),
+                    model_name,
+                    initial_on,
+                })
+            } else {
+                Ok(Element::VoltageSwitch {
+                    name,
+                    pos: canon_node(tokens[1]),
+                    neg: canon_node(tokens[2]),
+                    ctrl_pos: canon_node(tokens[3]),
+                    ctrl_neg: canon_node(tokens[4]),
+                    model_name,
+                    initial_on,
+                })
+            }
+        }
         't' => {
             // T<name> A+ A- B+ B- Z0=<Ω> (TD=<s> | F=<Hz> [NL=<wavelengths>])
             if tokens.len() < 6 {

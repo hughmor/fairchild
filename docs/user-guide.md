@@ -46,6 +46,11 @@ C1  out 0  1u
 
 ## 2. Elements reference
 
+> For a per-parameter breakdown of what is actually *stamped* versus merely
+> accepted, and what each is validated against, see
+> [`model_status.md`](model_status.md). Several parameters here are parsed
+> for compatibility and do nothing.
+
 ### Passive elements
 
 ```
@@ -124,6 +129,51 @@ T1  in 0 out 0  Z0=50 TD=1n        ; 50 Ω, 1 ns one-way delay
 ```
 
 (Lossy lines with LTRA-style loss/dispersion are not yet supported.)
+
+### Switches (`S` voltage-controlled, `W` current-controlled)
+
+```
+S<name>  <N+> <N-> <NC+> <NC->  <model> [ON|OFF]
+W<name>  <N+> <N-> <vsource>    <model> [ON|OFF]
+```
+
+A resistor whose value is `RON` or `ROFF` depending on a control quantity —
+`V(NC+,NC-)` for `S`, the branch current of a named voltage source for `W`.
+The trailing `ON`/`OFF` keyword sets the initial state (default `OFF`).
+
+```spice
+.model swmod SW  (VT=2.5 VH=0 RON=10  ROFF=1e9)
+.model cs    CSW (IT=1m   IH=0 RON=0.1 ROFF=1e9)
+S1  in out  clk 0  swmod OFF     ; sample-and-hold gate
+W1  a  b    Vsense cs            ; trips on current through Vsense
+```
+
+Switching is a **hard step**, matching ngspice:
+
+```
+ctrl > threshold + hysteresis  → ON
+ctrl < threshold − hysteresis  → OFF
+otherwise                      → hold the previous state
+```
+
+Two practical notes, both consequences of that discontinuity:
+
+- **Resolve the timestep.** Pick `h` small enough that a hold capacitor's
+  companion conductance (`2C/h` under TR) dominates `1/RON`. Otherwise the
+  switched node can move far enough in one step to re-cross the threshold, and
+  Newton oscillates between the two states.
+- **Use `VH` on feedback paths.** Any switch whose own output can reach its
+  control input will chatter with `VH=0`; the hysteresis band is the fix, and
+  it is worth reaching for before raising `itl1`.
+
+Inside the hysteresis band the state is held from the **last accepted
+timestep**, not the last Newton iterate, so a switch cannot flip-flop within
+one NR loop. One consequence: `.dc` sweep points run in parallel and therefore
+do not inherit each other's state, so a sweep through the band reports the
+instance's `ON`/`OFF` keyword rather than the path-dependent value ngspice
+would give. With the default `VH=0` there is no band and no difference.
+
+See `examples/electronic/switched_capacitor.sp`.
 
 ### Subcircuit instantiation
 
@@ -208,6 +258,15 @@ Series resistances RB/RC/RE are accepted and silently ignored (Tier-2 gap).
 | `PHI` | Surface potential (V) | 0.6 |
 
 Instance `W` / `L` override model defaults.
+
+### Switch (`SW` / `CSW`)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `RON` | On-resistance (Ω); must be > 0 | 1 |
+| `ROFF` | Off-resistance (Ω); must be > 0 | 1e12 |
+| `VT` (`SW`) / `IT` (`CSW`) | Threshold on the control quantity | 0 |
+| `VH` (`SW`) / `IH` (`CSW`) | Hysteresis half-width; magnitude is used | 0 |
 
 ---
 
