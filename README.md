@@ -181,19 +181,35 @@ Head-to-head accuracy and performance vs ngspice. See [`docs/benchmarks.md`](doc
 
 ![Accuracy overlay](docs/plots/accuracy_analog.png)
 
-Linear circuits (RC, RLC, diode) match ngspice to sub-1 mV RMS. Switching
-circuits (CMOS inverter, BJT CE amp) show higher RMS error from edge-timing
-offset: the MOSFET Level 1 model stamps Meyer gate caps and depletion junction
-caps (Cbs/Cbd), but the benchmark model cards omit CGSO/CGDO/CJ/CJSW, leaving
-those caps at zero. BJT CJE/CJC are not yet stamped.
+Each panel carries a residual strip (fairchild − ngspice, on ngspice's
+timebase), because two curves drawn on top of each other look identical at
+1 mV and at 100 mV alike.
+
+Linear circuits (RC, RLC, diode) match ngspice to sub-1 mV RMS. The switching
+circuits' larger RMS is **edge timing, not offset** — which is exactly what the
+residual strips show: the error is a spike at each transition and flat between
+them. A fixed-step run resolves a 1 ns edge to within one step, so the two
+simulators disagree only about *when* the edge lands, and a finer `.tran` step
+shrinks it. BJT CJE/CJC and MOSFET Meyer + depletion caps are all stamped now
+(see [`docs/model_status.md`](docs/model_status.md)).
 
 ### Performance scaling
 
 ![Scaling plot](docs/plots/scaling_wall_time.png)
 
-Fairchild is 1.5–4× faster than ngspice on the CMOS ring oscillator family
-(Level-1 MOSFET, 3–51 stages). Advantage is largest on small circuits due to
-lower startup overhead; both simulators show similar scaling exponents.
+Transient wall-clock on the CMOS ring oscillator family (Level-1 MOSFET,
+3–499 stages, n ≈ 7–999 nodes), each fairchild solver backend forced in turn.
+At 499 stages:
+
+| backend | wall-clock | vs ngspice |
+|---|---|---|
+| fairchild — KLU | 2.96 s | **6.5× faster** |
+| fairchild — sparse LU (faer) | 6.38 s | 3.0× faster |
+| ngspice (default) | 19.2 s | — |
+
+KLU is the fastest backend at every size and pulls away as circuits grow; dense
+LU is capped at 250 nodes because it is O(N³). The MNA matrix is stored sparse,
+so both sparse backends allocate and factorise O(nnz) rather than O(n²).
 
 Reproduce:
 ```bash
