@@ -34,10 +34,15 @@ fn assert_complete(tag: &str, src: &str) {
     let o = opts();
     let op = dc_op_nr_with_registry_opts(&net, &reg, &o).unwrap_or_else(|e| panic!("{tag}: {e}"));
 
-    // 1e-4 relative: the reference side is itself a finite difference, and a
-    // stamped entry that is right to four figures is not the failure mode this
-    // is looking for — a wholly missing block is off by 100 %.
-    let bad = jacobian_check(&net, &reg, &o, &op.x, 1e-4, 1e-9).unwrap();
+    // 1e-6 relative.  This started at 1e-4, on the reasoning that the reference
+    // side is itself a finite difference and the failure mode being hunted — a
+    // wholly missing block — is off by 100 %.  That reasoning was wrong, and it
+    // cost a real bug: `fc_photodetector` stamped a 1 µS shunt it then cancelled
+    // out of the residual, which against the 50 Ω load below is 5e-5 relative
+    // and passed.  It was still a genuine `∂f/∂x` error, and it made every
+    // adjoint gradient through a detector wrong by `R_load/r_shunt`.  A stamp
+    // that is right to four figures and no further is not right.
+    let bad = jacobian_check(&net, &reg, &o, &op.x, 1e-6, 1e-9).unwrap();
     let undeclared: Vec<_> = bad.iter().filter(|m| !m.frozen).collect();
     assert!(
         undeclared.is_empty(),
@@ -156,16 +161,22 @@ fn electro_optic_devices_declare_what_they_freeze() {
 
 /// A full electro-optic link: modulator drives light, photodiode turns it back
 /// into current, and the gradient has to traverse both directions.
+///
+/// Two load resistances, because the size of a detector-stamp error relative to
+/// its own row scales with the load: the 1 µS shunt bug was 5e-5 against 50 Ω
+/// and 1e-3 against 1 kΩ, and only one of those was ever going to be noticed.
 #[test]
 fn a_full_eo_link_stamps_a_complete_jacobian() {
-    assert_complete(
-        "link",
-        &format!(
-            ".optical_port in0\n.optical_port out0\n{LASER}\
-             Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1000\n\
-             Xpd out0 pout 0 fc_photodetector responsivity=0.8\n\
-             Rl pout 0 50\n\
-             Vsig vsig 0 DC 1.5\n.op\n.end\n"
-        ),
-    );
+    for r_load in ["50", "1k"] {
+        assert_complete(
+            &format!("link with a {r_load} load"),
+            &format!(
+                ".optical_port in0\n.optical_port out0\n{LASER}\
+                 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1000\n\
+                 Xpd out0 pout 0 fc_photodetector responsivity=0.8\n\
+                 Rl pout 0 {r_load}\n\
+                 Vsig vsig 0 DC 1.5\n.op\n.end\n"
+            ),
+        );
+    }
 }
