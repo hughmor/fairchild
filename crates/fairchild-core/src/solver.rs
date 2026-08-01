@@ -33,7 +33,7 @@ use faer::{linalg::solvers::Solve, Col, Mat};
 use std::sync::Arc;
 
 use crate::error::SimError;
-use crate::mna::MnaMatrix;
+use crate::mna::{MnaMatrix, SparseRow};
 
 /// Choice of linear-system backend.  Carried on `SimOptions` and propagated
 /// to each analysis loop.
@@ -67,19 +67,13 @@ pub enum SolverKind {
 /// parallel-sweep drivers can share one solver across threads.
 pub trait LinearSolver: Send + Sync {
     /// Solve `A · x = b`.  Returns `SingularMatrix` if the result is non-finite.
-    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError>;
+    fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError>;
 
     /// Solve `A^T · x = b`.  Default falls back to constructing the explicit
     /// transpose and reusing `solve` — backends with cached factorisations
     /// override this to avoid the O(n²) copy.
-    fn solve_transpose(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
-        let n = b.len();
-        let mut at = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            for j in 0..n {
-                at[i][j] = a[j][i];
-            }
-        }
+    fn solve_transpose(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let at = transpose_sparse(a, b.len());
         self.solve(&at, b)
     }
 
@@ -100,7 +94,7 @@ pub trait LinearSolver: Send + Sync {
     /// `refactor_and_solve` falls back to `solve(a, b)` from scratch.
     /// Backends like KLU override this to cache the symbolic factorisation
     /// and call into the appropriate `refactor` primitive.
-    fn factorise(&self, a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+    fn factorise(&self, a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
         // The default impl just remembers nothing: each refactor_and_solve
         // re-uses the solver wholesale.  For DenseSolver this is the right
         // behaviour; for sparse backends, this default is overridden to
@@ -132,7 +126,7 @@ pub trait Factorisation: Send {
     /// `a` (sparsity pattern assumed unchanged since the call to
     /// [`LinearSolver::factorise`] that produced this handle), then solve
     /// `A · x = b`.
-    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError>;
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError>;
 
     /// [`Factorisation::refactor_and_solve`] taking the whole matrix, so a
     /// backend holding a cached CSC structure can refill values by walking the
@@ -147,16 +141,10 @@ pub trait Factorisation: Send {
     /// override this.
     fn refactor_and_solve_transpose(
         &mut self,
-        a: &[Vec<f64>],
+        a: &[SparseRow],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
-        let n = b.len();
-        let mut at = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            for j in 0..n {
-                at[i][j] = a[j][i];
-            }
-        }
+        let at = transpose_sparse(a, b.len());
         self.refactor_and_solve(&at, b)
     }
 }
@@ -179,12 +167,12 @@ impl NoCacheFactorisation {
 }
 
 impl Factorisation for NoCacheFactorisation {
-    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         self.backend.solve(a, b)
     }
     fn refactor_and_solve_transpose(
         &mut self,
-        a: &[Vec<f64>],
+        a: &[SparseRow],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
         self.backend.solve_transpose(a, b)
@@ -199,7 +187,7 @@ impl Factorisation for NoCacheFactorisation {
 pub struct DenseSolver;
 
 impl LinearSolver for DenseSolver {
-    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let n = b.len();
         if n == 0 {
             return Ok(Vec::new());
@@ -215,7 +203,7 @@ impl LinearSolver for DenseSolver {
         Ok(x)
     }
 
-    fn factorise(&self, _a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+    fn factorise(&self, _a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
         // No-op cache for dense: re-running partial_piv_lu is cheap
         // enough that caching the column permutation does not pay.
         Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
@@ -253,7 +241,7 @@ impl Default for FaerSparseSolver {
 }
 
 impl LinearSolver for FaerSparseSolver {
-    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         use faer::sparse::{SparseColMat, Triplet};
 
         let n = b.len();
@@ -263,7 +251,7 @@ impl LinearSolver for FaerSparseSolver {
 
         let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         for (i, row) in a.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
+            for (j, v) in row.iter() {
                 if v.abs() > self.zero_threshold {
                     triplets.push(Triplet::new(i, j, v));
                 }
@@ -283,7 +271,7 @@ impl LinearSolver for FaerSparseSolver {
         Ok(x)
     }
 
-    fn factorise(&self, _a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+    fn factorise(&self, _a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
         // Without a structural pattern there is nothing sound to cache:
         // discovering the pattern from values on iteration 0 misses cells that
         // are zero at x=0 and non-zero at the solution, which photonic devices
@@ -351,7 +339,7 @@ impl FaerSparseFactorisation {
     /// Rebuild the CSC structure and symbolic LU from the cells of `a` that are
     /// currently non-zero.  Runs on the first solve and again only if a new
     /// cell inside the structural pattern turns non-zero.
-    fn rebuild(&mut self, a: &[Vec<f64>]) -> Result<(), SimError> {
+    fn rebuild(&mut self, a: &[SparseRow]) -> Result<(), SimError> {
         use faer::sparse::linalg::solvers::SymbolicLu;
         use faer::sparse::SymbolicSparseColMatRef;
 
@@ -403,7 +391,7 @@ impl FaerSparseFactorisation {
     /// Copy current values into the cached CSC.  Returns true if a structural
     /// cell outside the active set has become non-zero, meaning the caller must
     /// rebuild before factorising.
-    fn refill(&mut self, a: &[Vec<f64>]) -> bool {
+    fn refill(&mut self, a: &[SparseRow]) -> bool {
         let thr = self.zero_threshold;
         let mut grew = false;
         let mut k = 0usize;
@@ -444,7 +432,7 @@ impl FaerSparseFactorisation {
 }
 
 impl Factorisation for FaerSparseFactorisation {
-    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         // `refill` indexes the cached slot map, so it is only valid once
         // `rebuild` has run; short-circuit ordering matters here.
         if self.symbolic.is_none() || self.refill(a) {
@@ -455,17 +443,11 @@ impl Factorisation for FaerSparseFactorisation {
 
     fn refactor_and_solve_transpose(
         &mut self,
-        a: &[Vec<f64>],
+        a: &[SparseRow],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
         // Adjoint paths are cold; the explicit transpose keeps this simple.
-        let n = b.len();
-        let mut at = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            for j in 0..n {
-                at[i][j] = a[j][i];
-            }
-        }
+        let at = transpose_sparse(a, b.len());
         FaerSparseSolver {
             zero_threshold: self.zero_threshold,
         }
@@ -487,19 +469,20 @@ pub struct KluSolver;
 
 #[cfg(feature = "klu")]
 impl LinearSolver for KluSolver {
-    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
-        fairchild_klu::klu_solve_dense(a, b).map_err(|_| SimError::SingularMatrix)
+    fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let dense = crate::mna::CircuitTopology::to_dense(a, b.len());
+        fairchild_klu::klu_solve_dense(&dense, b).map_err(|_| SimError::SingularMatrix)
     }
 
-    fn factorise(&self, a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
-        use fairchild_klu::{dense_to_csc, KluCommon, KluNumeric, KluSymbolic};
+    fn factorise(&self, a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
+        use fairchild_klu::{KluCommon, KluNumeric, KluSymbolic};
         let n = a.len();
         if n == 0 {
             return Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
                 KluSolver,
             ))));
         }
-        let (mut ap, mut ai, mut ax) = dense_to_csc(a, 1e-30);
+        let (mut ap, mut ai, mut ax) = crate::mna::CircuitTopology::to_csc(a, 1e-30);
         let mut common = KluCommon::new();
         // Save the row-index map so refactor_and_solve can pull values
         // at the exact same CSC positions on subsequent iterations.
@@ -557,9 +540,8 @@ impl KluFactorisation {
     /// structural entry appeared since the symbolic factorisation was
     /// computed) — devices stamping zero at x=0 produce this on the
     /// 2nd NR iteration once the operating point activates them.
-    fn refresh_csc(&mut self, a: &[Vec<f64>]) -> bool {
-        use fairchild_klu::dense_to_csc;
-        let (ap_new, ai_new, ax_new) = dense_to_csc(a, 1e-30);
+    fn refresh_csc(&mut self, a: &[SparseRow]) -> bool {
+        let (ap_new, ai_new, ax_new) = crate::mna::CircuitTopology::to_csc(a, 1e-30);
         let pattern_changed = ap_new != self.ap || ai_new != self.ai;
         self.ap = ap_new;
         self.ai = ai_new;
@@ -600,7 +582,7 @@ impl KluFactorisation {
 
 #[cfg(feature = "klu")]
 impl Factorisation for KluFactorisation {
-    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         if self.refresh_csc(a) {
             // Pattern changed since the cached symbolic factorisation —
             // re-analyze + factor afresh.  Subsequent iterations with
@@ -629,7 +611,7 @@ impl Factorisation for KluFactorisation {
 
     fn refactor_and_solve_transpose(
         &mut self,
-        a: &[Vec<f64>],
+        a: &[SparseRow],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
         if self.refresh_csc(a) {
@@ -691,7 +673,7 @@ pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
 /// function so existing analyses compile unchanged; new analyses should
 /// prefer constructing a `Box<dyn LinearSolver>` from `make_solver()` and
 /// calling its methods directly.
-pub fn lu_solve(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+pub fn lu_solve(a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
     DenseSolver.solve(a, b)
 }
 
@@ -702,25 +684,29 @@ pub fn lu_solve(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
 /// Two-sided ∞-norm (Ruiz) scaling factors `(D_r, D_c)` such that the rows and
 /// columns of `diag(D_r)·A·diag(D_c)` have ∞-norm ≈ 1.  A few iterations is
 /// enough in practice; empty rows/columns are left unscaled (factor 1).
-fn equilibration_factors(a: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
+fn equilibration_factors(a: &[SparseRow]) -> (Vec<f64>, Vec<f64>) {
     let n = a.len();
     let mut dr = vec![1.0_f64; n];
     let mut dc = vec![1.0_f64; n];
+    // Row and column ∞-norms only ever see non-zero cells, so both sweeps walk
+    // the sparse entries — O(nnz) per pass instead of O(n²).
     for _ in 0..3 {
-        for i in 0..n {
+        for (i, row) in a.iter().enumerate() {
             let mut m = 0.0_f64;
-            for j in 0..n {
-                m = m.max((dr[i] * a[i][j] * dc[j]).abs());
+            for (j, v) in row.iter() {
+                m = m.max((dr[i] * v * dc[j]).abs());
             }
             if m > 0.0 {
                 dr[i] /= m.sqrt();
             }
         }
-        for j in 0..n {
-            let mut m = 0.0_f64;
-            for (i, row) in a.iter().enumerate() {
-                m = m.max((dr[i] * row[j] * dc[j]).abs());
+        let mut col_max = vec![0.0_f64; n];
+        for (i, row) in a.iter().enumerate() {
+            for (j, v) in row.iter() {
+                col_max[j] = col_max[j].max((dr[i] * v * dc[j]).abs());
             }
+        }
+        for (j, m) in col_max.into_iter().enumerate() {
             if m > 0.0 {
                 dc[j] /= m.sqrt();
             }
@@ -731,18 +717,24 @@ fn equilibration_factors(a: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
 
 /// `A' = diag(D_r)·A·diag(D_c)`, `b' = D_r·b`.  Returns the scaled system.
 fn apply_equilibration(
-    a: &[Vec<f64>],
+    a: &[SparseRow],
     b: &[f64],
     dr: &[f64],
     dc: &[f64],
-) -> (Vec<Vec<f64>>, Vec<f64>) {
+) -> (Vec<SparseRow>, Vec<f64>) {
     let n = a.len();
-    let mut a_s = vec![vec![0.0_f64; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            a_s[i][j] = dr[i] * a[i][j] * dc[j];
-        }
-    }
+    // Diagonal scaling is elementwise, so the structure carries over untouched.
+    let a_s: Vec<SparseRow> = a
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            SparseRow::from_sorted_cells(
+                row.iter()
+                    .map(|(j, v)| (j as u32, dr[i] * v * dc[j]))
+                    .collect(),
+            )
+        })
+        .collect();
     let b_s: Vec<f64> = (0..n).map(|i| dr[i] * b[i]).collect();
     (a_s, b_s)
 }
@@ -761,20 +753,35 @@ impl EquilibratedSolver {
     }
 }
 
+/// Sparse transpose. The adjoint paths are cold, so this stays a plain rebuild
+/// rather than a cached structure.
+fn transpose_sparse(a: &[SparseRow], n: usize) -> Vec<SparseRow> {
+    let mut cells: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
+    for (i, row) in a.iter().enumerate() {
+        for (j, v) in row.iter() {
+            cells[j].push((i as u32, v));
+        }
+    }
+    cells
+        .into_iter()
+        .map(SparseRow::from_sorted_cells)
+        .collect()
+}
+
 impl LinearSolver for EquilibratedSolver {
-    fn solve(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let (dr, dc) = equilibration_factors(a);
         let (a_s, b_s) = apply_equilibration(a, b, &dr, &dc);
         let x_s = self.inner.solve(&a_s, &b_s)?;
         Ok((0..x_s.len()).map(|j| dc[j] * x_s[j]).collect())
     }
 
-    fn solve_transpose(&self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn solve_transpose(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         // Adjoint path left unscaled (forward-only equilibration).
         self.inner.solve_transpose(a, b)
     }
 
-    fn factorise(&self, a: &[Vec<f64>]) -> Result<Box<dyn Factorisation>, SimError> {
+    fn factorise(&self, a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
         // Scaling preserves sparsity, so the inner symbolic factorisation built
         // on the unscaled `a` stays valid across refactors.
         Ok(Box::new(EquilibratedFactorisation {
@@ -788,7 +795,7 @@ struct EquilibratedFactorisation {
 }
 
 impl Factorisation for EquilibratedFactorisation {
-    fn refactor_and_solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, SimError> {
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let (dr, dc) = equilibration_factors(a);
         let (a_s, b_s) = apply_equilibration(a, b, &dr, &dc);
         let x_s = self.inner.refactor_and_solve(&a_s, &b_s)?;
@@ -797,7 +804,7 @@ impl Factorisation for EquilibratedFactorisation {
 
     fn refactor_and_solve_transpose(
         &mut self,
-        a: &[Vec<f64>],
+        a: &[SparseRow],
         b: &[f64],
     ) -> Result<Vec<f64>, SimError> {
         self.inner.refactor_and_solve_transpose(a, b)
@@ -814,7 +821,7 @@ impl Factorisation for EquilibratedFactorisation {
 /// iteration `(AᵀA)⁻¹ = A⁻¹A⁻ᵀ` using a dense LU for the inner solves. Returns
 /// `None` if `A` is singular (the inverse iteration fails) or empty. This is a
 /// diagnostic — it builds dense LUs, so it is opt-in (`.options cond_estimate`).
-pub fn estimate_condition_2norm(a: &[Vec<f64>]) -> Option<f64> {
+pub fn estimate_condition_2norm(a: &[SparseRow]) -> Option<f64> {
     let n = a.len();
     if n == 0 {
         return Some(1.0);
@@ -874,6 +881,12 @@ pub fn estimate_condition_2norm(a: &[Vec<f64>]) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    /// These fixtures are written as dense literals because that is the
+    /// readable way to write a 2×2; the solvers take sparse rows.
+    fn sp(a: &[Vec<f64>]) -> Vec<SparseRow> {
+        crate::mna::CircuitTopology::sparse_from_dense(a)
+    }
+
     use super::*;
 
     #[test]
@@ -885,8 +898,8 @@ mod tests {
             vec![0.0, 0.0, -1.0, 3.0],
         ];
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let x_d = DenseSolver.solve(&a, &b).unwrap();
-        let x_s = FaerSparseSolver::default().solve(&a, &b).unwrap();
+        let x_d = DenseSolver.solve(&sp(&a), &b).unwrap();
+        let x_s = FaerSparseSolver::default().solve(&sp(&a), &b).unwrap();
         for i in 0..4 {
             assert!(
                 (x_d[i] - x_s[i]).abs() < 1e-10,
@@ -902,11 +915,11 @@ mod tests {
         let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         let b = vec![1.0, 2.0];
         assert!(matches!(
-            DenseSolver.solve(&a, &b),
+            DenseSolver.solve(&sp(&a), &b),
             Err(SimError::SingularMatrix)
         ));
         assert!(matches!(
-            FaerSparseSolver::default().solve(&a, &b),
+            FaerSparseSolver::default().solve(&sp(&a), &b),
             Err(SimError::SingularMatrix)
         ));
     }
@@ -921,8 +934,8 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0];
         let at: Vec<Vec<f64>> = (0..3).map(|i| (0..3).map(|j| a[j][i]).collect()).collect();
 
-        let x_via_explicit_t = DenseSolver.solve(&at, &b).unwrap();
-        let x_via_method = DenseSolver.solve_transpose(&a, &b).unwrap();
+        let x_via_explicit_t = DenseSolver.solve(&sp(&at), &b).unwrap();
+        let x_via_method = DenseSolver.solve_transpose(&sp(&a), &b).unwrap();
         for i in 0..3 {
             assert!((x_via_explicit_t[i] - x_via_method[i]).abs() < 1e-12);
         }
@@ -935,15 +948,15 @@ mod tests {
         // dense solve of the second matrix.
         let a1 = vec![vec![3.0, 1.0], vec![0.0, 4.0]];
         let solver = FaerSparseSolver::default();
-        let mut fact = solver.factorise(&a1).unwrap();
-        let x1 = fact.refactor_and_solve(&a1, &[5.0, 8.0]).unwrap();
+        let mut fact = solver.factorise(&sp(&a1)).unwrap();
+        let x1 = fact.refactor_and_solve(&sp(&a1), &[5.0, 8.0]).unwrap();
         // 3x+y=5, 4y=8 → y=2, x=1
         assert!((x1[0] - 1.0).abs() < 1e-12);
         assert!((x1[1] - 2.0).abs() < 1e-12);
 
         // Change values, same pattern.
         let a2 = vec![vec![6.0, 2.0], vec![0.0, 4.0]];
-        let x2 = fact.refactor_and_solve(&a2, &[10.0, 8.0]).unwrap();
+        let x2 = fact.refactor_and_solve(&sp(&a2), &[10.0, 8.0]).unwrap();
         // 6x+2y=10, 4y=8 → y=2, 6x=6 → x=1
         assert!((x2[0] - 1.0).abs() < 1e-12);
         assert!((x2[1] - 2.0).abs() < 1e-12);
@@ -953,11 +966,11 @@ mod tests {
     fn condition_estimate_diagonal_and_identity() {
         // Identity → κ = 1.
         let id = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
-        let k = estimate_condition_2norm(&id).unwrap();
+        let k = estimate_condition_2norm(&sp(&id)).unwrap();
         assert!((k - 1.0).abs() < 1e-6, "identity κ={k}");
         // diag(1, 1000) → κ = 1000.
         let d = vec![vec![1.0, 0.0], vec![0.0, 1000.0]];
-        let k = estimate_condition_2norm(&d).unwrap();
+        let k = estimate_condition_2norm(&sp(&d)).unwrap();
         assert!((k - 1000.0).abs() / 1000.0 < 1e-3, "diag κ={k}");
     }
 
@@ -967,11 +980,11 @@ mod tests {
         let a = vec![vec![2.0e6, 1.0e6], vec![1.0e-6, 3.0e-6]];
         let b = vec![3.0e6, 4.0e-6];
         let eq = EquilibratedSolver::new(Box::new(DenseSolver));
-        let x = eq.solve(&a, &b).unwrap();
+        let x = eq.solve(&sp(&a), &b).unwrap();
         assert!((x[0] - 1.0).abs() < 1e-6, "x0={}", x[0]);
         assert!((x[1] - 1.0).abs() < 1e-6, "x1={}", x[1]);
         // Equilibrated answer matches the plain dense solve (scaling is exact).
-        let x_plain = DenseSolver.solve(&a, &b).unwrap();
+        let x_plain = DenseSolver.solve(&sp(&a), &b).unwrap();
         assert!((x[0] - x_plain[0]).abs() < 1e-9);
         assert!((x[1] - x_plain[1]).abs() < 1e-9);
     }
@@ -980,8 +993,8 @@ mod tests {
     fn equilibrated_factorisation_matches_direct() {
         let a = vec![vec![3.0, 1.0], vec![0.0, 4.0]];
         let eq = EquilibratedSolver::new(Box::new(DenseSolver));
-        let mut fact = eq.factorise(&a).unwrap();
-        let x = fact.refactor_and_solve(&a, &[5.0, 8.0]).unwrap();
+        let mut fact = eq.factorise(&sp(&a)).unwrap();
+        let x = fact.refactor_and_solve(&sp(&a), &[5.0, 8.0]).unwrap();
         assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12);
     }
 }

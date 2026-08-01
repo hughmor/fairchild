@@ -70,7 +70,13 @@ impl CircuitTopology {
     ///
     /// Operates on any row-major dense matrix (`mat.a`, the AC/noise real
     /// `g_mat`, or a condition-estimate copy).
-    pub fn stamp_gmin(&self, a: &mut [Vec<f64>], g: f64) {
+    /// Generic over the row type so one implementation serves both the sparse
+    /// [`SparseRow`] matrix the Newton loop stamps and the dense `Vec<f64>`
+    /// rows `.ac`/`.noise` build for their complex assembly.
+    pub fn stamp_gmin<R>(&self, a: &mut [R], g: f64)
+    where
+        R: std::ops::IndexMut<usize, Output = f64>,
+    {
         let n_nodes = self.n_nodes();
         for (i, row) in a.iter_mut().enumerate().take(n_nodes) {
             row[i] += g;
@@ -79,6 +85,80 @@ impl CircuitTopology {
         for (i, row) in a.iter_mut().enumerate().skip(vsrc_end) {
             row[i] += g;
         }
+    }
+
+    /// Compressed-sparse-column arrays `(ap, ai, ax)` built straight from the
+    /// sparse rows, dropping values at or below `thr`.
+    ///
+    /// This is what a sparse LU backend actually wants, and building it from
+    /// the row structure is O(nnz). The dense equivalent
+    /// (`fairchild_klu::dense_to_csc`) scanned all n² cells in column-major
+    /// order over row-major storage — 41 ms per call at n = 3200.
+    pub fn to_csc(a: &[SparseRow], thr: f64) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
+        let n = a.len();
+        let mut col_count = vec![0i32; n];
+        for row in a {
+            for (j, v) in row.iter() {
+                if v.abs() > thr {
+                    col_count[j] += 1;
+                }
+            }
+        }
+        let mut ap = vec![0i32; n + 1];
+        for j in 0..n {
+            ap[j + 1] = ap[j] + col_count[j];
+        }
+        let nnz = ap[n] as usize;
+        let mut ai = vec![0i32; nnz];
+        let mut ax = vec![0.0f64; nnz];
+        let mut fill = ap.clone();
+        // Row-major walk keeps row indices ascending within each column.
+        for (i, row) in a.iter().enumerate() {
+            for (j, v) in row.iter() {
+                if v.abs() > thr {
+                    let k = fill[j] as usize;
+                    ai[k] = i as i32;
+                    ax[k] = v;
+                    fill[j] += 1;
+                }
+            }
+        }
+        (ap, ai, ax)
+    }
+
+    /// Wrap dense rows as sparse ones, dropping exact zeros.
+    ///
+    /// For the `.ac` / `.noise` assemblies, which still build their real
+    /// 2n×2n complex-as-real system densely. They allocate three dense n×n
+    /// matrices already, so this conversion changes nothing asymptotically —
+    /// sparsifying those assemblies is its own piece of work.
+    pub fn sparse_from_dense(a: &[Vec<f64>]) -> Vec<SparseRow> {
+        a.iter()
+            .map(|row| {
+                SparseRow::from_sorted_cells(
+                    row.iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0.0)
+                        .map(|(j, &v)| (j as u32, v))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Materialise sparse rows as a dense row-major matrix.
+    ///
+    /// For the paths that are inherently O(n²) anyway — dense LU, Ruiz
+    /// equilibration, the condition-number estimate, and the complex assembly
+    /// in `.ac`/`.noise`. Never call it from a Newton iteration.
+    pub fn to_dense(a: &[SparseRow], n: usize) -> Vec<Vec<f64>> {
+        let mut d = vec![vec![0.0f64; n]; n];
+        for (i, row) in a.iter().enumerate() {
+            for (j, v) in row.iter() {
+                d[i][j] = v;
+            }
+        }
+        d
     }
 
     /// Retrieve a node voltage from a solution vector.
@@ -108,11 +188,11 @@ impl CircuitTopology {
 /// The set of `(row, col)` cells any stamper may write, stored row-major to
 /// mirror `MnaMatrix::a`.
 ///
-/// The matrix itself stays dense (`Vec<Vec<f64>>`) because every device stamps
-/// through `mat.a[i][j] += v`, but a circuit matrix is ~0.1 % occupied, so the
-/// two full-matrix passes per Newton iteration — zeroing it, then scanning it
-/// to build the solver's CSC — cost O(n²) against O(nnz) of real work.  At
-/// n ≈ 3000 that was ~90 % of solve time with the numeric LU itself at ~1 %.
+/// A circuit matrix is ~0.1 % occupied, so the two full-matrix passes per
+/// Newton iteration — zeroing it, then scanning it to build the solver's CSC —
+/// cost O(n²) against O(nnz) of real work.  At n ≈ 3000 that was ~90 % of solve
+/// time with the numeric LU itself at ~1 %.  The pattern is also what
+/// [`SparseRow`] allocates against, so the storage itself is O(nnz).
 /// Knowing the footprint up front turns both passes into O(nnz).
 ///
 /// This is a *superset*: it is built structurally, from each element's
@@ -243,9 +323,111 @@ impl PatternBuilder {
     }
 }
 
+/// One row of the MNA matrix, stored sparse but indexed as though dense.
+///
+/// # Why this exists in this shape
+///
+/// Every device in the tree stamps through `mat.a[i][j] += v`. A circuit matrix
+/// is ~0.1 % occupied, so `Vec<Vec<f64>>` allocated and zeroed an n² array —
+/// 82 MB at n = 3200 — to hold a few thousand numbers, and that allocation was
+/// the last O(n²) left in the solver once `Pattern` had made clearing and
+/// scanning O(nnz).
+///
+/// Implementing `Index`/`IndexMut` over a sorted column list keeps `a[i][j]`
+/// compiling untouched in all ~20 device stampers while the storage underneath
+/// becomes O(nnz). The cost is a binary search per stamp instead of a direct
+/// offset; rows carry a handful of entries, so that is 2-3 comparisons.
+///
+/// A read of an absent cell yields `0.0`, as a dense matrix would. A *write* to
+/// an absent cell inserts it, which keeps patternless matrices (unit tests,
+/// `MnaMatrix::zeros`) working; with a pattern attached every cell a stamper
+/// can touch is pre-allocated, so no insertion ever happens on the hot path.
+#[derive(Clone, Debug, Default)]
+pub struct SparseRow {
+    /// Column indices, sorted ascending.
+    cols: Vec<u32>,
+    /// Values, parallel to `cols`.
+    vals: Vec<f64>,
+}
+
+/// Returned for reads of cells that are structurally absent.
+static ZERO: f64 = 0.0;
+
+impl SparseRow {
+    /// A row with every column of `cols` pre-allocated at zero.
+    fn with_cols(cols: &[u32]) -> Self {
+        SparseRow {
+            cols: cols.to_vec(),
+            vals: vec![0.0; cols.len()],
+        }
+    }
+
+    /// Build from `(column, value)` cells. Sorts, so callers may emit in any
+    /// order; used by the sparse transpose in `crate::solver`.
+    pub fn from_sorted_cells(mut cells: Vec<(u32, f64)>) -> Self {
+        cells.sort_unstable_by_key(|&(j, _)| j);
+        let mut cols = Vec::with_capacity(cells.len());
+        let mut vals = Vec::with_capacity(cells.len());
+        for (j, v) in cells {
+            cols.push(j);
+            vals.push(v);
+        }
+        SparseRow { cols, vals }
+    }
+
+    /// Non-zero `(column, value)` pairs, ascending by column.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.cols
+            .iter()
+            .zip(self.vals.iter())
+            .map(|(&j, &v)| (j as usize, v))
+    }
+
+    /// Every allocated `(column, value)` pair including explicit zeros —
+    /// the storage order the solvers walk.
+    pub fn entries(&self) -> (&[u32], &[f64]) {
+        (&self.cols, &self.vals)
+    }
+
+    /// Set every allocated value to zero, keeping the column structure so the
+    /// next stamp needs no insertion.
+    fn clear(&mut self) {
+        self.vals.fill(0.0);
+    }
+
+    fn slot(&self, j: usize) -> Result<usize, usize> {
+        self.cols.binary_search(&(j as u32))
+    }
+}
+
+impl std::ops::Index<usize> for SparseRow {
+    type Output = f64;
+    fn index(&self, j: usize) -> &f64 {
+        match self.slot(j) {
+            Ok(k) => &self.vals[k],
+            Err(_) => &ZERO,
+        }
+    }
+}
+
+impl std::ops::IndexMut<usize> for SparseRow {
+    fn index_mut(&mut self, j: usize) -> &mut f64 {
+        match self.slot(j) {
+            Ok(k) => &mut self.vals[k],
+            Err(k) => {
+                // Only reachable on a patternless matrix; with a pattern every
+                // stampable cell is pre-allocated.
+                self.cols.insert(k, j as u32);
+                self.vals.insert(k, 0.0);
+                &mut self.vals[k]
+            }
+        }
+    }
+}
+
 /// An assembled MNA system: A·x = b.
 pub struct MnaMatrix {
-    pub a: Vec<Vec<f64>>,
+    pub a: Vec<SparseRow>,
     pub b: Vec<f64>,
     /// Structural footprint, when the caller built one.  Present only on the
     /// matrices owned by the hot NR / transient loops; `None` keeps the
@@ -256,7 +438,9 @@ pub struct MnaMatrix {
 impl MnaMatrix {
     fn new(size: usize) -> Self {
         MnaMatrix {
-            a: vec![vec![0.0f64; size]; size],
+            // Patternless: rows grow on first write. Only unit tests and the
+            // one-shot diagnostic stamps land here.
+            a: vec![SparseRow::default(); size],
             b: vec![0.0f64; size],
             pattern: None,
         }
@@ -277,9 +461,15 @@ impl MnaMatrix {
             size,
             "pattern built at a different size"
         );
+        let a = pattern
+            .cols
+            .iter()
+            .map(|cols| SparseRow::with_cols(cols))
+            .collect();
         MnaMatrix {
+            a,
+            b: vec![0.0f64; size],
             pattern: Some(pattern),
-            ..Self::new(size)
         }
     }
 
@@ -296,19 +486,10 @@ impl MnaMatrix {
     /// because the pattern is a superset of what any stamper writes, so
     /// everything outside it is already zero and stays zero.
     pub fn clear(&mut self) {
-        match &self.pattern {
-            Some(p) => {
-                for (row, cols) in self.a.iter_mut().zip(p.cols.iter()) {
-                    for &j in cols {
-                        row[j as usize] = 0.0;
-                    }
-                }
-            }
-            None => {
-                for row in self.a.iter_mut() {
-                    row.fill(0.0);
-                }
-            }
+        // Sparse rows keep their column structure, so this is O(nnz) whether or
+        // not a pattern is attached — and the next stamp needs no insertion.
+        for row in self.a.iter_mut() {
+            row.clear();
         }
         self.b.fill(0.0);
     }
@@ -320,25 +501,16 @@ impl MnaMatrix {
     /// is the linearisation at whichever `x` was last stamped.
     pub fn residual_norm(&self, x: &[f64]) -> f64 {
         let mut sumsq = 0.0_f64;
-        match &self.pattern {
-            Some(p) => {
-                for (i, cols) in p.cols.iter().enumerate() {
-                    let row = &self.a[i];
-                    let mut acc = 0.0_f64;
-                    for &j in cols {
-                        acc += row[j as usize] * x[j as usize];
-                    }
-                    let f = acc - self.b[i];
-                    sumsq += f * f;
-                }
+        // O(nnz) by construction now — the row *is* its own sparsity pattern,
+        // so this needs no separate `pattern` branch.
+        for (i, row) in self.a.iter().enumerate() {
+            let (cols, vals) = row.entries();
+            let mut acc = 0.0_f64;
+            for (&j, &v) in cols.iter().zip(vals.iter()) {
+                acc += v * x[j as usize];
             }
-            None => {
-                for (i, row) in self.a.iter().enumerate() {
-                    let acc: f64 = row.iter().zip(x.iter()).map(|(a, xj)| a * xj).sum();
-                    let f = acc - self.b[i];
-                    sumsq += f * f;
-                }
-            }
+            let f = acc - self.b[i];
+            sumsq += f * f;
         }
         sumsq.sqrt()
     }
@@ -347,11 +519,13 @@ impl MnaMatrix {
     /// in `a`.  A miss means some stamper wrote outside the footprint derived
     /// from its terminals, which would silently drop that entry from the sparse
     /// solve — so this guards the one invariant the whole scheme rests on.
-    /// Called once per NR loop after the first stamp; O(n²), debug builds only.
+    /// Called once per NR loop after the first stamp; O(nnz), debug builds only.
+    /// A stamper writing outside the pattern now *inserts* the cell rather than
+    /// silently filling a dense slot, so this catches it either way.
     pub fn debug_assert_covers(&self) {
         let Some(p) = &self.pattern else { return };
         for (i, row) in self.a.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
+            for (j, v) in row.iter() {
                 if v != 0.0 && p.cols[i].binary_search(&(j as u32)).is_err() {
                     panic!(
                         "sparsity pattern misses a stamped cell at ({i}, {j}) = {v}; \
@@ -742,7 +916,7 @@ fn stamp_netlist_into(
 
 /// Add a conductance G between pos and neg (same as resistor with R=1/G).
 pub fn stamp_conductance(
-    a: &mut [Vec<f64>],
+    a: &mut [SparseRow],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
@@ -752,7 +926,7 @@ pub fn stamp_conductance(
 }
 
 /// [`stamp_conductance`] against pre-resolved row indices.  `None` = ground.
-pub fn stamp_conductance_at(a: &mut [Vec<f64>], pos: NodeId, neg: NodeId, g: f64) {
+pub fn stamp_conductance_at(a: &mut [SparseRow], pos: NodeId, neg: NodeId, g: f64) {
     if let Some(p) = pos {
         a[p][p] += g;
         if let Some(n) = neg {
@@ -767,7 +941,7 @@ pub fn stamp_conductance_at(a: &mut [Vec<f64>], pos: NodeId, neg: NodeId, g: f64
 
 /// Stamp a voltage source at aux row `vi`: V(pos) - V(neg) = value.
 fn stamp_vsource_at(
-    a: &mut [Vec<f64>],
+    a: &mut [SparseRow],
     b: &mut [f64],
     pos: NodeId,
     neg: NodeId,
@@ -1052,7 +1226,7 @@ fn find_inductor_terminals<'a>(
 ///
 /// `g` is G12 (typically negative for positive coupling).
 fn stamp_mutual_conductance(
-    a: &mut [Vec<f64>],
+    a: &mut [SparseRow],
     idx: &IndexMap<String, usize>,
     pos1: &str,
     neg1: &str,

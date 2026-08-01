@@ -101,9 +101,11 @@ pub fn noise_analysis(
         dev.eval(&x0, EvalFlags::tran(), &ctx);
         let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
+        // `tmp.a` is sparse now, so this walks only the cells the device
+        // actually stamped instead of the whole row.
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
-            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
-                *g += t;
+            for (j, t) in t_row.iter() {
+                g_row[j] += t;
             }
         }
     }
@@ -201,7 +203,7 @@ pub fn noise_analysis(
         }
         let mut rhs_fwd = vec![0.0f64; n2];
         rhs_fwd[n_nodes + input_vsrc_idx] = 1.0; // unit AC amplitude on V source
-        let v_fwd = noise_solver.solve(&a_fwd, &rhs_fwd)?;
+        let v_fwd = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_fwd), &rhs_fwd)?;
         let v_re_fwd = &v_fwd[..size];
         let v_im_fwd = &v_fwd[size..];
         let h_re = pick(v_re_fwd, out_pos_idx) - pick(v_re_fwd, out_neg_idx);
@@ -233,7 +235,7 @@ pub fn noise_analysis(
         if let Some(i) = out_neg_idx {
             rhs_adj[i] -= 1.0;
         }
-        let lam = noise_solver.solve(&a_adj, &rhs_adj)?;
+        let lam = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_adj), &rhs_adj)?;
         let lam_re = &lam[..size];
         let lam_im = &lam[size..];
 

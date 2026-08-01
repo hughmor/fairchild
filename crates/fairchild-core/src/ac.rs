@@ -194,9 +194,11 @@ pub fn ac_analysis_opts(
         // Use a temporary MnaMatrix to collect resistive Jacobian entries.
         let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
+        // `tmp.a` is sparse now, so this walks only the cells the device
+        // actually stamped instead of the whole row.
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
-            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
-                *g += t;
+            for (j, t) in t_row.iter() {
+                g_row[j] += t;
             }
         }
     }
@@ -303,7 +305,7 @@ pub fn ac_analysis_opts(
                 rhs[size + i] = b_ac_im[i];
             }
 
-            let x = solver_ref.solve(&a2, &rhs)?;
+            let x = solver_ref.solve(&CircuitTopology::sparse_from_dense(&a2), &rhs)?;
             let row: Vec<(f64, f64)> = topo
                 .node_index
                 .values()
