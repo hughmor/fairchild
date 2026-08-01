@@ -78,7 +78,7 @@ struct Cli {
     /// Override an arbitrary solver option.  Format: KEY=VALUE.  Layered on
     /// top of any `.options` directives in the netlist.  Can be repeated.
     ///
-    /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
+    /// Recognised keys: reltol, abstol, vntol, lambdatol, gmin, vmax, itl1, itl4,
     /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
     /// variable_step, waveguide_delay, cond_estimate, equilibrate.
     ///

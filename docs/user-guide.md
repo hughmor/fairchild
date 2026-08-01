@@ -475,6 +475,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `reltol` | 1e-3 | NR relative tolerance |
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
+| `lambdatol` | 1e-13 | NR wavelength absolute tolerance (m), for λ wires |
 | `vmax` | 0.5 | Per-iteration |ΔV| clamp |
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
@@ -642,6 +643,14 @@ Convergence criteria:
 
 - `|ΔV| < vntol + reltol · |V|` for all node voltages.
 - `|ΔI| < abstol + reltol · |I|` for all branch currents.
+- `|Δλ| < lambdatol` for optical wavelength wires — absolute only.
+
+  The tolerance is per *quantity*, not one number for the whole solution
+  vector: a λ wire carries metres (~1.55e-6), so a volt tolerance let
+  Newton stop a micron out. λ takes no relative term because
+  `reltol·|λ|` is scale-invariant — 1e-3 of 1.55 µm is 1.55 nm however
+  you spell the unit, which is still 5× a 40 GHz passband. See
+  `crates/fairchild-core/src/tolerance.rs`.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal
@@ -1240,17 +1249,15 @@ the two numbers datasheets actually quote.
 * … in1 … in7, out0 … out7 …
 Xr in0 in1 in2 in3 in4 in5 in6 in7  out0 out1 out2 out3 out4 out5 out6 out7
 +   fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30
-.options vntol=1e-14 reltol=1e-12
 ```
 
-**Set a tight `vntol`.** The λ wires carry ~1.55e-6, so the default
-`vntol = 1e-6` is the same order as the entire quantity: Newton's step test can
-be satisfied while λ is still ~10 pm out, and 10 pm is a real detuning for a
-40 GHz passband. The router then reports the transmission for the wrong
-wavelength with no error. At N ≤ 5 the first step lands accurately enough that
-it never shows, which is what makes it a trap — measured at N = 8, the routed
-output reads 0 instead of 1.109 under defaults. Put `.options vntol=1e-14
-reltol=1e-12` in any deck containing an `fc_awgr`.
+**No solver options needed.** Earlier versions of this guide told you to add
+`.options vntol=1e-14 reltol=1e-12` to any deck containing an `fc_awgr`,
+because a λ wire tested against a *volt* tolerance could stop ~10 pm out and
+the router would silently report the wrong wavelength's transmission (measured
+at N = 8: routed output 0 instead of 1.109; N ≤ 5 hid it). λ rows now carry
+their own `lambdatol`, so that workaround is obsolete — delete it from any deck
+that still has it.
 
 **Measured spectra.** The file path is a string and X-line instance params are
 numeric, so a measured router comes in through a `.model` card:
