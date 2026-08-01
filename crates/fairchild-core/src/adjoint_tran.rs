@@ -245,6 +245,17 @@ impl TranAdjoint {
         &self.x
     }
 
+    /// One output's value at every timepoint.
+    ///
+    /// The forward half of a gradient loop: read the waveform, build a loss from
+    /// it, hand the loss's derivative back through [`TranAdjoint::weighted`].
+    pub fn signal(&self, out: &Output) -> Result<Vec<f64>, SimError> {
+        self.x
+            .iter()
+            .map(|x| Ok(out.seed(&self.topo, x)?.0))
+            .collect()
+    }
+
     /// `(L, ∂L/∂x_k for every k)` for `L = Σ_k weights[k]·out(x_k)`.
     ///
     /// `weights` has one entry per timepoint, so the common objectives are just
