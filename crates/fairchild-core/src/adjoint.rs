@@ -136,7 +136,11 @@ pub enum Output {
 
 impl Output {
     /// `(value at x*, ∂L/∂x at x*)`.
-    fn seed(&self, topo: &CircuitTopology, x: &[f64]) -> Result<(f64, Vec<f64>), SimError> {
+    pub(crate) fn seed(
+        &self,
+        topo: &CircuitTopology,
+        x: &[f64],
+    ) -> Result<(f64, Vec<f64>), SimError> {
         let mut seed = vec![0.0; topo.size];
         match self {
             Output::NodeVoltage(node) => {
@@ -221,7 +225,7 @@ impl Sensitivities {
 }
 
 /// Which mechanism carries a perturbation to the equations.
-enum Handle {
+pub(crate) enum Handle {
     /// Index into `netlist.elements`; the element stamper reads its value each
     /// pass, so editing the netlist copy is enough.
     NetlistElement,
@@ -428,7 +432,7 @@ pub fn dc_sensitivity(
 /// freezes λ (the alternative does not converge), so asking each of them to say
 /// so would be fourteen copies of one fact.  Everything else is declared by the
 /// device that froze it.
-fn frozen_columns(
+pub(crate) fn frozen_columns(
     netlist: &Netlist,
     topo: &CircuitTopology,
     devices: &[Box<dyn Device>],
@@ -658,7 +662,7 @@ pub fn jacobian_check(
 /// ponytail: the zero-nominal fallback is a guess.  A parameter that is
 /// genuinely zero has no scale of its own to borrow; pass `step` explicitly if
 /// 1e-9 is wrong for yours.
-fn default_step(nominal: f64) -> f64 {
+pub(crate) fn default_step(nominal: f64) -> f64 {
     if nominal == 0.0 {
         1e-9
     } else {
@@ -667,7 +671,11 @@ fn default_step(nominal: f64) -> f64 {
 }
 
 /// Find how to reach `p`, and its nominal value.
-fn resolve(p: &ParamRef, netlist: &Netlist, dev_names: &[String]) -> Option<(Handle, f64)> {
+pub(crate) fn resolve(
+    p: &ParamRef,
+    netlist: &Netlist,
+    dev_names: &[String],
+) -> Option<(Handle, f64)> {
     let el_lc = p.element.to_lowercase();
     let nominal = match p.nominal {
         Some(v) => v,
@@ -695,7 +703,7 @@ fn resolve(p: &ParamRef, netlist: &Netlist, dev_names: &[String]) -> Option<(Han
     Some((idx, nominal))
 }
 
-fn apply(
+pub(crate) fn apply(
     handle: &Handle,
     p: &ParamRef,
     value: f64,

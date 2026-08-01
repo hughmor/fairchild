@@ -1,5 +1,6 @@
 pub mod ac;
 pub mod adjoint;
+pub mod adjoint_tran;
 pub mod behavioral;
 pub mod connectivity;
 pub mod dc_sweep;
@@ -23,6 +24,7 @@ pub mod tran_step;
 
 pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, AcResult};
 pub use adjoint::{dc_sensitivity, Output, ParamRef, Sensitivities};
+pub use adjoint_tran::{TranAdjoint, TranSensitivities};
 pub use connectivity::check_connectivity;
 pub use dc_sweep::{dc_sweep_with_registry, dc_sweep_with_registry_opts, DcSweepResult, SweepAxis};
 pub use delay::DelayLine;

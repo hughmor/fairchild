@@ -96,6 +96,33 @@ impl TranStepper {
         opts: &SimOptions,
         step: f64,
     ) -> Result<Self, SimError> {
+        Self::build(netlist, registry, opts, step, None)
+    }
+
+    /// [`TranStepper::new`] with `t = 0` supplied rather than solved for.
+    ///
+    /// The adjoint's parameter replay needs a stepper whose trajectory is
+    /// *imposed*: it re-walks an already-solved run with one parameter nudged,
+    /// holding every `x_k` frozen, so the DC operating point that `new` would
+    /// compute is both wasted work and the wrong point to start from — the
+    /// whole construction differentiates the residual at a fixed `x`.
+    pub(crate) fn seeded(
+        netlist: Netlist,
+        registry: &DeviceRegistry,
+        opts: &SimOptions,
+        step: f64,
+        x0: &[f64],
+    ) -> Result<Self, SimError> {
+        Self::build(netlist, registry, opts, step, Some(x0))
+    }
+
+    fn build(
+        netlist: Netlist,
+        registry: &DeviceRegistry,
+        opts: &SimOptions,
+        step: f64,
+        seed: Option<&[f64]>,
+    ) -> Result<Self, SimError> {
         if opts.sanity_check && opts.uic {
             crate::sanity::check_netlist_sanity(&netlist);
         }
@@ -105,7 +132,23 @@ impl TranStepper {
 
         // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
         // Without UIC (the default): use DC OP as t=0 condition.
-        let (mut topo, mut x) = if opts.uic {
+        let (mut topo, mut x) = if let Some(x0) = seed {
+            // Reproduce the row layout the operating-point path arrives at.
+            // `push_device` appends fresh rows on every call, so building the
+            // devices twice — once for the DC solve, once here — is what fixes
+            // where each device's internal nodes live.  The seeded path skips
+            // the solve but must not skip the allocation, or it would be
+            // indexing different unknowns than the run it is replaying.
+            //
+            // ponytail: those first rows are then dead weight in every
+            // non-UIC transient — 6 of 21 on a modest photonic netlist, and the
+            // DC operating point's internal-node values are discarded with
+            // them.  Worth removing, but that moves every matrix index in the
+            // tree and belongs in its own change.
+            let mut t = CircuitTopology::build(&netlist);
+            let _ = build_devices_with_footprints(&netlist, &mut t, &ctx, registry)?;
+            (t, x0.to_vec())
+        } else if opts.uic {
             let topo = CircuitTopology::build(&netlist);
             let mut x = vec![0.0f64; topo.size];
             for (name, value) in &netlist.ic {
@@ -219,81 +262,35 @@ impl TranStepper {
     /// companion models were built for `self.step` and the batch driver's final
     /// clamped step relies on exactly this behaviour.
     pub(crate) fn solve_at(&mut self, t_next: f64) -> Result<(), SimError> {
-        let alpha = 1.0 / self.step;
-        // Expose the absolute time of this step to devices (delay lines look up
-        // historical port values at `time_s − τ`).
-        self.ctx.time_s = t_next;
-        // Companions for this step, derived from physical history rather than
-        // advanced in place.  One rebuild per step buys a single representation
-        // that any step size can consume — see `crate::reactive`.
-        let mode = self.step_mode();
-        self.reactive.build(&self.devices, mode, self.step, None);
-        // Devices that stamp their own reactance (OSDI/Verilog-A `ddt`) need the
-        // method, not just `alpha`, which can only express Backward Euler. Same
-        // `mode` and the same absent BDF-2 history as the branch stamper below,
-        // so one decision still reaches everything.
-        self.ctx.discretisation = Some(crate::device::Discretisation {
-            mode,
-            h: self.step,
-            gear2_h_prev: None,
-        });
+        self.prepare(t_next, self.step_mode(), self.step);
         // One noise realisation for this step, drawn at the previous accepted
         // bias and then held: shot noise follows the current, and the current
         // is whatever the circuit last settled at.  Devices are re-evaluated at
         // `self.x` first so the very first step (where UIC leaves them fresh)
         // is not drawn from a zero bias.  Never redrawn inside the Newton loop
-        // — see `TransientNoise::draw`.
+        // — see `TransientNoise::draw`.  Drawn here rather than in `prepare`,
+        // which the adjoint calls a second time at a perturbed `h`: that must
+        // re-stamp the same realisation, not a fresh one.
         if let Some(noise) = self.noise.as_mut() {
             for dev in &mut self.devices {
                 dev.eval(&self.x, EvalFlags::tran(), &self.ctx);
             }
             noise.draw(&self.devices, &self.ctx, self.step);
         }
-
         // Solve into a scratch vector so a non-converging step leaves the last
         // accepted solution intact for the caller to inspect or retry from.
         let mut x_try = self.x.clone();
 
         for _iter in 0..self.opts.itl4 {
-            crate::mna::stamp_netlist_in_place(
-                &mut self.mat,
-                &self.topo,
-                &self.netlist,
-                t_next,
-                &self.reactive.cap_state,
-                &self.reactive.ind_state,
-                Some(&self.plan),
-                crate::mna::InductorDc::Short,
-            );
+            self.stamp_at(&x_try);
+            // Added here rather than inside `stamp_at` so the adjoint's
+            // re-stamps stay a pure function of the frozen state: the held
+            // realisation belongs to this timepoint's forward solve only.
             if let Some(noise) = self.noise.as_ref() {
                 for (b, n) in self.mat.b.iter_mut().zip(noise.rhs()) {
                     *b += n;
                 }
             }
-
-            for dev in &mut self.devices {
-                dev.set_source_scale(1.0);
-                dev.eval(&x_try, EvalFlags::tran(), &self.ctx);
-                dev.load_residual_tran(&mut self.mat.b, alpha);
-                dev.load_jacobian_tran(&mut self.mat, alpha);
-            }
-            // Stamp integrator-managed reactive companions for every
-            // device-declared linear reactive branch (uses the device's
-            // current bias-dependent value AND the history from the
-            // previous accepted timestep).
-            // BDF-2 needs two-timepoint history, which only the variable-step
-            // integrator carries; GEAR demotes to BE here, as it always has for
-            // the built-in C/L on this path too.
-            stamp_device_branches(
-                &self.devices,
-                &self.reactive.dev_state,
-                &mut self.mat,
-                self.step,
-                mode,
-                None,
-            );
-
-            self.topo.stamp_gmin(&mut self.mat.a, self.opts.gmin);
 
             let x_new = if let Some(f) = self.fact.as_mut() {
                 f.refactor_and_solve_mat(&self.mat)?
@@ -336,6 +333,130 @@ impl TranStepper {
         })
     }
 
+    /// Everything one timestep needs that does *not* change per Newton
+    /// iteration: the companion models for `h` under `mode`, and the absolute
+    /// time devices resolve their sources and delays against.
+    ///
+    /// Split out from [`Self::stamp_at`] because the adjoint re-stamps the same
+    /// timepoint at a second step size to read the charge Jacobian out of the
+    /// difference, and because rebuilding companions per Newton iteration would
+    /// be pure waste.  Reactive history is physical, so calling this again with
+    /// the step's own `h` restores exactly what the last call left behind.
+    pub(crate) fn prepare(&mut self, t: f64, mode: IntegratorMode, h: f64) {
+        self.ctx.time_s = t;
+        // Companions for this step, derived from physical history rather than
+        // advanced in place.  One rebuild per step buys a single representation
+        // that any step size can consume — see `crate::reactive`.
+        self.reactive.build(&self.devices, mode, h, None);
+        // Devices that stamp their own reactance (OSDI/Verilog-A `ddt`) need the
+        // method, not just `alpha`, which can only express Backward Euler. Same
+        // `mode` and the same absent BDF-2 history as the branch stamper in
+        // `stamp_at`, so one decision still reaches everything.
+        self.ctx.discretisation = Some(crate::device::Discretisation {
+            mode,
+            h,
+            gear2_h_prev: None,
+        });
+    }
+
+    /// Stamp the whole transient system at `probe`, leaving `A` and `b` in
+    /// `self.mat` — one Newton iteration with the solve taken out.
+    ///
+    /// [`Self::prepare`] must have run for this timepoint.
+    pub(crate) fn stamp_at(&mut self, probe: &[f64]) {
+        let d = self
+            .ctx
+            .discretisation
+            .expect("stamp_at without a preceding prepare");
+        let alpha = 1.0 / d.h;
+        let t = self.ctx.time_s;
+        crate::mna::stamp_netlist_in_place(
+            &mut self.mat,
+            &self.topo,
+            &self.netlist,
+            t,
+            &self.reactive.cap_state,
+            &self.reactive.ind_state,
+            Some(&self.plan),
+            crate::mna::InductorDc::Short,
+        );
+
+        for dev in &mut self.devices {
+            dev.set_source_scale(1.0);
+            dev.eval(probe, EvalFlags::tran(), &self.ctx);
+            dev.load_residual_tran(&mut self.mat.b, alpha);
+            dev.load_jacobian_tran(&mut self.mat, alpha);
+        }
+        // Stamp integrator-managed reactive companions for every
+        // device-declared linear reactive branch (uses the device's current
+        // bias-dependent value AND the history from the previous accepted
+        // timestep).
+        // BDF-2 needs two-timepoint history, which only the variable-step
+        // integrator carries; GEAR demotes to BE here, as it always has for the
+        // built-in C/L on this path too.
+        stamp_device_branches(
+            &self.devices,
+            &self.reactive.dev_state,
+            &mut self.mat,
+            d.h,
+            d.mode,
+            None,
+        );
+
+        self.topo.stamp_gmin(&mut self.mat.a, self.opts.gmin);
+    }
+
+    /// Stamp the *DC* system at `probe`, the way the `t = 0` operating point was
+    /// solved.  The adjoint needs it because the initial condition is a
+    /// constraint like any other timestep, and its Jacobian is the DC one.
+    pub(crate) fn stamp_dc_at(&mut self, probe: &[f64]) {
+        self.ctx.discretisation = None;
+        let _ = crate::newton::residual_l2(
+            &mut self.mat,
+            &self.topo,
+            &self.netlist,
+            &mut self.devices,
+            &self.ctx,
+            &self.opts,
+            1.0,
+            0.0,
+            Some(&self.plan),
+            probe,
+        );
+    }
+
+    /// The system as last stamped.
+    pub(crate) fn matrix(&self) -> &MnaMatrix {
+        &self.mat
+    }
+
+    pub(crate) fn devices(&self) -> &[Box<dyn Device>] {
+        &self.devices
+    }
+
+    /// Impose a solution rather than solving for one — the replay's whole point.
+    pub(crate) fn force_solution(&mut self, x: &[f64]) {
+        self.x.copy_from_slice(x);
+    }
+
+    /// Retune a live device, then re-seed the reactive history from it.
+    ///
+    /// The re-seed is the part that is easy to forget: `set_real_param` can move
+    /// a device's declared capacitance, and the `t = 0` history was seeded from
+    /// the old one.  Leaving it stale would make the gradient with respect to
+    /// that parameter miss its entire history path.
+    ///
+    /// Returns whether the device recognised the parameter.
+    pub(crate) fn set_device_param(&mut self, i: usize, name: &str, value: f64) -> bool {
+        let ok = self.devices[i].set_real_param(name, value);
+        self.ctx.discretisation = None;
+        for dev in &mut self.devices {
+            dev.eval(&self.x, EvalFlags::dc(), &self.ctx);
+        }
+        self.reactive = ReactiveState::new(&self.netlist, &self.topo, &self.devices, &self.x);
+        ok
+    }
+
     /// Accept the solved iterate as the state at `t_next`.
     pub(crate) fn commit(&mut self, t_next: f64) {
         for dev in &mut self.devices {
@@ -356,7 +477,7 @@ impl TranStepper {
     /// Trapezoidal takes its first step with Backward Euler, for stability
     /// across the t=0 discontinuity; `accept` then records the capacitor current
     /// that step implied, which is exactly what TR needs to continue.
-    fn step_mode(&self) -> IntegratorMode {
+    pub(crate) fn step_mode(&self) -> IntegratorMode {
         if self.first_step && matches!(self.mode, IntegratorMode::Trapezoidal) {
             IntegratorMode::BackwardEuler
         } else {
