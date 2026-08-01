@@ -120,3 +120,132 @@ fn klu_matches_dense_on_nonlinear_diode_circuit() {
         "KLU vs Dense: V(n1) klu={v_klu} dense={v_dense}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cross-backend agreement — the paths the divider tests above never reach.
+//
+// The KLU factorisation caches a CSC structure and a slot map derived from the
+// structural pattern (mirroring `FaerSparseFactorisation`), so the interesting
+// cases are the ones that exercise the cache rather than build it once:
+//
+//   * a nonlinear solve, where `klu_refactor` runs on iterations 2..n;
+//   * a device that stamps a cell which is *zero at x = 0*, so the refill walk
+//     has to notice the pattern growing and trigger exactly one rebuild;
+//   * a transient, where the same handle is reused across every timestep;
+//   * `.noise`, which goes through the transpose solve.
+//
+// Each asserts KLU against faer-sparse on the identical netlist: two spellings
+// of one answer, which is the shape that catches a stale or mis-slotted cache.
+// ---------------------------------------------------------------------------
+
+use fairchild_core::noise::noise_analysis;
+use fairchild_core::tran::tran_nr_with_registry_opts;
+
+fn both_backends<T, F>(net_src: &str, run: F) -> (T, T)
+where
+    F: Fn(&fairchild_parser::Netlist, &DeviceRegistry, &SimOptions) -> T,
+{
+    let net = parse_spice(net_src).unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&net.models);
+    let base = SimOptions::from_netlist(&net);
+
+    let mut sparse = base.clone();
+    sparse.solver = SolverKind::Sparse;
+    let mut klu = base;
+    klu.solver = SolverKind::Klu;
+    (run(&net, &reg, &sparse), run(&net, &reg, &klu))
+}
+
+/// Nonlinear DC: several NR iterations, so most solves take the
+/// `klu_refactor` fast path rather than a fresh analyze.
+#[test]
+fn klu_matches_sparse_on_a_nonlinear_dc_solve() {
+    let src = "* diode ladder\n\
+               .model dm D (IS=1e-14 N=1)\n\
+               V1 in 0 DC 3\n\
+               R1 in a 1k\nD1 a b dm\nR2 b c 1k\nD2 c d dm\nR3 d 0 1k\n\
+               .op\n.end\n";
+    let (sp, kl) = both_backends(src, |n, r, o| {
+        let res = dc_op_nr_with_registry_opts(n, r, o).expect("DC OP");
+        ["a", "b", "c", "d"]
+            .iter()
+            .map(|k| res.node_voltage(k).unwrap())
+            .collect::<Vec<_>>()
+    });
+    for (i, (s, k)) in sp.iter().zip(kl.iter()).enumerate() {
+        assert!((s - k).abs() < 1e-9, "node {i}: sparse {s}, klu {k}");
+    }
+}
+
+/// A cell that is **zero at the x = 0 initial guess and non-zero at the
+/// solution** — the case the cached slot map has to detect and rebuild for.
+///
+/// `I = V(c)·V(a)` has `∂I/∂V(a) = V(c)`, which is exactly zero on the first
+/// iterate and non-zero once `V(c)` moves, so the active set genuinely grows.
+/// Verified by instrumenting `KluFactorisation::rebuild`: this deck rebuilds
+/// twice (build, then growth) where the linear decks above rebuild once.
+///
+/// What this pins is that the two backends agree *while* the pattern grows.
+/// It is deliberately not claimed as a regression guard for growth detection
+/// itself: disabling that detection leaves this test passing, because a
+/// Jacobian missing an entry costs Newton iterations rather than accuracy —
+/// the residual is computed from the real matrix either way. Catching a
+/// dropped rebuild needs an iteration-count or convergence-failure assertion,
+/// which is a sharper instrument than this file has.
+#[test]
+fn klu_matches_sparse_when_the_active_pattern_grows() {
+    let src = "* product term: dI/dV(a) is zero at x=0\n\
+               Vc c 0 DC 2\n\
+               V1 in 0 DC 1\n\
+               R1 in a 1k\n\
+               B1 a 0 I=V(c)*V(a)*1m\n\
+               R2 a 0 10k\n\
+               .op\n.end\n";
+    let (sp, kl) = both_backends(src, |n, r, o| {
+        let res = dc_op_nr_with_registry_opts(n, r, o).expect("DC OP");
+        res.node_voltage("a").unwrap()
+    });
+    assert!(sp.abs() > 1e-6, "expected a non-trivial solution, got {sp}");
+    assert!((sp - kl).abs() < 1e-9, "sparse {sp}, klu {kl}");
+}
+
+/// One factorisation handle reused across every timestep.
+#[test]
+fn klu_matches_sparse_across_a_transient() {
+    let src = "* rc with a diode clamp\n\
+               .model dm D (IS=1e-14 N=1)\n\
+               V1 in 0 PULSE(0 2 1n 1n 1n 20n 40n)\n\
+               R1 in out 1k\nC1 out 0 1n\nD1 out 0 dm\n\
+               .tran 1n 60n\n.end\n";
+    let (sp, kl) = both_backends(src, |n, r, o| {
+        let res = tran_nr_with_registry_opts(n, 1e-9, 60e-9, r, o).expect("transient");
+        [10e-9, 25e-9, 45e-9]
+            .iter()
+            .map(|&t| res.voltage_at("out", t).unwrap())
+            .collect::<Vec<_>>()
+    });
+    for (i, (s, k)) in sp.iter().zip(kl.iter()).enumerate() {
+        assert!((s - k).abs() < 1e-9, "sample {i}: sparse {s}, klu {k}");
+    }
+}
+
+/// `.noise` is the only caller of the transpose solve. KLU now answers it with
+/// `klu_tsolve` on the existing factorisation instead of materialising a dense
+/// transpose, so this pins that the two agree.
+#[test]
+fn klu_matches_sparse_through_the_transpose_solve() {
+    let src = "* rc thermal noise\nV1 in 0 DC 0\nR1 in out 10k\nC1 out 0 1n\n.end\n";
+    let freqs = [1e3, 1e4, 1e5];
+    let (sp, kl) = both_backends(src, |n, r, o| {
+        let res = noise_analysis(n, &freqs, "out", "0", "v1", r, o).expect("noise");
+        res.onoise_psd.clone()
+    });
+    assert_eq!(sp.len(), freqs.len());
+    for (i, (s, k)) in sp.iter().zip(kl.iter()).enumerate() {
+        assert!(
+            (s - k).abs() <= 1e-12 * s.abs().max(1e-30),
+            "freq {i}: sparse {s:e}, klu {k:e}"
+        );
+    }
+}
