@@ -1,5 +1,6 @@
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+use crate::reactive::ChargeHistory;
 
 /// Small floor conductance for numerical stability.
 const GMIN: f64 = 1e-12;
@@ -72,9 +73,12 @@ pub struct Mosfet1 {
     cgs_eval: f64, // Cgs at current NR iterate (set by eval when transient)
     cgd_eval: f64,
     cgb_eval: f64,
-    q_gs_prev: f64, // Q_gs = Cgs * Vgs at previous accepted timestep
-    q_gd_prev: f64,
-    q_gb_prev: f64,
+    q_gs_eval: f64, // Q_gs = Cgs * Vgs at the current NR iterate
+    q_gd_eval: f64,
+    q_gb_eval: f64,
+    gs_hist: ChargeHistory, // history at the previous accepted timestep
+    gd_hist: ChargeHistory,
+    gb_hist: ChargeHistory,
 
     // ── Junction cap transient state (nonlinear depletion cap) ───────────────
     vbs_eval: f64,  // Vbs = Vb−Vs at current iterate (for stamp use)
@@ -83,8 +87,13 @@ pub struct Mosfet1 {
     cbd_eval: f64,  // Cbd(Vbd)
     q_bs_eval: f64, // Q_bs(Vbs) charge integral at current iterate
     q_bd_eval: f64,
-    q_bs_prev: f64, // Q_bs at previous accepted timestep
-    q_bd_prev: f64,
+    bs_hist: ChargeHistory, // history at the previous accepted timestep
+    bd_hist: ChargeHistory,
+
+    /// The integrator's discretisation, captured during `eval` because
+    /// `load_*_tran` receives only `alpha` — which is Backward Euler and
+    /// nothing else. `None` outside the transient loop.
+    disc: Option<Discretisation>,
 }
 
 impl Mosfet1 {
@@ -176,17 +185,21 @@ impl Mosfet1 {
             cgs_eval: 0.0,
             cgd_eval: 0.0,
             cgb_eval: 0.0,
-            q_gs_prev: 0.0,
-            q_gd_prev: 0.0,
-            q_gb_prev: 0.0,
+            q_gs_eval: 0.0,
+            q_gd_eval: 0.0,
+            q_gb_eval: 0.0,
+            gs_hist: ChargeHistory::default(),
+            gd_hist: ChargeHistory::default(),
+            gb_hist: ChargeHistory::default(),
             vbs_eval: 0.0,
             vbd_eval: 0.0,
             cbs_eval: 0.0,
             cbd_eval: 0.0,
             q_bs_eval: 0.0,
             q_bd_eval: 0.0,
-            q_bs_prev: 0.0,
-            q_bd_prev: 0.0,
+            bs_hist: ChargeHistory::default(),
+            bd_hist: ChargeHistory::default(),
+            disc: None,
         };
         (dev, unknown)
     }
@@ -376,6 +389,8 @@ impl Device for Mosfet1 {
         self.jeq = ids_real - gm_eff * vgs - gds_total * vds - gmbs_eff * vbs;
 
         // ── Capacitance evaluation ──────────────────────────────────────────
+        self.disc = ctx.discretisation;
+
         if flags.transient {
             // Gate caps: Meyer model (region-dependent linear caps).
             let vth_capped = vth; // already computed above
@@ -393,6 +408,11 @@ impl Device for Mosfet1 {
             self.cgs_eval = self.cgs_ov + cgs_ch;
             self.cgd_eval = self.cgd_ov + cgd_ch;
             self.cgb_eval = self.cgb_ov + cgb_ch;
+            // Meyer caps are linear, so the charge at this iterate is just C·V —
+            // but the companion needs it explicitly, not folded into `alpha·Q_prev`.
+            self.q_gs_eval = self.cgs_eval * (vg - vs);
+            self.q_gd_eval = self.cgd_eval * (vg - vd);
+            self.q_gb_eval = self.cgb_eval * (vg - vb);
 
             // Junction caps: depletion model.
             // Use real (non-pol-flipped) junction voltages.
@@ -446,53 +466,56 @@ impl Device for Mosfet1 {
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
         self.load_residual(b);
         let (d, g, s, bk) = (self.drain, self.gate, self.source, self.bulk);
+        let disc = self.disc;
 
-        // ── Gate caps (linear): i_hist = alpha * Q_prev ─────────────────────
-        // Gate-Source
-        if self.cgs_eval != 0.0 || self.q_gs_prev != 0.0 {
-            Self::stamp_hist(b, g, s, alpha * self.q_gs_prev);
-        }
-        // Gate-Drain
-        if self.cgd_eval != 0.0 || self.q_gd_prev != 0.0 {
-            Self::stamp_hist(b, g, d, alpha * self.q_gd_prev);
-        }
-        // Gate-Bulk
-        if self.cgb_eval != 0.0 || self.q_gb_prev != 0.0 {
-            Self::stamp_hist(b, g, bk, alpha * self.q_gb_prev);
-        }
-
-        // ── Junction caps (nonlinear): i_hist = alpha*(C*V + Q_prev − Q_now) ─
+        // Every cap here is a charge branch, so one companion serves all five:
+        // the history current cancels whatever the Jacobian stamp contributes
+        // to the residual, under whichever method the integrator chose. Under
+        // Backward Euler the gate caps reduce to the old `alpha·Q_prev` and the
+        // junction caps to `alpha·(C·V + Q_prev − Q_now)`.
+        //
+        // Gate caps are linear (Q = C·V), so charge and the Jacobian term
+        // coincide; the depletion caps' do not, which is why both are passed.
+        let mut cap = |hist: &ChargeHistory, a, bn, q_new, cv| {
+            let (i_hist, _) = hist.companion(disc, alpha, q_new, cv);
+            Self::stamp_hist(b, a, bn, i_hist);
+        };
+        cap(&self.gs_hist, g, s, self.q_gs_eval, self.q_gs_eval);
+        cap(&self.gd_hist, g, d, self.q_gd_eval, self.q_gd_eval);
+        cap(&self.gb_hist, g, bk, self.q_gb_eval, self.q_gb_eval);
         if self.cbs0 != 0.0 {
-            let i_hist = alpha * (self.cbs_eval * self.vbs_eval + self.q_bs_prev - self.q_bs_eval);
-            Self::stamp_hist(b, bk, s, i_hist);
+            let cv = self.cbs_eval * self.vbs_eval;
+            cap(&self.bs_hist, bk, s, self.q_bs_eval, cv);
         }
         if self.cbd0 != 0.0 {
-            let i_hist = alpha * (self.cbd_eval * self.vbd_eval + self.q_bd_prev - self.q_bd_eval);
-            Self::stamp_hist(b, bk, d, i_hist);
+            let cv = self.cbd_eval * self.vbd_eval;
+            cap(&self.bd_hist, bk, d, self.q_bd_eval, cv);
         }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
         self.load_jacobian(mat);
         let (d, g, s, bk) = (self.drain, self.gate, self.source, self.bulk);
+        // Same factor the residual's companion used, from the same place.
+        let scale = ChargeHistory::scale(self.disc, alpha);
 
         // Gate caps.
         if self.cgs_eval != 0.0 {
-            Self::stamp_g_pair(mat, g, s, alpha * self.cgs_eval);
+            Self::stamp_g_pair(mat, g, s, scale * self.cgs_eval);
         }
         if self.cgd_eval != 0.0 {
-            Self::stamp_g_pair(mat, g, d, alpha * self.cgd_eval);
+            Self::stamp_g_pair(mat, g, d, scale * self.cgd_eval);
         }
         if self.cgb_eval != 0.0 {
-            Self::stamp_g_pair(mat, g, bk, alpha * self.cgb_eval);
+            Self::stamp_g_pair(mat, g, bk, scale * self.cgb_eval);
         }
 
         // Junction caps.
         if self.cbs_eval != 0.0 {
-            Self::stamp_g_pair(mat, bk, s, alpha * self.cbs_eval);
+            Self::stamp_g_pair(mat, bk, s, scale * self.cbs_eval);
         }
         if self.cbd_eval != 0.0 {
-            Self::stamp_g_pair(mat, bk, d, alpha * self.cbd_eval);
+            Self::stamp_g_pair(mat, bk, d, scale * self.cbd_eval);
         }
     }
 
@@ -533,16 +556,19 @@ impl Device for Mosfet1 {
         let vs = self.source.map_or(0.0, |i| x[i]);
         let vb = self.bulk.map_or(0.0, |i| x[i]);
 
-        // Save gate cap charges (linear caps: Q = C * V).
-        self.q_gs_prev = self.cgs_eval * (vg - vs);
-        self.q_gd_prev = self.cgd_eval * (vg - vd);
-        self.q_gb_prev = self.cgb_eval * (vg - vb);
-
-        // Save junction cap charges (nonlinear depletion cap).
+        // Roll each cap's history. Charges are recomputed from the converged
+        // solution rather than reused from the last `eval`, which is one NR
+        // iterate behind it.
+        let disc = self.disc;
+        // Gate caps (linear: Q = C·V).
+        self.gs_hist.advance(disc, self.cgs_eval * (vg - vs));
+        self.gd_hist.advance(disc, self.cgd_eval * (vg - vd));
+        self.gb_hist.advance(disc, self.cgb_eval * (vg - vb));
+        // Junction caps (nonlinear depletion cap).
         let vbs_j = vb - vs;
         let vbd_j = vb - vd;
-        self.q_bs_prev = self.q_depl(self.cbs0, vbs_j);
-        self.q_bd_prev = self.q_depl(self.cbd0, vbd_j);
+        self.bs_hist.advance(disc, self.q_depl(self.cbs0, vbs_j));
+        self.bd_hist.advance(disc, self.q_depl(self.cbd0, vbd_j));
 
         // Update fetlim reference.
         self.vgs_eff_prev = self.polarity * (vg - vs);
