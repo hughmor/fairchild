@@ -232,7 +232,9 @@ otherwise.
 
 | Device | Parameters | Validated |
 |---|---|---|
-| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp` | ⚠️ analytic |
+| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp`, `rin_db_hz` | ⚠️ analytic |
+| `fc_driven_laser` | `slope_w_v`/`slope_mw_v`, `v_th`, `p_floor_w`, `r_in`, `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | ⚠️ analytic L–V + a transient through a PD; the opto-electronic-loop test is what pins the stamped `dA/dV` |
+| `fc_facet` | `reflectance`/`r`, `transmittance`/`t`, `loss`, `phase_deg` | ⚠️ analytic (`native_facet`): power fraction, phase rotation, round-trip loss, budget rejection |
 | `fc_waveguide` | `l_um`, `l_m`/`length`, `n_g`, `n_eff`, `alpha_db_cm`, `wl_ref_nm`/`wl_ref_m`, `pin_at_ref` | ⚠️ analytic closed form (loss, phase, group delay) |
 | `fc_dcoupler` | `kappa_per_m`, `l_um`, `l_m`, `kappa_l` | ⚠️ analytic |
 | `fc_splitter` | `alpha`, `alpha_db`/`il_db`, `r`/`split_ratio` | ⚠️ analytic (`native_splitter_asymmetric`) |
@@ -251,9 +253,9 @@ otherwise.
 | Gap | Status |
 |---|---|
 | Optical noise — laser RIN, PD shot noise | ✅ in `.noise`: `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from `fc_cw_laser` (`rin_db_hz`, off unless set). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor, no time-domain noise |
-| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); no scattering-matrix backscattering |
+| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and `fc_cw_laser` *drives* its backward wires to zero rather than absorbing them — putting one at the far end of a reflecting chain over-determines that node |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
-| Reflections at facets / grating couplers | ❌ not modelled |
+| Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |
 
 ---
 

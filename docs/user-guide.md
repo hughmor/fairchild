@@ -331,7 +331,7 @@ Adjoint-method noise analysis. Device noise sources:
 | Diode | 2qI_d shot |
 | MOSFET | 8kTg_m/3 channel |
 | `fc_photodetector` | 2q(I_ph + I_dark) shot |
-| `fc_cw_laser` | RIN, `S_P = 10^(rin_dB_Hz/10) · P²` — off unless `rin_db_hz` is set |
+| `fc_cw_laser`, `fc_driven_laser` | RIN, `S_P = 10^(rin_dB_Hz/10) · P²` — off unless `rin_db_hz` is set |
 
 Output is `onoise` (V²/Hz at the output port) and `inoise` (equivalent input
 PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
@@ -875,6 +875,97 @@ current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 `V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input and no spectral
 linewidth. `rin_db_hz` adds intensity noise in `.noise` (see §5); it does not
 affect `.op`, `.dc`, `.ac` or `.tran`.
+
+### `fc_driven_laser` — voltage-driven laser (direct modulation)
+
+```
+X<name>  out  p  n  fc_driven_laser  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `out` | bundle, optical output (one channel) |
+| `p`, `n` | electrical drive |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `slope_w_v` / `slope` | 1e−3 | dP/dV above threshold, W/V. `slope_mw_v` for mW/V. |
+| `v_th` | 0 | Lasing threshold, V. |
+| `p_floor_w` | 1e−12 | Below-threshold output floor, W (−90 dBm). |
+| `r_in` | 1e6 | Input resistance across (`p`, `n`), Ω. |
+| `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | as `fc_cw_laser` | |
+
+```
+P(V) = p_floor_w + max(0, slope_w_v · (V(p) − V(n) − v_th))
+```
+
+The L–I curve of a diode laser written against voltage: a hard threshold and a
+straight line above it. One SPICE source now produces a modulated optical
+waveform with no `fc_mzm` in the deck — `Vd drv 0 PULSE(0 2 0 10p 10p 490p 1n)`
+is a 1 Gb/s directly-modulated transmitter. Drive it from a current source
+instead by working in `I · r_in`; `slope_w_v · r_in` is then the slope
+efficiency in W/A.
+
+**`p_floor_w` is load-bearing.** The wires carry `A = √P`, so
+`dA/dV = slope/(2√P)` diverges as `P → 0` — a laser switched hard off would
+hand Newton an unbounded Jacobian entry on every falling edge. The floor caps
+it and doubles as the spontaneous-emission background a real laser has anyway.
+At the default it is 90 dB below a 1 mW output, far under any extinction ratio
+worth quoting.
+
+The drive derivative is stamped exactly rather than frozen at the previous
+iterate, so an opto-electronic feedback loop (laser → detector → back to the
+drive node) converges as Newton rather than as successive substitution, and
+sensitivities reach through the laser.
+
+No chirp: direct modulation shifts the emission wavelength with carrier
+density, and λ here is a static tag on a wire.
+
+### `fc_facet` — one-port terminator / partial reflector / mirror
+
+```
+X<name>  port  fc_facet  [param=val …]
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `reflectance` / `r` | 0 | Power fraction returned into the port. |
+| `transmittance` / `t` | 0 | Power fraction leaving the model. |
+| `loss` | remainder | Power fraction absorbed. |
+| `phase_deg` | 0 | Phase added on reflection (180 for a metal mirror). |
+
+One optical port whose forward field is split three ways: reflected back into
+the same port, transmitted out of the simulation, absorbed. `R = 0` is a
+terminator (the default), `R ≈ 0.3` a cleaved facet, `R = 1` a mirror.
+
+Set any one, any two, or all three of `reflectance` / `transmittance` / `loss`;
+the unset ones take the remainder, `loss` first. Setting all three requires them
+to sum to 1. **Only `reflectance` changes the answer** — light that leaves via
+`transmittance` or `loss` is gone either way, and there is no second port for it
+to arrive at. The other two exist so the budget is written down and checked;
+`reflectance=0.9 transmittance=0.5` is an error, not an average.
+
+Reflection applies `A_bw = √R · e^(−jφ) · A_fw`, the same phase convention the
+waveguide uses for propagation.
+
+**Needs `.options enable_bidirectional=1`** for any non-zero reflectance — a
+unidirectional bundle has no backward wire to drive. A reflector without it is
+a hard error rather than a silent terminator.
+
+Bundle-aware (`wpc·N` terminals), one budget shared across channels; a
+wavelength-dependent facet (a DBR) is not modelled.
+
+This is an **end cap** — light arrives on the port's forward wires and leaves on
+its backward ones. A Fabry-Pérot cavity needs a partial mirror coupling an
+outside port to an inside one in both directions, which is a two-port device and
+not this one.
+
+> **Watching a reflection needs care about what else drives the wire.**
+> `fc_cw_laser` *drives* its port's backward wires to zero — a perfect absorber,
+> but also a device with an opinion. Put one at the far end of a reflecting
+> chain and two devices pin the same node to different values. Terminate the
+> return path somewhere the laser is not, or launch with plain `V` sources on
+> the forward wires.
 
 ### `fc_waveguide` — lossy waveguide
 

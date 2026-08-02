@@ -236,3 +236,224 @@ impl Device for NativeCwLaser {
         self.load_jacobian(mat);
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Voltage-driven laser (direct intensity modulation)
+// ────────────────────────────────────────────────────────────────────────
+
+/// A laser whose optical power follows an electrical input, so one SPICE
+/// source produces a time-varying optical waveform with no external modulator.
+///
+/// ```text
+///   P(V) = p_floor_w + max(0, slope_w_v · (V − v_th))      V = V(p) − V(n)
+///   A    = √P,   re = A·cos φ₀,   im = A·sin φ₀
+/// ```
+///
+/// That is the L–I curve of a diode laser written against voltage: a hard
+/// threshold and a straight line above it.  Drive it from a current source
+/// instead by working in `I·r_in` — the input resistance is a real parameter,
+/// not a numerical crutch, so `slope_w_v · r_in` is the slope efficiency in W/A.
+///
+/// | Parameter | Default | Meaning |
+/// |---|---|---|
+/// | `slope_w_v` / `slope_mw_v` | 1e−3 W/V | dP/dV above threshold. |
+/// | `v_th` | 0 | Lasing threshold. |
+/// | `p_floor_w` | 1e−12 | Below-threshold floor, −90 dBm. |
+/// | `r_in` | 1e6 | Input resistance across (p, n). |
+/// | `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | as `fc_cw_laser` | |
+///
+/// **`p_floor_w` is load-bearing, not cosmetic.**  The wires carry `A = √P`,
+/// and `dA/dV = slope/(2√P)` diverges as `P → 0`; a laser switched hard off
+/// would hand Newton an unbounded Jacobian entry every time the drive crossed
+/// threshold.  The floor caps it at `slope/(2·√p_floor)` and doubles as the
+/// spontaneous-emission background a real laser has anyway.  At the default it
+/// is 90 dB below a 1 mW output, far under any extinction ratio worth quoting.
+///
+/// The drive derivative is stamped exactly (no frozen coefficient), so adjoint
+/// sensitivities reach through the laser — see `Device::frozen_jacobian_columns`
+/// for why that distinction matters.
+///
+/// ponytail: no chirp.  Direct modulation shifts the emission wavelength with
+/// carrier density, and λ here is a static tag on a wire.  Modelling it means
+/// making the λ wire drive-dependent, which every downstream device would then
+/// see move — worth doing only when something in the tree cares about
+/// dispersion penalty.
+pub struct NativeDrivenLaser {
+    slope_w_v: f64,
+    v_th: f64,
+    p_floor_w: f64,
+    r_in: f64,
+    phi_0: f64,
+    wavelen_m: f64,
+    rin_db_hz: Option<f64>,
+    src_scale: f64,
+    wpc: usize,
+    nodes: Vec<NodeId>,
+    branches: Vec<Option<usize>>,
+    /// Linearisation about the previous iterate: amplitude, its derivative
+    /// w.r.t. the drive, and the drive itself.
+    a_op: f64,
+    da_dv: f64,
+    v_op: f64,
+}
+
+impl Default for NativeDrivenLaser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeDrivenLaser {
+    pub fn new() -> Self {
+        Self {
+            slope_w_v: 1e-3,
+            v_th: 0.0,
+            p_floor_w: 1e-12,
+            r_in: 1e6,
+            phi_0: 0.0,
+            wavelen_m: 1550e-9,
+            rin_db_hz: None,
+            src_scale: 1.0,
+            wpc: 3,
+            nodes: Vec::new(),
+            branches: Vec::new(),
+            a_op: 0.0,
+            da_dv: 0.0,
+            v_op: 0.0,
+        }
+    }
+
+    /// Electrical terminals sit after the bundle wires: `[wires…, p, n]`.
+    fn drive_nodes(&self) -> (NodeId, NodeId) {
+        (self.nodes[self.wpc], self.nodes[self.wpc + 1])
+    }
+}
+
+impl Device for NativeDrivenLaser {
+    fn num_terminals(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wavelen_m = ctx.lambda_center_m;
+        self.wpc = ctx.wires_per_channel();
+    }
+
+    fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
+        let wpc = ctx.wires_per_channel();
+        self.wpc = wpc;
+        assert_eq!(
+            terminals.len(),
+            wpc + 2,
+            "fc_driven_laser: expected {} terminals (one optical channel + p, n); got {}",
+            wpc + 2,
+            terminals.len()
+        );
+        self.nodes = terminals.to_vec();
+        self.branches = vec![None; wpc];
+    }
+
+    fn num_extra_nodes(&self) -> usize {
+        self.branches.len()
+    }
+
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        for (i, b) in self.branches.iter_mut().enumerate() {
+            *b = Some(first_idx + i);
+        }
+    }
+
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "slope_w_v" | "slope" => self.slope_w_v = value,
+            "slope_mw_v" => self.slope_w_v = value * 1e-3,
+            "v_th" | "vth" => self.v_th = value,
+            "p_floor_w" => self.p_floor_w = value.max(0.0),
+            "r_in" => self.r_in = value,
+            "phi_0_deg" | "phase_deg" => self.phi_0 = value.to_radians(),
+            "wavelength_nm" => self.wavelen_m = value * 1e-9,
+            "wavelength_m" => self.wavelen_m = value,
+            "rin_db_hz" | "rin" => self.rin_db_hz = Some(value),
+            _ => return false,
+        }
+        true
+    }
+
+    fn set_source_scale(&mut self, scale: f64) {
+        self.src_scale = scale;
+    }
+
+    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
+        let (p_node, n_node) = self.drive_nodes();
+        let v = p_node.map_or(0.0, |i| x[i]) - n_node.map_or(0.0, |i| x[i]);
+        let above = self.slope_w_v * (v - self.v_th);
+        let power = self.p_floor_w + above.max(0.0);
+        self.a_op = power.sqrt();
+        // Below threshold the power is pinned at the floor, so dA/dV is zero
+        // there — not merely small.  Above it, dA/dV = slope / (2√P), which the
+        // floor keeps finite through the corner.
+        self.da_dv = if above > 0.0 && self.a_op > 0.0 {
+            self.slope_w_v / (2.0 * self.a_op)
+        } else {
+            0.0
+        };
+        self.v_op = v;
+    }
+
+    fn load_residual(&self, b: &mut [f64]) {
+        // Branch row k enforces V(wire_k) − dA/dV·cos·(V_p − V_n) = const, so
+        // the RHS carries the linearisation offset A_op − dA/dV·V_op.
+        let (re_w, im_w) = (self.phi_0.cos(), self.phi_0.sin());
+        let offset = self.src_scale * (self.a_op - self.da_dv * self.v_op);
+        if let Some(j) = self.branches[0] {
+            b[j] += offset * re_w;
+        }
+        if let Some(j) = self.branches[1] {
+            b[j] += offset * im_w;
+        }
+        // bw wires (bidir) stay at 0: a laser emits one way.  λ is a static tag.
+        let lam = self.wpc - 1;
+        if let Some(j) = self.branches[lam] {
+            b[j] += self.wavelen_m;
+        }
+    }
+
+    fn load_jacobian(&self, mat: &mut MnaMatrix) {
+        for (i, out_node) in self.nodes.iter().take(self.wpc).enumerate() {
+            if let (Some(out), Some(j)) = (*out_node, self.branches[i]) {
+                mat.a[j][out] += 1.0;
+                mat.a[out][j] += 1.0;
+            }
+        }
+        let (p_node, n_node) = self.drive_nodes();
+        let g = self.src_scale * self.da_dv;
+        for (i, w) in [(0usize, self.phi_0.cos()), (1, self.phi_0.sin())] {
+            let Some(j) = self.branches[i] else { continue };
+            if let Some(p) = p_node {
+                mat.a[j][p] -= g * w;
+            }
+            if let Some(n) = n_node {
+                mat.a[j][n] += g * w;
+            }
+        }
+        if self.r_in > 0.0 {
+            super::stamp_resistor(mat, p_node, n_node, 1.0 / self.r_in);
+        }
+    }
+
+    fn correlated_noise_sources(&self, _ctx: &SimContext) -> Vec<CorrelatedNoise> {
+        rin_source(
+            self.rin_db_hz,
+            self.a_op * self.phi_0.cos(),
+            self.a_op * self.phi_0.sin(),
+            &self.branches,
+        )
+    }
+
+    fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
+        self.load_residual(b);
+    }
+    fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
+        self.load_jacobian(mat);
+    }
+}

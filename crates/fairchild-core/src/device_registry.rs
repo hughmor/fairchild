@@ -9,9 +9,9 @@ use crate::models::{
     pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
     thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeAwgr,
-    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
-    NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
-    ShockleyDiode, SpectrumTable,
+    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeDrivenLaser,
+    NativeFacet, NativeGratingCoupler, NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector,
+    NativeSplitter, NativeWaveguide, ShockleyDiode, SpectrumTable,
 };
 
 /// The set of instance parameters from an `X…` element line, threaded into a
@@ -599,6 +599,8 @@ impl DeviceRegistry {
     ///
     /// Actives (B4):
     /// - `fc_photodetector` — PIN photodetector with linear responsivity.
+    /// - `fc_driven_laser`  — laser whose power follows an electrical input.
+    /// - `fc_facet`         — one-port terminator / partial reflector / mirror.
     /// - `fc_thermal_ps`    — thermal phase shifter (Joule heating → φ = π·P/P_pi).
     /// - `fc_pn_ps`         — PN-junction phase shifter (Δn_eff = dn_dv·V).
     pub fn register_native_photonics(&mut self) {
@@ -611,6 +613,8 @@ impl DeviceRegistry {
         self.register_default::<NativeMzm>("fc_mzm");
         self.register_default::<NativeCirculator>("fc_circulator");
         self.register_default::<NativeCwLaser>("fc_cw_laser");
+        self.register_default::<NativeDrivenLaser>("fc_driven_laser");
+        self.register_default::<NativeFacet>("fc_facet");
         self.register_default::<NativeMux>("fc_mux");
         self.register_default::<NativeDemux>("fc_demux");
         self.register_default::<NativeOptical2x2>("fc_optical_2x2");

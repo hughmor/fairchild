@@ -90,8 +90,10 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
         // not the exception.
         "fc_waveguide" | "fc_splitter" | "fc_dcoupler" | "fc_grating_coupler" | "fc_pn_ps"
         | "fc_pn_ps_cap" | "fc_pn_th_ps" | "fc_thermal_ps" | "fc_thermal_ps_rc" | "fc_mzm"
-        | "fc_photodetector" | "fc_circulator" | "fc_optical_2x2" | "fc_awgr" => BundleArity::Aware,
-        // `fc_cw_laser` deliberately stays Scalar — a single laser source
+        | "fc_photodetector" | "fc_circulator" | "fc_optical_2x2" | "fc_awgr" | "fc_facet" => {
+            BundleArity::Aware
+        }
+        // `fc_cw_laser` / `fc_driven_laser` deliberately stay Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for
         // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
         // also Scalar.
