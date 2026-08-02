@@ -72,6 +72,12 @@ jobs:
       - name: Check benchmarks compile
         run: cargo test --workspace --benches
 
+      # The KiCad symbol library is hand-edited *and* partly generated, so the
+      # generated half drifts silently unless something checks it.
+      - name: KiCad symbol library is up to date
+        if: runner.os == 'Linux'
+        run: python3 scripts/gen_kicad_symbols.py --check
+
       # cargo test --workspace builds fairchild-py as a plain lib, which never
       # exercises the extension-module build or python/fairchild/__init__.py.
       # A renamed pyo3 export breaks `import fairchild` with every Rust test green.
