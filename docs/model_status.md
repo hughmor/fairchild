@@ -253,7 +253,7 @@ otherwise.
 | Gap | Status |
 |---|---|
 | Optical noise — laser RIN, PD shot noise | ✅ in `.noise`: `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from `fc_cw_laser` (`rin_db_hz`, off unless set). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor, no time-domain noise |
-| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and `fc_cw_laser` *drives* its backward wires to zero rather than absorbing them — putting one at the far end of a reflecting chain over-determines that node |
+| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
 | Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |
 

@@ -1,6 +1,38 @@
 use crate::device::{CorrelatedNoise, Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
+/// How many of a laser's `wpc` bundle wires it actually drives: the two forward
+/// field components and the λ tag, never the backward pair.
+///
+/// **A laser absorbs backward light; it does not assert that there is none.**
+/// Driving `re_bw = 0` looks like the same thing — a perfect absorber — right
+/// up until something upstream sends light back.  The neighbouring device also
+/// drives that wire (a waveguide's input-side backward wires are its own
+/// output), so two branch rows then pin one node to different values, the block
+/// goes rank-deficient, and the solve returns a weighted average of the two
+/// answers instead of failing.  Measured on a laser → waveguide → `fc_facet`
+/// deck: the returned power came out 4x low, with no diagnostic.
+///
+/// Leaving the wire alone is both correct and simpler.  When nothing else
+/// drives it — a laser straight into a photodetector — `stamp_gmin` leaves the
+/// row at `gmin·V = 0`, so it still reads exactly zero.
+fn emitted_wires(wpc: usize) -> usize {
+    if wpc == 5 {
+        3
+    } else {
+        wpc
+    }
+}
+
+/// Bind branch rows for the wires `emitted_wires` counts: `re`, `im`, and λ
+/// (the last wire), leaving the backward pair unbound.
+fn bind_emitted(branches: &mut [Option<usize>], wpc: usize, first_idx: usize) {
+    branches.fill(None);
+    branches[0] = Some(first_idx);
+    branches[1] = Some(first_idx + 1);
+    branches[wpc - 1] = Some(first_idx + 2);
+}
+
 /// Relative-intensity-noise generator for a laser emitting `(re_amp, im_amp)`
 /// on branch rows `branches`, shared by every laser model in this file.
 ///
@@ -53,10 +85,9 @@ pub(super) fn rin_source(
 /// potential contributions — no electrical input.
 ///
 /// `A_re = √P · cos(φ₀)`, `A_im = √P · sin(φ₀)` where `P = power_mW · 1e−3`.
-/// CW laser source.  Drives ONE optical channel's bundle wires: 3 wires
-/// (re, im, λ) under unidirectional propagation, or 5 wires (re_fw, im_fw,
-/// re_bw, im_bw, λ) under bidirectional — the bw wires are forced to 0
-/// because a laser emits in one direction only.
+/// Drives ONE optical channel: `(re, im, λ)` under unidirectional propagation,
+/// and the same three under bidirectional — the backward pair is left to
+/// whatever sends light back, see `emitted_wires`.
 pub struct NativeCwLaser {
     re_amp: f64,
     im_amp: f64,
@@ -120,13 +151,11 @@ impl Device for NativeCwLaser {
     }
 
     fn num_extra_nodes(&self) -> usize {
-        self.branches.len()
+        emitted_wires(self.wpc)
     }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for i in 0..self.branches.len() {
-            self.branches[i] = Some(first_idx + i);
-        }
+        bind_emitted(&mut self.branches, self.wpc, first_idx);
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -188,35 +217,21 @@ impl Device for NativeCwLaser {
         // Inhomogeneous branch equations: V(out_re_fw) = re_amp, ...
         // Wire order: [re_fw, im_fw, re_bw, im_bw, λ] (5-wire bidir) or
         //             [re,    im,    λ]               (3-wire unidir).
-        if self.wpc == 5 {
-            if let Some(j) = self.branches[0] {
-                b[j] += self.src_scale * self.re_amp;
-            }
-            if let Some(j) = self.branches[1] {
-                b[j] += self.src_scale * self.im_amp;
-            }
-            // bw wires forced to 0 — no contribution from RHS (branch row
-            // already enforces V = 0 because rhs is 0).
-            if let Some(j) = self.branches[4] {
-                b[j] += self.wavelen_m;
-            }
-        } else {
-            if let Some(j) = self.branches[0] {
-                b[j] += self.src_scale * self.re_amp;
-            }
-            if let Some(j) = self.branches[1] {
-                b[j] += self.src_scale * self.im_amp;
-            }
-            if let Some(j) = self.branches[2] {
-                b[j] += self.wavelen_m;
-            }
+        if let Some(j) = self.branches[0] {
+            b[j] += self.src_scale * self.re_amp;
+        }
+        if let Some(j) = self.branches[1] {
+            b[j] += self.src_scale * self.im_amp;
+        }
+        if let Some(j) = self.branches[self.wpc - 1] {
+            b[j] += self.wavelen_m;
         }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         // Branch rows: V(out_wire) - target = 0.  Stamp +1 at (J, out) and
-        // +1 at (out, J).  RHS handled in load_residual.  bw wires use the
-        // same shape, with target = 0 (no explicit RHS contribution).
+        // +1 at (out, J).  RHS handled in load_residual.  The backward wires
+        // get no branch at all — see `bind_emitted`.
         for (i, out_node) in self.nodes.iter().enumerate() {
             if let (Some(out), Some(j)) = (*out_node, self.branches[i]) {
                 mat.a[j][out] += 1.0;
@@ -354,13 +369,11 @@ impl Device for NativeDrivenLaser {
     }
 
     fn num_extra_nodes(&self) -> usize {
-        self.branches.len()
+        emitted_wires(self.wpc)
     }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        for (i, b) in self.branches.iter_mut().enumerate() {
-            *b = Some(first_idx + i);
-        }
+        bind_emitted(&mut self.branches, self.wpc, first_idx);
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -411,7 +424,7 @@ impl Device for NativeDrivenLaser {
         if let Some(j) = self.branches[1] {
             b[j] += offset * im_w;
         }
-        // bw wires (bidir) stay at 0: a laser emits one way.  λ is a static tag.
+        // The backward wires get no branch at all — see `bind_emitted`.
         let lam = self.wpc - 1;
         if let Some(j) = self.branches[lam] {
             b[j] += self.wavelen_m;

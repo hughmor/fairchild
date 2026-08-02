@@ -1,12 +1,11 @@
 //! `fc_facet` — the one-port terminator / partial reflector / mirror.
 //!
-//! The bundles are written out wire by wire rather than through
-//! `.optical_port`, and driven by plain `V` sources rather than a laser. That
-//! is deliberate: `fc_cw_laser` *drives* its port's backward wires to zero, so
-//! putting one at the far end of a reflecting chain gives two devices pinning
-//! the same node to different values. Any real deck that wants to watch a
-//! reflection needs the same care — a laser is a perfect absorber only as long
-//! as nothing else is trying to talk on that wire.
+//! Most cases write the bundles out wire by wire and launch with plain `V`
+//! sources rather than through `.optical_port` and a laser. That keeps the
+//! reflection algebra visible: the expected value is a product of three
+//! numbers, and any of them being wrong shows up directly.
+//! `a_laser_does_not_fight_the_wave_reflected_back_into_it` covers the deck
+//! shape a user would actually write.
 //!
 //! Wire order under `enable_bidirectional=1` is `[re_fw, im_fw, re_bw, im_bw, λ]`.
 
@@ -159,4 +158,48 @@ fn a_reflected_wave_pays_the_propagation_loss_both_ways() {
         (got - expect).abs() / expect < 1e-9,
         "returned {got:.6e} W, expected {expect:.6e} W"
     );
+}
+
+/// The regression that motivated leaving a laser's backward wires unbound: a
+/// laser feeding a reflecting chain.
+///
+/// A laser that *drives* `re_bw = 0` is a second opinion on a node the
+/// waveguide is already driving with the returning field. The block goes
+/// rank-deficient and the solve splits the difference — measured 4x low on
+/// this exact deck, with no error and no warning. Now the laser only emits,
+/// and the returned power is the analytic one.
+#[test]
+fn a_laser_does_not_fight_the_wave_reflected_back_into_it() {
+    const R_POWER: f64 = 0.3;
+    const P_MW: f64 = 1.0;
+    let r = run(&format!(
+        ".optical_port src\n\
+         .optical_port far\n\
+         Xl  src fc_cw_laser power_mW={P_MW} wavelength_nm=1550\n\
+         Xwg src far fc_waveguide L_um=500 n_eff=2.445 n_g=4.2 alpha_dB_cm=2.0\n\
+         Xf  far fc_facet reflectance={R_POWER}\n"
+    ));
+    let re = r.node_voltage("src_re_bw_0").unwrap();
+    let im = r.node_voltage("src_im_bw_0").unwrap();
+    let one_way = 10f64.powf(-2.0 * 0.05 / 10.0); // 500 µm at 2 dB/cm, power
+    let expect = P_MW * 1e-3 * one_way * R_POWER * one_way;
+    let got = re * re + im * im;
+    assert!(
+        (got - expect).abs() / expect < 1e-9,
+        "reflection into the laser: {got:.6e} W, expected {expect:.6e} W"
+    );
+}
+
+/// With nothing sending light back, an unbound backward wire still reads
+/// exactly zero — `stamp_gmin` leaves the row at `gmin·V = 0`. That is what
+/// makes leaving it alone safe rather than merely correct in the hard case.
+#[test]
+fn an_undriven_backward_wire_is_still_zero() {
+    let r = run("\
+.optical_port src\n\
+Xl  src fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+Xpd src pa 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_dark_a=0\n\
+Rl  pa 0 1k\n");
+    assert_eq!(r.node_voltage("src_re_bw_0").unwrap(), 0.0);
+    assert_eq!(r.node_voltage("src_im_bw_0").unwrap(), 0.0);
 }

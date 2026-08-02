@@ -960,12 +960,13 @@ its backward ones. A Fabry-Pérot cavity needs a partial mirror coupling an
 outside port to an inside one in both directions, which is a two-port device and
 not this one.
 
-> **Watching a reflection needs care about what else drives the wire.**
-> `fc_cw_laser` *drives* its port's backward wires to zero — a perfect absorber,
-> but also a device with an opinion. Put one at the far end of a reflecting
-> chain and two devices pin the same node to different values. Terminate the
-> return path somewhere the laser is not, or launch with plain `V` sources on
-> the forward wires.
+Light reflected all the way back to a laser is absorbed there: `fc_cw_laser`
+and `fc_driven_laser` drive only `(re, im, λ)`, never the backward pair, so the
+returning wave is whatever the chain puts on that wire. (They used to *drive*
+the backward wires to zero, which reads as a perfect absorber and behaves as a
+second opinion — the node ended up over-determined and the returned power came
+out 4× low with no diagnostic.) There is no feedback into the laser's output;
+back-reflection is observable, not yet consequential.
 
 ### `fc_waveguide` — lossy waveguide
 
