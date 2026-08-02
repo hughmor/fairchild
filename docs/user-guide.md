@@ -319,11 +319,45 @@ omitted from `.ac`/`.noise`; they are now consistent across all analyses.)
 
 ### Noise
 
+fairchild has **two** noise analyses over one set of physical sources:
+
+| | What you get | When to reach for it |
+|---|---|---|
+| **`.noise`** — small-signal | PSDs vs frequency, and a per-source budget | Sensitivity, noise figure, "which device dominates" |
+| **`.options trannoise=1`** — time domain | Random currents injected into `.tran` | Eye closure, jitter, comparator/PLL behaviour, anything nonlinear |
+
+They are not alternatives with different answers. `crate::noise::NoiseSources`
+enumerates the generators once and both analyses consume that list, so the
+time-domain variance of an unfiltered node is exactly the `.noise` PSD
+integrated over the resolved band. `transient_noise_agrees_with_the_noise_
+analysis` asserts it on three circuits, each biased so a different source
+dominates.
+
+Use `.noise` unless the thing you care about is nonlinear or a threshold
+crossing. It costs two solves per frequency; a transient-noise run costs a
+transient, and you need many of them to estimate a tail.
+
+#### `.noise` — small-signal
+
 ```
 .noise  V(<out_pos>[,<out_neg>])  <input_src>  DEC|OCT|LIN  <points>  <fstart>  <fstop>
 ```
 
-Adjoint-method noise analysis. Device noise sources:
+```bash
+fairchild -f receiver.sp -o out.csv             # onoise / inoise columns
+```
+
+```python
+r = c.run("noise", out="det", out_neg="bias", src="Vb",
+          fstart=1e6, fstop=40e9, points=20, variation="dec")
+psd   = r["onoise"]           # V²/Hz at the output port
+vrthz = r["onoise_vrthz"]     # V/√Hz, the same thing datasheets quote
+inoise = r["inoise"]          # referred back to `src`
+```
+
+Adjoint-method: one transposed solve per frequency gives the transfer impedance
+from every internal injection to the output, so the cost does not grow with the
+number of noise sources. Device noise sources:
 
 | Device | Source |
 |---|---|
@@ -338,6 +372,15 @@ PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
 `noise_sources()` hook. Like `.ac`, the noise small-signal network now includes
 device-internal capacitances, so high-frequency noise shaping from device caps
 is captured.
+
+> **`.noise` linearises about ONE operating point, and a modulated link does
+> not have one.** Shot noise follows the current and RIN follows the optical
+> power, so a link's `1` rail can be tens of times noisier than its `0` rail.
+> Run `.noise` on a deck whose sources idle at zero and you get the idle
+> answer — in `examples/photonic/noisy_eye_and_ber.py` that is 68× low on the
+> `1` rail. Bias the deck at the level you care about, one run per rail. This is
+> also why the Q-factor formula has two sigmas in it:
+> `Q = (µ₁ − µ₀)/(σ₁ + σ₀)`.
 
 **Optical noise.** A laser + PIN + load resistor gives the textbook receiver
 budget, and fairchild reproduces it term by term:
@@ -357,8 +400,89 @@ correlated generator via `Device::correlated_noise_sources`. Treating the two
 wires as independent sources would under-report by up to 2× depending on
 `phase_deg` — a bug that hides completely at the default 0°.
 
-Noise here is small-signal only: `.noise` reports PSDs, it does not inject
-random waveforms into `.tran`.
+#### Transient noise — time domain
+
+```
+.options trannoise=1 [noiseseed=<n>] [noisescale=<x>]
+```
+
+```bash
+fairchild -f receiver.sp -o out.csv              # `.options` line lives in the deck
+```
+
+```python
+r = c.run("tran", step=2e-12, stop=20e-9, trannoise=True, noiseseed=7)
+v = r["V(det)"]                                    # now a noisy waveform
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `trannoise` | `0` | Inject the noise sources into `.tran`. |
+| `noiseseed` | `1` | RNG seed. Same seed ⇒ same waveform; sweep it for independent trials. |
+| `noisescale` | `1.0` | Multiplier on the noise **amplitude**, so power goes as its square. `noisescale=3` gives 9× the noise power — the usual way to pull a deep-BER eye closure into a simulation short enough to run, then extrapolate. |
+
+Every generator in the `.noise` table above is drawn once per timestep, held
+across the step, and injected as a current at the same terminals the PSD is
+defined between. A generator with one-sided PSD `S` is realised as
+
+```
+i_n = √(S / 2h) · N(0, 1)          h = timestep
+```
+
+because a zero-order-held sequence of variance `σ²` at interval `h` has PSD
+`2σ²h` below its Nyquist frequency. Integrating `S` over the resolved band
+`[0, 1/2h]` gives back `σ²`, which is the consistency the two analyses share.
+
+**Off by default, and deterministic when off** — a `.tran` is expected to be
+reproducible, and every golden in the tree depends on it. A noisy run is still
+reproducible: fix `noiseseed` and you get the same waveform every time.
+
+**Fixed step only.** `.options variable_step=1` with `trannoise=1` is an error,
+not an approximation: the LTE controller reads a fresh random sample as a fast
+signal and shrinks the step to chase it, and the step size then becomes
+correlated with the noise, biasing the very spectrum it was meant to reproduce.
+Fixed steps are what SDE solvers use, for this reason.
+
+**Bandwidth is set by the timestep, and that is usually fine.** The injected
+noise is white up to `1/2h` and absent above it. That truncation does not bias
+anything you measure through a circuit, because a transient that resolves your
+circuit has its Nyquist frequency well above the circuit's bandwidth and the
+circuit filters the difference away — an RC low-pass settles at `kT/C` for any
+`h ≪ RC`, independent of `h`, which is the test that pins this. What *does*
+depend on the step is a node with no bandwidth limit of its own: a bare resistor
+divider has variance `S_V/2h` and always will, in any simulator, because
+white noise of unbounded bandwidth has unbounded power. If you are reading a
+number that has no filter in front of it, put one there.
+
+**How long to run.** The variance of a variance estimate over `N` independent
+samples is `2/N`, and samples are independent only about once per circuit time
+constant — so a 1 % variance estimate needs ~20 000 time constants, not
+20 000 timesteps. One transient is one realisation of a random process: expect
+several per cent of scatter between seeds and pool a few before believing a
+number.
+
+**`noisescale` is only exactly linear while the circuit is.** A doubled
+amplitude doubles σ as long as the circuit still responds linearly to it. Push
+it far enough and it will not: in `noisy_eye_and_ber.py` the quiet rail tracks
+`noisescale` to 0.1 %, while the RIN-limited rail runs ~5 % superlinear by 4×,
+because a ±40 % optical-power swing is outside the photodiode's square law being
+approximately linear. A BER extrapolated that way errs conservative, which is
+the direction you want, but check the scaling rather than assuming it.
+
+#### Worked examples
+
+| Script | Shows |
+|---|---|
+| `examples/photonic/receiver_noise_budget.py` | `.noise` only — thermal / shot / RIN vs optical power, and the SNR ceiling `1/(RIN·B)` |
+| `examples/photonic/noisy_eye_and_ber.py` | Both — a 10 Gb/s eye with injected noise, Q and BER, and each rail checked against its own `.noise` integral |
+
+#### What neither analysis models
+
+Flicker (1/f) and RTS noise — no device implements them, in either domain.
+`.noise` reports PSDs and never injects; transient noise injects and never
+reports a PSD. Nothing here is correlated between separate generators, so a
+device with physically correlated drain and gate noise would need a single
+multi-tap `CorrelatedNoise` (the mechanism exists — laser RIN uses it).
 
 ---
 
@@ -574,6 +698,9 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
 | `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
+| `trannoise` | false | Inject the `.noise` sources into `.tran` as random currents. Fixed step only. Aliases: `tran_noise`, `transient_noise`. See §5. |
+| `noiseseed` | 1 | Transient-noise RNG seed. Same seed ⇒ same waveform. |
+| `noisescale` | 1.0 | Multiplier on transient-noise **amplitude** (power goes as its square). |
 | `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See §12 `fc_waveguide`. |
 
 Setting any of these from the netlist:

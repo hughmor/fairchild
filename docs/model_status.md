@@ -24,9 +24,10 @@ Legend: ✅ yes · ⚠️ partial (see the note) · ❌ no.
   accepted **silently** and do nothing. The diode at least warns about `BV`.
 - MOSFET `MJSW` is parsed, stored, and never read — sidewall junction caps use
   `MJ`.
-- `.noise` has no ngspice comparison. Optical noise (PD shot, laser RIN) exists
-  and is checked against the analytic receiver budget, but only in `.noise` —
-  nothing injects noise into `.tran`.
+- `.noise` has no ngspice comparison. Optical noise (PD shot, laser RIN) is
+  checked against the analytic receiver budget, and `.options trannoise=1`
+  injects the same generators into `.tran`. Neither domain models flicker (1/f)
+  or RTS noise.
 - The photonic models are validated against analytic forms and against
   themselves, never against an external simulator. That is the biggest gap in
   this document; see `_notes/sotu.md` §I.
@@ -252,7 +253,7 @@ otherwise.
 
 | Gap | Status |
 |---|---|
-| Optical noise — laser RIN, PD shot noise | ✅ in `.noise`: `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from `fc_cw_laser` (`rin_db_hz`, off unless set). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor, no time-domain noise |
+| Optical noise — laser RIN, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor |
 | Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
 | Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |

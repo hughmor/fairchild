@@ -72,9 +72,12 @@ expansion.
 Every bundle-aware device handles WDM by default: N-channel optical bus
 in, N parallel propagation paths inside, one shared electrical interface.
 Bidirectional propagation is enabled with `.options enable_bidirectional=1`;
-`fc_facet` is what puts light back on the return path. `.noise` carries
-photodetector shot noise and laser RIN, so a receiver reports the whole
-`4kT/R + 2qI + RIN·I²` budget rather than just its load resistor.
+`fc_facet` is what puts light back on the return path. Photodetector shot noise
+and laser RIN mean a receiver reports the whole `4kT/R + 2qI + RIN·I²` budget
+rather than just its load resistor — as PSDs from `.noise`, or injected into
+`.tran` as random currents with `.options trannoise=1` for eye-closure and BER
+work. Both analyses read one source list, so the time-domain variance is the
+frequency-domain PSD integrated over the resolved band.
 Higher-level structures (micro-ring resonators, MZIs) are composed in the
 netlist from these primitives; see `examples/photonic/`.
 

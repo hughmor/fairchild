@@ -412,6 +412,19 @@ pub fn tran_nr_with_registry_var_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    // Adaptive step control and injected noise do not mix: the LTE estimator
+    // reads a fresh random sample as a fast signal and shrinks the step to
+    // chase it, and the step size then becomes correlated with the noise, which
+    // biases the spectrum it was meant to reproduce.  Fixed steps are what SDE
+    // solvers use, for this reason.  Refusing beats quietly returning a
+    // plausible waveform with the wrong noise in it.
+    if opts.trannoise {
+        return Err(SimError::ParameterError(
+            "transient noise needs a fixed timestep; set `.options variable_step=0` \
+             (the LTE controller would chase the noise and bias its spectrum)"
+                .into(),
+        ));
+    }
     if opts.sanity_check && opts.uic {
         crate::sanity::check_netlist_sanity(netlist);
     }
