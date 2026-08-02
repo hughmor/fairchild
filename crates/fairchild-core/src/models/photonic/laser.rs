@@ -1,5 +1,48 @@
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{CorrelatedNoise, Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+
+/// Relative-intensity-noise generator for a laser emitting `(re_amp, im_amp)`
+/// on branch rows `branches`, shared by every laser model in this file.
+///
+/// `RIN` is defined on POWER: `S_P(f) = RIN·P²` with `RIN = 10^(rin_db_hz/10)`
+/// [1/Hz], one-sided, and flat.  The wires carry the field `A = √P`, so
+/// `δA = δP/(2√P)` and the injected PSD is `S_A = RIN·P/4` [W/Hz].
+///
+/// One fluctuation, two wires: `δA` splits onto `re` and `im` by the emission
+/// phase and the two arrive perfectly correlated, which is why this returns a
+/// `CorrelatedNoise` rather than two independent sources.
+///
+/// The injection lands on the laser's branch ROWS, whose RHS entries are the
+/// enforced field values — perturbing `b[j]` by δ moves the emitted amplitude
+/// by δ.  That is the branch-row spelling of a series voltage source, and it is
+/// why the PSD is in W/Hz rather than A²/Hz.
+///
+/// ponytail: flat.  A real diode laser has a relaxation-oscillation peak at a
+/// few GHz and a 1/f tail; both want `rin_f_res` / `rin_damping` parameters and
+/// a frequency argument on this hook.  Flat is the right first model and is
+/// what a datasheet's single "RIN < −155 dB/Hz" number means anyway.
+pub(super) fn rin_source(
+    rin_db_hz: Option<f64>,
+    re_amp: f64,
+    im_amp: f64,
+    branches: &[Option<usize>],
+) -> Vec<CorrelatedNoise> {
+    let Some(rin_db) = rin_db_hz else {
+        return Vec::new();
+    };
+    let p = re_amp * re_amp + im_amp * im_amp;
+    if p <= 0.0 || branches.len() < 2 {
+        return Vec::new();
+    }
+    let a = p.sqrt();
+    vec![CorrelatedNoise {
+        psd: 10f64.powf(rin_db / 10.0) * p / 4.0,
+        taps: vec![
+            (branches[0], None, re_amp / a),
+            (branches[1], None, im_amp / a),
+        ],
+    }]
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Native CW laser source
@@ -22,6 +65,9 @@ pub struct NativeCwLaser {
     /// wavelength tag is never scaled: it is a label, and a ring detuned by a
     /// ramped lambda would be a worse homotopy path than one that is simply dark.
     src_scale: f64,
+    /// Relative intensity noise in dB/Hz (e.g. −155).  `None` = noiseless,
+    /// which is the default because 0 dB/Hz is not a sane fallback.
+    rin_db_hz: Option<f64>,
     wpc: usize, // 3 (unidir) or 5 (bidir)
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
@@ -42,6 +88,7 @@ impl NativeCwLaser {
             im_amp: 0.0,
             wavelen_m: 1550e-9,
             src_scale: 1.0,
+            rin_db_hz: None,
             wpc: 3,
             nodes: Vec::new(),
             branches: Vec::new(),
@@ -115,6 +162,10 @@ impl Device for NativeCwLaser {
                 self.wavelen_m = value;
                 true
             }
+            "rin_db_hz" | "rin" => {
+                self.rin_db_hz = Some(value);
+                true
+            }
             "re_amp" => {
                 self.re_amp = value;
                 true
@@ -172,6 +223,10 @@ impl Device for NativeCwLaser {
                 mat.a[out][j] += 1.0;
             }
         }
+    }
+
+    fn correlated_noise_sources(&self, _ctx: &SimContext) -> Vec<CorrelatedNoise> {
+        rin_source(self.rin_db_hz, self.re_amp, self.im_amp, &self.branches)
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {

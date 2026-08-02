@@ -330,12 +330,35 @@ Adjoint-method noise analysis. Device noise sources:
 | Resistor | 4kT/R thermal |
 | Diode | 2qI_d shot |
 | MOSFET | 8kTg_m/3 channel |
+| `fc_photodetector` | 2q(I_ph + I_dark) shot |
+| `fc_cw_laser` | RIN, `S_P = 10^(rin_dB_Hz/10) · P²` — off unless `rin_db_hz` is set |
 
 Output is `onoise` (V²/Hz at the output port) and `inoise` (equivalent input
 PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
 `noise_sources()` hook. Like `.ac`, the noise small-signal network now includes
 device-internal capacitances, so high-frequency noise shaping from device caps
 is captured.
+
+**Optical noise.** A laser + PIN + load resistor gives the textbook receiver
+budget, and fairchild reproduces it term by term:
+
+```
+S_V(f) = ( 4kT/R_L  +  2q·I  +  RIN·I² ) · |Z(f)|²        I = responsivity · P
+```
+
+Thermal is flat in power, shot is linear, RIN is quadratic — so RIN is the
+floor a link cannot buy its way out of by turning the laser up. Both optical
+sources are flat with frequency; the receiver's own poles shape them through
+`Z(f)`, which is why device capacitances belong in the small-signal network.
+
+RIN reaches the circuit through *both* field wires at once (one intensity
+fluctuation, split by the emission phase), so it is stamped as a single
+correlated generator via `Device::correlated_noise_sources`. Treating the two
+wires as independent sources would under-report by up to 2× depending on
+`phase_deg` — a bug that hides completely at the default 0°.
+
+Noise here is small-signal only: `.noise` reports PSDs, it does not inject
+random waveforms into `.tran`.
 
 ---
 
@@ -842,14 +865,16 @@ X<name>  out  fc_cw_laser  [param=val …]
 | `phase_deg` | 0 | Initial phase of the SVEA carrier. |
 | `wavelength_nm` | 1550 | Output wavelength (drives the `λ` wire). |
 | `re_amp` / `im_amp` | derived | Direct override of the SVEA components. |
+| `rin_db_hz` | unset | Relative intensity noise, dB/Hz (e.g. `-155`). Unset = noiseless; `.noise` only. |
 
 `power_mW`, `power_W`, and `phase_deg` are not orthogonal: `power_*` set
 the magnitude of `(re, im)` while preserving phase; `phase_deg` rotates the
 current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 
 **Physics.** Three direct-potential equations fix `V(out_re) = √P · cos(φ₀)`,
-`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input; no noise;
-no spectral linewidth.
+`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input and no spectral
+linewidth. `rin_db_hz` adds intensity noise in `.noise` (see §5); it does not
+affect `.op`, `.dc`, `.ac` or `.tran`.
 
 ### `fc_waveguide` — lossy waveguide
 

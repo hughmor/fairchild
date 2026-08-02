@@ -270,6 +270,18 @@ pub fn noise_analysis(
                 let z_mag_sq = z_re * z_re + z_im * z_im;
                 s_v_out += s_i * z_mag_sq;
             }
+            // One generator reaching several rows at once — the taps sum
+            // BEFORE the magnitude, so they interfere instead of adding in
+            // quadrature.  Laser RIN is the case; see `CorrelatedNoise`.
+            for src in dev.correlated_noise_sources(&ctx) {
+                let mut z_re = 0.0;
+                let mut z_im = 0.0;
+                for (p_idx, n_idx, w) in src.taps {
+                    z_re += w * (pick(lam_re, p_idx) - pick(lam_re, n_idx));
+                    z_im += w * (pick(lam_im, p_idx) - pick(lam_im, n_idx));
+                }
+                s_v_out += src.psd * (z_re * z_re + z_im * z_im);
+            }
         }
 
         let s_v_in = if h_mag_sq > 1e-30 {

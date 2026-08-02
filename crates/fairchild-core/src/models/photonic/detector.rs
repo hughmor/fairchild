@@ -1,4 +1,4 @@
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, SimContext, Q_ELECTRON};
 use crate::mna::MnaMatrix;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -288,6 +288,27 @@ impl Device for NativePhotodetector {
                 }
             }
         }
+    }
+
+    /// Shot noise on the detected current: `S_i = 2q·I` (one-sided), between
+    /// the same terminal pair the photocurrent flows through.
+    ///
+    /// `i_ph` already carries `responsivity·ΣP + i_dark`, and both terms shot,
+    /// so one source covers the pair — a dark-current-limited receiver and a
+    /// signal-limited one come out of the same expression.  Nothing here is
+    /// frequency-dependent; the receiver's own bandwidth shapes it through the
+    /// transfer impedance.
+    ///
+    /// ponytail: no excess-noise factor.  An APD needs `F(M)·M²`, which is a
+    /// second parameter and a second model — add it with the APD, not here.
+    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        let s_i = 2.0 * Q_ELECTRON * self.i_ph.abs();
+        if s_i == 0.0 {
+            return Vec::new();
+        }
+        let elec_base = self.wpc * self.n_channels;
+        let j_idx = self.v_int_idx.or(self.nodes[elec_base]);
+        vec![(j_idx, self.nodes[elec_base + 1], s_i)]
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {

@@ -24,7 +24,9 @@ Legend: ✅ yes · ⚠️ partial (see the note) · ❌ no.
   accepted **silently** and do nothing. The diode at least warns about `BV`.
 - MOSFET `MJSW` is parsed, stored, and never read — sidewall junction caps use
   `MJ`.
-- `.noise` has no ngspice comparison, and there is **no optical noise at all**.
+- `.noise` has no ngspice comparison. Optical noise (PD shot, laser RIN) exists
+  and is checked against the analytic receiver budget, but only in `.noise` —
+  nothing injects noise into `.tran`.
 - The photonic models are validated against analytic forms and against
   themselves, never against an external simulator. That is the biggest gap in
   this document; see `_notes/sotu.md` §I.
@@ -248,7 +250,7 @@ otherwise.
 
 | Gap | Status |
 |---|---|
-| Optical noise — laser RIN, PD shot noise, TIA input-referred | ❌ **none exists.** `detector.rs` is deterministic; `.noise` is electrical only |
+| Optical noise — laser RIN, PD shot noise | ✅ in `.noise`: `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from `fc_cw_laser` (`rin_db_hz`, off unless set). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor, no time-domain noise |
 | Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); no scattering-matrix backscattering |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
 | Reflections at facets / grating couplers | ❌ not modelled |
