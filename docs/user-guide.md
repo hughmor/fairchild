@@ -1103,7 +1103,7 @@ channel actually carries. λ labels are never attenuated.
 | `il_db` | 0 | insertion loss (flat, if no `fwhm_ghz`) |
 | `lambda0_nm` | `.options lambda_center_nm` | grid anchor (channel 0's centre) |
 | `df_ghz` | 100 | channel spacing (a **frequency** grid) |
-| `fwhm_ghz` | — | passband FWHM; setting it gives each channel a passband |
+| `fwhm_ghz` | — | passband FWHM; setting it gives each channel a passband, and `0` means none (as on `fc_awgr`) |
 | `shape_p` | 1 | 1 = Gaussian, 2–4 = flat-top |
 | `dlambda_dt_pm_per_k` | 0 | thermal grid drift (silica ≈ 11, SOI ≈ 80) |
 | `t_nom_k` | 300.15 | reference temperature for the drift |
