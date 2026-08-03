@@ -52,6 +52,7 @@ expansion.
 | Device | Card name |
 |---|---|
 | CW laser | `fc_cw_laser` |
+| Directly-modulated laser (voltage in) | `fc_driven_laser` |
 | Waveguide | `fc_waveguide` |
 | 2×2 directional coupler | `fc_dcoupler` |
 | Behavioural 2×2 transfer block | `fc_optical_2x2` |
@@ -66,10 +67,17 @@ expansion.
 | Combined PN + thermal PS | `fc_pn_th_ps` |
 | Idealised testbench MZM | `fc_mzm` |
 | Photodetector | `fc_photodetector` |
+| Facet — terminator / partial reflector / mirror | `fc_facet` |
 
 Every bundle-aware device handles WDM by default: N-channel optical bus
 in, N parallel propagation paths inside, one shared electrical interface.
-Bidirectional propagation is enabled with `.options enable_bidirectional=1`.
+Bidirectional propagation is enabled with `.options enable_bidirectional=1`;
+`fc_facet` is what puts light back on the return path. Photodetector shot noise
+and laser RIN mean a receiver reports the whole `4kT/R + 2qI + RIN·I²` budget
+rather than just its load resistor — as PSDs from `.noise`, or injected into
+`.tran` as random currents with `.options trannoise=1` for eye-closure and BER
+work. Both analyses read one source list, so the time-domain variance is the
+frequency-domain PSD integrated over the resolved band.
 Higher-level structures (micro-ring resonators, MZIs) are composed in the
 netlist from these primitives; see `examples/photonic/`.
 

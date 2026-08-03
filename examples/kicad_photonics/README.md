@@ -12,6 +12,21 @@ device. Optical (bundle) ports are a single pin per port; the post-processor
 expands each into its `(re, im, λ)` wires at simulate time.
 `sym-lib-table` registers it for the example project via `${KIPRJMOD}`.
 
+Most symbols were drawn by hand. Newer ones are generated:
+
+```bash
+python3 scripts/gen_kicad_symbols.py          # write the generated symbols
+python3 scripts/gen_kicad_symbols.py --check  # exit 1 if the library is stale
+```
+
+The generator only touches names listed in its `SYMBOLS` table and replaces
+those wholesale, so it is safe to re-run — but do not add a spec for a symbol
+whose art someone drew by hand unless you mean to lose it. What the table
+really encodes is **pin order**, which has to match the positional net order on
+the `X…` line. Keep it in step with `PORT_SCHEMA` in
+`scripts/kicad_to_fairchild.py` and `register_native_photonics` in
+`crates/fairchild-core/src/device_registry.rs`.
+
 ## Examples
 
 **`mrm_single_channel.kicad_sch`** (+ `.kicad_pro`) — the worked example.

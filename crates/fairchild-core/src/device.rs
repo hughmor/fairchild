@@ -6,6 +6,26 @@ pub const Q_ELECTRON: f64 = 1.602176634e-19;
 /// Index of a terminal in the MNA solution vector; `None` → ground (excluded from matrix).
 pub type NodeId = Option<usize>;
 
+/// One noise generator that injects into several places at once, all driven by
+/// the SAME underlying random process.
+///
+/// The taps of one `CorrelatedNoise` add **coherently** —
+/// `|Σ wₖ·(λ[posₖ] − λ[negₖ])|² · psd` — which is what separates it from
+/// returning several entries from [`Device::noise_sources`], where each entry
+/// is independent and the transfer magnitudes add in quadrature.
+///
+/// Laser RIN is the case that needs it: one intensity fluctuation `δP` lands on
+/// both the `re` and `im` field wires, split by the emission phase.  At φ₀ = 0
+/// the two forms happen to agree; at 45° the quadrature sum is √2 low.
+pub struct CorrelatedNoise {
+    /// One-sided PSD of the driving process, in the squared units of whatever
+    /// the taps inject — A²/Hz for a current into a node, or the square of the
+    /// enforced potential's unit for an injection into a branch row.
+    pub psd: f64,
+    /// `(pos, neg, weight)`.  A `neg` of `None` is ground.
+    pub taps: Vec<(NodeId, NodeId, f64)>,
+}
+
 /// Simulator context passed to device model callbacks at every eval.
 pub struct SimContext {
     pub temperature: f64, // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
@@ -293,6 +313,12 @@ pub trait Device: Send + Sync {
     /// (resistor thermal noise is iterated as `Element::Resistor` in
     /// `noise_analysis`, not through this hook).
     fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        Vec::new()
+    }
+
+    /// Noise generators whose one random process reaches the circuit at more
+    /// than one place at once — see [`CorrelatedNoise`].  Default is empty.
+    fn correlated_noise_sources(&self, _ctx: &SimContext) -> Vec<CorrelatedNoise> {
         Vec::new()
     }
 

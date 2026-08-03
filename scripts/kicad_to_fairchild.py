@@ -63,6 +63,8 @@ PORT_SCHEMA: Dict[str, List[str]] = {
     "fc_dcoupler":        ["bundle", "bundle", "bundle", "bundle"],     # a1, a2, b1, b2
     "fc_splitter":        ["bundle", "bundle", "bundle"],               # in, out_a, out_b
     "fc_photodetector":   ["bundle", "scalar", "scalar"],               # in, anode, cathode
+    "fc_driven_laser":    ["bundle", "scalar", "scalar"],               # out, p, n
+    "fc_facet":           ["bundle"],                                   # port (terminator/mirror)
     # PN phase-shifter family (LEVEL 1-4 / dedicated names) — in, out, anode, cathode.
     "fc_pn_ps":           ["bundle", "bundle", "scalar", "scalar"],     # L1 linear
     "fc_pn_ps_cap":       ["bundle", "bundle", "scalar", "scalar"],     # L2 +Cj depletion
