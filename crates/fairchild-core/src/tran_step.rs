@@ -81,6 +81,8 @@ pub struct TranStepper {
     /// once here because the netlist and topology cannot change under a
     /// stepper; `set_source` only rewrites a waveform.  See `crate::tolerance`.
     tol: crate::tolerance::Tolerances,
+    /// `None` unless `.options trannoise=1`; see `crate::noise::TransientNoise`.
+    noise: Option<crate::noise::TransientNoise>,
 }
 
 impl TranStepper {
@@ -156,6 +158,7 @@ impl TranStepper {
             .collect();
 
         let tol = crate::tolerance::Tolerances::build(&netlist, &topo, opts);
+        let noise = crate::noise::TransientNoise::new(&netlist, &topo, opts);
 
         Ok(TranStepper {
             netlist,
@@ -175,6 +178,7 @@ impl TranStepper {
             first_step: true,
             sources,
             tol,
+            noise,
         })
     }
 
@@ -233,6 +237,19 @@ impl TranStepper {
             h: self.step,
             gear2_h_prev: None,
         });
+        // One noise realisation for this step, drawn at the previous accepted
+        // bias and then held: shot noise follows the current, and the current
+        // is whatever the circuit last settled at.  Devices are re-evaluated at
+        // `self.x` first so the very first step (where UIC leaves them fresh)
+        // is not drawn from a zero bias.  Never redrawn inside the Newton loop
+        // — see `TransientNoise::draw`.
+        if let Some(noise) = self.noise.as_mut() {
+            for dev in &mut self.devices {
+                dev.eval(&self.x, EvalFlags::tran(), &self.ctx);
+            }
+            noise.draw(&self.devices, &self.ctx, self.step);
+        }
+
         // Solve into a scratch vector so a non-converging step leaves the last
         // accepted solution intact for the caller to inspect or retry from.
         let mut x_try = self.x.clone();
@@ -247,6 +264,11 @@ impl TranStepper {
                 &self.reactive.ind_state,
                 Some(&self.plan),
             );
+            if let Some(noise) = self.noise.as_ref() {
+                for (b, n) in self.mat.b.iter_mut().zip(noise.rhs()) {
+                    *b += n;
+                }
+            }
 
             for dev in &mut self.devices {
                 dev.set_source_scale(1.0);

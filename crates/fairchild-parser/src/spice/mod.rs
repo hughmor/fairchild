@@ -1815,7 +1815,9 @@ R1 a b 1k
     /// Python can pull in a shared PCell file.
     #[test]
     fn parse_spice_resolves_includes_from_string() {
-        let dir = std::env::temp_dir().join("fc_include_test");
+        // Process-scoped, like `fc_lib_test_*` below: the fixed path made two
+        // concurrent `cargo test` runs delete each other's include file.
+        let dir = std::env::temp_dir().join(format!("fc_include_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let inc = dir.join("pcell_r.sp");
         std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n").unwrap();

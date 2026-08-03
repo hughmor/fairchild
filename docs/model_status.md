@@ -24,7 +24,10 @@ Legend: ✅ yes · ⚠️ partial (see the note) · ❌ no.
   accepted **silently** and do nothing. The diode at least warns about `BV`.
 - MOSFET `MJSW` is parsed, stored, and never read — sidewall junction caps use
   `MJ`.
-- `.noise` has no ngspice comparison, and there is **no optical noise at all**.
+- `.noise` has no ngspice comparison. Optical noise (PD shot, laser RIN) is
+  checked against the analytic receiver budget, and `.options trannoise=1`
+  injects the same generators into `.tran`. Neither domain models flicker (1/f)
+  or RTS noise.
 - The photonic models are validated against analytic forms and against
   themselves, never against an external simulator. That is the biggest gap in
   this document; see `_notes/sotu.md` §I.
@@ -230,7 +233,9 @@ otherwise.
 
 | Device | Parameters | Validated |
 |---|---|---|
-| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp` | ⚠️ analytic |
+| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp`, `rin_db_hz` | ⚠️ analytic |
+| `fc_driven_laser` | `slope_w_v`/`slope_mw_v`, `v_th`, `p_floor_w`, `r_in`, `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | ⚠️ analytic L–V + a transient through a PD; the opto-electronic-loop test is what pins the stamped `dA/dV` |
+| `fc_facet` | `reflectance`/`r`, `transmittance`/`t`, `loss`, `phase_deg` | ⚠️ analytic (`native_facet`): power fraction, phase rotation, round-trip loss, budget rejection |
 | `fc_waveguide` | `l_um`, `l_m`/`length`, `n_g`, `n_eff`, `alpha_db_cm`, `wl_ref_nm`/`wl_ref_m`, `pin_at_ref` | ⚠️ analytic closed form (loss, phase, group delay) |
 | `fc_dcoupler` | `kappa_per_m`, `l_um`, `l_m`, `kappa_l` | ⚠️ analytic |
 | `fc_splitter` | `alpha`, `alpha_db`/`il_db`, `r`/`split_ratio` | ⚠️ analytic (`native_splitter_asymmetric`) |
@@ -248,10 +253,10 @@ otherwise.
 
 | Gap | Status |
 |---|---|
-| Optical noise — laser RIN, PD shot noise, TIA input-referred | ❌ **none exists.** `detector.rs` is deterministic; `.noise` is electrical only |
-| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); no scattering-matrix backscattering |
+| Optical noise — laser RIN, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor |
+| Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
-| Reflections at facets / grating couplers | ❌ not modelled |
+| Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |
 
 ---
 

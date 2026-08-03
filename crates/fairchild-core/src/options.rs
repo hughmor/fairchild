@@ -134,6 +134,25 @@ pub struct SimOptions {
     /// variable_step=1`, CLI `--variable-step`, or Python `variable_step=True`.
     pub variable_step: bool,
 
+    /// Inject device and resistor noise as random currents during `.tran`,
+    /// turning the PSDs `.noise` reports into a time-domain waveform. Off by
+    /// default: a transient is expected to be reproducible and deterministic,
+    /// and every golden in the tree depends on it being so.
+    ///
+    /// Fixed step only — see `crate::noise::TransientNoise`. Set via `.options
+    /// trannoise=1`, or Python `trannoise=True`.
+    pub trannoise: bool,
+
+    /// Seed for the transient-noise generator. The same seed gives the same
+    /// waveform, so a noisy run is still a reproducible one; sweep it to get
+    /// independent trials for a BER or Monte-Carlo estimate.
+    pub noiseseed: u64,
+
+    /// Multiplier on every injected noise AMPLITUDE (not power). `2.0` gives
+    /// 4× the noise power everywhere, which is the usual trick for pulling a
+    /// deep-BER eye closure into a simulation short enough to run.
+    pub noisescale: f64,
+
     /// Model the group delay of optical waveguides (and any device exposing a
     /// group delay τ_g) as a true delay line: the output optical envelope is
     /// the input envelope delayed by τ_g = L·n_g/c, reconstructed from a
@@ -191,6 +210,9 @@ impl Default for SimOptions {
             verbose: false,
             sanity_check: true,
             variable_step: false,
+            trannoise: false,
+            noiseseed: 1,
+            noisescale: 1.0,
             waveguide_delay: false,
             cond_estimate: false,
             equilibrate: false,
@@ -307,6 +329,18 @@ impl SimOptions {
                     value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on"
                 );
+            }
+            "trannoise" | "tran_noise" | "transient_noise" => {
+                self.trannoise = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
+            }
+            "noiseseed" | "noise_seed" => {
+                self.noiseseed = parse_num(value).map_or(self.noiseseed, |v| v.max(0.0) as u64);
+            }
+            "noisescale" | "noise_scale" => {
+                self.noisescale = parse_num(value).map_or(self.noisescale, |v| v.max(0.0));
             }
             "waveguide_delay" | "wg_delay" | "optical_delay" => {
                 self.waveguide_delay = matches!(

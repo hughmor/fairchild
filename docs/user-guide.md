@@ -319,23 +319,170 @@ omitted from `.ac`/`.noise`; they are now consistent across all analyses.)
 
 ### Noise
 
+fairchild has **two** noise analyses over one set of physical sources:
+
+| | What you get | When to reach for it |
+|---|---|---|
+| **`.noise`** — small-signal | PSDs vs frequency, and a per-source budget | Sensitivity, noise figure, "which device dominates" |
+| **`.options trannoise=1`** — time domain | Random currents injected into `.tran` | Eye closure, jitter, comparator/PLL behaviour, anything nonlinear |
+
+They are not alternatives with different answers. `crate::noise::NoiseSources`
+enumerates the generators once and both analyses consume that list, so the
+time-domain variance of an unfiltered node is exactly the `.noise` PSD
+integrated over the resolved band. `transient_noise_agrees_with_the_noise_
+analysis` asserts it on three circuits, each biased so a different source
+dominates.
+
+Use `.noise` unless the thing you care about is nonlinear or a threshold
+crossing. It costs two solves per frequency; a transient-noise run costs a
+transient, and you need many of them to estimate a tail.
+
+#### `.noise` — small-signal
+
 ```
 .noise  V(<out_pos>[,<out_neg>])  <input_src>  DEC|OCT|LIN  <points>  <fstart>  <fstop>
 ```
 
-Adjoint-method noise analysis. Device noise sources:
+```bash
+fairchild -f receiver.sp -o out.csv             # onoise / inoise columns
+```
+
+```python
+r = c.run("noise", out="det", out_neg="bias", src="Vb",
+          fstart=1e6, fstop=40e9, points=20, variation="dec")
+psd   = r["onoise"]           # V²/Hz at the output port
+vrthz = r["onoise_vrthz"]     # V/√Hz, the same thing datasheets quote
+inoise = r["inoise"]          # referred back to `src`
+```
+
+Adjoint-method: one transposed solve per frequency gives the transfer impedance
+from every internal injection to the output, so the cost does not grow with the
+number of noise sources. Device noise sources:
 
 | Device | Source |
 |---|---|
 | Resistor | 4kT/R thermal |
 | Diode | 2qI_d shot |
 | MOSFET | 8kTg_m/3 channel |
+| `fc_photodetector` | 2q(I_ph + I_dark) shot |
+| `fc_cw_laser`, `fc_driven_laser` | RIN, `S_P = 10^(rin_dB_Hz/10) · P²` — off unless `rin_db_hz` is set |
 
 Output is `onoise` (V²/Hz at the output port) and `inoise` (equivalent input
 PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
 `noise_sources()` hook. Like `.ac`, the noise small-signal network now includes
 device-internal capacitances, so high-frequency noise shaping from device caps
 is captured.
+
+> **`.noise` linearises about ONE operating point, and a modulated link does
+> not have one.** Shot noise follows the current and RIN follows the optical
+> power, so a link's `1` rail can be tens of times noisier than its `0` rail.
+> Run `.noise` on a deck whose sources idle at zero and you get the idle
+> answer — in `examples/photonic/noisy_eye_and_ber.py` that is 68× low on the
+> `1` rail. Bias the deck at the level you care about, one run per rail. This is
+> also why the Q-factor formula has two sigmas in it:
+> `Q = (µ₁ − µ₀)/(σ₁ + σ₀)`.
+
+**Optical noise.** A laser + PIN + load resistor gives the textbook receiver
+budget, and fairchild reproduces it term by term:
+
+```
+S_V(f) = ( 4kT/R_L  +  2q·I  +  RIN·I² ) · |Z(f)|²        I = responsivity · P
+```
+
+Thermal is flat in power, shot is linear, RIN is quadratic — so RIN is the
+floor a link cannot buy its way out of by turning the laser up. Both optical
+sources are flat with frequency; the receiver's own poles shape them through
+`Z(f)`, which is why device capacitances belong in the small-signal network.
+
+RIN reaches the circuit through *both* field wires at once (one intensity
+fluctuation, split by the emission phase), so it is stamped as a single
+correlated generator via `Device::correlated_noise_sources`. Treating the two
+wires as independent sources would under-report by up to 2× depending on
+`phase_deg` — a bug that hides completely at the default 0°.
+
+#### Transient noise — time domain
+
+```
+.options trannoise=1 [noiseseed=<n>] [noisescale=<x>]
+```
+
+```bash
+fairchild -f receiver.sp -o out.csv              # `.options` line lives in the deck
+```
+
+```python
+r = c.run("tran", step=2e-12, stop=20e-9, trannoise=True, noiseseed=7)
+v = r["V(det)"]                                    # now a noisy waveform
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `trannoise` | `0` | Inject the noise sources into `.tran`. |
+| `noiseseed` | `1` | RNG seed. Same seed ⇒ same waveform; sweep it for independent trials. |
+| `noisescale` | `1.0` | Multiplier on the noise **amplitude**, so power goes as its square. `noisescale=3` gives 9× the noise power — the usual way to pull a deep-BER eye closure into a simulation short enough to run, then extrapolate. |
+
+Every generator in the `.noise` table above is drawn once per timestep, held
+across the step, and injected as a current at the same terminals the PSD is
+defined between. A generator with one-sided PSD `S` is realised as
+
+```
+i_n = √(S / 2h) · N(0, 1)          h = timestep
+```
+
+because a zero-order-held sequence of variance `σ²` at interval `h` has PSD
+`2σ²h` below its Nyquist frequency. Integrating `S` over the resolved band
+`[0, 1/2h]` gives back `σ²`, which is the consistency the two analyses share.
+
+**Off by default, and deterministic when off** — a `.tran` is expected to be
+reproducible, and every golden in the tree depends on it. A noisy run is still
+reproducible: fix `noiseseed` and you get the same waveform every time.
+
+**Fixed step only.** `.options variable_step=1` with `trannoise=1` is an error,
+not an approximation: the LTE controller reads a fresh random sample as a fast
+signal and shrinks the step to chase it, and the step size then becomes
+correlated with the noise, biasing the very spectrum it was meant to reproduce.
+Fixed steps are what SDE solvers use, for this reason.
+
+**Bandwidth is set by the timestep, and that is usually fine.** The injected
+noise is white up to `1/2h` and absent above it. That truncation does not bias
+anything you measure through a circuit, because a transient that resolves your
+circuit has its Nyquist frequency well above the circuit's bandwidth and the
+circuit filters the difference away — an RC low-pass settles at `kT/C` for any
+`h ≪ RC`, independent of `h`, which is the test that pins this. What *does*
+depend on the step is a node with no bandwidth limit of its own: a bare resistor
+divider has variance `S_V/2h` and always will, in any simulator, because
+white noise of unbounded bandwidth has unbounded power. If you are reading a
+number that has no filter in front of it, put one there.
+
+**How long to run.** The variance of a variance estimate over `N` independent
+samples is `2/N`, and samples are independent only about once per circuit time
+constant — so a 1 % variance estimate needs ~20 000 time constants, not
+20 000 timesteps. One transient is one realisation of a random process: expect
+several per cent of scatter between seeds and pool a few before believing a
+number.
+
+**`noisescale` is only exactly linear while the circuit is.** A doubled
+amplitude doubles σ as long as the circuit still responds linearly to it. Push
+it far enough and it will not: in `noisy_eye_and_ber.py` the quiet rail tracks
+`noisescale` to 0.1 %, while the RIN-limited rail runs ~5 % superlinear by 4×,
+because a ±40 % optical-power swing is outside the photodiode's square law being
+approximately linear. A BER extrapolated that way errs conservative, which is
+the direction you want, but check the scaling rather than assuming it.
+
+#### Worked examples
+
+| Script | Shows |
+|---|---|
+| `examples/photonic/receiver_noise_budget.py` | `.noise` only — thermal / shot / RIN vs optical power, and the SNR ceiling `1/(RIN·B)` |
+| `examples/photonic/noisy_eye_and_ber.py` | Both — a 10 Gb/s eye with injected noise, Q and BER, and each rail checked against its own `.noise` integral |
+
+#### What neither analysis models
+
+Flicker (1/f) and RTS noise — no device implements them, in either domain.
+`.noise` reports PSDs and never injects; transient noise injects and never
+reports a PSD. Nothing here is correlated between separate generators, so a
+device with physically correlated drain and gate noise would need a single
+multi-tap `CorrelatedNoise` (the mechanism exists — laser RIN uses it).
 
 ---
 
@@ -551,6 +698,9 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
 | `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
+| `trannoise` | false | Inject the `.noise` sources into `.tran` as random currents. Fixed step only. Aliases: `tran_noise`, `transient_noise`. See §5. |
+| `noiseseed` | 1 | Transient-noise RNG seed. Same seed ⇒ same waveform. |
+| `noisescale` | 1.0 | Multiplier on transient-noise **amplitude** (power goes as its square). |
 | `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See §12 `fc_waveguide`. |
 
 Setting any of these from the netlist:
@@ -842,14 +992,108 @@ X<name>  out  fc_cw_laser  [param=val …]
 | `phase_deg` | 0 | Initial phase of the SVEA carrier. |
 | `wavelength_nm` | 1550 | Output wavelength (drives the `λ` wire). |
 | `re_amp` / `im_amp` | derived | Direct override of the SVEA components. |
+| `rin_db_hz` | unset | Relative intensity noise, dB/Hz (e.g. `-155`). Unset = noiseless; `.noise` only. |
 
 `power_mW`, `power_W`, and `phase_deg` are not orthogonal: `power_*` set
 the magnitude of `(re, im)` while preserving phase; `phase_deg` rotates the
 current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 
 **Physics.** Three direct-potential equations fix `V(out_re) = √P · cos(φ₀)`,
-`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input; no noise;
-no spectral linewidth.
+`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input and no spectral
+linewidth. `rin_db_hz` adds intensity noise in `.noise` (see §5); it does not
+affect `.op`, `.dc`, `.ac` or `.tran`.
+
+### `fc_driven_laser` — voltage-driven laser (direct modulation)
+
+```
+X<name>  out  p  n  fc_driven_laser  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `out` | bundle, optical output (one channel) |
+| `p`, `n` | electrical drive |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `slope_w_v` / `slope` | 1e−3 | dP/dV above threshold, W/V. `slope_mw_v` for mW/V. |
+| `v_th` | 0 | Lasing threshold, V. |
+| `p_floor_w` | 1e−12 | Below-threshold output floor, W (−90 dBm). |
+| `r_in` | 1e6 | Input resistance across (`p`, `n`), Ω. |
+| `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | as `fc_cw_laser` | |
+
+```
+P(V) = p_floor_w + max(0, slope_w_v · (V(p) − V(n) − v_th))
+```
+
+The L–I curve of a diode laser written against voltage: a hard threshold and a
+straight line above it. One SPICE source now produces a modulated optical
+waveform with no `fc_mzm` in the deck — `Vd drv 0 PULSE(0 2 0 10p 10p 490p 1n)`
+is a 1 Gb/s directly-modulated transmitter. Drive it from a current source
+instead by working in `I · r_in`; `slope_w_v · r_in` is then the slope
+efficiency in W/A.
+
+**`p_floor_w` is load-bearing.** The wires carry `A = √P`, so
+`dA/dV = slope/(2√P)` diverges as `P → 0` — a laser switched hard off would
+hand Newton an unbounded Jacobian entry on every falling edge. The floor caps
+it and doubles as the spontaneous-emission background a real laser has anyway.
+At the default it is 90 dB below a 1 mW output, far under any extinction ratio
+worth quoting.
+
+The drive derivative is stamped exactly rather than frozen at the previous
+iterate, so an opto-electronic feedback loop (laser → detector → back to the
+drive node) converges as Newton rather than as successive substitution, and
+sensitivities reach through the laser.
+
+No chirp: direct modulation shifts the emission wavelength with carrier
+density, and λ here is a static tag on a wire.
+
+### `fc_facet` — one-port terminator / partial reflector / mirror
+
+```
+X<name>  port  fc_facet  [param=val …]
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `reflectance` / `r` | 0 | Power fraction returned into the port. |
+| `transmittance` / `t` | 0 | Power fraction leaving the model. |
+| `loss` | remainder | Power fraction absorbed. |
+| `phase_deg` | 0 | Phase added on reflection (180 for a metal mirror). |
+
+One optical port whose forward field is split three ways: reflected back into
+the same port, transmitted out of the simulation, absorbed. `R = 0` is a
+terminator (the default), `R ≈ 0.3` a cleaved facet, `R = 1` a mirror.
+
+Set any one, any two, or all three of `reflectance` / `transmittance` / `loss`;
+the unset ones take the remainder, `loss` first. Setting all three requires them
+to sum to 1. **Only `reflectance` changes the answer** — light that leaves via
+`transmittance` or `loss` is gone either way, and there is no second port for it
+to arrive at. The other two exist so the budget is written down and checked;
+`reflectance=0.9 transmittance=0.5` is an error, not an average.
+
+Reflection applies `A_bw = √R · e^(−jφ) · A_fw`, the same phase convention the
+waveguide uses for propagation.
+
+**Needs `.options enable_bidirectional=1`** for any non-zero reflectance — a
+unidirectional bundle has no backward wire to drive. A reflector without it is
+a hard error rather than a silent terminator.
+
+Bundle-aware (`wpc·N` terminals), one budget shared across channels; a
+wavelength-dependent facet (a DBR) is not modelled.
+
+This is an **end cap** — light arrives on the port's forward wires and leaves on
+its backward ones. A Fabry-Pérot cavity needs a partial mirror coupling an
+outside port to an inside one in both directions, which is a two-port device and
+not this one.
+
+Light reflected all the way back to a laser is absorbed there: `fc_cw_laser`
+and `fc_driven_laser` drive only `(re, im, λ)`, never the backward pair, so the
+returning wave is whatever the chain puts on that wire. (They used to *drive*
+the backward wires to zero, which reads as a perfect absorber and behaves as a
+second opinion — the node ended up over-determined and the returned power came
+out 4× low with no diagnostic.) There is no feedback into the laser's output;
+back-reflection is observable, not yet consequential.
 
 ### `fc_waveguide` — lossy waveguide
 
