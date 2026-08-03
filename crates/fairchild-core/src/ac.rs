@@ -194,15 +194,23 @@ pub fn ac_analysis_opts(
         // Use a temporary MnaMatrix to collect resistive Jacobian entries.
         let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
+        // `tmp.a` is sparse now, so this walks only the cells the device
+        // actually stamped instead of the whole row.
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
-            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
-                *g += t;
+            for (j, t) in t_row.iter() {
+                g_row[j] += t;
             }
         }
     }
     // GMIN — node rows and device-internal rows (skips vsource aux rows).
     topo.stamp_gmin(&mut g_mat, opts.gmin);
 
+    // ponytail: `.ac` assembles G/C/L and the 2n×2n system densely — O(n²)
+    // memory and O(n²) work per frequency point. The DC/transient matrix went
+    // sparse in a929041 and this did not, because it is not on that hot path.
+    // Upgrade path: emit `SparseRow`s directly (the stamp primitives and
+    // `CircuitTopology::to_csc` already take them); do it when AC on a large
+    // photonic circuit starts hurting. Tracked as task #12.
     // --- Capacitance matrix C (purely imaginary part of Y) ---
     let mut c_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {
@@ -303,7 +311,7 @@ pub fn ac_analysis_opts(
                 rhs[size + i] = b_ac_im[i];
             }
 
-            let x = solver_ref.solve(&a2, &rhs)?;
+            let x = solver_ref.solve(&CircuitTopology::sparse_from_dense(&a2), &rhs)?;
             let row: Vec<(f64, f64)> = topo
                 .node_index
                 .values()

@@ -3,7 +3,14 @@
 //! KLU is the de-facto sparse direct LU solver for circuit-shaped
 //! matrices: it exploits Block Triangular Form (BTF) to decompose the
 //! matrix into strongly-connected components and run dense LU within
-//! each.  On a typical analog circuit it beats UMFPACK 2-5×.
+//! each.
+//!
+//! Measured in-tree against `faer-sparse` (2026-08-01, `cargo bench -p
+//! fairchild-core --features klu`): **1.2-1.5× faster**, widening with size —
+//! resistor mesh 1.12× at n=25 up to 1.46× at n=400; diode ladder a steady
+//! ~1.4×. Those numbers only became true once `KluFactorisation` stopped
+//! rebuilding its CSC from a dense O(n²) scan on every solve; see the history
+//! note on that type in `fairchild-core::solver`.
 //!
 //! This crate is intentionally minimal — it covers exactly the slice of
 //! the KLU C API that fairchild needs:
@@ -15,6 +22,12 @@
 //!   * `klu_solve`    — back-substitute `A·x = b`
 //!   * `klu_tsolve`   — back-substitute `Aᵀ·x = b` (for adjoint paths)
 //!   * `klu_free_symbolic` / `klu_free_numeric`
+//!
+//! [`dense_to_csc`] remains for the one-shot `klu_solve_dense` path and for
+//! callers with no structural pattern to offer. Do **not** reach for it inside
+//! an iteration loop: at n=3200 one call costs ~41 ms, because it walks a
+//! row-major matrix in column-major order. The cached path in
+//! `fairchild-core::solver` exists precisely to avoid it.
 //!
 //! The `klu_common` C struct is treated as **fully opaque** — we never
 //! dereference it from Rust.  Errors are detected via the return values
