@@ -132,6 +132,26 @@ pub fn check_connectivity(netlist: &Netlist) -> Result<(), SimError> {
                 // K element only affects transient; L1/L2 terminals are
                 // already handled by their Inductor elements.
             }
+            Element::VoltageSwitch {
+                pos,
+                neg,
+                ctrl_pos,
+                ctrl_neg,
+                ..
+            } => {
+                // Conducting either way (RON or ROFF), so the switched pair is
+                // always joined for the orphan-island check. The control pair
+                // is a sense input and joins nothing.
+                for n in &[pos, neg, ctrl_pos, ctrl_neg] {
+                    record(n, &mut nodes);
+                }
+                add_edge(pos, neg, &mut adj);
+            }
+            Element::CurrentSwitch { pos, neg, .. } => {
+                record(pos, &mut nodes);
+                record(neg, &mut nodes);
+                add_edge(pos, neg, &mut adj);
+            }
             Element::TransmissionLine {
                 a_pos,
                 a_neg,

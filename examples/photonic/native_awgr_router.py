@@ -18,11 +18,11 @@ Three figures from one device:
 
 Run:  python3 examples/photonic/native_awgr_router.py [--png out.png]
 
-NOTE on `.options vntol`.  The lambda wires carry ~1.55e-6, so SPICE's default
-absolute voltage tolerance of 1e-6 is the same order as the whole quantity:
-Newton's step test can be satisfied while lambda is still ~10 pm out, and 10 pm
-is a real detuning for a 40 GHz passband.  Every deck here sets a tight vntol.
-See docs/photonic_awgr.md, "Solver tolerance".
+These decks set no solver options.  They used to need a tight `vntol`, because
+the lambda wires carry ~1.55e-6 and a *voltage* tolerance of 1e-6 let Newton
+stop with lambda ~10 pm out -- a real detuning for a 40 GHz passband.  Lambda
+rows now carry their own `lambdatol` in the solver, so the deck no longer has to
+know about it.  See docs/photonic_awgr.md, "Solver tolerance".
 """
 import argparse
 import sys
@@ -40,7 +40,6 @@ C0 = 299_792_458.0
 N = 8
 LAMBDA0_NM = 1550.0
 DF_GHZ = 100.0
-TIGHT = ".options vntol=1e-14 reltol=1e-12"
 
 
 def grid_nm(n=N, lambda0_nm=LAMBDA0_NM, df_ghz=DF_GHZ):
@@ -64,7 +63,8 @@ def deck(lit_ports, lam_nm, extra="", n=N):
         f" {side}{p}_{k}_re {side}{p}_{k}_im {side}{p}_{k}_wl"
         for side in ("in", "out") for p in range(n) for k in range(n)
     )
-    lines += [f"Xr{wires} fc_awgr{extra}", TIGHT, ".op", ".end"]
+    # No .options: λ wires carry their own `lambdatol` in the solver now.
+    lines += [f"Xr{wires} fc_awgr{extra}", ".op", ".end"]
     return "\n".join(lines) + "\n"
 
 

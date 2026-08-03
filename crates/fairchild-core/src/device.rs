@@ -6,6 +6,26 @@ pub const Q_ELECTRON: f64 = 1.602176634e-19;
 /// Index of a terminal in the MNA solution vector; `None` → ground (excluded from matrix).
 pub type NodeId = Option<usize>;
 
+/// One noise generator that injects into several places at once, all driven by
+/// the SAME underlying random process.
+///
+/// The taps of one `CorrelatedNoise` add **coherently** —
+/// `|Σ wₖ·(λ[posₖ] − λ[negₖ])|² · psd` — which is what separates it from
+/// returning several entries from [`Device::noise_sources`], where each entry
+/// is independent and the transfer magnitudes add in quadrature.
+///
+/// Laser RIN is the case that needs it: one intensity fluctuation `δP` lands on
+/// both the `re` and `im` field wires, split by the emission phase.  At φ₀ = 0
+/// the two forms happen to agree; at 45° the quadrature sum is √2 low.
+pub struct CorrelatedNoise {
+    /// One-sided PSD of the driving process, in the squared units of whatever
+    /// the taps inject — A²/Hz for a current into a node, or the square of the
+    /// enforced potential's unit for an injection into a branch row.
+    pub psd: f64,
+    /// `(pos, neg, weight)`.  A `neg` of `None` is ground.
+    pub taps: Vec<(NodeId, NodeId, f64)>,
+}
+
 /// Simulator context passed to device model callbacks at every eval.
 pub struct SimContext {
     pub temperature: f64, // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
@@ -34,6 +54,33 @@ pub struct SimContext {
     /// lines can look up historical port values at `time_s - τ`.  Zero during
     /// DC operating-point and AC analyses.
     pub time_s: f64,
+    /// How the integrator is discretising the current timestep, for devices
+    /// that stamp their own reactive companion rather than declaring
+    /// [`Device::reactive_branches`].
+    ///
+    /// `None` outside transient. Set immediately before each `eval`, which such
+    /// a device is already required to have called before `load_*_tran`.
+    pub discretisation: Option<Discretisation>,
+}
+
+/// The integrator's discretisation of one timestep.
+///
+/// The `alpha` handed to [`Device::load_residual_tran`] cannot express anything
+/// but Backward Euler: Trapezoidal and BDF-2 need history terms there is no room
+/// for in a single scalar. A device that stamps its own reactance therefore
+/// needs the method itself, and gets it here rather than through 18 changed
+/// signatures.
+///
+/// Feed it to [`crate::reactive::charge_current`] — the one place a method is
+/// interpreted for charge-based reactance.
+#[derive(Clone, Copy, Debug)]
+pub struct Discretisation {
+    pub mode: crate::tran::IntegratorMode,
+    /// The step being taken, in seconds.
+    pub h: f64,
+    /// `Some(h_prev)` only when BDF-2 is permitted this step — GEAR, no recent
+    /// rejection, sane step ratio. Absent, GEAR demotes to BE.
+    pub gear2_h_prev: Option<f64>,
 }
 
 impl Default for SimContext {
@@ -46,6 +93,7 @@ impl Default for SimContext {
             bidirectional_propagation: false,
             waveguide_delay: false,
             time_s: 0.0,
+            discretisation: None,
         }
     }
 }
@@ -211,6 +259,25 @@ pub trait Device: Send + Sync {
         self.reactive_branches()
     }
 
+    /// Stamp this device's reactive Jacobian ∂q/∂x directly into the
+    /// small-signal capacitance matrix, for devices whose reactance is a
+    /// general matrix rather than a set of two-terminal branches.
+    ///
+    /// `.ac` and `.noise` form their susceptance block as `ω·C − L/ω`, so what
+    /// lands here is the frequency-domain twin of the `α·J_react` that
+    /// [`Device::load_jacobian_tran`] stamps: same entries, same positions,
+    /// α → jω. Indices are MNA rows/columns, as for
+    /// [`Device::load_jacobian`].
+    ///
+    /// Default is a no-op. Override this **instead of**
+    /// [`Device::small_signal_reactances`], not as well — whatever both report
+    /// gets stamped, so a device answering to both double-counts. Native
+    /// devices report two-terminal branches and are fine as they are; this
+    /// exists for OSDI/Verilog-A, where ∂q_i/∂v_j need not equal ∂q_j/∂v_i
+    /// (transcapacitance) and so cannot be expressed as reciprocal branches at
+    /// all.
+    fn load_reactive_jacobian(&self, _c_mat: &mut [Vec<f64>]) {}
+
     /// Set a named real-valued parameter on this device instance.
     ///
     /// Returns `true` if the parameter was found and set; `false` if not supported
@@ -246,6 +313,12 @@ pub trait Device: Send + Sync {
     /// (resistor thermal noise is iterated as `Element::Resistor` in
     /// `noise_analysis`, not through this hook).
     fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+        Vec::new()
+    }
+
+    /// Noise generators whose one random process reaches the circuit at more
+    /// than one place at once — see [`CorrelatedNoise`].  Default is empty.
+    fn correlated_noise_sources(&self, _ctx: &SimContext) -> Vec<CorrelatedNoise> {
         Vec::new()
     }
 

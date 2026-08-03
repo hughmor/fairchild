@@ -9,9 +9,9 @@ use crate::models::{
     pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
     thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeAwgr,
-    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeGratingCoupler,
-    NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
-    ShockleyDiode, SpectrumTable,
+    NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeDrivenLaser,
+    NativeFacet, NativeGratingCoupler, NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector,
+    NativeSplitter, NativeWaveguide, ShockleyDiode, SpectrumTable,
 };
 
 /// The set of instance parameters from an `X…` element line, threaded into a
@@ -75,6 +75,16 @@ impl ParamSet {
         }
     }
 
+    /// Whether `name` is present, **without** marking it consumed.
+    ///
+    /// For deciding whether a model-card default is overridden by an instance
+    /// param: the instance param is applied by the target factory, so counting
+    /// it consumed here as well would be a lie either way round.
+    pub fn contains(&self, name: &str) -> bool {
+        let nl = name.to_lowercase();
+        self.params.iter().any(|(k, _)| *k == nl)
+    }
+
     /// Keys not consumed by `get`/`apply` — i.e. params the device did not
     /// recognise (likely typos). Used to warn the user.
     pub fn unconsumed(&self) -> Vec<String> {
@@ -128,6 +138,12 @@ pub struct DeviceRegistry {
     pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
     /// BJT model cards: model_name → (is_pnp, params).
     pub(crate) bjt_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
+    /// Switch model cards: model_name → (is_current_controlled, params).
+    /// Like the MOSFET/BJT maps, these are consumed by `build_devices` rather
+    /// than by a factory closure: a switch needs its instance's `ON`/`OFF`
+    /// keyword, and a `W` needs a controlling branch row the factory has no
+    /// way to resolve.
+    pub(crate) switch_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
 }
 
 impl DeviceRegistry {
@@ -136,6 +152,7 @@ impl DeviceRegistry {
             factories: HashMap::new(),
             mosfet_cards: HashMap::new(),
             bjt_cards: HashMap::new(),
+            switch_cards: HashMap::new(),
         };
         // Native photonic passives are always available — no .model card or
         // .osdi import required to instantiate `fc_waveguide`, `fc_dcoupler`,
@@ -223,6 +240,63 @@ impl DeviceRegistry {
         Ok(())
     }
 
+    /// Register every `.model <card> <kind> (...)` whose `kind` names a factory
+    /// that is already in the registry, as an alias of that factory with the
+    /// card's parameters as defaults.
+    ///
+    /// This is the `.model`-card indirection for **OSDI models**, and it is the
+    /// idiom every foundry PDK ships:
+    ///
+    /// ```spice
+    /// .osdi  bsim4.osdi
+    /// .model nch  bsim4 (tox=3n vth0=0.4 …)
+    /// M1 d g s b nch W=1u L=100n
+    /// ```
+    ///
+    /// Call it *after* `register_builtin_models` and after every `.osdi`
+    /// library has been registered. Cards whose name is already registered are
+    /// skipped, so the native card handlers (which do construction-time work
+    /// this cannot — `LEVEL` dispatch, expression parsing) keep ownership of
+    /// their cards; this only fills the gap they leave.
+    ///
+    /// Card params are applied *after* construction and only for keys the
+    /// instance line did not give, so an instance param always wins. The
+    /// consequence, and the reason this is not the native card path: a device
+    /// that reads params at construction time (via [`ParamSet::get`]) will not
+    /// see these defaults. OSDI models have no construction-time params —
+    /// everything routes through `set_real_param` — so the OSDI case is exact.
+    pub fn register_loaded_model_cards(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let card_name = card.name.to_lowercase();
+            let kind = card.kind.to_lowercase();
+            if card_name == kind || self.factories.contains_key(&card_name) {
+                continue;
+            }
+            let Some(target) = self.factories.get(&kind).cloned() else {
+                continue;
+            };
+            let defaults: Arc<Vec<(String, f64)>> = Arc::new(
+                card.params
+                    .iter()
+                    .map(|(k, v)| (k.to_lowercase(), *v))
+                    .collect(),
+            );
+            let label = card.name.clone();
+            self.register(card_name, move |terminals, params: &ParamSet, ctx| {
+                let mut dev = target(terminals, params, ctx);
+                for (k, v) in defaults.iter() {
+                    if params.contains(k) {
+                        continue; // instance line wins
+                    }
+                    if !dev.set_real_param(k, *v) {
+                        eprintln!("warning: .model '{label}': unknown parameter '{k}' ignored");
+                    }
+                }
+                dev
+            });
+        }
+    }
+
     /// Populate the registry from `.model D` cards using the built-in Shockley diode.
     pub fn register_builtin_diodes(&mut self, cards: &[ModelCard]) {
         for card in cards {
@@ -246,6 +320,34 @@ impl DeviceRegistry {
                 ps.apply(&mut dev);
                 Box::new(dev)
             });
+        }
+    }
+
+    /// Record `.model … SW` / `.model … CSW` cards for `build_devices`.
+    ///
+    /// Unlike diodes there is no factory closure: the element line carries an
+    /// `ON`/`OFF` keyword and, for `W`, a controlling voltage-source name that
+    /// only the builder can turn into an MNA row.
+    pub fn register_builtin_switches(&mut self, cards: &[ModelCard]) {
+        for card in cards {
+            let is_current = match card.kind.to_lowercase().as_str() {
+                "sw" | "vswitch" => false,
+                "csw" | "iswitch" => true,
+                _ => continue,
+            };
+            // Warn once per card, matching the diode/MOSFET/BJT convention.
+            match crate::models::Switch::from_model_params(is_current, &card.params, false) {
+                Ok((_, unknown)) if !unknown.is_empty() => eprintln!(
+                    "warning: switch model '{}' params not recognised (using defaults): {}",
+                    card.name,
+                    unknown.join(", ")
+                ),
+                // A bad RON/ROFF is reported when the instance is built, where
+                // there is an error path to return it on.
+                Ok(_) | Err(_) => {}
+            }
+            self.switch_cards
+                .insert(card.name.clone(), (is_current, card.params.clone()));
         }
     }
 
@@ -468,6 +570,7 @@ impl DeviceRegistry {
         self.register_builtin_diodes(cards);
         self.register_builtin_mosfets(cards);
         self.register_builtin_bjts(cards);
+        self.register_builtin_switches(cards);
         self.register_photonic_models(cards);
     }
 
@@ -496,6 +599,8 @@ impl DeviceRegistry {
     ///
     /// Actives (B4):
     /// - `fc_photodetector` — PIN photodetector with linear responsivity.
+    /// - `fc_driven_laser`  — laser whose power follows an electrical input.
+    /// - `fc_facet`         — one-port terminator / partial reflector / mirror.
     /// - `fc_thermal_ps`    — thermal phase shifter (Joule heating → φ = π·P/P_pi).
     /// - `fc_pn_ps`         — PN-junction phase shifter (Δn_eff = dn_dv·V).
     pub fn register_native_photonics(&mut self) {
@@ -508,6 +613,8 @@ impl DeviceRegistry {
         self.register_default::<NativeMzm>("fc_mzm");
         self.register_default::<NativeCirculator>("fc_circulator");
         self.register_default::<NativeCwLaser>("fc_cw_laser");
+        self.register_default::<NativeDrivenLaser>("fc_driven_laser");
+        self.register_default::<NativeFacet>("fc_facet");
         self.register_default::<NativeMux>("fc_mux");
         self.register_default::<NativeDemux>("fc_demux");
         self.register_default::<NativeOptical2x2>("fc_optical_2x2");

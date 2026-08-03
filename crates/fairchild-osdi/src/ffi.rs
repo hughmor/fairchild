@@ -21,6 +21,13 @@ pub const CALC_RESIST_JACOBIAN: u32 = 4;
 pub const CALC_REACT_JACOBIAN: u32 = 8;
 pub const CALC_NOISE: u32 = 16;
 pub const CALC_OP: u32 = 32;
+pub const CALC_RESIST_LIM_RHS: u32 = 64;
+pub const CALC_REACT_LIM_RHS: u32 = 128;
+/// Apply `$limit()` limiting this evaluation, against `prev_state`.
+pub const ENABLE_LIM: u32 = 256;
+/// First evaluation of a solve: seed the limiting state instead of limiting
+/// against a `prev_state` that means nothing yet.
+pub const INIT_LIM: u32 = 512;
 pub const ANALYSIS_DC: u32 = 2048;
 pub const ANALYSIS_AC: u32 = 4096;
 pub const ANALYSIS_TRAN: u32 = 8192;
@@ -91,13 +98,34 @@ pub struct OsdiNoiseSource {
     pub nodes: OsdiNodePair,
 }
 
+/// One entry of a library's `OSDI_LIM_TABLE`.
+///
+/// The library exports the table with every `func_ptr` **null**; the simulator
+/// is expected to walk it and install its own implementation of each named
+/// limiting function before any `eval`. OpenVAF emits the call
+/// unconditionally, so leaving a `func_ptr` null means a jump to address 0 the
+/// first time the model evaluates.
 #[repr(C)]
 pub struct OsdiLimFunction {
     pub name: *mut c_char,
+    /// Extra arguments beyond `(init, check, vnew, vold)`. `pnjlim` reports 2:
+    /// `vt` and `vcrit`.
     pub num_args: u32,
     // 4 bytes C padding before next pointer
     pub func_ptr: *mut c_void,
 }
+
+/// `pnjlim` as OSDI expects it — see `OsdiLimFunction`. Returns the limited
+/// voltage and sets `*check` when it intervened, which tells the simulator the
+/// iteration is not yet converged.
+pub type FnPnjlim = unsafe extern "C" fn(
+    init: bool,
+    check: *mut bool,
+    vnew: f64,
+    vold: f64,
+    vt: f64,
+    vcrit: f64,
+) -> f64;
 
 #[repr(C)]
 pub struct OsdiSimParas {

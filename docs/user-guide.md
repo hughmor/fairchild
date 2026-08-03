@@ -17,7 +17,7 @@
 11. [Solver theory](#11-solver-theory)
 12. [Photonic devices](#12-photonic-devices)
 13. [Writing custom devices](#13-writing-custom-devices)
-14. [OSDI model loading](#14-osdi-model-loading)
+14. [Verilog-A models (OSDI)](#14-verilog-a-models-osdi)
 
 ---
 
@@ -45,6 +45,11 @@ C1  out 0  1u
 ---
 
 ## 2. Elements reference
+
+> For a per-parameter breakdown of what is actually *stamped* versus merely
+> accepted, and what each is validated against, see
+> [`model_status.md`](model_status.md). Several parameters here are parsed
+> for compatibility and do nothing.
 
 ### Passive elements
 
@@ -124,6 +129,51 @@ T1  in 0 out 0  Z0=50 TD=1n        ; 50 Ω, 1 ns one-way delay
 ```
 
 (Lossy lines with LTRA-style loss/dispersion are not yet supported.)
+
+### Switches (`S` voltage-controlled, `W` current-controlled)
+
+```
+S<name>  <N+> <N-> <NC+> <NC->  <model> [ON|OFF]
+W<name>  <N+> <N-> <vsource>    <model> [ON|OFF]
+```
+
+A resistor whose value is `RON` or `ROFF` depending on a control quantity —
+`V(NC+,NC-)` for `S`, the branch current of a named voltage source for `W`.
+The trailing `ON`/`OFF` keyword sets the initial state (default `OFF`).
+
+```spice
+.model swmod SW  (VT=2.5 VH=0 RON=10  ROFF=1e9)
+.model cs    CSW (IT=1m   IH=0 RON=0.1 ROFF=1e9)
+S1  in out  clk 0  swmod OFF     ; sample-and-hold gate
+W1  a  b    Vsense cs            ; trips on current through Vsense
+```
+
+Switching is a **hard step**, matching ngspice:
+
+```
+ctrl > threshold + hysteresis  → ON
+ctrl < threshold − hysteresis  → OFF
+otherwise                      → hold the previous state
+```
+
+Two practical notes, both consequences of that discontinuity:
+
+- **Resolve the timestep.** Pick `h` small enough that a hold capacitor's
+  companion conductance (`2C/h` under TR) dominates `1/RON`. Otherwise the
+  switched node can move far enough in one step to re-cross the threshold, and
+  Newton oscillates between the two states.
+- **Use `VH` on feedback paths.** Any switch whose own output can reach its
+  control input will chatter with `VH=0`; the hysteresis band is the fix, and
+  it is worth reaching for before raising `itl1`.
+
+Inside the hysteresis band the state is held from the **last accepted
+timestep**, not the last Newton iterate, so a switch cannot flip-flop within
+one NR loop. One consequence: `.dc` sweep points run in parallel and therefore
+do not inherit each other's state, so a sweep through the band reports the
+instance's `ON`/`OFF` keyword rather than the path-dependent value ngspice
+would give. With the default `VH=0` there is no band and no difference.
+
+See `examples/electronic/switched_capacitor.sp`.
 
 ### Subcircuit instantiation
 
@@ -209,6 +259,15 @@ Series resistances RB/RC/RE are accepted and silently ignored (Tier-2 gap).
 
 Instance `W` / `L` override model defaults.
 
+### Switch (`SW` / `CSW`)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `RON` | On-resistance (Ω); must be > 0 | 1 |
+| `ROFF` | Off-resistance (Ω); must be > 0 | 1e12 |
+| `VT` (`SW`) / `IT` (`CSW`) | Threshold on the control quantity | 0 |
+| `VH` (`SW`) / `IH` (`CSW`) | Hysteresis half-width; magnitude is used | 0 |
+
 ---
 
 ## 5. Analyses
@@ -260,23 +319,170 @@ omitted from `.ac`/`.noise`; they are now consistent across all analyses.)
 
 ### Noise
 
+fairchild has **two** noise analyses over one set of physical sources:
+
+| | What you get | When to reach for it |
+|---|---|---|
+| **`.noise`** — small-signal | PSDs vs frequency, and a per-source budget | Sensitivity, noise figure, "which device dominates" |
+| **`.options trannoise=1`** — time domain | Random currents injected into `.tran` | Eye closure, jitter, comparator/PLL behaviour, anything nonlinear |
+
+They are not alternatives with different answers. `crate::noise::NoiseSources`
+enumerates the generators once and both analyses consume that list, so the
+time-domain variance of an unfiltered node is exactly the `.noise` PSD
+integrated over the resolved band. `transient_noise_agrees_with_the_noise_
+analysis` asserts it on three circuits, each biased so a different source
+dominates.
+
+Use `.noise` unless the thing you care about is nonlinear or a threshold
+crossing. It costs two solves per frequency; a transient-noise run costs a
+transient, and you need many of them to estimate a tail.
+
+#### `.noise` — small-signal
+
 ```
 .noise  V(<out_pos>[,<out_neg>])  <input_src>  DEC|OCT|LIN  <points>  <fstart>  <fstop>
 ```
 
-Adjoint-method noise analysis. Device noise sources:
+```bash
+fairchild -f receiver.sp -o out.csv             # onoise / inoise columns
+```
+
+```python
+r = c.run("noise", out="det", out_neg="bias", src="Vb",
+          fstart=1e6, fstop=40e9, points=20, variation="dec")
+psd   = r["onoise"]           # V²/Hz at the output port
+vrthz = r["onoise_vrthz"]     # V/√Hz, the same thing datasheets quote
+inoise = r["inoise"]          # referred back to `src`
+```
+
+Adjoint-method: one transposed solve per frequency gives the transfer impedance
+from every internal injection to the output, so the cost does not grow with the
+number of noise sources. Device noise sources:
 
 | Device | Source |
 |---|---|
 | Resistor | 4kT/R thermal |
 | Diode | 2qI_d shot |
 | MOSFET | 8kTg_m/3 channel |
+| `fc_photodetector` | 2q(I_ph + I_dark) shot |
+| `fc_cw_laser`, `fc_driven_laser` | RIN, `S_P = 10^(rin_dB_Hz/10) · P²` — off unless `rin_db_hz` is set |
 
 Output is `onoise` (V²/Hz at the output port) and `inoise` (equivalent input
 PSD referred to `input_src`). OSDI devices can plug in via the `Device` trait's
 `noise_sources()` hook. Like `.ac`, the noise small-signal network now includes
 device-internal capacitances, so high-frequency noise shaping from device caps
 is captured.
+
+> **`.noise` linearises about ONE operating point, and a modulated link does
+> not have one.** Shot noise follows the current and RIN follows the optical
+> power, so a link's `1` rail can be tens of times noisier than its `0` rail.
+> Run `.noise` on a deck whose sources idle at zero and you get the idle
+> answer — in `examples/photonic/noisy_eye_and_ber.py` that is 68× low on the
+> `1` rail. Bias the deck at the level you care about, one run per rail. This is
+> also why the Q-factor formula has two sigmas in it:
+> `Q = (µ₁ − µ₀)/(σ₁ + σ₀)`.
+
+**Optical noise.** A laser + PIN + load resistor gives the textbook receiver
+budget, and fairchild reproduces it term by term:
+
+```
+S_V(f) = ( 4kT/R_L  +  2q·I  +  RIN·I² ) · |Z(f)|²        I = responsivity · P
+```
+
+Thermal is flat in power, shot is linear, RIN is quadratic — so RIN is the
+floor a link cannot buy its way out of by turning the laser up. Both optical
+sources are flat with frequency; the receiver's own poles shape them through
+`Z(f)`, which is why device capacitances belong in the small-signal network.
+
+RIN reaches the circuit through *both* field wires at once (one intensity
+fluctuation, split by the emission phase), so it is stamped as a single
+correlated generator via `Device::correlated_noise_sources`. Treating the two
+wires as independent sources would under-report by up to 2× depending on
+`phase_deg` — a bug that hides completely at the default 0°.
+
+#### Transient noise — time domain
+
+```
+.options trannoise=1 [noiseseed=<n>] [noisescale=<x>]
+```
+
+```bash
+fairchild -f receiver.sp -o out.csv              # `.options` line lives in the deck
+```
+
+```python
+r = c.run("tran", step=2e-12, stop=20e-9, trannoise=True, noiseseed=7)
+v = r["V(det)"]                                    # now a noisy waveform
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `trannoise` | `0` | Inject the noise sources into `.tran`. |
+| `noiseseed` | `1` | RNG seed. Same seed ⇒ same waveform; sweep it for independent trials. |
+| `noisescale` | `1.0` | Multiplier on the noise **amplitude**, so power goes as its square. `noisescale=3` gives 9× the noise power — the usual way to pull a deep-BER eye closure into a simulation short enough to run, then extrapolate. |
+
+Every generator in the `.noise` table above is drawn once per timestep, held
+across the step, and injected as a current at the same terminals the PSD is
+defined between. A generator with one-sided PSD `S` is realised as
+
+```
+i_n = √(S / 2h) · N(0, 1)          h = timestep
+```
+
+because a zero-order-held sequence of variance `σ²` at interval `h` has PSD
+`2σ²h` below its Nyquist frequency. Integrating `S` over the resolved band
+`[0, 1/2h]` gives back `σ²`, which is the consistency the two analyses share.
+
+**Off by default, and deterministic when off** — a `.tran` is expected to be
+reproducible, and every golden in the tree depends on it. A noisy run is still
+reproducible: fix `noiseseed` and you get the same waveform every time.
+
+**Fixed step only.** `.options variable_step=1` with `trannoise=1` is an error,
+not an approximation: the LTE controller reads a fresh random sample as a fast
+signal and shrinks the step to chase it, and the step size then becomes
+correlated with the noise, biasing the very spectrum it was meant to reproduce.
+Fixed steps are what SDE solvers use, for this reason.
+
+**Bandwidth is set by the timestep, and that is usually fine.** The injected
+noise is white up to `1/2h` and absent above it. That truncation does not bias
+anything you measure through a circuit, because a transient that resolves your
+circuit has its Nyquist frequency well above the circuit's bandwidth and the
+circuit filters the difference away — an RC low-pass settles at `kT/C` for any
+`h ≪ RC`, independent of `h`, which is the test that pins this. What *does*
+depend on the step is a node with no bandwidth limit of its own: a bare resistor
+divider has variance `S_V/2h` and always will, in any simulator, because
+white noise of unbounded bandwidth has unbounded power. If you are reading a
+number that has no filter in front of it, put one there.
+
+**How long to run.** The variance of a variance estimate over `N` independent
+samples is `2/N`, and samples are independent only about once per circuit time
+constant — so a 1 % variance estimate needs ~20 000 time constants, not
+20 000 timesteps. One transient is one realisation of a random process: expect
+several per cent of scatter between seeds and pool a few before believing a
+number.
+
+**`noisescale` is only exactly linear while the circuit is.** A doubled
+amplitude doubles σ as long as the circuit still responds linearly to it. Push
+it far enough and it will not: in `noisy_eye_and_ber.py` the quiet rail tracks
+`noisescale` to 0.1 %, while the RIN-limited rail runs ~5 % superlinear by 4×,
+because a ±40 % optical-power swing is outside the photodiode's square law being
+approximately linear. A BER extrapolated that way errs conservative, which is
+the direction you want, but check the scaling rather than assuming it.
+
+#### Worked examples
+
+| Script | Shows |
+|---|---|
+| `examples/photonic/receiver_noise_budget.py` | `.noise` only — thermal / shot / RIN vs optical power, and the SNR ceiling `1/(RIN·B)` |
+| `examples/photonic/noisy_eye_and_ber.py` | Both — a 10 Gb/s eye with injected noise, Q and BER, and each rail checked against its own `.noise` integral |
+
+#### What neither analysis models
+
+Flicker (1/f) and RTS noise — no device implements them, in either domain.
+`.noise` reports PSDs and never injects; transient noise injects and never
+reports a PSD. Nothing here is correlated between separate generators, so a
+device with physically correlated drain and gate noise would need a single
+multi-tap `CorrelatedNoise` (the mechanism exists — laser RIN uses it).
 
 ---
 
@@ -414,15 +620,18 @@ they also share 8 parallel junctions. Give each replica its own drive with an
 `.electrical_port`, or use a bundle-aware device (`fc_optical_2x2`) when one
 electrical interface must serve every channel.
 
-### OSDI
+### OSDI (Verilog-A)
 
 ```
 .osdi  <path/to/model.osdi>
 .model <card_name> <module_name> (<params>)
 ```
 
-Loads a compiled OpenVAF-Reloaded shared library; `.model` names the SPICE
-card and matches the module exported in the library.
+`.osdi` loads a compiled OpenVAF-Reloaded shared library and registers every
+module in it under its own name. The optional `.model` card binds a second
+name to one of those modules with default parameters, which is how foundry
+PDKs are written. Instantiate with `X`, or with `D`/`M`/`Q` for a model of
+matching arity. Full treatment in §14.
 
 ### Bus vectors and optical ports
 
@@ -472,6 +681,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `reltol` | 1e-3 | NR relative tolerance |
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
+| `lambdatol` | 1e-13 | NR wavelength absolute tolerance (m), for λ wires |
 | `vmax` | 0.5 | Per-iteration |ΔV| clamp |
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
@@ -488,6 +698,9 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
 | `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |
+| `trannoise` | false | Inject the `.noise` sources into `.tran` as random currents. Fixed step only. Aliases: `tran_noise`, `transient_noise`. See §5. |
+| `noiseseed` | 1 | Transient-noise RNG seed. Same seed ⇒ same waveform. |
+| `noisescale` | 1.0 | Multiplier on transient-noise **amplitude** (power goes as its square). |
 | `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See §12 `fc_waveguide`. |
 
 Setting any of these from the netlist:
@@ -639,6 +852,14 @@ Convergence criteria:
 
 - `|ΔV| < vntol + reltol · |V|` for all node voltages.
 - `|ΔI| < abstol + reltol · |I|` for all branch currents.
+- `|Δλ| < lambdatol` for optical wavelength wires — absolute only.
+
+  The tolerance is per *quantity*, not one number for the whole solution
+  vector: a λ wire carries metres (~1.55e-6), so a volt tolerance let
+  Newton stop a micron out. λ takes no relative term because
+  `reltol·|λ|` is scale-invariant — 1e-3 of 1.55 µm is 1.55 nm however
+  you spell the unit, which is still 5× a 40 GHz passband. See
+  `crates/fairchild-core/src/tolerance.rs`.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal
@@ -771,14 +992,108 @@ X<name>  out  fc_cw_laser  [param=val …]
 | `phase_deg` | 0 | Initial phase of the SVEA carrier. |
 | `wavelength_nm` | 1550 | Output wavelength (drives the `λ` wire). |
 | `re_amp` / `im_amp` | derived | Direct override of the SVEA components. |
+| `rin_db_hz` | unset | Relative intensity noise, dB/Hz (e.g. `-155`). Unset = noiseless; `.noise` only. |
 
 `power_mW`, `power_W`, and `phase_deg` are not orthogonal: `power_*` set
 the magnitude of `(re, im)` while preserving phase; `phase_deg` rotates the
 current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 
 **Physics.** Three direct-potential equations fix `V(out_re) = √P · cos(φ₀)`,
-`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input; no noise;
-no spectral linewidth.
+`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input and no spectral
+linewidth. `rin_db_hz` adds intensity noise in `.noise` (see §5); it does not
+affect `.op`, `.dc`, `.ac` or `.tran`.
+
+### `fc_driven_laser` — voltage-driven laser (direct modulation)
+
+```
+X<name>  out  p  n  fc_driven_laser  [param=val …]
+```
+
+| Port | Role |
+|---|---|
+| `out` | bundle, optical output (one channel) |
+| `p`, `n` | electrical drive |
+
+| Parameter | Default | Description |
+|---|---|---|
+| `slope_w_v` / `slope` | 1e−3 | dP/dV above threshold, W/V. `slope_mw_v` for mW/V. |
+| `v_th` | 0 | Lasing threshold, V. |
+| `p_floor_w` | 1e−12 | Below-threshold output floor, W (−90 dBm). |
+| `r_in` | 1e6 | Input resistance across (`p`, `n`), Ω. |
+| `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | as `fc_cw_laser` | |
+
+```
+P(V) = p_floor_w + max(0, slope_w_v · (V(p) − V(n) − v_th))
+```
+
+The L–I curve of a diode laser written against voltage: a hard threshold and a
+straight line above it. One SPICE source now produces a modulated optical
+waveform with no `fc_mzm` in the deck — `Vd drv 0 PULSE(0 2 0 10p 10p 490p 1n)`
+is a 1 Gb/s directly-modulated transmitter. Drive it from a current source
+instead by working in `I · r_in`; `slope_w_v · r_in` is then the slope
+efficiency in W/A.
+
+**`p_floor_w` is load-bearing.** The wires carry `A = √P`, so
+`dA/dV = slope/(2√P)` diverges as `P → 0` — a laser switched hard off would
+hand Newton an unbounded Jacobian entry on every falling edge. The floor caps
+it and doubles as the spontaneous-emission background a real laser has anyway.
+At the default it is 90 dB below a 1 mW output, far under any extinction ratio
+worth quoting.
+
+The drive derivative is stamped exactly rather than frozen at the previous
+iterate, so an opto-electronic feedback loop (laser → detector → back to the
+drive node) converges as Newton rather than as successive substitution, and
+sensitivities reach through the laser.
+
+No chirp: direct modulation shifts the emission wavelength with carrier
+density, and λ here is a static tag on a wire.
+
+### `fc_facet` — one-port terminator / partial reflector / mirror
+
+```
+X<name>  port  fc_facet  [param=val …]
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `reflectance` / `r` | 0 | Power fraction returned into the port. |
+| `transmittance` / `t` | 0 | Power fraction leaving the model. |
+| `loss` | remainder | Power fraction absorbed. |
+| `phase_deg` | 0 | Phase added on reflection (180 for a metal mirror). |
+
+One optical port whose forward field is split three ways: reflected back into
+the same port, transmitted out of the simulation, absorbed. `R = 0` is a
+terminator (the default), `R ≈ 0.3` a cleaved facet, `R = 1` a mirror.
+
+Set any one, any two, or all three of `reflectance` / `transmittance` / `loss`;
+the unset ones take the remainder, `loss` first. Setting all three requires them
+to sum to 1. **Only `reflectance` changes the answer** — light that leaves via
+`transmittance` or `loss` is gone either way, and there is no second port for it
+to arrive at. The other two exist so the budget is written down and checked;
+`reflectance=0.9 transmittance=0.5` is an error, not an average.
+
+Reflection applies `A_bw = √R · e^(−jφ) · A_fw`, the same phase convention the
+waveguide uses for propagation.
+
+**Needs `.options enable_bidirectional=1`** for any non-zero reflectance — a
+unidirectional bundle has no backward wire to drive. A reflector without it is
+a hard error rather than a silent terminator.
+
+Bundle-aware (`wpc·N` terminals), one budget shared across channels; a
+wavelength-dependent facet (a DBR) is not modelled.
+
+This is an **end cap** — light arrives on the port's forward wires and leaves on
+its backward ones. A Fabry-Pérot cavity needs a partial mirror coupling an
+outside port to an inside one in both directions, which is a two-port device and
+not this one.
+
+Light reflected all the way back to a laser is absorbed there: `fc_cw_laser`
+and `fc_driven_laser` drive only `(re, im, λ)`, never the backward pair, so the
+returning wave is whatever the chain puts on that wire. (They used to *drive*
+the backward wires to zero, which reads as a perfect absorber and behaves as a
+second opinion — the node ended up over-determined and the returned power came
+out 4× low with no diagnostic.) There is no feedback into the laser's output;
+back-reflection is observable, not yet consequential.
 
 ### `fc_waveguide` — lossy waveguide
 
@@ -1237,17 +1552,15 @@ the two numbers datasheets actually quote.
 * … in1 … in7, out0 … out7 …
 Xr in0 in1 in2 in3 in4 in5 in6 in7  out0 out1 out2 out3 out4 out5 out6 out7
 +   fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30
-.options vntol=1e-14 reltol=1e-12
 ```
 
-**Set a tight `vntol`.** The λ wires carry ~1.55e-6, so the default
-`vntol = 1e-6` is the same order as the entire quantity: Newton's step test can
-be satisfied while λ is still ~10 pm out, and 10 pm is a real detuning for a
-40 GHz passband. The router then reports the transmission for the wrong
-wavelength with no error. At N ≤ 5 the first step lands accurately enough that
-it never shows, which is what makes it a trap — measured at N = 8, the routed
-output reads 0 instead of 1.109 under defaults. Put `.options vntol=1e-14
-reltol=1e-12` in any deck containing an `fc_awgr`.
+**No solver options needed.** Earlier versions of this guide told you to add
+`.options vntol=1e-14 reltol=1e-12` to any deck containing an `fc_awgr`,
+because a λ wire tested against a *volt* tolerance could stop ~10 pm out and
+the router would silently report the wrong wavelength's transmission (measured
+at N = 8: routed output 0 instead of 1.109; N ≤ 5 hid it). λ rows now carry
+their own `lambdatol`, so that workaround is obsolete — delete it from any deck
+that still has it.
 
 **Measured spectra.** The file path is a string and X-line instance params are
 numeric, so a measured router comes in through a `.model` card:
@@ -1612,13 +1925,19 @@ electrical device models distributed as Verilog-A** — foundry transistor model
 `.osdi <path>` and instantiate with an `X` element. The loader is verified in CI
 by the `osdi-mock` fixture.
 
-For *photonics*, prefer the native Rust devices documented in §12 — OSDI/
-Verilog-A cannot express the optical bundle / complex-envelope abstractions. The
-pre-Phase-B photonic Verilog-A models (MRR, MZI, PN-PS, thermo PS, photodetector)
-remain loadable via `.osdi` for back-compatibility (Norton-equivalent flow
-discipline, 12-pin underlying-wire syntax), but new photonic work should use the
-native devices; the CLI prints a one-shot hint pointing at them when a photonic
-`.osdi` is loaded.
+**Photonics can be written in Verilog-A too** — the complex-envelope
+representation is three ordinary real unknowns per channel, so a custom
+`optical_field` / `optical_lambda` discipline needs no compiler support and
+interoperates exactly with the native devices. See §14.3 and
+`examples/verilog_a/`.
+
+What a Verilog-A optical model *cannot* reach is the rest of the abstraction
+layer in §12: WDM bundle awareness, bidirectional propagation, `DelayLine`
+group delay, and `PhotonicActiveModel` composition. It is single-channel and
+forward-only. So prefer the native devices for anything needing those — and in
+particular do not start from the pre-Phase-B models under `legacy/`, which are
+on the superseded Norton-drive discipline and carry a factor-of-two loss bug
+(see `legacy/README.md`). The CLI prints a one-shot hint when one is loaded.
 
 ---
 
@@ -1943,34 +2262,173 @@ simpler and produces faster code.
 
 ---
 
-## 14. OSDI model loading
+## 14. Verilog-A models (OSDI)
 
-fairchild loads compact models compiled by [OpenVAF-Reloaded][openvaf] as
-OSDI v0.4 shared libraries (`.osdi`).
+fairchild does not parse Verilog-A. You compile it with
+[OpenVAF-Reloaded][openvaf] into an OSDI v0.4 shared library (`.osdi`), and
+`crates/fairchild-osdi` `dlopen`s it and drives it through the OSDI ABI. This
+is the supported route to foundry compact models — BSIM, PSP, HiCUM — which
+fairchild will never hand-write in Rust, and it is equally the route to your
+own models, electrical or optical.
 
-```spice
-.osdi /path/to/bsim4.osdi
-.model nmos_bsim4 nmos4 (tox=3n vth0=0.4 ...)
+Worked examples and eight ready models live in `examples/verilog_a/`.
+
+### 14.1 Writing a model
+
+An ordinary Verilog-A module. What the fairchild runtime supports:
+
+| Verilog-A | supported | notes |
+|---|---|---|
+| `I(a,b) <+ expr` | yes | the resistive branch |
+| `V(a,b) <+ expr` | yes | adds an internal branch unknown |
+| `ddt(q)` | yes | transient **and** `.ac`/`.noise` |
+| internal nodes | yes | `num_nodes > num_terminals`; fairchild allocates the MNA rows |
+| `analog function` | yes | |
+| `$abstime` | yes | reads the transient clock; 0 in DC and AC |
+| `$temperature` | yes | from `.options temp` |
+| custom disciplines | yes | OSDI treats them as metadata — see §14.3 |
+| `$limit(v, "pnjlim", …)` | yes | installed into the library's `OSDI_LIM_TABLE` at load |
+| other `$limit` functions | degrades | identity limiter + a warning; runs unlimited, never crashes |
+| `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
+| `$strobe`, `$finish` | no | |
+
+`ddt` is integrated with whatever `.options method` selects, through the same
+`crate::reactive` engine as a discrete `C`. A Verilog-A `ddt(C*V)` and a
+netlist `C` of the same value are the same circuit element to machine
+precision, under `be`, `tr` and `gear`, fixed step and variable step alike.
+
+That requires the charge itself, not just its Jacobian, so a model must expose
+`load_residual_react` — OpenVAF always emits it. A hand-written library that
+declares reactive Jacobian entries without it falls back to Backward Euler
+rather than stamping a companion with no history behind it.
+
+Junction limiting works the way a compact model expects:
+
+```verilog
+Vcrit = Vt * ln(Vt / (sqrt(2.0) * Is));
+Vd    = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
 ```
 
-The `.osdi` directive loads the shared library; the `.model` second token
-must match the module name exported by the compiled model. Parameter names
-match case-insensitively (VA preserves case; fairchild lowercases).
+OpenVAF compiles that into a call through the library's exported
+`OSDI_LIM_TABLE`, whose entries ship **null** for the simulator to fill in.
+fairchild fills every one of them at load time.
 
-Reactive Jacobian contributions are stamped via the `write_jacobian_array_react`
-copy path with `α = 1/h` scaling. The aliasing path (`load_jacobian_resist`)
-is broken in OpenVAF-Reloaded and not used.
+The limiter name is not a fixed vocabulary — OpenVAF does not validate it,
+it forwards whatever string literal the model wrote — so no simulator can
+implement them all. fairchild implements `pnjlim`; anything else (or `pnjlim`
+called with an unexpected number of arguments, which would be an ABI mismatch)
+gets an **identity limiter** and a warning naming it. That model then runs
+*without* limiting for that call: convergence may be slower or need a smaller
+step, but the answer is unaffected and the process does not die. Adding a
+limiter is one row in `LIMITERS` (`fairchild-osdi/src/loader.rs`).
 
-Encrypted PDK Verilog-A (IEEE-1735 / Cadence NCPROTECT) is fundamentally
-unsupported by OpenVAF — that's an upstream Cadence-key problem, not a
-fairchild limitation.
+Limiting changes the Newton path, not the solution: the `$limit` diode in
+`examples/verilog_a/` converges to 0.6333213 V against 0.6333214 V for the same
+model without it.
+
+A bare `exp()` is fine too — the Newton loop's Armijo line search carries it,
+checked to a 500 V drive — but limiting is what scales to stiffer circuits.
+
+### 14.2 Compiling
 
 ```bash
-# Build
-openvaf bsim4.va -o bsim4.osdi
-
-# Use
-fairchild -f my_circuit.sp
+openvaf-r -I models models/va_diode.va -o build/va_diode.osdi
 ```
+
+`-I` sets the include path for `\`include "optical.vams"`. On macOS
+`openvaf-r` needs LLVM 18 on the loader path:
+
+```bash
+export DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm@18/lib
+```
+
+`examples/verilog_a/build.sh` wraps both. Compiled `.osdi` files are platform
+binaries and are gitignored.
+
+Encrypted PDK Verilog-A (IEEE-1735 / Cadence NCPROTECT) is unsupported by
+OpenVAF — an upstream Cadence-key problem, not a fairchild limitation.
+
+### 14.3 Optical models
+
+fairchild carries an optical signal on ordinary real-valued MNA unknowns —
+three per channel — so a custom optical discipline needs no compiler support
+at all; OSDI passes it through as metadata.
+
+| wire | carries | units |
+|---|---|---|
+| `<port>_re` | real part of the field envelope | sqrt(W) |
+| `<port>_im` | imaginary part | sqrt(W) |
+| `<port>_wl` | carrier wavelength | m |
+
+Optical power is `re² + im²`. These are exactly the wires a native
+`.optical_port p` expands to (`p_re_0`, `p_im_0`, `p_wl_0`), so a Verilog-A
+model drops straight into a link built from native `fc_*` devices — address the
+underlying wire names on the `X` line. `examples/verilog_a/models/optical.vams`
+is the discipline; `wg_compare.sp` pins a Verilog-A waveguide against the
+native one in a single deck.
+
+Two rules, both of which cost real debugging time to learn:
+
+**Take the wavelength from a parameter, never off the λ wire.** The wire
+exists so a chain stays self-consistent and native devices can read it. Do not
+put `OWL(...)` inside an expression you contribute from. Propagation phase is
+thousands of radians — 400 µm at n_g = 4.2 is about 6800 rad — so OpenVAF
+differentiating it against the λ unknown puts ∂φ/∂λ = φ/λ ≈ 1e9 per metre into
+the Jacobian, and Newton fails to converge at some wavelengths and not others.
+Native devices dodge this by freezing λ at the previous iterate, which
+Verilog-A has no way to express. Sweep wavelength with `--param` or
+`set_param` instead.
+
+**`alpha_dB_cm` is power dB, so the amplitude factor divides by 20** —
+`10^(−dB/20)`. Everything under `legacy/` predates commit `0f689cb` and is a
+factor of two out.
+
+Verilog-A optical models are single-channel and forward-only. WDM bundle
+awareness, bidirectional propagation, `DelayLine` group delay and
+`PhotonicActiveModel` composition are native-Rust features a Verilog-A model
+cannot reach; see §12.
+
+### 14.4 Instantiating
+
+```spice
+.osdi build/va_diode.osdi                  ; relative to the netlist file
+Xd1  a out  va_diode  Is=1e-14 Rs=0.5      ; model name == module name
+```
+
+`.osdi` registers every descriptor in the library under its module name. From
+there it resolves like any other model: `X` takes an arbitrary terminal list,
+and `D`, `M`, `Q` work for two-, four- and three-terminal models respectively.
+All four carry instance parameters.
+
+The foundry idiom puts process parameters on a card and geometry per instance:
+
+```spice
+.osdi  bsim4.osdi
+.model nch  bsim4 (tox=3n vth0=0.4 …)
+M1  d g s b  nch  W=1u L=100n
+```
+
+`.model` binds a card name to a loaded descriptor, with the card's parameters
+as defaults; an instance parameter overrides the card. Parameter names match
+case-insensitively (Verilog-A preserves case, fairchild lowercases). A card
+whose second token names no loaded descriptor and no built-in type is left
+alone, so a typo surfaces as `unknown model` at the element that uses it.
+
+`--param ELEMENT.PARAM=VALUE` reaches `X`, `R`, `C` and `L` elements only; to
+sweep a Verilog-A transistor use the Python bindings' `set_param`, or a
+`.param` in the netlist referenced as `{name}`.
+
+### 14.5 Implementation notes
+
+Reactive Jacobian contributions are stamped through the
+`write_jacobian_array_react` copy path — `α·∂q/∂x` in transient, `ω·∂q/∂x` in
+`.ac` and `.noise`, the same entries in the same positions. The aliasing path
+(`load_jacobian_resist`) is broken in OpenVAF-Reloaded and not used.
+
+`OsdiDevice` deliberately does not report `small_signal_reactances`: a
+Verilog-A charge is a general matrix, and ∂q_i/∂v_j ≠ ∂q_j/∂v_i —
+transcapacitance is exactly what a BSIM-class model is made of, so reciprocal
+two-terminal branches would be silently wrong. It overrides
+`Device::load_reactive_jacobian` instead.
 
 [openvaf]: https://codeberg.org/arpadbuermen/OpenVAF-Reloaded

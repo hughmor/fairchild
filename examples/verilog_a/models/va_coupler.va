@@ -1,0 +1,70 @@
+// va_coupler — 2×2 evanescent directional coupler, lossless and symmetric.
+//
+// Ported from legacy/va-models/photonic/directional_coupler.va, which was
+// still on the superseded Norton scheme (`Oamp(out) <+ G·(target − Ophase(out))`
+// with 1e-12 shunts on the inputs, and a 1e6 drive conductance sitting in the
+// matrix).  Direct potential contributions do the same job with no stiffness
+// and no fictitious conductance.  Its wavelength read was also wrong for this
+// discipline — it scaled by 1e3 as though lambda were in microns.
+//
+// With this and va_waveguide you can build an MZI or a ring resonator
+// entirely in Verilog-A; see va_link.sp.
+//
+// Ports (3 wires each): a1, a2 in; b1 (bar/through), b2 (cross) out.
+//
+// Transfer matrix:
+//   b1 = √(1−κ)·a1 + j·√κ·a2
+//   b2 = j·√κ·a1 + √(1−κ)·a2
+//
+// κ is the POWER cross-coupling fraction, so κ=0.5 is a 3 dB splitter and the
+// matrix is unitary for any κ ∈ [0,1] — power is conserved by construction.
+// (Native `fc_dcoupler` parametrises the same device by κL instead:
+// κ = sin²(κL).)
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_coupler(a1_re, a1_im, a1_wl,
+                  a2_re, a2_im, a2_wl,
+                  b1_re, b1_im, b1_wl,
+                  b2_re, b2_im, b2_wl);
+    inout a1_re, a1_im, a1_wl, a2_re, a2_im, a2_wl;
+    inout b1_re, b1_im, b1_wl, b2_re, b2_im, b2_wl;
+    optical_field  a1_re, a1_im, a2_re, a2_im, b1_re, b1_im, b2_re, b2_im;
+    optical_lambda a1_wl, a2_wl, b1_wl, b2_wl;
+
+    parameter real kappa_0           = 0.5    from [0:1];   // power cross-coupling
+    parameter real lambda_0_nm       = 1550.0 from (0:inf); // where kappa_0 holds
+    parameter real dkappa_dlambda_nm = 0.0;                 // dispersion, 1/nm
+    parameter real wavelength_nm     = 1550.0 from (0:inf); // operating lambda
+
+    real wl_nm, kappa, sq_t, sq_k;
+
+    analog begin
+        // Wavelength from the parameter, never differentiated off the wire —
+        // see optical.vams.  The dispersion slope here is mild enough to be
+        // harmless either way, but the rule is worth keeping uniform.
+        wl_nm = wavelength_nm;
+
+        kappa = kappa_0 + dkappa_dlambda_nm * (wl_nm - lambda_0_nm);
+        if (kappa < 0.0) kappa = 0.0;
+        if (kappa > 1.0) kappa = 1.0;
+
+        sq_t = sqrt(1.0 - kappa);
+        sq_k = sqrt(kappa);
+
+        // b1 = sq_t·a1 + j·sq_k·a2
+        OF(b1_re) <+ sq_t * OF(a1_re) - sq_k * OF(a2_im);
+        OF(b1_im) <+ sq_t * OF(a1_im) + sq_k * OF(a2_re);
+        // b2 = j·sq_k·a1 + sq_t·a2
+        OF(b2_re) <+ -sq_k * OF(a1_im) + sq_t * OF(a2_re);
+        OF(b2_im) <+ sq_k * OF(a1_re) + sq_t * OF(a2_im);
+
+        // Pass the wire through untouched, so a chain mixing native and
+        // Verilog-A devices keeps one consistent wavelength.  Port 1 feeds
+        // both outputs; a dark port 2 would otherwise pull them to zero.
+        OWL(b1_wl) <+ OWL(a1_wl);
+        OWL(b2_wl) <+ OWL(a1_wl);
+    end
+endmodule

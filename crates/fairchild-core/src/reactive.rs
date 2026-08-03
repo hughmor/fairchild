@@ -126,6 +126,155 @@ pub fn companion(
     }
 }
 
+/// The same method interpretation as [`companion`], expressed on charge rather
+/// than on a branch value.
+///
+/// [`companion`] is parametrised by a C or an L, which presumes the reactance is
+/// a two-terminal branch with one number describing it. A Verilog-A device has
+/// no such number: its `ddt` contributions form a charge *vector* `q(x)` whose
+/// Jacobian `∂q_i/∂x_j` need not be symmetric — transcapacitance is exactly what
+/// a BSIM-class model is made of. This form takes `(q, i)` instead of
+/// `(value, v)`, so it applies **per row** and serves both.
+///
+/// Returns `(i_n, dq_scale)`: the branch current at this iterate, and the factor
+/// such that `dq_scale · ∂q/∂x` is its Jacobian. `dq_scale` is deliberately the
+/// same quantity [`conductance`] returns for `value = 1`, so the two forms
+/// cannot drift apart — [`charge_current_agrees_with_scalar_companion`] pins
+/// that.
+///
+/// `q_prev2` is `Some` only when a second charge history exists; BDF-2 also
+/// needs `gear2_h_prev`, and demotes to BE without either, which is ordinary
+/// order control.
+///
+/// (This `(q, i)` formulation is also the prerequisite noted on [`companion`]
+/// for offering real Trapezoidal on the variable-step path — it carries no
+/// `h`-dependent history term.)
+pub fn charge_current(
+    mode: IntegratorMode,
+    h: f64,
+    gear2_h_prev: Option<f64>,
+    q_new: f64,
+    q_prev: f64,
+    q_prev2: Option<f64>,
+    i_prev: f64,
+) -> (f64, f64) {
+    if let (IntegratorMode::Gear, Some(h_prev), Some(q2)) = (mode, gear2_h_prev, q_prev2) {
+        // Variable-step BDF-2, matching `cap_companion_gear2` term for term
+        // under q = C·v.
+        let rho = h / h_prev;
+        let denom = h * (1.0 + rho);
+        let scale = (1.0 + 2.0 * rho) / denom;
+        let i = scale * q_new - (1.0 + rho) / h * q_prev + (rho * rho) / denom * q2;
+        return (i, scale);
+    }
+    match mode {
+        // TR: (q_n − q_{n−1})·2/h = i_n + i_{n−1}.
+        IntegratorMode::Trapezoidal => {
+            let scale = 2.0 / h;
+            (scale * (q_new - q_prev) - i_prev, scale)
+        }
+        // BE, and GEAR before it has the history for second order.
+        _ => {
+            let scale = 1.0 / h;
+            (scale * (q_new - q_prev), scale)
+        }
+    }
+}
+
+/// One charge branch's history, for a device that stamps its own reactance.
+///
+/// [`BranchHistory`] serves devices that *declare* a reactive branch and let
+/// the shared stamper integrate it. A device that stamps its own — the diode's
+/// `Cj + TT·gd`, the MOSFET's Meyer and depletion caps, a Verilog-A `ddt` —
+/// only ever receives `alpha`, which cannot express anything but Backward
+/// Euler. This is the state those devices need to build any other method's
+/// companion, plus the two operations on it, so they cannot each grow their own
+/// answer to "what does `method` mean" — the failure mode this module exists to
+/// prevent.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChargeHistory {
+    q_prev: f64,
+    /// `None` until two timepoints have been accepted; gates BDF-2, exactly as
+    /// [`BranchHistory::state_prev2`] does.
+    q_prev2: Option<f64>,
+    /// Branch current at the last accepted timepoint. Only Trapezoidal reads
+    /// it; zero from a DC operating point, where a capacitor carries none.
+    i_prev: f64,
+}
+
+impl ChargeHistory {
+    /// Companion for this branch at the current Newton iterate.
+    ///
+    /// `q_new` is the branch charge there; `cv` is `C·v` at the same point —
+    /// the term the Jacobian stamp itself contributes to the residual, which
+    /// the history current has to cancel. (For a linear cap the two are equal;
+    /// for a depletion cap they are not, which is the whole reason both are
+    /// arguments.)
+    ///
+    /// Returns `(i_hist, scale)`: the current to stamp from the branch's
+    /// positive node to its negative one, and the factor multiplying `C` in the
+    /// Jacobian. Taking both from one call is what keeps residual and Jacobian
+    /// linearised about the same point.
+    ///
+    /// `disc` is `None` outside the transient loop — a caller with no method to
+    /// offer, where the `alpha` it passes is Backward Euler by definition.
+    pub fn companion(
+        &self,
+        disc: Option<crate::device::Discretisation>,
+        alpha: f64,
+        q_new: f64,
+        cv: f64,
+    ) -> (f64, f64) {
+        let (i_n, scale) = match disc {
+            Some(d) => charge_current(
+                d.mode,
+                d.h,
+                d.gear2_h_prev,
+                q_new,
+                self.q_prev,
+                self.q_prev2,
+                self.i_prev,
+            ),
+            None => (alpha * (q_new - self.q_prev), alpha),
+        };
+        (scale * cv - i_n, scale)
+    }
+
+    /// The Jacobian factor alone, for the stamp that has no charge to hand.
+    ///
+    /// [`conductance`] is linear in the branch value, so evaluating it at 1.0
+    /// gives exactly the scalar — and it is the same quantity
+    /// [`charge_current`] returns as `scale`, so the two stamps cannot drift.
+    pub fn scale(disc: Option<crate::device::Discretisation>, alpha: f64) -> f64 {
+        match disc {
+            Some(d) => conductance(ReactiveKind::Capacitor, 1.0, d.mode, d.h, d.gear2_h_prev),
+            None => alpha,
+        }
+    }
+
+    /// Roll past an accepted step, `q_now` being the branch charge at the
+    /// converged solution.
+    ///
+    /// The current *entering* this step becomes Trapezoidal's history for the
+    /// next one, and must be computed before `q_prev` is overwritten.
+    pub fn advance(&mut self, disc: Option<crate::device::Discretisation>, q_now: f64) {
+        if let Some(d) = disc {
+            let (i_n, _) = charge_current(
+                d.mode,
+                d.h,
+                d.gear2_h_prev,
+                q_now,
+                self.q_prev,
+                self.q_prev2,
+                self.i_prev,
+            );
+            self.i_prev = i_n;
+        }
+        self.q_prev2 = Some(self.q_prev);
+        self.q_prev = q_now;
+    }
+}
+
 /// Conductance alone, for a branch whose `value` is re-queried mid-Newton.
 ///
 /// Device-declared branches have bias-dependent C, so `G_eq` must be recomputed
@@ -505,6 +654,73 @@ pub fn branch_voltage(br: &ReactiveBranchSpec, x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `charge_current` must be the *same* method interpretation as
+    /// `companion`, not a second one that happens to look similar. For a
+    /// constant `C` the two describe one physical branch, so with `q = C·v`
+    /// they have to agree on both the current and the Jacobian — under every
+    /// mode, including a non-uniform BDF-2 step.
+    ///
+    /// This is the test that stops the Verilog-A path and the native path
+    /// drifting into two integrators again.
+    #[test]
+    fn charge_current_agrees_with_scalar_companion() {
+        let c = 2.5e-12;
+        let cases: [(IntegratorMode, f64, Option<f64>); 5] = [
+            (IntegratorMode::BackwardEuler, 1e-9, None),
+            (IntegratorMode::Trapezoidal, 1e-9, None),
+            (IntegratorMode::Gear, 1e-9, None), // no prev2 yet -> demotes to BE
+            (IntegratorMode::Gear, 1e-9, Some(1e-9)), // uniform BDF-2
+            (IntegratorMode::Gear, 4e-10, Some(1.3e-9)), // non-uniform BDF-2
+        ];
+
+        for (mode, h, gear2_h_prev) in cases {
+            // A history with distinct values in every slot, so a dropped or
+            // swapped term cannot pass by coincidence.
+            let (v_prev, v_prev2, i_prev) = (0.37, 0.11, 4.2e-5);
+            let hist = BranchHistory {
+                value: c,
+                state: v_prev,
+                aux: i_prev,
+                state_prev2: Some(v_prev2),
+            };
+            let v_new = 0.83;
+
+            // Voltage form: i_C = G_eq·v − I_hist.
+            let (g_eq, i_hist) = companion(ReactiveKind::Capacitor, &hist, mode, h, gear2_h_prev);
+            let i_voltage_form = g_eq * v_new - i_hist;
+
+            // Charge form, same branch expressed as q = C·v.
+            let (i_charge_form, scale) = charge_current(
+                mode,
+                h,
+                gear2_h_prev,
+                c * v_new,
+                c * v_prev,
+                Some(c * v_prev2),
+                i_prev,
+            );
+
+            let tol = 1e-9 * i_voltage_form.abs().max(1e-12);
+            assert!(
+                (i_charge_form - i_voltage_form).abs() <= tol,
+                "{mode:?} h={h:e} gear2={gear2_h_prev:?}: current \
+                 {i_charge_form:e} != {i_voltage_form:e}"
+            );
+            // And the Jacobians: scale·∂q/∂v = scale·C must equal G_eq.
+            assert!(
+                (scale * c - g_eq).abs() <= 1e-9 * g_eq.abs(),
+                "{mode:?} h={h:e}: scale·C {:e} != G_eq {g_eq:e}",
+                scale * c
+            );
+            // `conductance` is documented as `scale` at value = 1; hold it to that.
+            let cond = conductance(ReactiveKind::Capacitor, 1.0, mode, h, gear2_h_prev);
+            assert!(
+                (cond - scale).abs() <= 1e-9 * scale.abs(),
+                "{mode:?} h={h:e}: conductance(1.0) {cond:e} != scale {scale:e}"
+            );
+        }
+    }
 
     /// The property the whole module rests on: a companion built from physical
     /// state is the same one the incremental recursion would have produced, and

@@ -513,7 +513,7 @@ impl Circuit {
     ///   `src` (excitation source name, default `None` = first V source).
     ///
     ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
-    ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
+    ///   `lambdatol`, `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
     ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C),
     ///   `solver` (`"dense"` | `"sparse"` | `"auto"` | `"klu"`),
     ///   `variable_step` (bool, enables LTE-controlled variable-step transient),
@@ -773,6 +773,10 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
         let lib = Arc::new(lib);
         lib.register_into(&mut registry);
     }
+    // `.model <card> <module> (...)` cards naming a descriptor we just loaded.
+    // After the libraries, so the descriptors exist to alias.
+    #[cfg(feature = "osdi")]
+    registry.register_loaded_model_cards(&netlist.models);
 
     #[cfg(not(feature = "osdi"))]
     if !netlist.osdi_paths.is_empty() {

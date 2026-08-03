@@ -3,7 +3,7 @@
 Generate benchmark plots comparing fairchild vs ngspice.
 
 Outputs (to docs/plots/):
-  accuracy_analog.png    — 6-panel waveform overlay with RMS error
+  accuracy_analog.png    — 6-panel waveform overlay, each with a residual strip
   scaling_wall_time.png  — log-log wall-clock vs circuit size
 
 Usage:
@@ -197,6 +197,24 @@ def time_median_ms(cmd: list[str], n: int = N_TIMING_RUNS) -> float:
 # RMS accuracy metric
 # ---------------------------------------------------------------------------
 
+def residual(t_ref: np.ndarray, v_ref: np.ndarray,
+             t_test: np.ndarray, v_test: np.ndarray):
+    """(t, v_test - v_ref) on the reference timebase over the overlapping window.
+
+    ngspice is the reference, so a positive residual means fairchild reads high.
+    Returns None when the two runs do not overlap in at least two points.
+    """
+    if t_ref.size < 2 or t_test.size < 2:
+        return None
+    t_lo = max(t_ref[0], t_test[0])
+    t_hi = min(t_ref[-1], t_test[-1])
+    mask = (t_ref >= t_lo) & (t_ref <= t_hi)
+    if mask.sum() < 2:
+        return None
+    t_common = t_ref[mask]
+    return t_common, np.interp(t_common, t_test, v_test) - v_ref[mask]
+
+
 def rms_error(t_ref: np.ndarray, v_ref: np.ndarray,
               t_test: np.ndarray, v_test: np.ndarray) -> float | None:
     if t_ref.size < 2 or t_test.size < 2:
@@ -219,16 +237,33 @@ def rms_error(t_ref: np.ndarray, v_ref: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def plot_accuracy(fc_bin: str, ng_bin: str | None) -> Path:
+    """Six waveform panels, each with a residual strip beneath it.
+
+    The residual (fairchild − ngspice, on ngspice's timebase) is what actually
+    answers "do these agree": two curves drawn on top of each other at this
+    scale look identical at 1 mV and at 100 mV alike. The strip is a quarter
+    the height of its panel — enough to read the shape and sign of the
+    disagreement without competing with the waveform.
+    """
     n_panels = len(ACCURACY_PANELS)
     ncols = 3
     nrows = (n_panels + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 3.5 * nrows))
-    axes = axes.flatten()
+    fig = plt.figure(figsize=(13, 4.0 * nrows))
+    # Outer grid separates the panel rows; each cell then splits into a
+    # waveform axis and a residual axis at 1/4 height, with just enough gap to
+    # separate the residual's top spine from the panel's x-axis while still
+    # reading as one unit. A single flat gridspec cannot do
+    # both — the gap that keeps the next row's title clear would also open up
+    # between a panel and its own residual.
+    outer = fig.add_gridspec(nrows, ncols, hspace=0.34, wspace=0.30)
 
     summary_rows = []
 
     for idx, (title, fname, fc_col, ng_node, xlabel, xscale, ylabel) in enumerate(ACCURACY_PANELS):
-        ax = axes[idx]
+        r, c = divmod(idx, ncols)
+        inner = outer[r, c].subgridspec(2, 1, height_ratios=[4, 1], hspace=0.10)
+        ax = fig.add_subplot(inner[0])
+        ax_res = fig.add_subplot(inner[1], sharex=ax)
         netlist = CIRCUITS / fname
         print(f"  {title} ...", end=" ", flush=True)
 
@@ -243,12 +278,16 @@ def plot_accuracy(fc_bin: str, ng_bin: str | None) -> Path:
             ng_result, ng_err = run_ngspice(ng_bin, netlist, ng_node)
 
         if fc_t is None:
-            # Fairchild failed — gray panel
+            # Fairchild failed — gray panel, and no residual to draw.
             ax.set_facecolor("#f5f5f5")
             ax.text(0.5, 0.5, f"FAILED\n{fc_err[:60]}", transform=ax.transAxes,
                     ha="center", va="center", fontsize=7, color="#c62828",
                     bbox=dict(fc="white", ec="#c62828", pad=3))
             ax.set_title(title, fontsize=9, pad=3)
+            ax.tick_params(labelbottom=False)
+            ax_res.set_facecolor("#f5f5f5")
+            ax_res.tick_params(labelsize=7)
+            ax_res.set_xlabel(xlabel, fontsize=8)
             print(f"fc FAILED: {fc_err[:40]}")
             summary_rows.append((title, "FAILED", "—", "—"))
             continue
@@ -266,28 +305,48 @@ def plot_accuracy(fc_bin: str, ng_bin: str | None) -> Path:
                 ax.annotate(f"RMS {rms_mv:.2f} mV", xy=(0.97, 0.05),
                             xycoords="axes fraction", ha="right", va="bottom",
                             fontsize=7.5, color="#555")
-        elif ng_bin:
-            ax.annotate(f"ngspice error", xy=(0.97, 0.05),
-                        xycoords="axes fraction", ha="right", va="bottom",
-                        fontsize=7.5, color=RED)
+            res = residual(ng_t, ng_v, fc_t, fc_v)
+            if res is not None:
+                t_res, dv = res
+                # Residual carries the fairchild colour because it *is* the
+                # fairchild trace, re-referenced; the zero line is ngspice's,
+                # dotted, because that is the curve being differenced against.
+                ax_res.axhline(0.0, color=RED, lw=0.9, ls=":", zorder=1)
+                ax_res.plot(t_res * xscale, dv * 1000, color=BLUE, lw=1.0, zorder=2)
+                peak = float(np.max(np.abs(dv))) * 1000
+                # Symmetric limits so the sign of the error is readable, with a
+                # floor so a genuinely-zero residual does not autoscale to noise.
+                lim = max(peak * 1.3, 1e-3)
+                ax_res.set_ylim(-lim, lim)
+                ax_res.annotate(f"peak {peak:.2f} mV", xy=(0.97, 0.88),
+                                xycoords="axes fraction", ha="right", va="top",
+                                fontsize=6.5, color="#666")
+        else:
+            note = "ngspice error" if ng_bin else "no ngspice"
+            ax.annotate(note, xy=(0.97, 0.05), xycoords="axes fraction",
+                        ha="right", va="bottom", fontsize=7.5, color=RED)
+            ax_res.text(0.5, 0.5, note, transform=ax_res.transAxes, ha="center",
+                        va="center", fontsize=7, color=GRAY)
 
         ax.set_title(title, fontsize=9, pad=3)
-        ax.set_xlabel(xlabel, fontsize=8)
         ax.set_ylabel(ylabel, fontsize=8)
         ax.legend(fontsize=7, loc="upper right", framealpha=0.8)
         ax.grid(True, lw=0.4)
-        ax.tick_params(labelsize=7)
+        ax.tick_params(labelsize=7, labelbottom=False)  # x labels live below
+
+        ax_res.set_ylabel("Δ (mV)", fontsize=7)
+        ax_res.set_xlabel(xlabel, fontsize=8)
+        ax_res.grid(True, lw=0.4)
+        ax_res.tick_params(labelsize=6.5)
 
         rms_str = f"{rms_mv:.2f} mV" if rms_mv is not None else ("—" if ng_bin else "no ngspice")
         summary_rows.append((title, "ok", rms_str, f"{len(fc_t)} pts"))
         print(f"ok  RMS={rms_str}")
 
-    # Hide unused axes
-    for ax in axes[n_panels:]:
-        ax.set_visible(False)
-
-    fig.suptitle("fairchild vs ngspice — waveform accuracy", fontsize=11, y=1.01)
-    fig.tight_layout()
+    # No suptitle: each panel is titled, and the figure is embedded under a
+    # heading in the README and docs/benchmarks.md that already says what it is.
+    # No tight_layout either — it cannot handle the nested gridspec, and the
+    # outer hspace/wspace above already do the spacing.
 
     # Print summary table
     print("\n  {:<25} {:>8} {:>12}".format("Circuit", "Status", "RMS error"))

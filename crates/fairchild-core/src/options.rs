@@ -22,10 +22,25 @@ pub struct SimOptions {
     // ── convergence tolerances ─────────────────────────────────────────────
     /// Relative tolerance on Newton update (typical 1e-3).
     pub reltol: f64,
-    /// Absolute current tolerance (A); used by current-domain residuals.
+    /// Absolute current tolerance (A); the convergence floor for
+    /// voltage-source branch-current rows.
     pub abstol: f64,
     /// Absolute node-voltage tolerance (V); convergence floor for voltage NR.
     pub vntol: f64,
+    /// Absolute wavelength tolerance (m); the convergence floor for λ wires.
+    ///
+    /// λ wires carry metres (~1.55e-6), so `vntol` — a *volt* tolerance —
+    /// let Newton stop with λ a micron out, and even a purely relative test at
+    /// `reltol` permits 1.55 nm. Both are enormous next to the features being
+    /// simulated: a 40 GHz passband is ~0.32 nm and a PN depletion tuning is
+    /// ~13 pm/V. The default 1e-13 m (0.1 pm) sits well below either, and costs
+    /// nothing in practice because Newton converges superlinearly near the root.
+    ///
+    /// The relative term is deliberately **not** applied to λ rows: λ is a
+    /// label whose absolute precision is what matters, and `reltol·|λ|` is
+    /// scale-invariant, so no choice of units can make it small enough.
+    /// See `crate::tolerance`.
+    pub lambdatol: f64,
     /// Maximum allowed |Δv| per NR iteration before damping (V).
     pub vmax: f64,
     /// Minimum conductance added to every diagonal entry (S).
@@ -119,6 +134,25 @@ pub struct SimOptions {
     /// variable_step=1`, CLI `--variable-step`, or Python `variable_step=True`.
     pub variable_step: bool,
 
+    /// Inject device and resistor noise as random currents during `.tran`,
+    /// turning the PSDs `.noise` reports into a time-domain waveform. Off by
+    /// default: a transient is expected to be reproducible and deterministic,
+    /// and every golden in the tree depends on it being so.
+    ///
+    /// Fixed step only — see `crate::noise::TransientNoise`. Set via `.options
+    /// trannoise=1`, or Python `trannoise=True`.
+    pub trannoise: bool,
+
+    /// Seed for the transient-noise generator. The same seed gives the same
+    /// waveform, so a noisy run is still a reproducible one; sweep it to get
+    /// independent trials for a BER or Monte-Carlo estimate.
+    pub noiseseed: u64,
+
+    /// Multiplier on every injected noise AMPLITUDE (not power). `2.0` gives
+    /// 4× the noise power everywhere, which is the usual trick for pulling a
+    /// deep-BER eye closure into a simulation short enough to run.
+    pub noisescale: f64,
+
     /// Model the group delay of optical waveguides (and any device exposing a
     /// group delay τ_g) as a true delay line: the output optical envelope is
     /// the input envelope delayed by τ_g = L·n_g/c, reconstructed from a
@@ -157,6 +191,7 @@ impl Default for SimOptions {
             reltol: 1e-3,
             abstol: 1e-12,
             vntol: 1e-6,
+            lambdatol: 1e-13,
             vmax: 0.5,
             gmin: 1e-12,
             itl1: 150,
@@ -175,6 +210,9 @@ impl Default for SimOptions {
             verbose: false,
             sanity_check: true,
             variable_step: false,
+            trannoise: false,
+            noiseseed: 1,
+            noisescale: 1.0,
             waveguide_delay: false,
             cond_estimate: false,
             equilibrate: false,
@@ -214,6 +252,8 @@ impl SimOptions {
             bidirectional_propagation: self.bidirectional_propagation,
             waveguide_delay: self.waveguide_delay,
             time_s: 0.0,
+            // Set per step by the transient loops; meaningless in DC/AC.
+            discretisation: None,
         }
     }
 
@@ -240,6 +280,7 @@ impl SimOptions {
             "reltol" => self.reltol = parse_num(value).unwrap_or(self.reltol),
             "abstol" => self.abstol = parse_num(value).unwrap_or(self.abstol),
             "vntol" => self.vntol = parse_num(value).unwrap_or(self.vntol),
+            "lambdatol" => self.lambdatol = parse_num(value).unwrap_or(self.lambdatol),
             "vmax" => self.vmax = parse_num(value).unwrap_or(self.vmax),
             "gmin" => self.gmin = parse_num(value).unwrap_or(self.gmin),
             "itl1" => self.itl1 = parse_int(value).unwrap_or(self.itl1),
@@ -288,6 +329,18 @@ impl SimOptions {
                     value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on"
                 );
+            }
+            "trannoise" | "tran_noise" | "transient_noise" => {
+                self.trannoise = matches!(
+                    value.to_lowercase().as_str(),
+                    "" | "1" | "true" | "yes" | "on"
+                );
+            }
+            "noiseseed" | "noise_seed" => {
+                self.noiseseed = parse_num(value).map_or(self.noiseseed, |v| v.max(0.0) as u64);
+            }
+            "noisescale" | "noise_scale" => {
+                self.noisescale = parse_num(value).map_or(self.noisescale, |v| v.max(0.0));
             }
             "waveguide_delay" | "wg_delay" | "optical_delay" => {
                 self.waveguide_delay = matches!(

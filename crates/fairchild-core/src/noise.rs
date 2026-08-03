@@ -19,7 +19,7 @@ use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, ReactiveKind};
+use crate::device::{Device, EvalFlags, NodeId, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology};
@@ -29,6 +29,230 @@ use crate::solver::LinearSolver;
 
 /// Boltzmann's constant in J/K.
 const KB: f64 = 1.380649e-23;
+
+// ───────────────────────────────────────────────────────────────────────────
+// The one enumeration of "what is a noise source in this circuit"
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Every noise generator in a circuit, resolved to MNA rows.
+///
+/// `.noise` and transient noise are two consumers of the same physics, and a
+/// source that exists in only one of them is a silent inconsistency — the
+/// frequency-domain answer and the time-domain answer would simply disagree,
+/// with nothing to notice. So the list lives here once, exactly as
+/// `crate::reactive` owns "what is reactive". `transient_noise_agrees_with_the
+/// _noise_analysis` is the regression that holds the two together.
+///
+/// Resistor taps are resolved once at construction because `4kT/R` and the node
+/// indices are static. Device sources are asked for on every visit: shot noise
+/// follows the bias, and in a transient the bias moves.
+pub struct NoiseSources {
+    /// `(pos, neg, 4kT/R)` for every linear resistor with `R > 0`.
+    resistors: Vec<(NodeId, NodeId, f64)>,
+}
+
+impl NoiseSources {
+    pub fn build(netlist: &Netlist, topo: &CircuitTopology, temp_k: f64) -> Self {
+        let four_kt = 4.0 * KB * temp_k;
+        let resistors = netlist
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor {
+                    pos,
+                    neg,
+                    resistance,
+                    ..
+                } if *resistance > 0.0 => Some((
+                    topo.node_index.get(pos).copied(),
+                    topo.node_index.get(neg).copied(),
+                    four_kt / resistance,
+                )),
+                _ => None,
+            })
+            .collect();
+        Self { resistors }
+    }
+
+    /// Visit `(taps, psd)` for every generator at the devices' current bias.
+    ///
+    /// `psd` is one-sided, in A²/Hz for an injection into a node row and in the
+    /// square of the enforced potential's unit for a branch row. Taps belonging
+    /// to one generator are driven by one random process and must be combined
+    /// coherently by the caller.
+    pub fn for_each(
+        &self,
+        devices: &[Box<dyn Device>],
+        ctx: &SimContext,
+        mut f: impl FnMut(&[(NodeId, NodeId, f64)], f64),
+    ) {
+        for &(p, n, s_i) in &self.resistors {
+            f(&[(p, n, 1.0)], s_i);
+        }
+        for dev in devices {
+            for (p, n, s_i) in dev.noise_sources(ctx) {
+                f(&[(p, n, 1.0)], s_i);
+            }
+            for src in dev.correlated_noise_sources(ctx) {
+                f(&src.taps, src.psd);
+            }
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Transient noise
+// ───────────────────────────────────────────────────────────────────────────
+
+/// splitmix64 — the whole random-number dependency.
+///
+/// A noise injector needs a reproducible stream of gaussians, not a
+/// cryptographic one, and splitmix64 clears BigCrush in five lines. Pulling in
+/// `rand` for this would add a dependency tree to the simulator so a test can
+/// draw a bell curve.
+struct Rng {
+    state: u64,
+    /// Box-Muller produces two normals per pair of uniforms; keep the spare.
+    spare: Option<f64>,
+}
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed,
+            spare: None,
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform on [0, 1) with 53 bits of mantissa.
+    fn uniform(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// Standard normal, Box-Muller.
+    fn normal(&mut self) -> f64 {
+        if let Some(v) = self.spare.take() {
+            return v;
+        }
+        // `ln(0)` is −inf and would poison the whole step; the uniform is on
+        // [0, 1) so zero is reachable, once in 2^53 draws.
+        let u1 = self.uniform().max(f64::MIN_POSITIVE);
+        let u2 = self.uniform();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = std::f64::consts::TAU * u2;
+        self.spare = Some(r * theta.sin());
+        r * theta.cos()
+    }
+}
+
+/// Time-domain noise: the same generators `.noise` reports as PSDs, realised as
+/// random currents injected at every timestep.
+///
+/// # The amplitude
+///
+/// A zero-order-held random sequence of variance `σ²` at interval `h` has a
+/// one-sided PSD of `2σ²h` below its Nyquist frequency, so a generator with PSD
+/// `S` is realised by drawing
+///
+/// ```text
+/// i_n = √(S / 2h) · N(0, 1)
+/// ```
+///
+/// and holding it for the step. The consistency check: integrating `S` over the
+/// resolved band `[0, 1/2h]` gives `S/2h`, which is exactly `σ²`.
+///
+/// # Bandwidth is set by the timestep — and that is usually fine
+///
+/// The injected noise is white up to `1/2h` and absent above it. Real thermal
+/// and shot noise are white far past any timestep worth using, so this is a
+/// truncation. It does not bias observable quantities, because any transient
+/// that resolves the circuit at all has its Nyquist frequency well above the
+/// circuit's own bandwidth, and the circuit filters the difference away: an RC
+/// low-pass settles at `kT/C` for any `h ≪ RC`, independent of `h`. What *is*
+/// step-dependent is a measurement with no bandwidth limit of its own — the
+/// voltage across a bare resistor divider has variance `S_V/2h` and always
+/// will, in any simulator, because unbounded-bandwidth white noise has infinite
+/// power.
+///
+/// ponytail: no `noisefmax`. Decoupling the noise bandwidth from the timestep
+/// means holding each sample for several steps, which is ~8 lines — worth it
+/// only if someone needs an unfiltered node to be step-independent.
+///
+/// # What is missing
+///
+/// Flicker (1/f) and RTS noise, which `.noise` does not model either — this
+/// injects exactly the generators that analysis knows about, no more. The
+/// sequence is white and gaussian per generator, and independent generators are
+/// independent here as they are there.
+pub struct TransientNoise {
+    sources: NoiseSources,
+    rng: Rng,
+    scale: f64,
+    /// RHS contribution for the current step. Frozen across Newton iterations —
+    /// see [`TransientNoise::draw`].
+    rhs: Vec<f64>,
+}
+
+impl TransientNoise {
+    /// `None` unless `.options trannoise=1`, so the cost is zero when off and
+    /// the caller has one branch instead of a flag test per step.
+    pub fn new(netlist: &Netlist, topo: &CircuitTopology, opts: &SimOptions) -> Option<Self> {
+        if !opts.trannoise {
+            return None;
+        }
+        Some(Self {
+            sources: NoiseSources::build(netlist, topo, opts.temp_k),
+            rng: Rng::new(opts.noiseseed),
+            scale: opts.noisescale,
+            rhs: vec![0.0; topo.size],
+        })
+    }
+
+    /// Draw one sample per generator for a step of length `h`, at the bias the
+    /// devices are currently evaluated at.
+    ///
+    /// **Once per timestep, never per Newton iteration.** Redrawing inside the
+    /// loop changes the equation being solved between iterations, so Newton is
+    /// chasing a target that moves as fast as it does and simply never
+    /// converges. Freezing the sample also makes it what it physically is: one
+    /// noise realisation held across the step.
+    pub fn draw(&mut self, devices: &[Box<dyn Device>], ctx: &SimContext, h: f64) {
+        self.rhs.fill(0.0);
+        let rng = &mut self.rng;
+        let scale = self.scale;
+        let rhs = &mut self.rhs;
+        self.sources.for_each(devices, ctx, |taps, psd| {
+            if psd <= 0.0 {
+                return;
+            }
+            let amp = scale * (psd / (2.0 * h)).sqrt() * rng.normal();
+            for &(p, n, w) in taps {
+                // Same sign convention as `stamp_current_source_at`, mirrored:
+                // a positive sample drives current INTO `pos`, which is the
+                // direction `.noise`'s `λ[p] − λ[n]` transfer assumes.
+                if let Some(i) = p {
+                    rhs[i] += amp * w;
+                }
+                if let Some(i) = n {
+                    rhs[i] -= amp * w;
+                }
+            }
+        });
+    }
+
+    /// This step's RHS contribution, to be added after every netlist stamp.
+    pub fn rhs(&self) -> &[f64] {
+        &self.rhs
+    }
+}
 
 /// Result of a `.noise` sweep.  All PSDs are one-sided (V²/Hz).
 pub struct NoiseResult {
@@ -101,13 +325,17 @@ pub fn noise_analysis(
         dev.eval(&x0, EvalFlags::tran(), &ctx);
         let mut tmp = crate::mna::MnaMatrix::zeros(size);
         dev.load_jacobian(&mut tmp);
+        // `tmp.a` is sparse now, so this walks only the cells the device
+        // actually stamped instead of the whole row.
         for (g_row, t_row) in g_mat.iter_mut().zip(tmp.a.iter()) {
-            for (g, t) in g_row.iter_mut().zip(t_row.iter()) {
-                *g += t;
+            for (j, t) in t_row.iter() {
+                g_row[j] += t;
             }
         }
     }
     topo.stamp_gmin(&mut g_mat, opts.gmin);
+    // ponytail: dense G/C/L and a dense 2n×2n adjoint system, same trade-off
+    // and same upgrade path as `ac.rs`. Tracked as task #12.
     let mut c_mat = vec![vec![0.0f64; size]; size];
     let mut l_mat = vec![vec![0.0f64; size]; size];
     for el in &netlist.elements {
@@ -139,6 +367,9 @@ pub fn noise_analysis(
                 ReactiveKind::Inductor => {}
             }
         }
+        // Devices whose reactance is a general ∂q/∂x matrix rather than a set
+        // of two-terminal branches (OSDI/Verilog-A) stamp it themselves.
+        dev.load_reactive_jacobian(&mut c_mat);
     }
 
     // Locate the named input source so we can compute its signal-path gain.
@@ -162,8 +393,7 @@ pub fn noise_analysis(
         ));
     }
 
-    let temp_k = opts.temp_k;
-    let four_kt = 4.0 * KB * temp_k;
+    let sources = NoiseSources::build(netlist, &topo, opts.temp_k);
 
     let mut result = NoiseResult {
         freq: freqs.to_vec(),
@@ -198,7 +428,7 @@ pub fn noise_analysis(
         }
         let mut rhs_fwd = vec![0.0f64; n2];
         rhs_fwd[n_nodes + input_vsrc_idx] = 1.0; // unit AC amplitude on V source
-        let v_fwd = noise_solver.solve(&a_fwd, &rhs_fwd)?;
+        let v_fwd = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_fwd), &rhs_fwd)?;
         let v_re_fwd = &v_fwd[..size];
         let v_im_fwd = &v_fwd[size..];
         let h_re = pick(v_re_fwd, out_pos_idx) - pick(v_re_fwd, out_neg_idx);
@@ -230,44 +460,24 @@ pub fn noise_analysis(
         if let Some(i) = out_neg_idx {
             rhs_adj[i] -= 1.0;
         }
-        let lam = noise_solver.solve(&a_adj, &rhs_adj)?;
+        let lam = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_adj), &rhs_adj)?;
         let lam_re = &lam[..size];
         let lam_im = &lam[size..];
 
-        // Resistor thermal noise: 4kT/R between (pos, neg) for every linear R.
+        // Every generator in the circuit, from the one enumeration both
+        // analyses share.  A source's taps sum BEFORE the magnitude is taken,
+        // so a multi-tap generator interferes with itself instead of adding in
+        // quadrature — laser RIN is the case; see `CorrelatedNoise`.
         let mut s_v_out = 0.0_f64;
-        for el in &netlist.elements {
-            if let Element::Resistor {
-                pos,
-                neg,
-                resistance,
-                ..
-            } = el
-            {
-                if *resistance <= 0.0 {
-                    continue;
-                }
-                let s_i = four_kt / resistance; // 4kT/R [A²/Hz]
-                let p_idx = topo.node_index.get(pos).copied();
-                let n_idx = topo.node_index.get(neg).copied();
-                let z_re = pick(lam_re, p_idx) - pick(lam_re, n_idx);
-                let z_im = pick(lam_im, p_idx) - pick(lam_im, n_idx);
-                let z_mag_sq = z_re * z_re + z_im * z_im;
-                s_v_out += s_i * z_mag_sq;
+        sources.for_each(&devices, &ctx, |taps, psd| {
+            let mut z_re = 0.0;
+            let mut z_im = 0.0;
+            for &(p_idx, n_idx, w) in taps {
+                z_re += w * (pick(lam_re, p_idx) - pick(lam_re, n_idx));
+                z_im += w * (pick(lam_im, p_idx) - pick(lam_im, n_idx));
             }
-        }
-        // Device-internal noise (diode shot, MOSFET channel thermal, …).
-        // Each device contributes one or more uncorrelated current sources
-        // between specific terminal indices; magnitude squared of the
-        // transfer impedance picks up the output PSD contribution.
-        for dev in devices.iter() {
-            for (p_idx, n_idx, s_i) in dev.noise_sources(&ctx) {
-                let z_re = pick(lam_re, p_idx) - pick(lam_re, n_idx);
-                let z_im = pick(lam_im, p_idx) - pick(lam_im, n_idx);
-                let z_mag_sq = z_re * z_re + z_im * z_im;
-                s_v_out += s_i * z_mag_sq;
-            }
-        }
+            s_v_out += psd * (z_re * z_re + z_im * z_im);
+        });
 
         let s_v_in = if h_mag_sq > 1e-30 {
             s_v_out / h_mag_sq
@@ -300,6 +510,8 @@ fn run_dc_op(
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
+    // Not every unknown is a volt — see `crate::tolerance`.
+    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
     let mut x = vec![0.0f64; topo.size];
 
     for _ in 0..opts.itl1 {
@@ -326,10 +538,7 @@ fn run_dc_op(
         } else {
             x_new
         };
-        let converged = x_next
-            .iter()
-            .zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
+        let converged = tol.converged(&x_next, &x);
         x = x_next;
         if converged {
             return Ok(x);

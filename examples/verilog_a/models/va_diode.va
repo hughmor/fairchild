@@ -1,0 +1,60 @@
+// va_diode — Shockley diode with series resistance and junction capacitance.
+//
+// Written for the fairchild OSDI runtime.  Deliberately exercises three
+// things the runtime has to get right:
+//
+//   1. a nonlinear resistive branch          -> write_jacobian_array_resist
+//   2. an internal node (the series R)       -> num_nodes > num_terminals
+//   3. a `ddt` charge branch                 -> write_jacobian_array_react
+//
+// Convergence: the junction voltage goes through `$limit(..., "pnjlim", ...)`,
+// which is what a real compact model does and what fairchild's own native
+// diode does internally.  OpenVAF compiles that into a call through the
+// library's `OSDI_LIM_TABLE`, and fairchild installs its `pnjlim` there when
+// the library loads.  `$limexp` is NOT available — OpenVAF 23.5 rejects it
+// outright, as a compile error rather than a silent no-op.
+//
+// A bare `exp(V(...))` also works here — the Newton loop's Armijo line search
+// carries it, checked to a 500 V drive — but limiting is what scales to
+// stiffer circuits, and it costs one line.
+
+`include "disciplines.vams"
+`include "constants.vams"
+
+module va_diode(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    electrical internal;            // between the series R and the junction
+
+    parameter real Is    = 1e-14 from (0:inf);   // saturation current (A)
+    parameter real N     = 1.0   from (0:inf);   // ideality factor
+    parameter real Rs    = 0.1   from (0:inf);   // series resistance (ohm)
+    parameter real Cj0   = 1e-12 from [0:inf);   // zero-bias junction cap (F)
+    parameter real Vj    = 0.7   from (0:inf);   // built-in potential (V)
+    parameter real M     = 0.5   from (0:1);     // grading coefficient
+    parameter real Tnom  = 300.15 from (0:inf);  // temperature (K)
+
+    real Vt, Vcrit, Vd, Id, Cj, qd;
+
+    analog begin
+        Vt = N * `P_K * Tnom / `P_Q;
+        // The usual SPICE critical voltage: the knee beyond which an
+        // unlimited Newton step overshoots by orders of magnitude.
+        Vcrit = Vt * ln(Vt / (sqrt(2.0) * Is));
+        Vd = $limit(V(internal, cathode), "pnjlim", Vt, Vcrit);
+
+        Id = Is * (exp(Vd / Vt) - 1.0);
+
+        // Depletion capacitance, frozen above 0.5*Vj (the usual SPICE dodge
+        // around the (1 - V/Vj)^-M singularity at V -> Vj).
+        if (Vd < 0.5 * Vj)
+            Cj = Cj0 * pow(1.0 - Vd / Vj, -M);
+        else
+            Cj = Cj0 * pow(0.5, -M) * (1.0 + M * (Vd / Vj - 0.5) / 0.5);
+        qd = Cj * Vd;
+
+        I(internal, cathode) <+ Id;
+        I(internal, cathode) <+ ddt(qd);
+        I(anode, internal)   <+ V(anode, internal) / Rs;
+    end
+endmodule

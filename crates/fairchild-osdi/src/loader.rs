@@ -7,7 +7,7 @@ use fairchild_core::Device;
 
 use crate::device::OsdiDevice;
 use crate::error::OsdiError;
-use crate::ffi::OsdiDescriptor;
+use crate::ffi::{OsdiDescriptor, OsdiLimFunction};
 
 /// A loaded `.osdi` shared library (RAII wrapper around dlopen).
 ///
@@ -82,6 +82,8 @@ impl OsdiLibrary {
 
         // dlsym returns the address of the first element of OSDI_DESCRIPTORS.
         let descriptors_base = dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
+
+        install_lim_table(handle);
 
         Ok(Self {
             handle,
@@ -169,5 +171,151 @@ unsafe fn dlsym_or_err(
         })
     } else {
         Ok(ptr)
+    }
+}
+
+// ── $limit() support ────────────────────────────────────────────────────────
+
+/// Limiting functions fairchild implements, keyed the way OSDI asks for them.
+///
+/// `num_args` is the count of arguments *beyond* the fixed `(init, check,
+/// vnew, vold)` prefix — i.e. what the model passes after the name, and what
+/// OpenVAF records in the table (`num_args - 2` of the lowered call's arity).
+/// It is part of the ABI contract: install a 6-parameter function against an
+/// entry the model calls with 5 and the callee reads a register that was never
+/// set. So the arity is matched, not assumed.
+///
+/// Adding a limiter is one row here plus its `extern "C"` function. There is no
+/// fixed set to complete: OpenVAF does not validate the name at all — it
+/// forwards whatever string literal the model wrote (see
+/// `hir_lower/src/expr.rs`, `BuiltIn::limit`), so this list can never be
+/// exhaustive and [`osdi_no_limit`] is what makes that safe.
+static LIMITERS: &[(&str, u32, LimiterFn)] = &[("pnjlim", 2, osdi_pnjlim)];
+
+/// Signature shared by every entry in [`LIMITERS`].
+///
+/// Declared with the widest argument list we implement; entries with fewer
+/// extra arguments simply ignore the tail. `osdi_no_limit` relies on the same
+/// property — see its docs.
+type LimiterFn = unsafe extern "C" fn(bool, *mut bool, f64, f64, f64, f64) -> f64;
+
+/// Install fairchild's limiting functions into a freshly-loaded library's
+/// `OSDI_LIM_TABLE`.
+///
+/// A library whose models call `$limit()` exports one table entry per distinct
+/// limiting function, each with `func_ptr` **null**, because the simulator is
+/// expected to supply the implementations. OpenVAF guards the call with the
+/// `ENABLE_LIM` eval flag, so a null entry is harmless right up until the
+/// simulator opts into limiting — which fairchild now does whenever a model
+/// declares limit state. That makes "no entry is left null" a hard invariant
+/// rather than a nicety: violate it and the first `eval` jumps to address 0.
+///
+/// Hence [`osdi_no_limit`] for anything unrecognised: an unimplemented limiter
+/// degrades to *no limiting*, which costs convergence robustness but keeps the
+/// model numerically valid, instead of killing the process.
+unsafe fn install_lim_table(handle: *mut libc::c_void) {
+    let table = libc::dlsym(handle, c"OSDI_LIM_TABLE".as_ptr()) as *mut OsdiLimFunction;
+    let len_ptr = libc::dlsym(handle, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32;
+    if table.is_null() || len_ptr.is_null() {
+        return; // no model in this library calls $limit()
+    }
+
+    for entry in std::slice::from_raw_parts_mut(table, *len_ptr as usize) {
+        let name = CStr::from_ptr(entry.name)
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        let chosen = LIMITERS
+            .iter()
+            .find(|(n, args, _)| *n == name && *args == entry.num_args);
+
+        match chosen {
+            Some((_, _, f)) => entry.func_ptr = *f as *mut libc::c_void,
+            None => {
+                // Distinguish "we have never heard of this" from "we have it
+                // but the model calls it differently" — the second is a real
+                // ABI mismatch and the more surprising of the two.
+                let known_name = LIMITERS.iter().find(|(n, _, _)| *n == name);
+                match known_name {
+                    Some((_, expected, _)) => eprintln!(
+                        "warning: OSDI model calls $limit(…, \"{name}\", …) with \
+                         {} extra argument(s); fairchild implements it with {expected}. \
+                         Running without limiting for this call — convergence may suffer.",
+                        entry.num_args
+                    ),
+                    None => eprintln!(
+                        "warning: OSDI model calls $limit(…, \"{name}\", …), which fairchild \
+                         does not implement. Running without limiting for this call — \
+                         convergence may suffer, results are unaffected. Add it to \
+                         `LIMITERS` in fairchild-osdi/src/loader.rs to support it."
+                    ),
+                }
+                entry.func_ptr = osdi_no_limit as LimiterFn as *mut libc::c_void;
+            }
+        }
+    }
+}
+
+/// The identity limiter: hand back the proposed value untouched.
+///
+/// Stands in for any limiting function fairchild does not implement, so no
+/// table entry is ever left null. Safe at *any* arity, which is what lets it
+/// substitute for a function whose signature we do not know: it reads only the
+/// four fixed leading parameters, and on every ABI fairchild targets
+/// (AArch64 AAPCS, x86-64 SysV, Windows x64) surplus arguments the callee
+/// never touches are harmless.
+///
+/// Deliberately does not set `*check`: it limited nothing, so it must not tell
+/// the solver to withhold convergence.
+unsafe extern "C" fn osdi_no_limit(
+    _init: bool,
+    _check: *mut bool,
+    vnew: f64,
+    _vold: f64,
+    _a: f64,
+    _b: f64,
+) -> f64 {
+    vnew
+}
+
+/// SPICE `pnjlim` — logarithmic compression of a forward junction step.
+///
+/// Matches `models::diode::ShockleyDiode::pnjlim` rather than SPICE3's exact
+/// expression, deliberately: a Verilog-A junction and a native fairchild
+/// junction then take the same path to the same answer. Not shared as one
+/// function because the native one is a method carrying the device's own
+/// `vcrit`, while OSDI passes `vcrit` per call.
+///
+/// Limiting changes the Newton path, not the solution — verified: the
+/// `$limit`-using diode in `examples/verilog_a/models/va_diode.va` converges to
+/// 0.6333213 V against 0.6333214 V for the same model without it.
+unsafe extern "C" fn osdi_pnjlim(
+    init: bool,
+    check: *mut bool,
+    vnew: f64,
+    vold: f64,
+    vt: f64,
+    vcrit: f64,
+) -> f64 {
+    // `check` tells the solver this iterate was modified, so it must not
+    // declare convergence on this step.
+    let limited = |v: f64| {
+        if !check.is_null() {
+            *check = true;
+        }
+        v
+    };
+    if init {
+        // First evaluation: no meaningful previous iterate to limit against,
+        // so start at the critical voltage.
+        return limited(vcrit);
+    }
+    if vnew > vcrit && (vnew - vold).abs() > 2.0 * vt {
+        if vnew > vold {
+            limited(vold + vt * ((vnew - vold) / vt + 1.0).ln())
+        } else {
+            limited(vold - vt * ((vold - vnew) / vt + 1.0).ln())
+        }
+    } else {
+        vnew
     }
 }

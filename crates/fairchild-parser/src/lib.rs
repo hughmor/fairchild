@@ -114,6 +114,9 @@ impl BundlePort {
     }
 
     /// Underlying wire names for channel `ch` of this port.
+    ///
+    /// See [`is_lambda_wire`] for the inverse of the `_wl_` half of this
+    /// naming — the solver needs to pick the wavelength wires back out.
     pub fn wires_for_channel(&self, ch: usize) -> Vec<String> {
         match self.kind {
             BundleKind::Optical {
@@ -146,6 +149,29 @@ impl BundlePort {
         }
         out
     }
+}
+
+/// Is `net` a wavelength wire — the `λ` third of an optical channel?
+///
+/// The inverse of the `_wl_` naming in [`BundlePort::wires_for_channel`], and
+/// the one place that convention is decoded. All three ways of declaring
+/// optical nets end up spelling the wavelength wire `<something>_wl_<channel>`:
+/// `.optical_port p 2` generates it, `.optical_bus 2 re im wl` generates
+/// `wl_0`/`wl_1` from the third base name, and `.optical foo_wl[0..1]` names it
+/// by hand. So one rule covers all of them.
+///
+/// The solver needs this because a λ wire carries **metres** (~1.55e-6) while
+/// sitting in the same solution vector as volts, and the Newton step test is
+/// otherwise calibrated for volts — see `crate::tolerance` in `fairchild-core`.
+///
+/// Callers are expected to check `netlist.optical_nets` membership first, so an
+/// electrical net that happens to be named `foo_wl_0` is not affected.
+pub fn is_lambda_wire(net: &str) -> bool {
+    let mut parts = net.rsplit('_');
+    let Some(channel) = parts.next() else {
+        return false;
+    };
+    !channel.is_empty() && channel.bytes().all(|b| b.is_ascii_digit()) && parts.next() == Some("wl")
 }
 
 /// One `.alter <label>` block: name-keyed patches applied to the base netlist
@@ -197,7 +223,9 @@ fn element_name(el: &Element) -> String {
         | Element::Bjt { name, .. }
         | Element::XOsdi { name, .. }
         | Element::Behavioral { name, .. }
-        | Element::TransmissionLine { name, .. } => name.to_lowercase(),
+        | Element::TransmissionLine { name, .. }
+        | Element::VoltageSwitch { name, .. }
+        | Element::CurrentSwitch { name, .. } => name.to_lowercase(),
     }
 }
 
@@ -478,6 +506,36 @@ pub enum Element {
         l2: String,
         coupling: f64,
     },
+    /// Voltage-controlled switch: `S<name> N+ N- NC+ NC- <model> [ON|OFF]`
+    ///
+    /// `.model <m> SW (VT= VH= RON= ROFF=)`.  A resistor that is `RON` while
+    /// `V(NC+,NC-)` is above `VT+VH` and `ROFF` below `VT-VH`, holding its
+    /// previous state in between.
+    VoltageSwitch {
+        name: String,
+        pos: NodeName,
+        neg: NodeName,
+        ctrl_pos: NodeName,
+        ctrl_neg: NodeName,
+        model_name: String,
+        /// The `ON`/`OFF` keyword: the state the switch starts in, and the one
+        /// it holds while the control sits inside the hysteresis band.
+        /// Defaults to OFF, as in SPICE.
+        initial_on: bool,
+    },
+    /// Current-controlled switch: `W<name> N+ N- <vsource> <model> [ON|OFF]`
+    ///
+    /// `.model <m> CSW (IT= IH= RON= ROFF=)`.  The `S` element's twin, watching
+    /// the current through a named voltage source instead of a node pair.
+    CurrentSwitch {
+        name: String,
+        pos: NodeName,
+        neg: NodeName,
+        /// Name of the voltage source whose branch current is the control.
+        ctrl_vsrc: String,
+        model_name: String,
+        initial_on: bool,
+    },
     /// Lossless transmission line: `T<name> A+ A- B+ B- Z0=<Ω> TD=<s>`
     ///
     /// Ideal (lossless) two-port delay line modelled by Branin's method: each
@@ -510,6 +568,8 @@ pub enum Element {
         anode: NodeName,
         cathode: NodeName,
         model_name: String,
+        /// Trailing `key=value` instance params, as on `M` and `Q`.
+        params: Vec<(String, f64)>,
     },
     Mosfet {
         name: String,
@@ -749,6 +809,26 @@ pub fn check_disciplines(netlist: &Netlist) -> Result<(), DisciplineError> {
                 check(name, a_neg)?;
                 check(name, b_pos)?;
                 check(name, b_neg)?;
+            }
+            Element::VoltageSwitch {
+                name,
+                pos,
+                neg,
+                ctrl_pos,
+                ctrl_neg,
+                ..
+            } => {
+                check(name, pos)?;
+                check(name, neg)?;
+                check(name, ctrl_pos)?;
+                check(name, ctrl_neg)?;
+            }
+            // The control is a voltage-source *name*, not a net; that it
+            // exists is checked when the device is built and the branch row
+            // resolved.
+            Element::CurrentSwitch { name, pos, neg, .. } => {
+                check(name, pos)?;
+                check(name, neg)?;
             }
         }
     }

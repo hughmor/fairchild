@@ -597,6 +597,7 @@ mod tests {
             anode,
             cathode,
             model_name,
+            ..
         } = &netlist.elements[0]
         {
             assert_eq!(name, "d1");
@@ -606,6 +607,23 @@ mod tests {
         } else {
             panic!("expected Diode element");
         }
+    }
+
+    /// `D` used to stop reading at the model name, so trailing `key=value`
+    /// pairs were dropped at parse time — silently, and with no way to
+    /// parameterise an OSDI model instantiated as a diode.  `M` and `Q`
+    /// always kept theirs.
+    #[test]
+    fn parse_diode_instance_params() {
+        let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n.end\n";
+        let netlist = parse_spice(input).unwrap();
+        let Element::Diode { params, .. } = &netlist.elements[0] else {
+            panic!("expected Diode element");
+        };
+        assert_eq!(
+            params,
+            &[("is".to_string(), 1e-12), ("rs".to_string(), 0.5)]
+        );
     }
 
     #[test]
@@ -1797,7 +1815,9 @@ R1 a b 1k
     /// Python can pull in a shared PCell file.
     #[test]
     fn parse_spice_resolves_includes_from_string() {
-        let dir = std::env::temp_dir().join("fc_include_test");
+        // Process-scoped, like `fc_lib_test_*` below: the fixed path made two
+        // concurrent `cargo test` runs delete each other's include file.
+        let dir = std::env::temp_dir().join(format!("fc_include_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let inc = dir.join("pcell_r.sp");
         std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n").unwrap();

@@ -1,0 +1,79 @@
+// Optical disciplines for fairchild Verilog-A models.
+//
+// fairchild carries an optical signal as a slowly-varying complex envelope on
+// three ordinary MNA unknowns per channel, so a Verilog-A model only ever sees
+// real potentials and OSDI needs no extension to handle it:
+//
+//   <port>_re   real part of the field amplitude,      units sqrt(W)
+//   <port>_im   imaginary part of the field amplitude, units sqrt(W)
+//   <port>_wl   carrier wavelength,                    units m
+//
+// Optical power is re^2 + im^2.  These are exactly the wires a native
+// `.optical_port p` expands to (`p_re_0`, `p_im_0`, `p_wl_0`), which is why a
+// Verilog-A model can be dropped into a link built from native fc_* devices —
+// see eam_link.sp.
+//
+// Convention: forward-only propagation, potential-only contribution.  A model
+// writes its output field directly (`OF(out_re) <+ ...`) rather than driving a
+// Norton-equivalent source, and passes the wavelength through unchanged.
+//
+// ── TAKE λ FROM A PARAMETER, NEVER FROM THE WIRE ────────────────────────────
+//
+// The λ wire exists so a chain stays self-consistent and so native devices can
+// read it.  Do NOT use `OWL(...)` inside an expression you contribute from.
+//
+// Propagation phase is φ = 2π·n_g·L/λ — thousands of radians for any real
+// waveguide (400 µm at n_g = 4.2 is ~6800 rad).  OpenVAF differentiates
+// everything you write, so reading λ off the wire puts ∂φ/∂λ = φ/λ ≈ 1e9 per
+// metre into the Jacobian, against an unknown whose scale is 1e-6.  Newton
+// does not converge; it fails at some wavelengths and not others, which reads
+// like a physics bug and is not one.
+//
+// fairchild's native devices dodge this by freezing λ at the previous Newton
+// iterate — a "don't differentiate this" that Verilog-A has no way to express.
+// So: `wavelength_nm` is a parameter, physics uses it, and the wire is passed
+// straight through (`OWL(out_wl) <+ OWL(in_wl)`).  Sweep wavelength with
+// `--param Xlaser.wavelength_nm=…` / `set_param`, not by driving the wire.
+//
+// OpenVAF 23.5 panics in `intern_node_strs` on a discipline that declares only
+// a potential, so each one below carries an unused placeholder flow nature.
+// Model bodies must never reference `_of_flow` / `_owl_flow`.
+
+`ifndef FAIRCHILD_OPTICAL_VAMS
+`define FAIRCHILD_OPTICAL_VAMS
+
+nature OpticalField
+    units   = "sqrt(W)";
+    access  = OF;
+    abstol  = 1e-9;
+endnature
+
+nature OpticalLambda
+    units   = "m";
+    access  = OWL;
+    abstol  = 1e-12;
+endnature
+
+nature _OpticalFieldFlow
+    units   = "A";
+    access  = _of_flow;
+    abstol  = 1e-15;
+endnature
+
+nature _OpticalLambdaFlow
+    units   = "A";
+    access  = _owl_flow;
+    abstol  = 1e-15;
+endnature
+
+discipline optical_field
+    potential OpticalField;
+    flow      _OpticalFieldFlow;
+enddiscipline
+
+discipline optical_lambda
+    potential OpticalLambda;
+    flow      _OpticalLambdaFlow;
+enddiscipline
+
+`endif

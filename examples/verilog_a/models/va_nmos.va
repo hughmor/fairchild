@@ -1,0 +1,49 @@
+// NMOS Level 1 (Shichman-Hodges) — OSDI v0.4 target
+// Terminals: drain, gate, source, bulk (bulk ignored in this simplified model)
+`include "disciplines.vams"
+`include "constants.vams"
+
+module va_nmos(drain, gate, source, bulk);
+  inout drain, gate, source, bulk;
+  electrical drain, gate, source, bulk;
+
+  // Model parameters
+  parameter real KP     = 120e-6  from (0:inf);  // A/V² process transconductance
+  parameter real VTH0   = 0.7                  ;  // V threshold voltage
+  parameter real LAMBDA = 0.01    from [0:inf) ;  // 1/V channel-length modulation
+  parameter real CGSO   = 200e-12 from [0:inf) ;  // F/m gate-source overlap cap/width
+  parameter real CGDO   = 200e-12 from [0:inf) ;  // F/m gate-drain overlap cap/width
+
+  // Instance parameters
+  parameter real W = 10e-6 from (0:inf);  // m channel width
+  parameter real L =  1e-6 from (0:inf);  // m channel length
+
+  real vgs, vds, beta, veff, vdsat, ids;
+
+  analog begin
+    vgs = V(gate, source);
+    vds = V(drain, source);
+
+    beta = KP * W / L;
+    veff = vgs - VTH0;
+
+    if (veff <= 0.0) begin
+      ids = 0.0;
+    end else begin
+      vdsat = veff;
+      if (vds < vdsat) begin
+        // Linear/triode region
+        ids = beta * (veff * vds - 0.5 * vds * vds);
+      end else begin
+        // Saturation region (with channel-length modulation)
+        ids = 0.5 * beta * veff * veff * (1.0 + LAMBDA * vds);
+      end
+    end
+
+    I(drain, source) <+ ids;
+
+    // Overlap gate capacitances (charge-based → transient-correct via ddt)
+    I(gate, source) <+ ddt(CGSO * W * V(gate, source));
+    I(gate, drain)  <+ ddt(CGDO * W * V(gate, drain));
+  end
+endmodule

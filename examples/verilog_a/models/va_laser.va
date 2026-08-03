@@ -1,0 +1,35 @@
+// CW laser source — injects a constant complex SVEA field.
+//
+// Direct potential contributions (B1+ discipline scheme).  Outputs are
+// 3-wire (re, im, lambda) using the `optical_field` + `optical_lambda`
+// disciplines; no Norton hack.
+//
+// Parameters:
+//   power_mW      — output power in mW (P = |A|² so A = √P)
+//   phi_0_deg     — initial phase offset in degrees
+//   wavelength_nm — carrier wavelength (nm); drives the lambda port in metres
+
+`include "disciplines.vams"
+`include "constants.vams"
+`include "optical.vams"
+
+module va_laser(out_re, out_im, out_lambda);
+    inout out_re, out_im, out_lambda;
+    optical_field  out_re, out_im;
+    optical_lambda out_lambda;
+
+    parameter real power_mW      = 1.0    from (0:inf);
+    parameter real phi_0_deg     = 0.0;
+    parameter real wavelength_nm = 1550.0 from (0:inf);
+
+    real A_re, A_im;
+
+    analog begin
+        A_re = sqrt(power_mW * 1e-3) * cos(phi_0_deg * `M_PI / 180.0);
+        A_im = sqrt(power_mW * 1e-3) * sin(phi_0_deg * `M_PI / 180.0);
+
+        OF(out_re)     <+ A_re;
+        OF(out_im)     <+ A_im;
+        OWL(out_lambda) <+ wavelength_nm * 1e-9;
+    end
+endmodule
