@@ -67,16 +67,11 @@ class Hw:
     xt_bg_db: float = -40.0  # AWGR port isolation, background
     er_db: float = 30.0  # MZM extinction ratio
     r_shunt: float = 1e15  # integrator leak path
-    # --- noise (all off by default; see `noise`) ---
+    # --- noise: `.options trannoise=1`, so shot and RIN come from the devices ---
     noise: bool = False
-    s_i_tia: float = 18e-12  # A/sqrt(Hz), input-referred
+    noise_seed: int = 1
+    s_i_tia: float = 18e-12  # A/sqrt(Hz), input-referred; no TIA device, see below
     rin_db_hz: float = -155.0
-    # Noise sample rate, in units of f_B. The injected process must look white
-    # to whatever filters it, and the filter here is the integrator's boxcar
-    # over one symbol. At the Nyquist rate 2*f_B that boxcar spans two samples,
-    # so its end weights are half the window and the residual comes out ~0.2 b
-    # optimistic; 8 makes the discretisation invisible.
-    noise_fs_mult: float = 8.0
     # --- knobs the experiments sweep ---
     predistort: bool = True  # arcsin drive -> exactly linear MZM
     tr_frac: float = 0.25  # NRZ edge as a fraction of the symbol period
@@ -163,12 +158,19 @@ def build(arch: Arch, hw: Hw, W: np.ndarray, X: np.ndarray, seed: int = 0) -> De
     ln = [f"* hypermultiplexed PTC  N={N} S={S} K={N} L={L} f_B={arch.f_B:.4g}",
           f".options lambda_center_nm={hw.lambda0_nm} vntol=1e-14 reltol=1e-12",
           f".options max_step={dt:.6e} method=gear"]
+    if hw.noise:
+        ln.append(f".options trannoise=1 noiseseed={hw.noise_seed}"
+                  " variable_step=0")
 
     # --- source bank -> WDM bus ---
     for k in range(N):
         ln.append(f".optical_port ch{k}")
+        # RIN is injected at the source, so it propagates through both
+        # modulators and arrives at every receiver of wavelength k perfectly
+        # correlated -- which is what a shared laser physically does.
+        rin = f" rin_db_hz={hw.rin_db_hz:.6g}" if hw.noise else ""
         ln.append(f"Xl{k} ch{k} fc_cw_laser power_mW={hw.p_laser_mW:.9g}"
-                  f" wavelength_nm={lam[k]:.9f}")
+                  f" wavelength_nm={lam[k]:.9f}{rin}")
     ln.append(".optical_port src %d" % N)
     ln.append("Xmux src " + " ".join(f"ch{k}" for k in range(N))
               + f" fc_mux il_db={hw.l_mux_db:.6g}")
@@ -190,17 +192,6 @@ def build(arch: Arch, hw: Hw, W: np.ndarray, X: np.ndarray, seed: int = 0) -> De
               f" xt_adj_db={hw.xt_adj_db:.6g} xt_bg_db={hw.xt_bg_db:.6g}")
 
     # --- spatial fan-out, input bank, demux, receivers ---
-    rng = np.random.default_rng(seed)
-    f_s = hw.noise_fs_mult * arch.f_B
-    n_samp = int(np.ceil(t_stop * f_s)) + 2
-    t_n = np.arange(n_samp) / f_s
-    if hw.noise:
-        assert hw.oversample >= 2 * hw.noise_fs_mult, (
-            "solver step must resolve the noise samples")
-        g = math.sqrt(hw.noise_fs_mult / 2.0)
-        for k in range(N):  # one RIN node per laser, shared by its receivers
-            ln.append(f"Vrin{k} nrin{k} 0 "
-                      + _pwl_raw(t_n, g * rng.standard_normal(n_samp)))
     for j in range(N):
         taps = _fanout(ln, f"b{j}", S, f"fs{j}", N)
         for s in range(S):
@@ -221,7 +212,7 @@ def build(arch: Arch, hw: Hw, W: np.ndarray, X: np.ndarray, seed: int = 0) -> De
                        f" r_shunt={hw.r_shunt:.6g} i_dark=0",
                        f"Ci{j}_{s}_{k} {q} 0 {hw.c_int_fF:.6g}f IC=0"]
                 if hw.noise:
-                    ln += _rx_noise(hw, arch, j, s, k, rng, t_n)
+                    ln += _tia_noise(hw, j, s, k)
 
     ln += [f".tran {dt:.6e} {t_stop:.6e}", ".end"]
     d = Deck("\n".join(ln) + "\n", arch, hw, n_blocks,
@@ -230,35 +221,28 @@ def build(arch: Arch, hw: Hw, W: np.ndarray, X: np.ndarray, seed: int = 0) -> De
     return d
 
 
-def _pwl_raw(t: np.ndarray, v: np.ndarray) -> str:
-    return "PWL(" + " ".join(f"{a:.9e} {b:.9e}" for a, b in zip(t, v)) + ")"
+KB = 1.380649e-23
 
 
-def _rx_noise(hw: Hw, arch: Arch, j: int, s: int, k: int,
-              rng: np.random.Generator, t_n: np.ndarray) -> list[str]:
-    """TIA + shot on one independent node; RIN on the shared per-lambda node.
+def _tia_noise(hw: Hw, j: int, s: int, k: int) -> list[str]:
+    """Input-referred TIA current noise.
 
-    Shot and RIN are signal-dependent, so they are B-element products of the
-    instantaneous optical power with a unit-variance noise node -- the only way
-    to get multiplicative noise out of a pre-sampled source.
+    Shot and RIN come from `fc_photodetector` and `fc_cw_laser` under
+    `.options trannoise=1`. The TIA does not: there is no TIA device, and no
+    element that spells "a current source of PSD S". A resistor of
+    `R = 4kT/S_i²` would have the right PSD but loads the integrator to death
+    (51 ohm across 500 fF is a 25 fs time constant).
 
-    The noise node carries iid samples at f_s = noise_fs_mult * f_B, whose
-    one-sided PSD is 2*sigma_s^2/f_s. The manuscript's coefficients are quoted
-    as a variance in bandwidth f_B, so scale by sqrt(f_s / 2 f_B) to put the
-    right PSD on the wire regardless of how finely it is sampled.
+    So: pick any convenient R, and buffer its 4kT·R volts through a B-element
+    transconductance chosen to land the wanted current PSD. The resistor sets
+    the spectrum, the B-element sets the amplitude, and nothing loads the
+    integrating node.
     """
-    q, p, tag = f"q{j}_{s}_{k}", f"p{j}_{s}_{k}", f"{j}_{s}_{k}"
-    pw = f"(V({p}_re_0)^2 + V({p}_im_0)^2)"
-    r, b = hw.responsivity, arch.f_B
-    rin = 10.0 ** (hw.rin_db_hz / 10.0)
-    g = math.sqrt(hw.noise_fs_mult / 2.0)  # PSD-preserving oversample scale
-    return [
-        f"Vn{tag} nrx{tag} 0 "
-        + _pwl_raw(t_n, g * rng.standard_normal(len(t_n))),
-        f"Bn{tag} 0 {q} I=sqrt({hw.s_i_tia ** 2 * b:.9e}"
-        f" + {2 * Q_E * r * b:.9e}*{pw})*V(nrx{tag})",
-        f"Br{tag} 0 {q} I={rin * b:.9e}^0.5*{r:.9g}*{pw}*V(nrin{k})",
-    ]
+    r_n = 1e3
+    g = hw.s_i_tia / math.sqrt(4.0 * KB * 300.15 * r_n)
+    tag = f"{j}_{s}_{k}"
+    return [f"Rtia{tag} ntia{tag} 0 {r_n:.6g}",
+            f"Btia{tag} 0 q{tag} I={g:.9e}*V(ntia{tag})"]
 
 
 def readout(deck: Deck, res) -> np.ndarray:
@@ -315,17 +299,26 @@ def enob(err: np.ndarray, span: float = 1.0) -> float:
     return math.log2(span / (math.sqrt(3.0) * err.std()))
 
 
-def enob_theory(hw: Hw, arch: Arch, i_ph: float) -> float:
+def enob_theory(hw: Hw, arch: Arch, i_ph: float,
+                rin_instantaneous: bool = True) -> float:
     """Block ENOB from eq:master_snr / eq:coefficients, no ASE (no SOA yet).
 
     The integrator is a boxcar of length 1/f_B, whose equivalent noise bandwidth
     is f_B/2 -- half the bandwidth the manuscript's per-symbol convention uses,
     hence the sqrt(2). The L-symbol accumulation then adds 0.5*log2(L).
+
+    `rin_instantaneous` inflates the RIN term by (1 + m^2<u^2>)^2. eq:coefficients
+    writes `r I_ph^2 B` against the *average* photocurrent, but RIN is
+    multiplicative on the instantaneous power and two cascaded modulators raise
+    <P^2>/<P>^2 by that factor. Set False to compare against the paper as
+    written; the simulator does the instantaneous thing whichever you pick.
     """
     b = arch.f_B
     a0 = hw.s_i_tia**2 * b
     a1 = 2.0 * Q_E * b
     a2 = 10.0 ** (hw.rin_db_hz / 10.0) * b
+    if rin_instantaneous:
+        a2 *= (1.0 + hw.m**2 / 3.0) ** 2  # uniform operands, <u^2> = 1/3
     sigma = math.sqrt((a0 + a1 * i_ph + a2 * i_ph**2) / 2.0)
     per_mac = math.log2(hw.m**2 * i_ph / (math.sqrt(3.0) * sigma))
     return per_mac + 0.5 * math.log2(arch.L)
@@ -346,8 +339,12 @@ def run(deck: Deck, method: str = "tr"):
     # uic is not optional: the integrator node sees only C_int and r_shunt,
     # so a DC operating point would put I_ph * 1e15 ohm on it and never
     # converge. The physical initial state is a discharged integrator.
+    # trannoise also needs a fixed step: the LTE controller would read a fresh
+    # noise sample as a fast signal and shrink the step to chase it, correlating
+    # step size with noise. The solver refuses the combination outright.
     return c.run("tran", step=deck.step, stop=deck.stop, method=method,
-                 max_step=deck.step, uic=True)
+                 max_step=deck.step, uic=True, variable_step=False,
+                 trannoise=deck.hw.noise, noiseseed=deck.hw.noise_seed)
 
 
 def calibrate(arch: Arch, hw: Hw, W: np.ndarray, X: np.ndarray, seed: int = 0):

@@ -54,25 +54,35 @@ Three things that are not obvious and will bite:
   from the TIA floor, through the shot knee at `I* = A_0/A_1 ≈ 1 mA`, up to the
   RIN ceiling (`enob_sweep.py`, `results/enob_sweep.png`).
 - AWGR port isolation degrades the MAC as expected when tightened to −15 dB.
-- **Experiment E** (`accumulation.py`): per-MAC ENOB is flat in `L` to 0.17 b
-  over `L = 1…32`, output-referred rises at **0.478 b per octave** against the
-  predicted 0.5. Confirms the `1/√L` converter amortization of eq:adc_power.
+- **Experiment E** (`accumulation.py`): per-MAC ENOB is flat in `L` to 0.08 b
+  over `L = 1…32`, output-referred rises at **0.485 b per octave** against the
+  predicted 0.5 (rerun on native noise sources). Confirms the `1/√L` converter amortization of eq:adc_power.
 
-### One discrepancy worth chasing
+### A correction to A₂ that the sim keeps insisting on
 
-In the RIN-dominated corner the sim lands **0.3–0.4 b below** the closed form.
-About 0.28 b of that is accounted for by a definition: eq:coefficients writes
-`⟨i_RIN²⟩ = r I_ph² B` against the *average* photocurrent, but RIN is
-multiplicative on the *instantaneous* power, and two cascaded modulators inflate
-`⟨P²⟩/⟨P⟩²` by `(1 + m²⟨u²⟩)² = 1.47` for uniform operands at `m = 0.8` — 1.7 dB,
-i.e. 0.28 b off the ceiling. Substituting that factor into `A_2` drops the worst
-disagreement from 0.375 b to 0.164 b, the remainder being sample statistics
-(640 MACs) and the boxcar-bandwidth approximation.
+eq:coefficients writes `⟨i_RIN²⟩ = r I_ph² B` against the **average**
+photocurrent. RIN is multiplicative on the **instantaneous** power, and two
+cascaded modulators raise `⟨P²⟩/⟨P⟩²` by `(1 + m²⟨u²⟩)²` — 1.47 for uniform
+operands at `m = 0.8`, i.e. 1.7 dB or 0.28 b off the ceiling.
 
-If it holds up, `A_2 = r f_B (1 + m²σ_op²)² + k_xt χ` — a small correction to
-`SNR_∞`, in the direction of *less* headroom. Shot noise is unaffected (its mean
-is untouched by zero-mean modulation). Worth confirming with a dedicated run at
-high `I_ph` and swept `m` before it goes anywhere near the manuscript.
+Measured three ways, and it survived all of them:
+
+1. Unmodulated, RIN-only: the injected noise is `√(r I_ph² f_B / 2)` to **0.5 %**,
+   so the generator itself is exactly the paper's expression.
+2. Modulators running, `m` swept 0 → 1 at RIN-dominant power: the noise grows as
+   `√(⟨P²⟩/⟨P⟩²)` to ~1 %, matching `(1 + m²/3)` per stage.
+3. Full deck at `I_ph = 4.6 mA`, 1920 MACs over 3 seeds: **8.03 b** measured
+   against **8.37 b** for the paper as written and **8.14 b** with the factor in.
+
+So `A₂ = r f_B (1 + m²σ_op²)² + k_xt χ` — a small correction, in the direction of
+*less* headroom. Shot noise is unaffected (its mean survives zero-mean
+modulation untouched). It also matters more than 0.28 b suggests, because `A₂`
+sets `SNR_∞`, which no amount of power moves.
+
+Residual after the correction: **0.11 b**, still slightly systematic. Not yet
+explained; candidates are the boxcar-bandwidth approximation on a
+signal-correlated noise term, and shot noise still being 15 % of the total at
+that current. Small enough not to block anything, big enough not to call closed.
 
 ## What fairchild is missing
 
@@ -99,16 +109,38 @@ Interim: gain as a negative-loss attenuator plus an equivalent receiver-side ASE
 current noise. That gets the ASE *noise* right at a fixed operating point and the
 *placement* physics wrong, so it cannot reproduce fig:link_limited.
 
-### 2. Transient random-noise source — worked around
+### 2. Transient noise — solved upstream
 
-There is no `TRNOISE`-style primitive, so noise here is pre-sampled and injected
-as `PWL` sources: one independent unit-variance node per receiver carrying TIA +
-shot through a `B`-element product with the instantaneous optical power, and one
-node per *wavelength* for RIN, shared by every receiver reading that laser
-because RIN is a property of the source. This is exact but the netlist grows as
-`(#noise nodes × duration × 2 f_B)` — already 0.5 MB at `N=8`, 10 blocks. A
-`TRNOISE(rms, dt)` waveform would be ~60 lines in the waveform module and make
-noise decks O(1) in size. Worth building before going past `N = 8`.
+`.options trannoise=1 noiseseed=<n>` (master, `da8ac20`) injects every generator
+the `.noise` table lists as a per-timestep random current. `fc_photodetector`
+shots `2q(I_ph + I_dark)` off its *current* photocurrent, so shot noise tracks
+the modulation; `fc_cw_laser rin_db_hz=` injects RIN at the source, so it
+propagates through both modulator banks and arrives at every receiver of
+wavelength `k` perfectly correlated — the physical behaviour of a shared laser,
+for free. This replaced a hand-rolled PWL construction here and the deck got
+smaller, faster, and more correct.
+
+Two constraints it imposes, both fine:
+
+- **Fixed step required.** `variable_step=1` is refused, not approximated.
+  This deck already ran fixed-step for the symbol edges.
+- **Noise bandwidth is the timestep's Nyquist.** Harmless here: the integrator
+  band-limits, so the block charge is step-independent for any `h ≪ 1/f_B`.
+
+The one source with no device is the **TIA's input-referred current noise**.
+There is no TIA model and no element spelling "a current source of PSD `S`". A
+resistor of `4kT/S_i²` = 51 Ω has the right spectrum but a 25 fs time constant
+across the integrator. `_tia_noise` therefore picks a convenient `R`, and
+buffers its `4kT·R` volts through a `B`-element transconductance sized to land
+the wanted current PSD: the resistor sets the spectrum, the `B`-element sets the
+amplitude, nothing loads the integrating node. It works, but a generic
+`noise PSD=<S>` two-terminal element would be the honest fix, and it is the
+natural home for ASE too.
+
+**Size `C_int` to the photocurrent.** At 500 mW the default 500 fF ends the run
+on a kilovolt node, where `reltol` alone exceeds the noise being measured and
+ENOB collapses from 8.3 b to 2.1 b. Nothing physical — but it looks like a
+physics result, so it is worth stating.
 
 ### 3. Spectral crosstalk — structurally out of scope
 

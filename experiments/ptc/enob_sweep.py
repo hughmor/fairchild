@@ -28,7 +28,12 @@ def sweep(powers_mW, arch, blocks=10, seed=0):
     X = rng.uniform(-1, 1, (n, arch.S, arch.N))
     rows = []
     for p in powers_mW:
-        base = ptc.Hw(p_laser_mW=p, tr_frac=0.02, oversample=400)
+        # Scale the integrator with the photocurrent. Left fixed, a 500 fF cap
+        # at 500 mW ends the run on a kilovolt node, where reltol alone is
+        # larger than the noise being measured and ENOB collapses. Nothing
+        # physical -- the sizing just has to follow the signal.
+        base = ptc.Hw(p_laser_mW=p, tr_frac=0.02, oversample=400,
+                      c_int_fF=500.0 * max(1.0, p / 10.0))
         got_q, want = ptc.simulate(arch, base, W, X)
         got_n, _ = ptc.simulate(arch, ptc.Hw(**{**base.__dict__, "noise": True}),
                                 W, X)
