@@ -19,8 +19,10 @@ Three failure modes, and only one of them is dangerous:
 | **SILENT** | Runs, says nothing, and the answer may be wrong. **These are bugs.** |
 
 The good news up front: every unimplemented element letter and every
-unimplemented dot-command is a hard **error**. The silent set is small, listed in
-§4, and is where the roadmap should start.
+unimplemented dot-command is a hard **error**. The silent set was small, and §4
+records it — **all five silent items are now fixed**; the section is kept as the
+record of what they were, because each one is a shape of bug worth recognising
+again.
 
 ---
 
@@ -43,7 +45,7 @@ fairchild does with a syntactically plausible line using that letter.
 | `J` | JFET | ❌ | error |
 | `K` | mutual inductance | ✅ | — |
 | `L` | inductor | ✅ + ESR parasitic | — |
-| `M` | MOSFET | ✅ Level 1 only (see §4.5) | — |
+| `M` | MOSFET | ✅ Level 1 only — `LEVEL≠1` warns loudly | — |
 | `N` | numerical device (NUMD, NBJT) | ❌ | error |
 | `O` | lossy transmission line (LTRA) | ❌ | error |
 | `P` | coupled multiconductor line | ❌ | error |
@@ -52,7 +54,7 @@ fairchild does with a syntactically plausible line using that letter.
 | `S` | voltage-controlled switch | ✅ | — |
 | `T` | lossless transmission line | ✅ | — |
 | `U` | uniform RC line (URC) | ❌ | error |
-| `V` | independent voltage source | ✅ (but see §4.1) | — |
+| `V` | independent voltage source | ✅ incl. `AC <mag> [phase]` | — |
 | `W` | current-controlled switch | ✅ | — |
 | `X` | subcircuit instance | ✅ + OSDI/Verilog-A instances | — |
 | `Y` | simple lossy line (TransLine/txl) | ❌ | error |
@@ -97,8 +99,8 @@ but it is a one-character difference away from a deck that runs.
 | `.control` / `.endc` | interactive control block | ❌ | error |
 | `.op` | operating point | ✅ | — |
 | `.dc` | DC sweep | ✅ nested, parallel | — |
-| `.ac` | AC small-signal | ✅ (but see §4.1) | — |
-| `.tran` | transient | ✅ (but see §4.4) | — |
+| `.ac` | AC small-signal | ✅ magnitude and phase honoured | — |
+| `.tran` | transient | ✅ incl. `tstart`, `tmax`, `UIC` | — |
 | `.noise` | noise analysis | ✅ | — |
 | `.disto` | small-signal distortion | ❌ | error |
 | `.pz` | pole-zero | ❌ | error |
@@ -114,7 +116,7 @@ but it is a one-character difference away from a deck that runs.
 | `.probe` | select probes | ⚠️ **silently ignored** | §4.6 |
 | `.width` | output width | ❌ | error |
 | `.measure` / `.meas` | measurements | ✅ (tran; see model_status §10) | — |
-| `.options` / `.option` | simulator options | ✅ known keys; **unknown keys silent** | §4.3 |
+| `.options` / `.option` | simulator options | ✅ known keys; unknown keys **warn** | — |
 | `.temp` | temperature (incl. sweep) | ✅ | — |
 | `.backanno` | (LTspice) back-annotation | ⚠️ silently ignored | §4.6 |
 
@@ -140,16 +142,18 @@ further than refusing the file.
 | `AM(…)` | ✅ | — |
 | `TRNOISE(…)` | ❌ | error |
 | `TRRANDOM(…)` | ❌ | error |
-| `AC <mag> [phase]` | ❌ | **SILENT — §4.1** |
+| `AC <mag> [phase]` | ✅ | — |
 
 Time-domain noise exists, but as `.options trannoise=1` over the `.noise` source
 list rather than as a `TRNOISE` source function.
 
 ---
 
-## 4. The silent set — every one of these is a bug
+## 4. The silent set — all five now fixed
 
-### 4.1 `AC <mag> [phase]` on a source line is discarded — WRONG ANSWERS
+Kept as the record. Each was found by running a deck, not by reading code.
+
+### 4.1 `AC <mag> [phase]` on a source line was discarded — FIXED
 
 ```spice
 V1 in 0 DC 0 AC 2      ← the "AC 2" is parsed away and never reaches the solver
@@ -168,11 +172,20 @@ diagnostic**. This is the worst item in this document: supported analysis,
 supported syntax, wrong number, silence. Phase is likewise unavailable, so
 multi-source AC (anything needing a 90° drive) cannot be expressed at all.
 
-*Fix:* parse `AC <mag> [phase]` in `parse_waveform`, carry it on the source, and
-use it in `build_ac_rhs` instead of the hardcoded `1.0, 0.0`. Until then it
-should at minimum be an error.
+**Fixed.** `AcSpec { mag, phase_deg }` on the source element, split off the line
+by `split_ac_spec` (the spec may sit anywhere after the nodes), and used by
+`build_ac_rhs`, which now returns both a real and an imaginary RHS. Verified
+against ngspice: magnitude scales exactly, and `AC 1 90` on an RC at its corner
+gives +45° where `AC 1 0` gives −45°.
 
-### 4.2 `.model x D(IS=…)` with no space before `(` loses the first parameter
+One deliberate wrinkle: a deck that declares **no** `AC` spec anywhere keeps the
+old unit drive, because there is no stated intent to contradict and the one
+in-tree `.ac` example relies on it. As soon as any source declares a spec the
+deck is read strictly, ngspice-style — which also fixes a second silent bug
+nobody had noticed: pairing an `AC 1` drive with a plain DC bias source used to
+excite the bias source too.
+
+### 4.2 `.model x D(IS=…)` with no space before `(` lost the first parameter — FIXED
 
 ```spice
 .model xx D (IS=1e-16)   → I(V1) = 5.670e-5 A     correct
@@ -185,10 +198,11 @@ MOSFET and BJT cards escape it — their dispatch is exact, so they raise
 `unknown model` — which makes the diode the one device that fails quietly.
 ngspice accepts the no-space form.
 
-*Fix:* split on `(` before tokenising the kind. One line, and it removes a whole
-class of confusion.
+**Fixed.** `parse_model` splits the kind token on `(` before lowercasing it, and
+folds the glued remainder back into the parameter list. Both spellings now give
+−5.670295e-5 A, against ngspice's −5.67035e-05.
 
-### 4.3 Unknown `.options` keys are accepted in silence
+### 4.3 Unknown `.options` keys were accepted in silence — FIXED
 
 ```spice
 .options reltol=1e-4 banana=7 trtol=7 chgtol=1e-14   ← all four accepted, no output
@@ -197,10 +211,10 @@ class of confusion.
 `trtol` and `chgtol` are real ngspice options someone would reasonably set and
 expect to matter. `banana` shows there is no validation at all.
 
-*Fix:* warn on any key not in the recognised set. Cheap, and it converts a
-silent no-op into a visible one.
+**Fixed.** `SimOptions::set` already returned `false` for an unrecognised key —
+`from_netlist` was discarding it. It now warns. Known keys stay quiet.
 
-### 4.4 `.tran`'s third and fourth arguments are discarded
+### 4.4 `.tran`'s third and fourth arguments were discarded — FIXED
 
 ```spice
 .tran 1n 20n 10n        tstart — ngspice suppresses output before 10 ns
@@ -215,10 +229,15 @@ finer resolution silently does not get it.
 (`UIC` *is* honoured — verified, `.ic v(out)=0.9` survives to t=0 with `UIC` and
 is discarded without it.)
 
-*Fix:* `tstart` is a trivial output filter. `tmax` should feed
-`SimOptions::max_step`, which already exists.
+**Fixed.** Both are parsed (skipping `UIC`, which may occupy any trailing slot)
+and picked up in `SimOptions::from_netlist`, so the CLI and the Python bindings
+get them from one place. `tstart` trims the finished result — SPICE's tstart
+selects what is *saved*, not where integration begins. `tmax` clamps
+`max_step` with `min`, so it can never loosen a ceiling set via
+`.options maxstep`. Verified: `tstart=10n` now starts at 1e-8 like ngspice, and
+`tmax=0.1n` turns 21 rows into 202.
 
-### 4.5 `LEVEL=` on a MOSFET card is only warned about generically
+### 4.5 `LEVEL=` on a MOSFET card was only warned about generically — FIXED
 
 ```spice
 .model nm NMOS (LEVEL=3 VTO=0.7 KP=100u KAPPA=0.2 THETA=0.1)
@@ -230,9 +249,11 @@ parameter among several, when what actually happened is that a Level 3 model was
 simulated as Level 1. That is a different device, not a defaulted coefficient,
 and it deserves to say so.
 
-*Fix:* call out `LEVEL != 1` separately and loudly.
+**Fixed.** `LEVEL != 1` gets its own warning saying the card is being simulated
+as Level 1 and that currents and capacitances will differ from the intended
+model — not merely in the unset parameters. `LEVEL=1` stays quiet.
 
-### 4.6 `.print` / `.plot` / `.probe` / `.backanno` are ignored by design
+### 4.6 `.print` / `.plot` / `.probe` / `.backanno` are ignored by design — no change
 
 Output selection is `--probe` instead, so these have nowhere to go. Benign, but
 undocumented until now: a deck whose `.print tran V(out)` you expect to narrow
@@ -240,25 +261,19 @@ the output gets every node instead.
 
 ---
 
-## 5. Suggested order of work
+## 5. What is left
 
-By (harm × cheapness), not by size:
+§4 is done. Remaining, by (value × cheapness):
 
-1. **§4.1 `AC <mag>`** — the only item that silently produces wrong numbers on a
-   supported analysis. Fix, or reject, but do not leave it.
-2. **§4.2 `.model` no-space paren** — one line, removes a 100× silent error.
-3. **§4.3 unknown `.options` keys** — one warning, closes an unbounded silent hole.
-4. **§4.4 `.tran` tstart/tmax** — small; `max_step` already exists.
-5. **§4.5 `LEVEL` warning** — wording.
-6. **`E`/`F`/`G`/`H` controlled sources** — the largest *capability* gap, and the
+1. **`E`/`F`/`G`/`H` controlled sources** — the largest *capability* gap, and the
    most likely reason a third-party deck will not load. All four are linear
    stamps; `B` already proves the machinery.
-7. **`.control` block skip-with-warning** — unblocks a large fraction of
+2. **`.control` block skip-with-warning** — unblocks a large fraction of
    real-world ngspice decks without implementing the shell.
-8. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+3. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-9. Everything else in §1–§2 is a clean error and can wait for a use case.
+4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document
 

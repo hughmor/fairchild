@@ -268,8 +268,9 @@ pub fn ac_analysis_opts(
     // Build the RHS for AC: voltage sources contribute to the stub row; current sources to node rows.
     // Voltage source in MNA: stamps A[vi][p]=+1, A[vi][n]=-1, A[p][vi]=+1, A[n][vi]=-1, b[vi]=V_ac.
     // For the AC analysis, we set V_ac = 1 for the chosen source(s).
-    let b_ac_re = build_ac_rhs(&topo, netlist, ac_source, 1.0, 0.0); // unit amplitude, 0° phase
-    let b_ac_im = vec![0.0f64; size];
+    // Unit amplitude is only the fallback for a deck that declares no `AC` spec
+    // anywhere; a declared spec wins. See `build_ac_rhs`.
+    let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source, 1.0);
 
     // --- Sweep (parallel across frequencies) ---
     //
@@ -393,49 +394,149 @@ fn dc_op(
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }
 
-/// Build the AC RHS vector.
+/// Build the AC excitation as `(real, imaginary)` RHS vectors.
 ///
-/// For the selected source (or all sources if ac_source=None), stamp the AC voltage/current.
-/// Voltage sources stamp into the auxiliary row; current sources stamp directly into node rows.
+/// A source's `AC <mag> [phase]` is the excitation: `mag·cos φ` into the real
+/// vector, `mag·sin φ` into the imaginary one. Voltage sources drive their
+/// auxiliary row; current sources drive their node rows.
+///
+/// **Two regimes, and the deck chooses.** When any source declares an `AC` spec,
+/// the deck is read strictly: declared sources drive at their own magnitude and
+/// phase, and undeclared ones contribute nothing — ngspice's rule. When *no*
+/// source declares one, every source (or the one named by `ac_source`) drives at
+/// `fallback_mag` with zero phase, which is what fairchild has always done and
+/// what a transfer-function sweep wants; there is no declared intent to
+/// contradict, so nothing is lost.
+///
+/// The regime split matters because the old code ignored `AC` entirely and drove
+/// *everything* at unit amplitude. A deck pairing an `AC 1` drive with a plain
+/// DC bias source therefore excited the bias source too — wrong, and silent.
 fn build_ac_rhs(
     topo: &CircuitTopology,
     netlist: &Netlist,
     ac_source: Option<&str>,
-    mag: f64,
-    _phase_rad: f64,
-) -> Vec<f64> {
+    fallback_mag: f64,
+) -> (Vec<f64>, Vec<f64>) {
     let n_nodes = topo.n_nodes();
-    let mut b = vec![0.0f64; topo.size];
+    let mut re = vec![0.0f64; topo.size];
+    let mut im = vec![0.0f64; topo.size];
+
+    let strict = netlist.elements.iter().any(|el| {
+        matches!(
+            el,
+            Element::VoltageSource { ac: Some(_), .. } | Element::CurrentSource { ac: Some(_), .. }
+        )
+    });
+
     for el in &netlist.elements {
-        match el {
-            Element::VoltageSource { name, .. } => {
-                let drives = ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name));
-                if drives {
-                    if let Some(&vi_idx) = topo.vsrc_index.get(name) {
-                        b[n_nodes + vi_idx] += mag;
-                    }
+        let (name, ac, nodes) = match el {
+            Element::VoltageSource { name, ac, .. } => (name, ac, None),
+            Element::CurrentSource {
+                name, ac, pos, neg, ..
+            } => (name, ac, Some((pos, neg))),
+            _ => continue,
+        };
+        if !ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let (mag, phase_deg) = match ac {
+            Some(spec) => (spec.mag, spec.phase_deg),
+            // Declared nothing in a deck that declares elsewhere: not a source.
+            None if strict => continue,
+            None => (fallback_mag, 0.0),
+        };
+        let phase = phase_deg.to_radians();
+        let (er, ei) = (mag * phase.cos(), mag * phase.sin());
+
+        match nodes {
+            None => {
+                if let Some(&vi) = topo.vsrc_index.get(name) {
+                    re[n_nodes + vi] += er;
+                    im[n_nodes + vi] += ei;
                 }
             }
-            Element::CurrentSource { name, pos, neg, .. } => {
-                let drives = ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name));
-                if drives {
-                    if let Some(&p) = topo.node_index.get(pos) {
-                        b[p] -= mag;
-                    }
-                    if let Some(&n) = topo.node_index.get(neg) {
-                        b[n] += mag;
-                    }
+            // SPICE: current leaves n+ and enters n-.
+            Some((pos, neg)) => {
+                if let Some(&p) = topo.node_index.get(pos) {
+                    re[p] -= er;
+                    im[p] -= ei;
+                }
+                if let Some(&n) = topo.node_index.get(neg) {
+                    re[n] += er;
+                    im[n] += ei;
                 }
             }
-            _ => {}
         }
     }
-    b
+    (re, im)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `AC <mag> [phase]` on a source line must reach the solver.
+    ///
+    /// It used to be parsed away, so `.ac` always drove at unit amplitude and
+    /// zero phase: an ngspice deck written with `AC 2` came out 2x too small
+    /// with no diagnostic. Values below are ngspice 46 on the same decks.
+    #[test]
+    fn ac_spec_on_a_source_sets_magnitude_and_phase() {
+        let deck = |spec: &str| {
+            format!(
+                "* ac spec\nV1 in 0 {spec}\nR1 in out 1k\nC1 out 0 159.15n\n                 .ac lin 1 1k 1k\n.end\n"
+            )
+        };
+        let run = |spec: &str| {
+            let nl = parse_spice(&deck(spec)).unwrap();
+            let reg = DeviceRegistry::new();
+            let r = ac_analysis(&nl, &[1e3], None, &reg).expect("ac failed");
+            let (re, im) = r.voltages.get("out").unwrap()[0];
+            ((re * re + im * im).sqrt(), im.atan2(re).to_degrees())
+        };
+
+        // Magnitude scales; the -3 dB corner keeps its -45 degrees.
+        for (spec, want_mag) in [("DC 0 AC 1", 0.7071178), ("DC 0 AC 2", 1.4142356)] {
+            let (mag, ph) = run(spec);
+            assert!(
+                (mag - want_mag).abs() < 1e-6,
+                "{spec}: |V(out)| = {mag:.7}, expected {want_mag:.7}"
+            );
+            assert!((ph + 45.0).abs() < 0.01, "{spec}: phase {ph:.4} != -45");
+        }
+
+        // Phase rotates the excitation: +90 deg in, -45+90 = +45 deg out.
+        let (mag, ph) = run("AC 1 90");
+        assert!((mag - 0.7071178).abs() < 1e-6, "|V(out)| = {mag:.7}");
+        assert!((ph - 45.0).abs() < 0.01, "phase {ph:.4} != +45");
+
+        // A deck that declares nothing keeps the legacy unit drive, which is
+        // what the one in-tree `.ac` example relies on.
+        let (mag, _) = run("DC 0");
+        assert!(
+            (mag - 0.7071178).abs() < 1e-6,
+            "no-spec fallback broke: {mag:.7}"
+        );
+    }
+
+    /// Once any source declares an `AC` spec the deck is read strictly, so a
+    /// plain DC bias source is no longer treated as a second AC drive. That
+    /// silent double-excitation is what the old unconditional unit drive did.
+    #[test]
+    fn a_declared_ac_spec_makes_undeclared_sources_quiet() {
+        let nl = parse_spice(
+            "* two sources, one AC\n             V1 in 0 DC 0 AC 1\n             Vbias b 0 DC 2.5\n             R1 in out 1k\n             Rb b out 1k\n             C1 out 0 1n\n             .ac lin 1 1k 1k\n.end\n",
+        )
+        .unwrap();
+        let reg = DeviceRegistry::new();
+        let r = ac_analysis(&nl, &[1e3], None, &reg).expect("ac failed");
+        let (re, im) = r.voltages.get("b").unwrap()[0];
+        assert!(
+            (re * re + im * im).sqrt() < 1e-12,
+            "the DC bias source is being driven as an AC source: |V(b)| = {:.3e}",
+            (re * re + im * im).sqrt()
+        );
+    }
+
     use crate::device_registry::DeviceRegistry;
     use fairchild_parser::parse_spice;
 

@@ -786,7 +786,9 @@ fn run_corner_analyses_ctx(
                 ran_something = true;
             }
 
-            Analysis::Tran { step, stop, uic } => {
+            Analysis::Tran {
+                step, stop, uic, ..
+            } => {
                 let local_opts;
                 let opts = if *uic && !opts.uic {
                     local_opts = SimOptions { uic: true, ..*opts };

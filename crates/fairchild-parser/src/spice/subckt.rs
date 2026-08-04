@@ -306,22 +306,26 @@ pub(super) fn remap_element_nodes(
             pos,
             neg,
             waveform,
+            ac,
         } => Element::VoltageSource {
             name: format!("{prefix}.{name}"),
             pos: rn(&pos),
             neg: rn(&neg),
             waveform,
+            ac,
         },
         Element::CurrentSource {
             name,
             pos,
             neg,
             waveform,
+            ac,
         } => Element::CurrentSource {
             name: format!("{prefix}.{name}"),
             pos: rn(&pos),
             neg: rn(&neg),
             waveform,
+            ac,
         },
         Element::Diode {
             name,

@@ -363,8 +363,31 @@ impl DeviceRegistry {
                 "pmos" => true,
                 _ => continue,
             };
+            // `LEVEL` gets its own warning. Folding it into the generic
+            // unimplemented-params list reads as one defaulted coefficient, when
+            // what actually happened is that a different device model was asked
+            // for and Level 1 was simulated instead.
+            if let Some((_, level)) = card
+                .params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("level"))
+            {
+                if (level - 1.0).abs() > 1e-9 {
+                    eprintln!(
+                        "warning: MOSFET model '{}' asks for LEVEL={} — fairchild \
+                         implements Level 1 (Shichman-Hodges) only, and is simulating \
+                         this card as Level 1. Currents and capacitances will differ \
+                         from the intended model, not merely in the unset parameters.",
+                        card.name, level
+                    );
+                }
+            }
             // Warn once per model card about unrecognised params.
             let (_, unknown) = Mosfet1::from_model_params(is_pmos, &card.params);
+            let unknown: Vec<_> = unknown
+                .into_iter()
+                .filter(|k| !k.eq_ignore_ascii_case("level"))
+                .collect();
             if !unknown.is_empty() {
                 eprintln!(
                     "warning: MOSFET model '{}' params not yet implemented (using defaults): {}",

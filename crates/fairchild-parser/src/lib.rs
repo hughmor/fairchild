@@ -6,6 +6,19 @@ pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
 pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, parse_spice_value, BundleArity};
 
+/// The `AC <mag> [phase]` small-signal excitation on a source line.
+///
+/// Orthogonal to the time-domain `waveform`: a source may carry a DC operating
+/// value, a transient function, and an AC spec all at once, and each analysis
+/// reads the one it needs. Absent when the line says nothing about AC — which
+/// `.ac` treats differently from `AC 0`, see `ac::build_ac_rhs`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcSpec {
+    pub mag: f64,
+    /// Degrees, as written on the line. Radians only inside the solver.
+    pub phase_deg: f64,
+}
+
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
 pub type NodeName = String;
 
@@ -556,12 +569,16 @@ pub enum Element {
         pos: NodeName,
         neg: NodeName,
         waveform: Waveform,
+        /// `AC <mag> [phase]`, when the line declares one.
+        ac: Option<AcSpec>,
     },
     CurrentSource {
         name: String,
         pos: NodeName,
         neg: NodeName,
         waveform: Waveform,
+        /// `AC <mag> [phase]`, when the line declares one.
+        ac: Option<AcSpec>,
     },
     Diode {
         name: String,
@@ -842,6 +859,12 @@ pub enum Analysis {
     Tran {
         step: f64,
         stop: f64,
+        /// `.tran step stop <tstart>` — output before this time is discarded.
+        /// The run still integrates from 0; SPICE's tstart selects what is
+        /// *saved*, not where the simulation begins.
+        tstart: f64,
+        /// `.tran step stop tstart <tmax>` — ceiling on the timestep.
+        tmax: Option<f64>,
         /// True when the `.tran` line carried the `UIC` keyword.
         uic: bool,
     },

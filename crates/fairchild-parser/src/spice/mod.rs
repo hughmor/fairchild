@@ -558,7 +558,9 @@ mod tests {
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         match &netlist.analyses[0] {
-            Analysis::Tran { step, stop, uic } => {
+            Analysis::Tran {
+                step, stop, uic, ..
+            } => {
                 assert!((step - 1e-6).abs() < 1e-12);
                 assert!((stop - 5e-3).abs() < 1e-12);
                 assert!(!uic);
@@ -660,6 +662,73 @@ mod tests {
         }
         assert!(parse_spice_value("banana").is_err());
         assert!(parse_spice_value("").is_err());
+    }
+
+    /// SPICE allows no space before a model card's parameter list. The kind
+    /// token then arrives as `d(is=1e-16`, which still `starts_with('d')`, so it
+    /// dispatched as a diode and the first parameter vanished — a 100x silent
+    /// error in the saturation current, and the diode was the only device that
+    /// failed quietly rather than raising `unknown model`.
+    #[test]
+    fn model_card_accepts_no_space_before_paren() {
+        for text in [
+            "* m\n.model xx D (IS=1e-16 N=1.5)\n.op\n.end\n",
+            "* m\n.model xx D(IS=1e-16 N=1.5)\n.op\n.end\n",
+        ] {
+            let nl = parse_spice(text).unwrap();
+            let card = &nl.models[0];
+            assert_eq!(card.kind.to_lowercase(), "d", "kind swallowed the paren");
+            let get = |k: &str| {
+                card.params
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| *v)
+                    .unwrap_or_else(|| panic!("{k} missing from {:?}", card.params))
+            };
+            assert!((get("is") - 1e-16).abs() < 1e-30);
+            assert!((get("n") - 1.5).abs() < 1e-12);
+        }
+    }
+
+    /// `.tran step stop [tstart [tmax]] [UIC]` — the third and fourth arguments
+    /// were parsed and dropped, so a deck asking for a finer step or a delayed
+    /// output window silently got neither. `UIC` may occupy any trailing slot,
+    /// so it must be skipped rather than parsed as a number.
+    #[test]
+    fn parse_tran_reads_tstart_tmax_and_uic() {
+        let cases = [
+            (".tran 1n 20n", 0.0, None, false),
+            (".tran 1n 20n UIC", 0.0, None, true),
+            (".tran 1n 20n 5n", 5e-9, None, false),
+            (".tran 1n 20n 5n 0.1n", 5e-9, Some(1e-10), false),
+            (".tran 1n 20n 5n 0.1n UIC", 5e-9, Some(1e-10), true),
+            (".tran 1n 20n UIC 5n", 5e-9, None, true),
+        ];
+        for (line, want_tstart, want_tmax, want_uic) in cases {
+            let nl = parse_spice(&format!("* t\nV1 a 0 DC 1\n{line}\n.end\n")).unwrap();
+            let Analysis::Tran {
+                tstart,
+                tmax,
+                uic,
+                step,
+                stop,
+            } = &nl.analyses[0]
+            else {
+                panic!("{line}: not a Tran analysis");
+            };
+            assert!((step - 1e-9).abs() < 1e-18, "{line}: step");
+            assert!((stop - 20e-9).abs() < 1e-18, "{line}: stop");
+            assert!(
+                (tstart - want_tstart).abs() < 1e-18,
+                "{line}: tstart {tstart:e}"
+            );
+            assert_eq!(uic, &want_uic, "{line}: uic");
+            match (tmax, want_tmax) {
+                (Some(g), Some(w)) => assert!((g - w).abs() < 1e-18, "{line}: tmax {g:e}"),
+                (None, None) => {}
+                _ => panic!("{line}: tmax {tmax:?} != {want_tmax:?}"),
+            }
+        }
     }
 
     #[test]
