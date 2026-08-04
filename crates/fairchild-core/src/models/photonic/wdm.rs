@@ -70,8 +70,11 @@ impl ChannelFilter {
                 self.df_hz = value * 1e9;
                 true
             }
+            // 0 means "no passband", matching `fc_awgr`. Taken literally it is a
+            // zero-width Gaussian, which darkens every channel but the one
+            // sitting exactly on the grid anchor.
             "fwhm_ghz" | "bw_ghz" => {
-                self.fwhm_hz = Some(value * 1e9);
+                self.fwhm_hz = (value > 0.0).then_some(value * 1e9);
                 true
             }
             "shape_p" => {
