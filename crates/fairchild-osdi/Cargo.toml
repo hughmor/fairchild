@@ -1,7 +1,11 @@
 [package]
 name = "fairchild-osdi"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OSDI v0.4 runtime for fairchild: loads Verilog-A models compiled by OpenVAF."
 
 [dependencies]
 fairchild-core = { workspace = true }

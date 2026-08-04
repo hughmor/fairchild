@@ -15,6 +15,14 @@ resolver = "2"
 # `dynamic = ["version"]`. Releasing is bumping this line, then tagging v<that>.
 [workspace.package]
 version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Hugh Morison"]
+repository = "https://github.com/hughmor/fairchild"
+description = "Open-source time-domain electro-optic circuit simulator: a SPICE analog solver with a native photonic discipline."
+readme = "README.md"
+keywords = ["spice", "simulation", "photonics", "circuit", "eda"]
+categories = ["science", "simulation"]
 
 [workspace.dependencies]
 fairchild-core   = { path = "crates/fairchild-core" }
