@@ -164,6 +164,25 @@ fn push_device(
     devices.push(dev);
 }
 
+/// Look up a switch's `.model` card and build the device from it.
+///
+/// Shared by the `S` and `W` arms of `build_devices_with_footprints`, which
+/// differ only in what they bind as the control.
+fn build_switch(
+    registry: &DeviceRegistry,
+    model_name: &str,
+    inst_name: &str,
+    initial_on: bool,
+) -> Result<crate::models::Switch, SimError> {
+    let (is_current, params) = registry
+        .switch_cards
+        .get(model_name)
+        .ok_or_else(|| SimError::UnknownModel(model_name.to_string()))?;
+    crate::models::Switch::from_model_params(*is_current, params, initial_on)
+        .map(|(dev, _)| dev)
+        .map_err(|e| SimError::ParameterError(format!("{inst_name}: {e}")))
+}
+
 /// A device list paired with each device's structural MNA footprint.
 pub type DevicesWithFootprints = (Vec<Box<dyn Device>>, Vec<Footprint>);
 
@@ -295,6 +314,51 @@ pub fn build_devices_with_footprints(
                 // has real slots to stamp into instead of running past
                 // mna_nodes.
                 push_device(&mut devices, &mut foot, topo, &terminals, dev);
+            }
+            Element::VoltageSwitch {
+                name,
+                pos,
+                neg,
+                ctrl_pos,
+                ctrl_neg,
+                model_name,
+                initial_on,
+            } => {
+                let node = |n: &fairchild_parser::NodeName| topo.node_index.get(n).copied();
+                let terms = [node(pos), node(neg), node(ctrl_pos), node(ctrl_neg)];
+                let dev = build_switch(registry, model_name, name, *initial_on)?;
+                let mut dev: Box<dyn Device> = Box::new(dev);
+                dev.setup_model(ctx);
+                dev.setup_instance(&terms, ctx);
+                push_device(&mut devices, &mut foot, topo, &terms, dev);
+            }
+            Element::CurrentSwitch {
+                name,
+                pos,
+                neg,
+                ctrl_vsrc,
+                model_name,
+                initial_on,
+            } => {
+                let node = |n: &fairchild_parser::NodeName| topo.node_index.get(n).copied();
+                let terms = [node(pos), node(neg)];
+                let mut dev = build_switch(registry, model_name, name, *initial_on)?;
+                // Resolving the controlling branch row is the whole reason a
+                // switch is not a plain registry factory: nothing below
+                // `build_devices` knows `vsrc_index`.
+                let vname = ctrl_vsrc.to_lowercase();
+                let idx = topo.vsrc_index.get(&vname).copied().ok_or_else(|| {
+                    SimError::ParameterError(format!(
+                        "{name}: controlling source '{vname}' is not a voltage source in this netlist"
+                    ))
+                })?;
+                dev.set_control(crate::models::SwitchControl::Current {
+                    row: Some(topo.n_nodes() + idx),
+                });
+                let mut dev: Box<dyn Device> = Box::new(dev);
+                dev.setup_model(ctx);
+                dev.setup_instance(&terms, ctx);
+                push_device(&mut devices, &mut foot, topo, &terms, dev);
             }
             Element::TransmissionLine {
                 a_pos,
@@ -644,6 +708,30 @@ fn element_touches(el: &Element, net_lc: &str) -> (String, bool, Option<String>)
             // K elements reference inductor names, not net names directly.
             (name.clone(), false, None)
         }
+        Element::VoltageSwitch {
+            name,
+            pos,
+            neg,
+            ctrl_pos,
+            ctrl_neg,
+            model_name,
+            ..
+        } => (
+            format!("{name} ({model_name})"),
+            net_match(pos) || net_match(neg) || net_match(ctrl_pos) || net_match(ctrl_neg),
+            None,
+        ),
+        Element::CurrentSwitch {
+            name,
+            pos,
+            neg,
+            model_name,
+            ..
+        } => (
+            format!("{name} ({model_name})"),
+            net_match(pos) || net_match(neg),
+            None,
+        ),
         Element::TransmissionLine {
             name,
             a_pos,
@@ -818,6 +906,9 @@ fn nr_inner(
 ) -> Result<Vec<f64>, SimError> {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
+    // Not every unknown is a volt — see `crate::tolerance`.  Built here rather
+    // than per iteration; `topo.size` is settled by the time any solver runs.
+    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
 
     // Sparsity pattern is fixed across this NR loop — devices stamp the
     // same matrix positions each iteration, only the values change.  The
@@ -997,10 +1088,7 @@ fn nr_inner(
             x_new
         };
 
-        let converged = x_next
-            .iter()
-            .zip(x.iter())
-            .all(|(n, o)| (n - o).abs() < opts.vntol + opts.reltol * n.abs());
+        let converged = tol.converged(&x_next, &x);
 
         x = x_next;
         if converged {

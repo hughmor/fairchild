@@ -81,7 +81,6 @@ carrying its N channels in order.
 * … in1 … in7, out0 … out7 …
 Xr in0 in1 in2 in3 in4 in5 in6 in7  out0 out1 out2 out3 out4 out5 out6 out7
 +   fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30
-.options vntol=1e-14 reltol=1e-12
 ```
 
 ### Modes
@@ -142,28 +141,32 @@ minimum steps and the solve never converges.
 
 ---
 
-## 4. Solver tolerance — read this before running an N ≥ 8 router
+## 4. Solver tolerance — fixed, and why the old workaround is gone
 
-The λ wires carry ~1.55e-6. SPICE's default absolute voltage tolerance
-`vntol = 1e-6` is therefore the **same order as the entire quantity**: Newton's
-step test can be satisfied while λ is still ~10 pm off, and 10 pm is a real
-detuning for a 40 GHz passband. The router then reports the transmission for
-the wrong wavelength, with no error.
+**Nothing to do. Run an `fc_awgr` on default options.** Earlier revisions of
+this document told you to put `.options vntol=1e-14 reltol=1e-12` in any deck
+containing a router. That is obsolete; the deck no longer has to know about the
+solver.
 
-Measured on the 8×8 example: with defaults, `V(in0_0_wl)` settles at
-1.53783 µm instead of 1.55 µm and the routed output reads 0 instead of 1.109.
-With `.options vntol=1e-14 reltol=1e-12` it is exact. At N ≤ 5 the first
-Newton step lands accurately enough that this never shows, which is precisely
-what makes it a trap.
+The problem was real. λ wires carry ~1.55e-6, and SPICE's default absolute
+*voltage* tolerance `vntol = 1e-6` is the same order as the entire quantity, so
+Newton's step test was satisfied while λ was still ~10 pm off — a real detuning
+for a 40 GHz passband. The router then reported the transmission for the wrong
+wavelength, with no error. Measured on the 8×8 example: `V(in0_0_wl)` settled
+at 1.53783 µm instead of 1.55 µm and the routed output read 0 instead of 1.109.
+At N ≤ 5 the first Newton step lands accurately enough that it never showed,
+which is precisely what made it a trap.
 
-**Put `.options vntol=1e-14 reltol=1e-12` in any deck containing an `fc_awgr`.**
+This was never specific to this device — every λ-reading photonic model has the
+same exposure, ring resonances included (12 pm is comparable to the 13.3 pm/V
+depletion tuning measured on giona).
 
-This is a property of the λ-wire representation, not of this device — every
-λ-reading photonic model (ring resonances included: 12 pm is comparable to the
-13.3 pm/V depletion tuning measured on giona) has the same exposure. It is the
-concrete case for the λ-wire rescale / convergence-hygiene item in
-`_notes/sotu.md §B`, and the fix belongs in the solver: a step test that is
-relative for nodes whose magnitude is far below `vntol`.
+The fix is per-row tolerances in the solver: λ rows carry their own absolute
+tolerance `lambdatol` (default 1e-13 m = 0.1 pm) and **no relative term**, since
+`reltol·|λ|` is scale-invariant and would still permit 1.55 nm. See
+`crates/fairchild-core/src/tolerance.rs` for the full argument, including why
+respelling λ in µm does not solve it. `an_eight_by_eight_router_is_exact_on_default_tolerances`
+is the regression.
 
 ---
 

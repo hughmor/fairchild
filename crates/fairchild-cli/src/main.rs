@@ -7,6 +7,7 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 
+use fairchild_core::netlist_edit::set_element_param;
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
@@ -14,9 +15,7 @@ use fairchild_core::{
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
-use fairchild_parser::{
-    check_disciplines, parse_spice_file, AcVariation, Analysis, Element, Netlist,
-};
+use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Netlist};
 
 #[derive(Parser)]
 #[command(
@@ -48,7 +47,9 @@ struct Cli {
     probe: Option<String>,
 
     /// Override a circuit parameter.  Format: ELEMENT.PARAM=VALUE
-    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2e3"
+    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2k"
+    /// Values take the same engineering suffixes as a netlist (k, meg, m, u, n,
+    /// p, f, g, t) — note SPICE's convention that `m` is milli and mega is `meg`.
     /// Can be specified multiple times.
     #[arg(long = "param", value_name = "ELEMENT.PARAM=VALUE")]
     params: Vec<String>,
@@ -78,7 +79,7 @@ struct Cli {
     /// Override an arbitrary solver option.  Format: KEY=VALUE.  Layered on
     /// top of any `.options` directives in the netlist.  Can be repeated.
     ///
-    /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
+    /// Recognised keys: reltol, abstol, vntol, lambdatol, gmin, vmax, itl1, itl4,
     /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
     /// variable_step, waveguide_delay, cond_estimate, equilibrate.
     ///
@@ -149,115 +150,38 @@ enum Format {
 
 /// Apply CLI `--param` overrides to a netlist in-place.
 ///
-/// Format: "ELEMENT.PARAM=VALUE" (case-insensitive element and param names).
-/// Supports XOsdi elements, Resistor, Capacitor, Inductor.
+/// Format: `ELEMENT.PARAM=VALUE`, case-insensitive on both names. The matching
+/// itself is [`fairchild_core::netlist_edit::set_element_param`], shared with
+/// the Python and C bindings — this function is only the CLI's parse-and-warn
+/// wrapper around it. It used to be a private re-implementation that reached
+/// X/R/C/L only, so a Verilog-A transistor on an `M`/`Q` line could not be
+/// swept from the command line.
 fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
     for raw in overrides {
-        let (lhs, rhs) = match raw.split_once('=') {
-            Some(pair) => pair,
-            None => {
-                if !quiet {
-                    eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM=VALUE, skipping");
-                }
-                continue;
+        let warn = |msg: &str| {
+            if !quiet {
+                eprintln!("warning: --param '{raw}': {msg}");
             }
         };
-        let value: f64 = match rhs.parse() {
-            Ok(v) => v,
-            Err(_) => {
-                if !quiet {
-                    eprintln!("warning: --param '{raw}': cannot parse value '{rhs}', skipping");
-                }
-                continue;
-            }
+        let Some((lhs, rhs)) = raw.split_once('=') else {
+            warn("expected ELEMENT.PARAM=VALUE, skipping");
+            continue;
         };
-        let (elem_name, param_name) = match lhs.split_once('.') {
-            Some(pair) => pair,
-            None => {
-                if !quiet {
-                    eprintln!("warning: --param '{raw}': expected ELEMENT.PARAM, skipping");
-                }
-                continue;
-            }
+        // The netlist's own value syntax, suffixes included — a bare
+        // `f64::parse` here silently rejected `W=1u` and `cjo=10p`, i.e. exactly
+        // what a user copies off the element line they are overriding.
+        let Ok(value) = fairchild_parser::parse_spice_value(rhs) else {
+            warn(&format!("cannot parse value '{rhs}', skipping"));
+            continue;
         };
-        let elem_name_lc = elem_name.to_lowercase();
-        let param_name_lc = param_name.to_lowercase();
-
-        let mut applied = false;
-        for el in &mut netlist.elements {
-            match el {
-                Element::XOsdi { name, params, .. } if name.to_lowercase() == elem_name_lc => {
-                    if let Some(slot) = params
-                        .iter_mut()
-                        .find(|(k, _)| k.to_lowercase() == param_name_lc)
-                    {
-                        slot.1 = value;
-                    } else {
-                        params.push((param_name_lc.clone(), value));
-                    }
-                    applied = true;
-                    break;
-                }
-                Element::Resistor {
-                    name, resistance, ..
-                } if name.to_lowercase() == elem_name_lc
-                    && (param_name_lc == "resistance"
-                        || param_name_lc == "value"
-                        || param_name_lc == "r") =>
-                {
-                    *resistance = value;
-                    applied = true;
-                    break;
-                }
-                Element::Capacitor {
-                    name, capacitance, ..
-                } if name.to_lowercase() == elem_name_lc
-                    && (param_name_lc == "capacitance"
-                        || param_name_lc == "value"
-                        || param_name_lc == "c") =>
-                {
-                    *capacitance = value;
-                    applied = true;
-                    break;
-                }
-                Element::Inductor {
-                    name, inductance, ..
-                } if name.to_lowercase() == elem_name_lc
-                    && (param_name_lc == "inductance"
-                        || param_name_lc == "value"
-                        || param_name_lc == "l") =>
-                {
-                    *inductance = value;
-                    applied = true;
-                    break;
-                }
-                Element::VoltageSource { name, waveform, .. }
-                    if name.to_lowercase() == elem_name_lc
-                        && (param_name_lc == "dc"
-                            || param_name_lc == "value"
-                            || param_name_lc == "v") =>
-                {
-                    *waveform = fairchild_parser::Waveform::Dc(value);
-                    applied = true;
-                    break;
-                }
-                Element::CurrentSource { name, waveform, .. }
-                    if name.to_lowercase() == elem_name_lc
-                        && (param_name_lc == "dc"
-                            || param_name_lc == "value"
-                            || param_name_lc == "i") =>
-                {
-                    *waveform = fairchild_parser::Waveform::Dc(value);
-                    applied = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        if !applied && !quiet {
-            eprintln!(
-                "warning: --param '{raw}': element '{elem_name}' not found or param not applicable"
-            );
+        let Some((elem_name, param_name)) = lhs.split_once('.') else {
+            warn("expected ELEMENT.PARAM, skipping");
+            continue;
+        };
+        if !set_element_param(netlist, elem_name, param_name, value) {
+            warn(&format!(
+                "element '{elem_name}' not found or param '{param_name}' not applicable"
+            ));
         }
     }
 }

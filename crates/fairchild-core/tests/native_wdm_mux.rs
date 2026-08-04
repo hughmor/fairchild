@@ -341,3 +341,26 @@ Xdm b0_re b0_im b0_wl b1_re b1_im b1_wl \
     assert!((r.node_voltage("d0_re").unwrap() - il).abs() < 1e-9);
     assert!((r.node_voltage("d1_re").unwrap() - il).abs() < 1e-9);
 }
+
+/// `fwhm_ghz=0` means "no passband", the same as on `fc_awgr`. Read literally it
+/// is a zero-width Gaussian, which darkens every channel except the one sitting
+/// exactly on the grid anchor — a silent wrong answer in any deck that sweeps
+/// the passband down through zero.
+#[test]
+fn a_zero_fwhm_is_no_passband_rather_than_an_infinitely_narrow_one() {
+    let netlist = "* zero-width passband\n\
+V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC 1.55e-6\n\
+V1r c1_re 0 DC 1.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC 1.5492e-6\n\
+Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
+      c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux il_db=0 fwhm_ghz=0\n\
+.op\n.end\n";
+    let net = fairchild_parser::parse_spice(netlist).unwrap();
+    let r = fairchild_core::newton::dc_op_nr_with_registry(
+        &net,
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .unwrap();
+    // Channel 1 is 100 GHz off the anchor and must still come through at unity.
+    assert!((r.node_voltage("b0_re").unwrap() - 1.0).abs() < 1e-12);
+    assert!((r.node_voltage("b1_re").unwrap() - 1.0).abs() < 1e-12);
+}

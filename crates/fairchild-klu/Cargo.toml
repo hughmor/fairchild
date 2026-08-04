@@ -1,9 +1,11 @@
 [package]
 name = "fairchild-klu"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Thin hand-rolled bindings to SuiteSparse KLU for fairchild's sparse linear solves."
-license = "Apache-2.0"
 
 [dependencies]
 libc = { workspace = true }

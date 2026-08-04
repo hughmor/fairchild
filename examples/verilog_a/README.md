@@ -135,9 +135,11 @@ All measured, not inferred:
   error rather than a silent no-op. Use `$limit(v, "pnjlim", vt, vcrit)`
   instead (`va_diode.va` does), or rely on the Newton loop's Armijo line
   search, which carries a bare `exp()` fine in practice.
-- **`--param` only reaches `X`, `R`, `C`, `L` elements**, so a Verilog-A
-  transistor's parameters cannot be swept from the CLI. Use the Python
-  bindings' `set_param`, or a `.param` in the netlist.
+
+- **`--param` reaches instance parameters, not `.model` cards.** `--param
+  "M1.W=1u"` works (`M`, `Q`, `D` and `X` alike, suffixes included); a process
+  parameter living on a `.model` card does not. Edit the card, or put the value
+  in a `.param` and reference it as `{name}`.
 
 Fixed while writing these, so no longer limitations: `.model` cards resolving
 to OSDI descriptors, `D`-element instance parameters, `$abstime` reading the

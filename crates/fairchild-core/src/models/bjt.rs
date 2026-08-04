@@ -18,8 +18,9 @@
 //! stamps are polarity-independent (pol² = 1), so the same `load_jacobian`
 //! works for both device types.
 
-use crate::device::{Device, EvalFlags, NodeId, SimContext};
+use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+use crate::reactive::ChargeHistory;
 
 const GMIN: f64 = 1e-12;
 
@@ -102,8 +103,8 @@ pub struct GummelPoonBjt {
     vbc_prev: f64,
 
     // ── Transient charge history ──────────────────────────────────────────────
-    qbe_tprev: f64, // QBE = TF*IF at last accepted timestep
-    qbc_tprev: f64, // QBC = TR*IR at last accepted timestep
+    qbe_hist: ChargeHistory, // QBE = TF*IF at last accepted timestep
+    qbc_hist: ChargeHistory, // QBC = TR*IR at last accepted timestep
     // Current-iterate charges (set by eval when transient flag is set)
     qbe_now: f64,
     qbc_now: f64,
@@ -124,8 +125,13 @@ pub struct GummelPoonBjt {
     cjc_eval: f64,  // CJC(VBC_eff) at current NR iterate
     q_je_eval: f64, // depletion charge at current NR iterate
     q_jc_eval: f64,
-    q_je_prev: f64, // depletion charge at last committed timestep
-    q_jc_prev: f64,
+    q_je_hist: ChargeHistory, // depletion charge at last committed timestep
+    q_jc_hist: ChargeHistory,
+
+    /// The integrator's discretisation, captured during `eval` because
+    /// `load_*_tran` receives only `alpha` — which is Backward Euler and
+    /// nothing else. `None` outside the transient loop.
+    disc: Option<Discretisation>,
 }
 
 impl GummelPoonBjt {
@@ -211,8 +217,8 @@ impl GummelPoonBjt {
             jeq_b: 0.0,
             vbe_prev: 0.0,
             vbc_prev: 0.0,
-            qbe_tprev: 0.0,
-            qbc_tprev: 0.0,
+            qbe_hist: ChargeHistory::default(),
+            qbc_hist: ChargeHistory::default(),
             qbe_now: 0.0,
             qbc_now: 0.0,
             cbe_eff: 0.0,
@@ -228,8 +234,9 @@ impl GummelPoonBjt {
             cjc_eval: 0.0,
             q_je_eval: 0.0,
             q_jc_eval: 0.0,
-            q_je_prev: 0.0,
-            q_jc_prev: 0.0,
+            q_je_hist: ChargeHistory::default(),
+            q_jc_hist: ChargeHistory::default(),
+            disc: None,
         };
         (dev, unknown)
     }
@@ -378,6 +385,8 @@ impl Device for GummelPoonBjt {
         self.jeq_c = pol * ic_eff - (self.gf - gce) * vb - gce * vc + self.gf * ve;
         self.jeq_b = pol * ib_eff - (self.gpi + self.gmu) * vb + self.gmu * vc + self.gpi * ve;
 
+        self.disc = ctx.discretisation;
+
         if flags.transient {
             self.cbe_eff = self.tf * self.gf;
             self.cbc_eff = self.tr * self.gr;
@@ -471,56 +480,47 @@ impl Device for GummelPoonBjt {
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {
         self.load_residual(b);
-        // B-E junction charge companion (transit-time diffusion): TF·IF
+        let (disc, pol) = (self.disc, self.polarity);
+
+        // All four charges live in the polarity-flipped ("effective") frame, so
+        // the companion is built there and `pol` applies only at stamp time.
+        // Companion current flows from the far terminal into the base, the same
+        // polarity as the junction it belongs to.
+        let mut cap = |hist: &ChargeHistory, far, q_new, cv| {
+            let (i_hist, _) = hist.companion(disc, alpha, q_new, cv);
+            if let Some(bk) = self.base {
+                b[bk] += pol * i_hist;
+            }
+            if let Some(f) = far {
+                b[f] -= pol * i_hist;
+            }
+        };
+
+        // Transit-time diffusion charge: TF·IF (B-E) and TR·IR (B-C).
         if self.cbe_eff != 0.0 {
-            let i_be = alpha * (self.cbe_eff * self.vbe_eff + self.qbe_tprev - self.qbe_now);
-            // Companion current flows from E→B (into B, out of E); same polarity as junction.
-            let pol = self.polarity;
-            if let Some(bk) = self.base {
-                b[bk] += pol * i_be;
-            }
-            if let Some(e) = self.emitter {
-                b[e] -= pol * i_be;
-            }
+            let cv = self.cbe_eff * self.vbe_eff;
+            cap(&self.qbe_hist, self.emitter, self.qbe_now, cv);
         }
-        // B-C junction charge companion: TR·IR
         if self.cbc_eff != 0.0 {
-            let i_bc = alpha * (self.cbc_eff * self.vbc_eff + self.qbc_tprev - self.qbc_now);
-            let pol = self.polarity;
-            if let Some(bk) = self.base {
-                b[bk] += pol * i_bc;
-            }
-            if let Some(c) = self.collector {
-                b[c] -= pol * i_bc;
-            }
+            let cv = self.cbc_eff * self.vbc_eff;
+            cap(&self.qbc_hist, self.collector, self.qbc_now, cv);
         }
-        // B-E depletion cap companion: CJE
+        // Depletion charge: CJE (B-E) and CJC (B-C).
         if self.cje_eval != 0.0 {
-            let i_je = alpha * (self.cje_eval * self.vbe_eff + self.q_je_prev - self.q_je_eval);
-            let pol = self.polarity;
-            if let Some(bk) = self.base {
-                b[bk] += pol * i_je;
-            }
-            if let Some(e) = self.emitter {
-                b[e] -= pol * i_je;
-            }
+            let cv = self.cje_eval * self.vbe_eff;
+            cap(&self.q_je_hist, self.emitter, self.q_je_eval, cv);
         }
-        // B-C depletion cap companion: CJC
         if self.cjc_eval != 0.0 {
-            let i_jc = alpha * (self.cjc_eval * self.vbc_eff + self.q_jc_prev - self.q_jc_eval);
-            let pol = self.polarity;
-            if let Some(bk) = self.base {
-                b[bk] += pol * i_jc;
-            }
-            if let Some(c) = self.collector {
-                b[c] -= pol * i_jc;
-            }
+            let cv = self.cjc_eval * self.vbc_eff;
+            cap(&self.q_jc_hist, self.collector, self.q_jc_eval, cv);
         }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
         self.load_jacobian(mat);
         let (c, bk, e) = (self.collector, self.base, self.emitter);
+        // Same factor the residual's companions used, from the same place.
+        let scale = ChargeHistory::scale(self.disc, alpha);
 
         macro_rules! stamp {
             ($ri:expr, $ci:expr, $val:expr) => {
@@ -532,7 +532,7 @@ impl Device for GummelPoonBjt {
 
         // B-E capacitive companion: cbe_eff between base and emitter.
         if self.cbe_eff != 0.0 {
-            let c_be = alpha * self.cbe_eff;
+            let c_be = scale * self.cbe_eff;
             stamp!(bk, bk, c_be);
             stamp!(bk, e, -c_be);
             stamp!(e, bk, -c_be);
@@ -540,7 +540,7 @@ impl Device for GummelPoonBjt {
         }
         // B-C capacitive companion: cbc_eff between base and collector.
         if self.cbc_eff != 0.0 {
-            let c_bc = alpha * self.cbc_eff;
+            let c_bc = scale * self.cbc_eff;
             stamp!(bk, bk, c_bc);
             stamp!(bk, c, -c_bc);
             stamp!(c, bk, -c_bc);
@@ -548,7 +548,7 @@ impl Device for GummelPoonBjt {
         }
         // B-E depletion cap: CJE
         if self.cje_eval != 0.0 {
-            let g_je = alpha * self.cje_eval;
+            let g_je = scale * self.cje_eval;
             stamp!(bk, bk, g_je);
             stamp!(bk, e, -g_je);
             stamp!(e, bk, -g_je);
@@ -556,7 +556,7 @@ impl Device for GummelPoonBjt {
         }
         // B-C depletion cap: CJC
         if self.cjc_eval != 0.0 {
-            let g_jc = alpha * self.cjc_eval;
+            let g_jc = scale * self.cjc_eval;
             stamp!(bk, bk, g_jc);
             stamp!(bk, c, -g_jc);
             stamp!(c, bk, -g_jc);
@@ -578,10 +578,15 @@ impl Device for GummelPoonBjt {
         let exp_bc = (vbc_eff / (self.nr * vt)).exp();
         let if_val = self.is * (exp_be - 1.0);
         let ir_val = self.is * (exp_bc - 1.0);
-        self.qbe_tprev = self.tf * if_val;
-        self.qbc_tprev = self.tr * ir_val;
-        self.q_je_prev = q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
-        self.q_jc_prev = q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
+        // Recomputed analytically from the converged solution rather than reused
+        // from the last `eval`, which is one NR iterate behind it.
+        let disc = self.disc;
+        self.qbe_hist.advance(disc, self.tf * if_val);
+        self.qbc_hist.advance(disc, self.tr * ir_val);
+        self.q_je_hist
+            .advance(disc, q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc));
+        self.q_jc_hist
+            .advance(disc, q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc));
     }
 
     fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
