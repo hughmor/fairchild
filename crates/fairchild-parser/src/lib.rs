@@ -4,7 +4,7 @@ mod spice;
 
 pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
-pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, BundleArity};
+pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, parse_spice_value, BundleArity};
 
 /// A node name. "0" and "gnd" and "GND" all refer to ground.
 pub type NodeName = String;

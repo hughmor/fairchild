@@ -40,7 +40,7 @@ pub(super) fn canon_node(s: &str) -> String {
 }
 
 /// Parse an SPICE suffix (k, meg, m, u, n, p, f, g, t) into a float.
-pub(super) fn parse_value(s: &str, lineno: usize) -> Result<f64, ParseError> {
+pub(crate) fn parse_value(s: &str, lineno: usize) -> Result<f64, ParseError> {
     let s_lc = s.to_lowercase();
     let (num_part, multiplier) = if let Some(n) = s_lc.strip_suffix("meg") {
         (n, 1e6)
