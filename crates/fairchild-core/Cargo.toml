@@ -1,7 +1,11 @@
 [package]
 name = "fairchild-core"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "DAE solver core for fairchild: MNA assembly, Newton-Raphson, transient/AC/noise analyses, and native photonic device models."
 
 [dependencies]
 fairchild-parser = { workspace = true }

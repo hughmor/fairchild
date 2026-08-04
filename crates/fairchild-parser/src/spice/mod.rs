@@ -7,6 +7,20 @@ mod waveforms;
 
 pub use bundles::{bundle_arity_for, BundleArity};
 
+/// Parse a SPICE numeric literal, including the engineering suffixes a netlist
+/// accepts: `k`, `meg`, `m`, `u`, `n`, `p`, `f`, `g`, `t` (case-insensitive).
+///
+/// Exposed so anything that takes a value from a user — `--param` overrides
+/// most of all — accepts exactly the syntax the netlist does, rather than a
+/// bare `f64::parse` that rejects `10p` and `1u`.
+///
+/// Note the SPICE convention, which this follows: `m` is **milli**, and mega is
+/// `meg`. So `1M` is 1e-3, not 1e6.
+pub fn parse_spice_value(s: &str) -> Result<f64, crate::ParseError> {
+    // `lineno` only decorates the error; there is no line here.
+    common::parse_value(s, 0)
+}
+
 // Pull internal helpers into scope so parse_spice + the test module can call
 // them unqualified (as they did before the split).
 use bundles::{expand_bundle_ports, scan_bidirectional};
@@ -613,6 +627,41 @@ mod tests {
     /// pairs were dropped at parse time — silently, and with no way to
     /// parameterise an OSDI model instantiated as a diode.  `M` and `Q`
     /// always kept theirs.
+    /// `parse_spice_value` is the public entry point that `--param` and any
+    /// other user-facing value now share with the netlist parser. A bare
+    /// `f64::parse` used to sit in `--param`, which silently rejected exactly
+    /// the values a user copies off the element line they are overriding.
+    #[test]
+    fn parse_spice_value_takes_netlist_suffixes() {
+        for (text, want) in [
+            ("1", 1.0),
+            ("-2.5", -2.5),
+            ("1e-6", 1e-6),
+            ("10u", 10e-6),
+            ("1U", 1e-6),
+            ("2k", 2e3),
+            ("10p", 10e-12),
+            ("1n", 1e-9),
+            ("5f", 5e-15),
+            ("3g", 3e9),
+            ("1t", 1e12),
+            // SPICE's convention, and the trap in it: `m` is milli, and mega
+            // is spelled `meg`. `1M` is 1e-3, NOT 1e6.
+            ("1m", 1e-3),
+            ("1M", 1e-3),
+            ("1meg", 1e6),
+            ("1MEG", 1e6),
+        ] {
+            let got = parse_spice_value(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1e-30),
+                "{text:?} parsed as {got:e}, expected {want:e}"
+            );
+        }
+        assert!(parse_spice_value("banana").is_err());
+        assert!(parse_spice_value("").is_err());
+    }
+
     #[test]
     fn parse_diode_instance_params() {
         let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n.end\n";

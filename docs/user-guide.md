@@ -2414,9 +2414,10 @@ case-insensitively (Verilog-A preserves case, fairchild lowercases). A card
 whose second token names no loaded descriptor and no built-in type is left
 alone, so a typo surfaces as `unknown model` at the element that uses it.
 
-`--param ELEMENT.PARAM=VALUE` reaches `X`, `R`, `C` and `L` elements only; to
-sweep a Verilog-A transistor use the Python bindings' `set_param`, or a
-`.param` in the netlist referenced as `{name}`.
+`--param ELEMENT.PARAM=VALUE` overrides an instance parameter on the element
+line, including `M`, `Q` and `D`, and takes the same engineering suffixes as a
+netlist (`--param "M1.W=1u"`). It does **not** reach `.model` card parameters —
+for those, edit the card, or use a `.param` referenced as `{name}`.
 
 ### 14.5 Implementation notes
 

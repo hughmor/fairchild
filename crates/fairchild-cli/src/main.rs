@@ -47,7 +47,9 @@ struct Cli {
     probe: Option<String>,
 
     /// Override a circuit parameter.  Format: ELEMENT.PARAM=VALUE
-    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2e3"
+    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2k"
+    /// Values take the same engineering suffixes as a netlist (k, meg, m, u, n,
+    /// p, f, g, t) — note SPICE's convention that `m` is milli and mega is `meg`.
     /// Can be specified multiple times.
     #[arg(long = "param", value_name = "ELEMENT.PARAM=VALUE")]
     params: Vec<String>,
@@ -165,7 +167,10 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
             warn("expected ELEMENT.PARAM=VALUE, skipping");
             continue;
         };
-        let Ok(value) = rhs.parse::<f64>() else {
+        // The netlist's own value syntax, suffixes included — a bare
+        // `f64::parse` here silently rejected `W=1u` and `cjo=10p`, i.e. exactly
+        // what a user copies off the element line they are overriding.
+        let Ok(value) = fairchild_parser::parse_spice_value(rhs) else {
             warn(&format!("cannot parse value '{rhs}', skipping"));
             continue;
         };
