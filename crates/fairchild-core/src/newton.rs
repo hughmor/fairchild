@@ -983,8 +983,23 @@ fn nr_inner(
     // search actually runs (it needs a clamped step first).
     let mut trial: Option<crate::mna::MnaMatrix> = None;
     let mut first_stamp = true;
+    // Which rows are λ wires (metres), so the volt-scaled trust region can skip
+    // them. Same membership test as `Tolerances::build`: gated on optical_nets
+    // so an electrical net merely *named* like a λ wire keeps volt semantics.
+    let lambda_rows = {
+        let mut m = vec![false; topo.size];
+        for net in &netlist.optical_nets {
+            if fairchild_parser::is_lambda_wire(net) {
+                if let Some(&r) = topo.node_index.get(net) {
+                    m[r] = true;
+                }
+            }
+        }
+        m
+    };
+    let mut warned_clamp = false;
 
-    for _ in 0..opts.itl1 {
+    for _iter in 0..opts.itl1 {
         crate::mna::stamp_netlist_scaled_in_place(
             &mut mat,
             topo,
@@ -1052,12 +1067,21 @@ fn nr_inner(
             }
         };
 
-        let max_dv = x_new
-            .iter()
-            .zip(x.iter())
-            .take(n_nodes)
-            .map(|(n, o)| (n - o).abs())
-            .fold(0.0f64, f64::max);
+        // `vmax` is a limit in VOLTS, so only rows carrying volts may set it.
+        // A λ wire is metres (~1.55e-6) and a step of a whole wavelength is
+        // normal, not a trust-region violation.
+        let mut max_dv = 0.0f64;
+        let mut max_dv_row = 0usize;
+        for i in 0..n_nodes {
+            if lambda_rows[i] {
+                continue;
+            }
+            let d = (x_new[i] - x[i]).abs();
+            if d > max_dv {
+                max_dv = d;
+                max_dv_row = i;
+            }
+        }
 
         // Damping path. When the proposed Newton step is small enough that
         // every node's update is below the `vmax` clamp threshold, take it
@@ -1075,15 +1099,49 @@ fn nr_inner(
         // passes on each clamped iteration.  ‖f(x)‖ itself is free — `mat` is
         // already stamped there.
         //
+        // Declared per iteration: a value carried over from an earlier clamped
+        // step would block convergence for the rest of the solve.
+        let mut armijo_fell_back = false;
         let x_next: Vec<f64> = if max_dv > opts.vmax {
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
+            // λ rows take the full step. λ is a label propagated from the
+            // sources, not a dynamical state that needs damping, and scaling it
+            // is actively destructive: it enters the phase as 2π·n·L/λ, so a
+            // λ scaled by 5e-13 makes every optical phase in the circuit wrong
+            // by twelve orders of magnitude. On giona_fc one under-constrained
+            // heater node wanting 1e12 V dragged every λ to 1e-19 m, and no
+            // iteration could recover because the clamp reproduced it exactly
+            // every time.
             let delta: Vec<f64> = x
                 .iter()
                 .zip(x_new.iter())
-                .map(|(o, n)| scale * (n - o))
+                .enumerate()
+                .map(|(i, (o, n))| {
+                    if lambda_rows[i] {
+                        n - o
+                    } else {
+                        scale * (n - o)
+                    }
+                })
                 .collect();
+            // A scale this small means the step carries no information: the
+            // offending row is almost certainly under-constrained rather than
+            // merely fast. Say which row, because "did not converge" sends the
+            // reader looking at the physics instead.
+            if scale < 1e-6 && !warned_clamp {
+                warned_clamp = true;
+                eprintln!(
+                    "warning: node '{}' wants to move {max_dv:.3e} V in one Newton \
+                     step, so the vmax={:.3e} trust region shrinks every unknown by \
+                     {scale:.3e}. A node driven only by a current source, with no \
+                     resistive path to ground, lands at I/gmin — check that this \
+                     node has a DC return path.",
+                    row_name(topo, max_dv_row),
+                    opts.vmax
+                );
+            }
 
             // `mat` still holds J(x) and b(x) from the stamp at the top of this
             // iteration, so ‖f(x)‖ is free — no restamp.
@@ -1115,6 +1173,7 @@ fn nr_inner(
             let mut alpha = 1.0_f64;
             let mut x_trial: Vec<f64>;
             loop {
+                armijo_fell_back = alpha <= ALPHA_MIN;
                 x_trial = x
                     .iter()
                     .zip(delta.iter())
@@ -1142,7 +1201,20 @@ fn nr_inner(
             x_new
         };
 
-        let converged = tol.converged(&x_next, &x);
+        // Never call it converged on a step the line search could not justify.
+        //
+        // When no alpha satisfies Armijo the loop falls through at ALPHA_MIN, so
+        // the step becomes a CONSTANT vmax/16 — independent of the Newton
+        // direction's magnitude. The iterate then marches at fixed velocity, and
+        // the relative test `|dx| < abstol + reltol*|x|` is satisfied as soon as
+        // |x| passes (vmax/16)/reltol ~ 31 V. That is not convergence, it is the
+        // tolerance catching up with a stalled walk, and it returned a +56% wrong
+        // operating point as a success: a photodetector shunt fed by a current
+        // source read 31.25 V where the answer is 19.985 V, at every iteration
+        // limit, because the stopping point depends on reltol rather than on the
+        // circuit. Refusing to converge here turns a confidently wrong answer
+        // into an honest failure that the homotopy can then try to fix.
+        let converged = tol.converged(&x_next, &x) && !armijo_fell_back;
 
         x = x_next;
         if converged {
