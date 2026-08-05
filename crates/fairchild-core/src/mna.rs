@@ -30,6 +30,13 @@ pub struct CircuitTopology {
     pub size: usize,
 }
 
+/// Conductance used to realise an ideal inductor's DC short (S).
+///
+/// 1 µΩ: three orders above the largest conductance a real circuit presents, so
+/// the node pair is effectively tied, and nine orders below 1/f64::EPSILON, so
+/// the factorisation stays sound.
+const G_DC_SHORT: f64 = 1e6;
+
 impl CircuitTopology {
     pub fn build(netlist: &Netlist) -> CircuitTopology {
         let (node_index, vsrc_index) = index_circuit(netlist);
@@ -831,8 +838,31 @@ fn stamp_netlist_into(
                     }
                     // Always stamp history current source.
                     stamp_current_source_at(&mut mat.b, p, n, i_hist);
+                } else {
+                    // No companion state means this is a DC solve, and at DC an
+                    // ideal inductor is a SHORT — the dual of the capacitor's
+                    // open above. It used to be left open, which silently cut
+                    // every DC path through an inductor: a source feeding a load
+                    // through a choke or a bondwire read 0 V, and a *current*
+                    // source into one left its node with nothing but gmin on the
+                    // diagonal, so the first Newton step demanded I/gmin volts
+                    // (1e9 V for 1 mA). On giona_fc that collapsed the vmax trust
+                    // region and took every optical phase with it.
+                    //
+                    // Enforced as a large conductance rather than a branch
+                    // constraint because a branch row would change topo.size, and
+                    // the sparsity pattern / symbolic LU cache are built from it.
+                    // G_DC_SHORT is far above any physical circuit conductance and
+                    // far below 1/eps, so the node pair is tied without wrecking
+                    // the conditioning.
+                    let (p, n) = resolved.unwrap_or_else(|| {
+                        (
+                            topo.node_index.get(pos).copied(),
+                            topo.node_index.get(neg).copied(),
+                        )
+                    });
+                    stamp_conductance_at(&mut mat.a, p, n, G_DC_SHORT);
                 }
-                // If not in ind_state (no transient yet), inductor = open circuit at DC.
             }
             Element::CoupledInductors {
                 l1, l2, coupling, ..

@@ -1132,14 +1132,21 @@ fn nr_inner(
             // reader looking at the physics instead.
             if scale < 1e-6 && !warned_clamp {
                 warned_clamp = true;
+                // Describe the symptom and let the reader draw the conclusion:
+                // the first version of this asserted "no resistive path to
+                // ground", which was wrong on the very circuit that prompted it
+                // (the path existed; the inductors on it were being stamped open).
                 eprintln!(
                     "warning: node '{}' wants to move {max_dv:.3e} V in one Newton \
                      step, so the vmax={:.3e} trust region shrinks every unknown by \
-                     {scale:.3e}. A node driven only by a current source, with no \
-                     resistive path to ground, lands at I/gmin — check that this \
-                     node has a DC return path.",
+                     {scale:.3e} — including unknowns in other units. A step this \
+                     small carries almost no information, so the solve will crawl \
+                     or stall. I/gmin ({:.3e} V at gmin={:.1e}) is what a node \
+                     carrying no conductance at all would show.",
                     row_name(topo, max_dv_row),
-                    opts.vmax
+                    opts.vmax,
+                    1.0 / opts.gmin,
+                    opts.gmin
                 );
             }
 
