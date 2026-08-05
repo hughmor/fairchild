@@ -1,7 +1,7 @@
 use super::common::{canon_node, expand_bus_vectors, parse_value};
-use super::waveforms::parse_waveform;
+use super::waveforms::{parse_waveform, split_ac_spec};
 use crate::expr::Expr;
-use crate::{BehavioralKind, Element, ModelCard, ParseError};
+use crate::{BehavioralKind, Element, ModelCard, ParseError, Waveform};
 
 pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -54,22 +54,32 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 inductance: parse_value(tokens[3], lineno)?,
             })
         }
-        'v' => {
-            let waveform = parse_waveform(&tokens, lineno)?;
-            Ok(Element::VoltageSource {
-                name,
-                pos: canon_node(tokens[1]),
-                neg: canon_node(tokens[2]),
-                waveform,
-            })
-        }
-        'i' => {
-            let waveform = parse_waveform(&tokens, lineno)?;
-            Ok(Element::CurrentSource {
-                name,
-                pos: canon_node(tokens[1]),
-                neg: canon_node(tokens[2]),
-                waveform,
+        'v' | 'i' => {
+            // The AC spec comes off first; a line that says nothing but `AC …`
+            // carries no time-domain value, which SPICE reads as DC 0.
+            let (ac, wf_tokens) = split_ac_spec(&tokens, lineno)?;
+            let waveform = if ac.is_some() && wf_tokens.len() < 4 {
+                Waveform::Dc(0.0)
+            } else {
+                parse_waveform(&wf_tokens, lineno)?
+            };
+            let (pos, neg) = (canon_node(tokens[1]), canon_node(tokens[2]));
+            Ok(if letter == 'v' {
+                Element::VoltageSource {
+                    name,
+                    pos,
+                    neg,
+                    waveform,
+                    ac,
+                }
+            } else {
+                Element::CurrentSource {
+                    name,
+                    pos,
+                    neg,
+                    waveform,
+                    ac,
+                }
             })
         }
         'd' => {
@@ -94,6 +104,88 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 cathode: canon_node(tokens[2]),
                 model_name: tokens[3].to_lowercase(),
                 params,
+            })
+        }
+        // ── E / F / G / H: the four linear controlled sources ────────────────
+        //
+        // Desugared onto the B-element rather than given their own stamps. A
+        // VCVS *is* `B… V=gain*(V(cp)-V(cn))`, and the behavioural path already
+        // owns everything these need: the auxiliary branch row for the two
+        // voltage-output kinds, a Jacobian column per referenced node or branch,
+        // and `extra_stamp_rows` for reaching a controlling source's row. Adding
+        // four more stampers would have been four more chances to get a sign
+        // wrong, against zero new capability.
+        //
+        //   E<n> p n nc+ nc- <gain>    V = gain·(V(nc+) − V(nc-))
+        //   G<n> p n nc+ nc- <gain>    I = gain·(V(nc+) − V(nc-))
+        //   H<n> p n <Vctrl>  <gain>   V = gain·I(Vctrl)
+        //   F<n> p n <Vctrl>  <gain>   I = gain·I(Vctrl)
+        'e' | 'g' | 'f' | 'h' => {
+            let voltage_controlled = matches!(letter, 'e' | 'g');
+            let outputs_voltage = matches!(letter, 'e' | 'h');
+            let want = if voltage_controlled {
+                6 // name n+ n- nc+ nc- gain
+            } else {
+                5 // name n+ n- Vctrl gain
+            };
+            // POLY / VALUE / TABLE are real SPICE spellings of these elements
+            // that mean something quite different. Refuse them by name rather
+            // than reading `POLY(1)` as a node.
+            for tok in &tokens[3..] {
+                let up = tok.to_uppercase();
+                if up.starts_with("POLY") || up.starts_with("VALUE") || up.starts_with("TABLE") {
+                    return Err(ParseError::UnsupportedForm {
+                        what: format!(
+                            "{}-element {} form (only the linear \
+                             `{}<name> n+ n- {} <gain>` form is supported; a \
+                             polynomial or expression source can be written as a \
+                             B-element)",
+                            letter.to_ascii_uppercase(),
+                            up.split('(').next().unwrap_or(&up),
+                            letter.to_ascii_uppercase(),
+                            if voltage_controlled {
+                                "nc+ nc-"
+                            } else {
+                                "Vctrl"
+                            },
+                        ),
+                        line: lineno,
+                    });
+                }
+            }
+            if tokens.len() < want {
+                return Err(ParseError::FieldCount {
+                    expected: if voltage_controlled {
+                        "6 (E/G name n+ n- nc+ nc- gain)"
+                    } else {
+                        "5 (F/H name n+ n- Vctrl gain)"
+                    },
+                    got: tokens.len(),
+                    line: lineno,
+                });
+            }
+            let gain = parse_value(tokens[want - 1], lineno)?;
+            let control = if voltage_controlled {
+                Expr::NodeDiffV(canon_node(tokens[3]), canon_node(tokens[4]))
+            } else {
+                // Element names are stored lower-cased, so the reference must be
+                // too or the branch lookup misses and silently reads zero.
+                Expr::BranchI(tokens[3].to_lowercase())
+            };
+            Ok(Element::Behavioral {
+                name,
+                pos: canon_node(tokens[1]),
+                neg: canon_node(tokens[2]),
+                kind: if outputs_voltage {
+                    BehavioralKind::Voltage
+                } else {
+                    BehavioralKind::Current
+                },
+                expr: Expr::Bin(
+                    crate::expr::BinOp::Mul,
+                    Box::new(Expr::Num(gain)),
+                    Box::new(control),
+                ),
             })
         }
         'b' => {
@@ -548,8 +640,24 @@ pub(super) fn parse_model(line: &str, lineno: usize) -> Result<Option<ModelCard>
         return Ok(None);
     }
     let name = tokens[1].to_string();
-    let kind = tokens[2].to_lowercase();
-    let rest = tokens[3..].join(" ");
+    // SPICE allows no space before the parameter list — `.model x D(IS=1e-16)` —
+    // so the kind token can arrive with the whole list glued on. Split on `(`
+    // rather than trusting whitespace: otherwise the kind becomes `d(is=1e-16`,
+    // which still `starts_with('d')`, so it dispatches as a diode built entirely
+    // from defaults with the first parameter silently swallowed. MOSFET and BJT
+    // escape it only because their dispatch is exact and they raise
+    // `unknown model`; the diode is the one device that failed quietly.
+    let (kind_tok, glued) = match tokens[2].find('(') {
+        Some(i) => (&tokens[2][..i], &tokens[2][i..]),
+        None => (tokens[2], ""),
+    };
+    let kind = kind_tok.to_lowercase();
+    let tail = tokens[3..].join(" ");
+    let rest = if glued.is_empty() {
+        tail
+    } else {
+        format!("{glued} {tail}")
+    };
 
     let mut params = Vec::new();
     let mut expr_params = Vec::new();

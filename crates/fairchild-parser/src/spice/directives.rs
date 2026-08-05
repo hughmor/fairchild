@@ -349,9 +349,24 @@ pub(super) fn parse_tran(line: &str, lineno: usize) -> Result<Analysis, ParseErr
         });
     }
     let uic = tokens.iter().any(|t| t.eq_ignore_ascii_case("uic"));
+    // `.tran step stop [tstart [tmax]] [UIC]`. `UIC` may sit in any trailing
+    // slot, so read positionally but skip it rather than parsing it as a number.
+    let mut trailing = tokens[3..]
+        .iter()
+        .filter(|t| !t.eq_ignore_ascii_case("uic"));
+    let tstart = match trailing.next() {
+        Some(t) => parse_value(t, lineno)?,
+        None => 0.0,
+    };
+    let tmax = match trailing.next() {
+        Some(t) => Some(parse_value(t, lineno)?),
+        None => None,
+    };
     Ok(Analysis::Tran {
         step: parse_value(tokens[1], lineno)?,
         stop: parse_value(tokens[2], lineno)?,
+        tstart,
+        tmax,
         uic,
     })
 }

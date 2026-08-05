@@ -70,6 +70,7 @@ fn voltage_source_dc_parses() {
         pos,
         neg,
         waveform: Waveform::Dc(v),
+        ..
     } = &nl.elements[0]
     {
         assert_eq!(name, "v1");
@@ -243,7 +244,10 @@ fn op_analysis() {
 #[test]
 fn tran_analysis() {
     let nl = parse_ok("R1 a 0 1k\n.tran 1n 10u\n.end\n");
-    if let Some(Analysis::Tran { step, stop, uic }) = nl.analyses.first() {
+    if let Some(Analysis::Tran {
+        step, stop, uic, ..
+    }) = nl.analyses.first()
+    {
         assert!((step - 1e-9).abs() < 1e-21);
         assert!((stop - 10e-6).abs() < 1e-18);
         assert!(!uic);

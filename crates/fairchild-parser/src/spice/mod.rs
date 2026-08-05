@@ -558,7 +558,9 @@ mod tests {
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         match &netlist.analyses[0] {
-            Analysis::Tran { step, stop, uic } => {
+            Analysis::Tran {
+                step, stop, uic, ..
+            } => {
                 assert!((step - 1e-6).abs() < 1e-12);
                 assert!((stop - 5e-3).abs() < 1e-12);
                 assert!(!uic);
@@ -660,6 +662,148 @@ mod tests {
         }
         assert!(parse_spice_value("banana").is_err());
         assert!(parse_spice_value("").is_err());
+    }
+
+    /// SPICE allows no space before a model card's parameter list. The kind
+    /// token then arrives as `d(is=1e-16`, which still `starts_with('d')`, so it
+    /// dispatched as a diode and the first parameter vanished — a 100x silent
+    /// error in the saturation current, and the diode was the only device that
+    /// failed quietly rather than raising `unknown model`.
+    #[test]
+    fn model_card_accepts_no_space_before_paren() {
+        for text in [
+            "* m\n.model xx D (IS=1e-16 N=1.5)\n.op\n.end\n",
+            "* m\n.model xx D(IS=1e-16 N=1.5)\n.op\n.end\n",
+        ] {
+            let nl = parse_spice(text).unwrap();
+            let card = &nl.models[0];
+            assert_eq!(card.kind.to_lowercase(), "d", "kind swallowed the paren");
+            let get = |k: &str| {
+                card.params
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| *v)
+                    .unwrap_or_else(|| panic!("{k} missing from {:?}", card.params))
+            };
+            assert!((get("is") - 1e-16).abs() < 1e-30);
+            assert!((get("n") - 1.5).abs() < 1e-12);
+        }
+    }
+
+    /// `.tran step stop [tstart [tmax]] [UIC]` — the third and fourth arguments
+    /// were parsed and dropped, so a deck asking for a finer step or a delayed
+    /// output window silently got neither. `UIC` may occupy any trailing slot,
+    /// so it must be skipped rather than parsed as a number.
+    #[test]
+    fn parse_tran_reads_tstart_tmax_and_uic() {
+        let cases = [
+            (".tran 1n 20n", 0.0, None, false),
+            (".tran 1n 20n UIC", 0.0, None, true),
+            (".tran 1n 20n 5n", 5e-9, None, false),
+            (".tran 1n 20n 5n 0.1n", 5e-9, Some(1e-10), false),
+            (".tran 1n 20n 5n 0.1n UIC", 5e-9, Some(1e-10), true),
+            (".tran 1n 20n UIC 5n", 5e-9, None, true),
+        ];
+        for (line, want_tstart, want_tmax, want_uic) in cases {
+            let nl = parse_spice(&format!("* t\nV1 a 0 DC 1\n{line}\n.end\n")).unwrap();
+            let Analysis::Tran {
+                tstart,
+                tmax,
+                uic,
+                step,
+                stop,
+            } = &nl.analyses[0]
+            else {
+                panic!("{line}: not a Tran analysis");
+            };
+            assert!((step - 1e-9).abs() < 1e-18, "{line}: step");
+            assert!((stop - 20e-9).abs() < 1e-18, "{line}: stop");
+            assert!(
+                (tstart - want_tstart).abs() < 1e-18,
+                "{line}: tstart {tstart:e}"
+            );
+            assert_eq!(uic, &want_uic, "{line}: uic");
+            match (tmax, want_tmax) {
+                (Some(g), Some(w)) => assert!((g - w).abs() < 1e-18, "{line}: tmax {g:e}"),
+                (None, None) => {}
+                _ => panic!("{line}: tmax {tmax:?} != {want_tmax:?}"),
+            }
+        }
+    }
+
+    /// The four linear controlled sources desugar onto the B-element, so the
+    /// test is that each one produces the right behavioural expression: `V=` for
+    /// the two voltage-output kinds, `I=` for the current-output ones, a node
+    /// difference for the voltage-controlled pair and a branch current for the
+    /// current-controlled pair.
+    #[test]
+    fn controlled_sources_desugar_onto_the_b_element() {
+        use crate::expr::{BinOp, Expr};
+        let cases = [
+            ("E1 out 0 in 0 2.0", BehavioralKind::Voltage, true),
+            ("G1 out 0 in 0 1m", BehavioralKind::Current, true),
+            ("H1 out 0 Vs 500", BehavioralKind::Voltage, false),
+            ("F1 out 0 Vs 3.0", BehavioralKind::Current, false),
+        ];
+        for (line, want_kind, voltage_controlled) in cases {
+            let nl = parse_spice(&format!(
+                "* cs\nVin in 0 DC 1\nVs a 0 DC 1\n{line}\nRl out 0 1k\n.op\n.end\n"
+            ))
+            .unwrap();
+            let el = nl
+                .elements
+                .iter()
+                .find(|e| matches!(e, Element::Behavioral { .. }))
+                .unwrap_or_else(|| panic!("{line}: no behavioural element produced"));
+            let Element::Behavioral {
+                pos,
+                neg,
+                kind,
+                expr,
+                ..
+            } = el
+            else {
+                unreachable!()
+            };
+            assert_eq!((pos.as_str(), neg.as_str()), ("out", "0"), "{line}: nodes");
+            assert_eq!(
+                std::mem::discriminant(kind),
+                std::mem::discriminant(&want_kind),
+                "{line}: V= vs I="
+            );
+            let Expr::Bin(BinOp::Mul, gain, control) = expr else {
+                panic!("{line}: expected gain*control, got {expr:?}");
+            };
+            assert!(matches!(**gain, Expr::Num(_)), "{line}: gain not a literal");
+            if voltage_controlled {
+                assert!(
+                    matches!(&**control, Expr::NodeDiffV(a, b) if a == "in" && b == "0"),
+                    "{line}: control should be V(in,0), got {control:?}"
+                );
+            } else {
+                // Lower-cased, or the branch lookup misses and reads zero.
+                assert!(
+                    matches!(&**control, Expr::BranchI(n) if n == "vs"),
+                    "{line}: control should be I(vs), got {control:?}"
+                );
+            }
+        }
+    }
+
+    /// `POLY`, `VALUE` and `TABLE` are real SPICE spellings of E/F/G/H that mean
+    /// something quite different. They must be refused by name, not read as a
+    /// node called `POLY(1)`.
+    #[test]
+    fn controlled_source_poly_form_is_refused() {
+        let err = parse_spice(
+            "* poly\nVin in 0 DC 1\nE1 out 0 POLY(1) in 0 0 2\nRl out 0 1k\n.op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("POLY") && msg.contains("B-element"),
+            "the POLY refusal should name POLY and point at the B-element: {msg}"
+        );
     }
 
     #[test]

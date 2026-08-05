@@ -18,4 +18,9 @@ pub enum SimError {
     FloatingNodes { nodes: Vec<String> },
     #[error("parameter error: {0}")]
     ParameterError(String),
+    #[error(
+        "no AC source: .ac needs at least one source with an `AC <mag> [phase]` spec, \
+         e.g. `V1 in 0 DC 0 AC 1`. Without one there is nothing to excite the circuit."
+    )]
+    NoAcSource,
 }
