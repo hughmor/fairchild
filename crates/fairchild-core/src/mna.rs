@@ -907,6 +907,7 @@ fn stamp_netlist_into(
                 pos,
                 neg,
                 waveform,
+                ..
             } => {
                 let (p, n) = resolved.unwrap_or_else(|| {
                     (

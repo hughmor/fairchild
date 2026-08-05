@@ -44,6 +44,32 @@ pub struct TranResult {
 }
 
 impl TranResult {
+    /// Drop every timepoint before `tstart` — `.tran`'s third argument.
+    ///
+    /// SPICE's tstart selects what is *saved*, not where integration begins, so
+    /// this runs on the finished result rather than gating the solver. A tstart
+    /// past the end leaves the last point, because returning an empty waveform
+    /// would be a worse answer than a short one.
+    pub fn trim_before(&mut self, tstart: f64) {
+        if tstart <= 0.0 || self.time.is_empty() {
+            return;
+        }
+        let keep_from = self
+            .time
+            .partition_point(|&t| t < tstart)
+            .min(self.time.len() - 1);
+        if keep_from == 0 {
+            return;
+        }
+        self.time.drain(..keep_from);
+        for v in self.node_voltages.values_mut() {
+            v.drain(..keep_from);
+        }
+        for i in self.vsrc_currents.values_mut() {
+            i.drain(..keep_from);
+        }
+    }
+
     /// Node voltage at a specific time, with linear interpolation.
     /// Returns None if the node is unknown or t is out of range.
     pub fn voltage_at(&self, node: &str, t: f64) -> Option<f64> {
@@ -343,6 +369,7 @@ pub fn tran_nr_with_registry_opts(
         t_next = (st.time() + step).min(stop);
     }
 
+    result.trim_before(opts.tstart);
     Ok(result)
 }
 
@@ -766,6 +793,7 @@ pub fn tran_nr_with_registry_var_opts(
         }
     }
 
+    result.trim_before(opts.tstart);
     Ok(result)
 }
 

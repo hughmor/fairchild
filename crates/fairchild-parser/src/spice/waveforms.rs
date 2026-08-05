@@ -1,6 +1,50 @@
 use super::common::parse_value;
 use crate::{ParseError, Waveform};
 
+/// Split `AC <mag> [phase]` out of a source line, returning the spec and the
+/// line with those tokens removed.
+///
+/// SPICE lets the AC spec sit anywhere after the nodes — before or after the DC
+/// value, before or after a transient function — so this is a scan, not a
+/// position check. Removing the tokens lets `parse_waveform` see the line as if
+/// the spec were never there, which is why it needed no changes.
+///
+/// A bare `AC` means magnitude 1, per SPICE. A following token that is not a
+/// number (a transient function, say) ends the spec rather than being eaten.
+pub(super) fn split_ac_spec<'a>(
+    tokens: &[&'a str],
+    lineno: usize,
+) -> Result<(Option<crate::AcSpec>, Vec<&'a str>), ParseError> {
+    let mut ac: Option<crate::AcSpec> = None;
+    let mut kept: Vec<&'a str> = tokens.iter().take(3).copied().collect();
+    let mut i = 3;
+    while i < tokens.len() {
+        if !tokens[i].eq_ignore_ascii_case("ac") {
+            kept.push(tokens[i]);
+            i += 1;
+            continue;
+        }
+        // `AC` with no number after it is magnitude 1.
+        let mag = match tokens.get(i + 1).and_then(|t| parse_value(t, lineno).ok()) {
+            Some(v) => {
+                i += 1;
+                v
+            }
+            None => 1.0,
+        };
+        let phase_deg = match tokens.get(i + 1).and_then(|t| parse_value(t, lineno).ok()) {
+            Some(v) => {
+                i += 1;
+                v
+            }
+            None => 0.0,
+        };
+        ac = Some(crate::AcSpec { mag, phase_deg });
+        i += 1;
+    }
+    Ok((ac, kept))
+}
+
 pub(super) fn parse_waveform(tokens: &[&str], lineno: usize) -> Result<Waveform, ParseError> {
     if tokens.len() < 4 {
         return Err(ParseError::FieldCount {

@@ -13,7 +13,7 @@ use fairchild_parser::parse_spice;
 fn rc_lowpass_magnitude_and_phase() {
     let net = parse_spice(
         "* RC low-pass: R=1k, C=1µF → f_c = 159.155 Hz\n\
-         V1 in 0 DC 1\n\
+         V1 in 0 DC 1 AC 1\n\
          R1 in out 1k\n\
          C1 out 0 1u\n\
          .end\n",
@@ -53,7 +53,7 @@ fn rlc_resonance_peak_at_f0() {
     // R=1Ω, L=1mH, C=1µF → f₀ ≈ 5.033 kHz, Q ≈ √(L/C)/R ≈ 31.62.
     let net = parse_spice(
         "* RLC bandpass\n\
-         V1 in 0 DC 1\n\
+         V1 in 0 DC 1 AC 1\n\
          R1 in m1 1\n\
          L1 m1 m2 1m\n\
          C1 m2 0 1u\n\

@@ -61,6 +61,9 @@ pub struct SimOptions {
     /// Maximum allowed step size (s).  `f64::INFINITY` means "use whatever the
     /// solver decides up to the .tran step argument."
     pub max_step: f64,
+    /// Discard transient output before this time — `.tran`'s third argument.
+    /// The run still integrates from 0.
+    pub tstart: f64,
 
     // ── convergence aids ───────────────────────────────────────────────────
     /// Initial extra GMIN added during GMIN-stepping (S).
@@ -199,6 +202,7 @@ impl Default for SimOptions {
             max_rejections: 30,
             method: IntegratorMode::Trapezoidal,
             max_step: f64::INFINITY,
+            tstart: 0.0,
             gmin_max: 1.0,
             srcsteps: 10,
             temp_k: 300.15,
@@ -236,7 +240,30 @@ impl SimOptions {
             opts.temp_k = t_k;
         }
         for (k, v) in &netlist.options {
-            opts.set(k, v);
+            // `set` already reports whether it recognised the key; discarding
+            // that made `.options trtol=7` — a real ngspice option — a silent
+            // no-op, indistinguishable from one that took effect.
+            if !opts.set(k, v) {
+                eprintln!(
+                    "warning: .options '{k}' is not recognised and has no effect \
+                     (see docs/spice_support.md)"
+                );
+            }
+        }
+        // `.tran`'s tstart and tmax used to be parsed and dropped. Picking them
+        // up here rather than at each analysis entry point means the CLI and the
+        // Python bindings both get them from one place.
+        for a in &netlist.analyses {
+            if let fairchild_parser::Analysis::Tran { tstart, tmax, .. } = a {
+                if *tstart > 0.0 {
+                    opts.tstart = *tstart;
+                }
+                if let Some(tmax) = tmax {
+                    // Tightest constraint wins, so this can never loosen a step
+                    // ceiling the user set through `.options maxstep`.
+                    opts.max_step = opts.max_step.min(*tmax);
+                }
+            }
         }
         opts
     }
@@ -286,6 +313,7 @@ impl SimOptions {
             "itl1" => self.itl1 = parse_int(value).unwrap_or(self.itl1),
             "itl4" => self.itl4 = parse_int(value).unwrap_or(self.itl4),
             "maxstep" | "max_step" => self.max_step = parse_num(value).unwrap_or(self.max_step),
+            "tstart" => self.tstart = parse_num(value).unwrap_or(self.tstart),
             "gmin_max" | "gminmax" => self.gmin_max = parse_num(value).unwrap_or(self.gmin_max),
             "srcsteps" | "srcmax" => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
             "temp" => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,

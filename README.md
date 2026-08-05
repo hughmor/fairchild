@@ -30,8 +30,8 @@ performance vs ngspice.
 
 | Category | Coverage |
 |---|---|
-| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), BJT (Gummel-Poon), B (behavioral), S/W (switches), T (lossless line), X (subckt / OSDI) |
-| Sources | DC, PULSE, PWL, SIN, EXP, SFFM, AM |
+| Elements | R, L, C, V, I, D, K (coupled inductors), MOSFET (Level 1), BJT (Gummel-Poon), B (behavioral), E/F/G/H (controlled sources), S/W (switches), T (lossless line), X (subckt / OSDI) |
+| Sources | DC, PULSE, PWL, SIN, EXP, SFFM, AM, `AC <mag> [phase]` |
 | Analyses | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | Solvers | NR with `pnjlim` / `fetlim`; BE, TR, GEAR (BDF-2); dense or sparse LU |
 | Directives | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`/`.endl`, `.include`, `.param`, `.subckt`/`.ends`, `.temp` (sweep), `.alter`, `.model`, `.osdi` |
@@ -41,6 +41,12 @@ performance vs ngspice.
 What's not yet supported: lossy transmission lines (lossless `T` and
 `S`/`W` switches are supported), `.disto`, `.pz`, native `.mc` Monte Carlo,
 PSF/FSDB binary output.
+
+Every ngspice element letter, dot-command and source function — and, for the ones
+fairchild does not implement, whether it errors or warns — is tabulated in
+[`docs/spice_support.md`](docs/spice_support.md). Per-parameter model coverage
+(parsed vs stamped vs validated) is in
+[`docs/model_status.md`](docs/model_status.md).
 
 ### Electro-optic co-simulation
 
