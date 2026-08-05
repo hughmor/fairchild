@@ -226,7 +226,14 @@ fn run_tran_mode(
             mode
         };
         reactive.build(&no_devices, step_mode, step, None);
-        let mat = stamp_netlist(&topo, netlist, t, &reactive.cap_state, &reactive.ind_state);
+        let mat = stamp_netlist(
+            &topo,
+            netlist,
+            t,
+            &reactive.cap_state,
+            &reactive.ind_state,
+            crate::mna::InductorDc::Short,
+        );
         x = lu_solve(&mat.a, &mat.b)?;
         push_timepoint(&mut result, t, &topo, &x);
         if t >= stop {
@@ -661,6 +668,7 @@ pub fn tran_nr_with_registry_var_opts(
                 &reactive.cap_state,
                 &reactive.ind_state,
                 Some(&plan),
+                crate::mna::InductorDc::Short,
             );
 
             for dev in devices.iter_mut() {

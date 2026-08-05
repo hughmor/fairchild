@@ -263,6 +263,7 @@ impl TranStepper {
                 &self.reactive.cap_state,
                 &self.reactive.ind_state,
                 Some(&self.plan),
+                crate::mna::InductorDc::Short,
             );
             if let Some(noise) = self.noise.as_ref() {
                 for (b, n) in self.mat.b.iter_mut().zip(noise.rhs()) {

@@ -30,6 +30,21 @@ pub struct CircuitTopology {
     pub size: usize,
 }
 
+/// How the assembler should treat an inductor that has no companion state.
+///
+/// There is no single right answer, which is why it is a parameter: a DC
+/// operating point needs the short (an ideal inductor is 0 Ω at DC), while `.ac`
+/// and `.noise` build only the *real* part here and add `jωL` themselves, so for
+/// them the inductor must contribute nothing. Stamping the short unconditionally
+/// shunts every inductor in an AC sweep and flattens LC resonance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InductorDc {
+    /// DC / operating point: an ideal inductor is a short.
+    Short,
+    /// `.ac` / `.noise`: reactance is added by the caller, so contribute nothing.
+    Reactive,
+}
+
 /// Conductance used to realise an ideal inductor's DC short (S).
 ///
 /// 1 µΩ: three orders above the largest conductance a real circuit presents, so
@@ -625,8 +640,9 @@ pub fn stamp_netlist_scaled_in_place(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
-    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state, plan);
+    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state, plan, ind_dc);
     if (source_scale - 1.0).abs() < 1e-15 {
         return;
     }
@@ -672,8 +688,9 @@ pub fn stamp_netlist_scaled(
     source_scale: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    ind_dc: InductorDc,
 ) -> MnaMatrix {
-    let mut mat = stamp_netlist(topo, netlist, 0.0, cap_state, ind_state);
+    let mut mat = stamp_netlist(topo, netlist, 0.0, cap_state, ind_state, ind_dc);
     if (source_scale - 1.0).abs() < 1e-15 {
         return mat;
     }
@@ -727,9 +744,10 @@ pub fn stamp_netlist_in_place(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
     mat.clear();
-    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state, plan);
+    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state, plan, ind_dc);
 }
 
 /// Allocating variant: produces a fresh `MnaMatrix`.  Kept for non-hot
@@ -744,9 +762,12 @@ pub fn stamp_netlist(
     t: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    ind_dc: InductorDc,
 ) -> MnaMatrix {
     let mut mat = MnaMatrix::new(topo.size);
-    stamp_netlist_into(&mut mat, topo, netlist, t, cap_state, ind_state, None);
+    stamp_netlist_into(
+        &mut mat, topo, netlist, t, cap_state, ind_state, None, ind_dc,
+    );
     mat
 }
 
@@ -760,6 +781,7 @@ fn stamp_netlist_into(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
     use std::collections::HashMap;
 
@@ -838,7 +860,7 @@ fn stamp_netlist_into(
                     }
                     // Always stamp history current source.
                     stamp_current_source_at(&mut mat.b, p, n, i_hist);
-                } else {
+                } else if ind_dc == InductorDc::Short {
                     // No companion state means this is a DC solve, and at DC an
                     // ideal inductor is a SHORT — the dual of the capacitor's
                     // open above. It used to be left open, which silently cut

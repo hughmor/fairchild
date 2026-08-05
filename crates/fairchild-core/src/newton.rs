@@ -411,7 +411,14 @@ fn report_matrix_stats(
     }
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let x0 = vec![0.0f64; topo.size];
-    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(&x0, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -550,7 +557,14 @@ fn validate_devices_finite(
     x: &[f64],
 ) {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(x, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -839,7 +853,14 @@ fn report_failure(
     // Recompute the residual at the failed iterate `x` so we can attribute
     // rows to devices.
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        source_scale,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(x, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -929,6 +950,7 @@ fn residual_l2(
         &empty,
         &empty,
         plan,
+        crate::mna::InductorDc::Short,
     );
     for dev in devices.iter_mut() {
         dev.set_source_scale(source_scale);
@@ -1008,6 +1030,7 @@ fn nr_inner(
             &empty,
             &empty,
             plan,
+            crate::mna::InductorDc::Short,
         );
 
         for dev in devices.iter_mut() {

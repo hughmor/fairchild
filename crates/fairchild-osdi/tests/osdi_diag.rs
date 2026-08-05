@@ -56,7 +56,14 @@ fn osdi_jacobian_value_at_zero_voltage() {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let x0 = vec![0.0f64; topo.size];
 
-    let mut mat = stamp_netlist(&topo, &netlist, 0.0, &empty, &empty);
+    let mut mat = stamp_netlist(
+        &topo,
+        &netlist,
+        0.0,
+        &empty,
+        &empty,
+        fairchild_core::mna::InductorDc::Short,
+    );
     eprintln!("mat.a before device stamp: {:?}", mat.a);
     eprintln!("mat.b before device stamp: {:?}", mat.b);
 
