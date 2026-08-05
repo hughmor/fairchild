@@ -394,7 +394,7 @@ def op_labels(sch, result, tag: str = "op", size_mm: float = 1.0,
     result, so unsolved or optical-only nets are quietly skipped rather than
     littering the sheet with blanks.
     """
-    from fairchild.kicad import _sanitise
+    from fairchild.kicad import _sanitise  # noqa: F401
     syms = symbols if symbols is not None else selected_symbols(sch)
     if not syms:
         return 0
@@ -410,7 +410,7 @@ def op_labels(sch, result, tag: str = "op", size_mm: float = 1.0,
         a = Annotation(sch, tag=tag, sheet=sheet.name if sheet else None)
         for s in group:
             for p in s.sorted_pins():
-                net = _sanitise(p.net)
+                net = sch.net(p.net)
                 key = f"V({net.lower()})"
                 if key not in sigs:
                     continue

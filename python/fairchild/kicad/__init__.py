@@ -326,11 +326,23 @@ class Symbol:
 
 
 def _sanitise(net: str) -> str:
-    """KiCad net names carry characters a SPICE deck can't: Net-(U1-out) etc."""
+    """KiCad net name → a SPICE-legal one. NOT injective on its own.
+
+    `+` and `-` map to `p`/`n` rather than `_` because they are the common case
+    and collapsing them silently shorts device terminals: `PD1+` and `PD1-` both
+    became `…_PD1_`, which shorted all 8 photodetectors in giona_fc and made the
+    operating point unsolvable. Any residual collision is resolved by
+    `LiveSchematic._build_net_map`, which is what callers should go through —
+    this function alone cannot see its siblings.
+    """
     if net in GROUND_NETS or net.upper() in ("GND", "GNDA", "VSS"):
         return "0"
     n = re.sub(r"^Net-\((.*)\)$", r"\1", net)
     n = re.sub(r"^unconnected-\((.*)\)$", r"nc_\1", n)
+    # Polarity suffix is the collision that matters; other separators can all
+    # collapse to '_' since the disambiguation pass will catch any leftovers.
+    n = re.sub(r"\+$", "_p", n)
+    n = re.sub(r"-$", "_n", n)
     return re.sub(r"[^A-Za-z0-9_]", "_", n)
 
 
@@ -357,9 +369,43 @@ class LiveSchematic:
         self._load_sheet_params()
         self._load_symbols()
         self._load_nets()
+        self._build_net_map()
         self._overlay_instance_params()
         self._resolve_sheet_params()
         return self
+
+    def _build_net_map(self) -> None:
+        """raw KiCad net name → unique SPICE net name.
+
+        Sanitisation is lossy, and two nets that collapse to one name are a
+        short circuit in the emitted deck — silent, and fatal to convergence
+        rather than to parsing. So build the mapping once, globally, and
+        disambiguate anything that would collide. Ground is exempt: every
+        ground alias is *meant* to become node 0.
+        """
+        raws = sorted({p.net for s in self.symbols for p in s.pins})
+        taken: dict[str, str] = {}   # safe name → the raw that claimed it
+        self.net_name: dict[str, str] = {}
+        for raw in raws:
+            safe = _sanitise(raw)
+            if safe == "0":
+                self.net_name[raw] = safe
+                continue
+            if safe in taken:
+                base, i = safe, 2
+                while safe in taken:
+                    safe = f"{base}_{i}"
+                    i += 1
+                self.warnings.append(
+                    f"net name collision: {raw!r} and {taken[base]!r} both "
+                    f"sanitise to {base!r}; renamed this one to {safe!r} — "
+                    f"without this they would be one net, i.e. a short")
+            taken[safe] = raw
+            self.net_name[raw] = safe
+
+    def net(self, raw: str) -> str:
+        """Deck net name for a KiCad net. Falls back for nets added since refresh."""
+        return self.net_name.get(raw) or _sanitise(raw)
 
     def _project_text_vars(self) -> dict[str, str]:
         """Project-wide ${} substitutions — the outermost parameter scope."""
@@ -590,7 +636,7 @@ class LiveSchematic:
             pins = s.sorted_pins()
             bus_i = next((i for i, p in enumerate(pins) if p.name == "bus"), 0)
             for i, p in enumerate(pins):
-                pinned[_sanitise(p.net)] = max(len(pins) - 1, 1) if i == bus_i else 1
+                pinned[self.net(p.net)] = max(len(pins) - 1, 1) if i == bus_i else 1
 
         widths = dict(pinned)
         for _ in range(len(self.symbols) + 1):  # fixpoint; can't cycle more than once per device
@@ -601,7 +647,7 @@ class LiveSchematic:
                 schema = PORT_SCHEMA.get(s.model)
                 if schema is None:
                     continue
-                nets = [_sanitise(p.net) for kind, p in zip(schema, s.sorted_pins())
+                nets = [self.net(p.net) for kind, p in zip(schema, s.sorted_pins())
                         if kind == "bundle"]
                 w = max((widths.get(n, 1) for n in nets), default=1)
                 for n in nets:
@@ -677,7 +723,7 @@ class LiveSchematic:
         out: dict[str, list[str]] = {}
         for s in self.symbols:
             for p in s.pins:
-                out.setdefault(_sanitise(p.net), []).append(f"{s.ref}.{p.name or p.number}")
+                out.setdefault(self.net(p.net), []).append(f"{s.ref}.{p.name or p.number}")
         return out
 
     @property
@@ -742,10 +788,10 @@ class LiveSchematic:
             if kind:
                 ordered = self._model_ordered_pins(s, kind)
                 body.append(self._emit_electrical(
-                    s, kind, [_sanitise(p.net) for p in ordered]))
+                    s, kind, [self.net(p.net) for p in ordered]))
                 continue
             pins = s.sorted_pins()
-            nets = [_sanitise(p.net) for p in pins]
+            nets = [self.net(p.net) for p in pins]
             if s.model in BUNDLE_BRIDGE_MODELS:
                 # Mux/demux arity is set by how many channel pins the symbol has,
                 # so there is no fixed PORT_SCHEMA entry. Every port is optical,
@@ -832,7 +878,7 @@ class LiveSchematic:
                 src = "" if s.params_source == "ipc" else f"  [{s.params_source}]"
                 out.append(f"  {s.ref:<8} {s.model:<16}{src}")
                 for p in s.sorted_pins():
-                    net = _sanitise(p.net)
+                    net = self.net(p.net)
                     w = widths.get(net)
                     out.append(f"      {p.number:>3} {p.name or '-':<10} {net}"
                                f"{f'  ({w}ch)' if w and w > 1 else ''}")
@@ -888,6 +934,19 @@ def demo() -> None:
                if s.model in PORT_SCHEMA and not s.excluded_from_sim), \
         "a known-model symbol is missing from the deck"
 
+    # Net naming must be injective. Two nets collapsing to one name is a short
+    # circuit in the deck: it parses, it looks fine, and the operating point
+    # becomes unsolvable. giona_fc had 8 of them — every `PDn+`/`PDn-` pair.
+    mapped = {raw: sch.net(raw) for s in sch.symbols for p in s.pins
+              for raw in (p.net,)}
+    inverse: dict[str, str] = {}
+    for raw, safe in mapped.items():
+        if safe == "0":
+            continue
+        assert safe not in inverse or inverse[safe] == raw, (
+            f"net names collide: {raw!r} and {inverse[safe]!r} both -> {safe!r}")
+        inverse[safe] = raw
+
     # A net name that reached the deck unsanitised would be a parse error.
     for line in deck.splitlines():
         if line.startswith("X"):
@@ -900,7 +959,7 @@ def demo() -> None:
         schema = PORT_SCHEMA.get(s.model)
         if schema is None or s.excluded_from_sim:
             continue
-        got = {widths.get(_sanitise(p.net), 1)
+        got = {widths.get(sch.net(p.net), 1)
                for kind, p in zip(schema, s.sorted_pins()) if kind == "bundle"}
         assert len(got) <= 1, f"{s.ref}: bundle widths not propagated: {got}"
 
