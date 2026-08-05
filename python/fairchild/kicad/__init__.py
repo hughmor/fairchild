@@ -135,8 +135,17 @@ class KiCad:
         self.socket = socket or os.environ.get("KICAD_API_SOCKET", DEFAULT_SOCKET)
         self.client_name = f"{client_name}-{os.getpid()}"
         self.token = os.environ.get("KICAD_API_TOKEN", "")
-        self._conn = pynng.Req0(dial=self.socket, block_on_dial=True,
-                                recv_timeout=timeout_ms, send_timeout=timeout_ms)
+        try:
+            self._conn = pynng.Req0(dial=self.socket, block_on_dial=True,
+                                    recv_timeout=timeout_ms, send_timeout=timeout_ms)
+        except pynng.ConnectionRefused as e:
+            # "Connection refused" on its own sends people hunting for a network
+            # problem; there are only really two causes.
+            raise ApiError(
+                f"no KiCad listening on {self.socket} — either KiCad is not "
+                f"running, or its IPC API is off (Preferences → Plugins → "
+                f"Enable KiCad API, i.e. \"enable_server\": true in "
+                f"kicad_common.json)") from e
 
     def send(self, msg, reply_type, retries: int = 40):
         """Send one request, waiting out AS_BUSY / AS_NOT_READY.

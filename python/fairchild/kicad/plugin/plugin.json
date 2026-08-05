@@ -1,0 +1,25 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.hartleyultrafast.fairchild",
+  "name": "fairchild",
+  "description": "Simulate the selected block with fairchild and annotate the results",
+  "runtime": { "type": "exec" },
+  "actions": [
+    {
+      "identifier": "annotate-op",
+      "name": "Annotate .op",
+      "description": "Run an operating point on the selection's sheet and label its node voltages",
+      "show-button": true,
+      "scopes": ["schematic"],
+      "entrypoint": "run.sh"
+    },
+    {
+      "identifier": "clear",
+      "name": "Clear fairchild annotations",
+      "description": "Remove every annotation fairchild has written to this schematic",
+      "show-button": true,
+      "scopes": ["schematic"],
+      "entrypoint": "clear.sh"
+    }
+  ]
+}
