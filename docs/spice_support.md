@@ -37,10 +37,10 @@ fairchild does with a syntactically plausible line using that letter.
 | `B` | behavioural (arbitrary) source | ✅ `V=`/`I=` expression (unbraced only) | — |
 | `C` | capacitor | ✅ + ESR/ESL parasitics | — |
 | `D` | diode | ✅ | — |
-| `E` | **VCVS** — linear voltage-controlled voltage source | ❌ | error |
-| `F` | **CCCS** — current-controlled current source | ❌ | error |
-| `G` | **VCCS** — voltage-controlled current source | ❌ | error |
-| `H` | **CCVS** — current-controlled voltage source | ❌ | error |
+| `E` | VCVS — linear voltage-controlled voltage source | ✅ | — |
+| `F` | CCCS — current-controlled current source | ✅ | — |
+| `G` | VCCS — voltage-controlled current source | ✅ | — |
+| `H` | CCVS — current-controlled voltage source | ✅ | — |
 | `I` | independent current source | ✅ | — |
 | `J` | JFET | ❌ | error |
 | `K` | mutual inductance | ✅ | — |
@@ -60,22 +60,26 @@ fairchild does with a syntactically plausible line using that letter.
 | `Y` | simple lossy line (TransLine/txl) | ❌ | error |
 | `Z` | MESFET / HFET | ❌ | error |
 
-**`E`/`F`/`G`/`H` are the notable gap.** Linear controlled sources are core SPICE
-and appear in most real op-amp, feedback and macromodel decks. `B` reaches the
-same physics — `B1 out 0 V=2*V(in)` gives 3.0 V from a 1.5 V input, verified —
-but a deck written for any other simulator will not load.
-
-Note the brace form does **not** work, though ngspice accepts it:
+**`E`/`F`/`G`/`H` are supported in their linear form only:**
 
 ```spice
-B1 out 0 V=2*V(in)      ✅ 3.0 V
-B1 out 0 V={2*V(in)}    ❌ error — ngspice gives 3.0 V
+E<n> p n nc+ nc- <gain>     V = gain·(V(nc+) − V(nc-))
+G<n> p n nc+ nc- <gain>     I = gain·(V(nc+) − V(nc-))
+H<n> p n <Vctrl>  <gain>    V = gain·I(Vctrl)
+F<n> p n <Vctrl>  <gain>    I = gain·I(Vctrl)
 ```
 
-`{…}` is claimed by `.param` substitution before the B-element sees it, so the
-expression is evaluated as a parameter and fails on the node reference. The error
-message says so clearly, so this is a compatibility gap rather than a trap —
-but it is a one-character difference away from a deck that runs.
+All four are desugared onto the B-element rather than given their own stamps — a
+VCVS *is* `B… V=gain*(V(cp)-V(cn))` — so they inherit its auxiliary branch row,
+its per-reference Jacobian columns, and its tested sign conventions. Values are
+pinned against ngspice in `crates/fairchild-core/tests/controlled_sources.rs`,
+including the one that is easy to get backwards: a `G` pushes current *out of*
+`n+`, so a VCCS wired across its own output nodes with `gm = 1/R` is exactly that
+resistor.
+
+`POLY(n)`, `VALUE={…}` and `TABLE` — the other SPICE spellings of these four —
+are refused by name rather than mis-read as a node. Write a polynomial or
+expression source as a `B` element instead.
 
 `R`/`C` referencing a `.model` card — ngspice's semiconductor resistor
 (`R1 n1 n2 rmod L=… W=…`) — is an error, not a silent mis-parse.
@@ -178,12 +182,18 @@ by `split_ac_spec` (the spec may sit anywhere after the nodes), and used by
 against ngspice: magnitude scales exactly, and `AC 1 90` on an RC at its corner
 gives +45° where `AC 1 0` gives −45°.
 
-One deliberate wrinkle: a deck that declares **no** `AC` spec anywhere keeps the
-old unit drive, because there is no stated intent to contradict and the one
-in-tree `.ac` example relies on it. As soon as any source declares a spec the
-deck is read strictly, ngspice-style — which also fixes a second silent bug
-nobody had noticed: pairing an `AC 1` drive with a plain DC bias source used to
-excite the bias source too.
+**SPICE semantics, and only those.** A source without an `AC` spec is not an AC
+source and contributes nothing; a deck with no AC source at all is a hard
+`no AC source` error rather than a quiet zero.
+
+There was briefly a compatibility fallback here — a deck declaring no spec
+anywhere kept the old unit drive — and it was removed on purpose. It made the
+rule depend on the deck's contents, and it preserved the worst part of the
+original bug: with no spec anywhere, *every* source in the circuit is still
+driven at unit amplitude, so DC bias rails get excited as though they were
+signal generators. In a multi-rail circuit that is wrong in a way no single
+number reveals. Requiring the spec costs one token per deck and removes the
+whole class.
 
 ### 4.2 `.model x D(IS=…)` with no space before `(` lost the first parameter — FIXED
 
@@ -263,17 +273,14 @@ the output gets every node instead.
 
 ## 5. What is left
 
-§4 is done. Remaining, by (value × cheapness):
+§4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **`E`/`F`/`G`/`H` controlled sources** — the largest *capability* gap, and the
-   most likely reason a third-party deck will not load. All four are linear
-   stamps; `B` already proves the machinery.
-2. **`.control` block skip-with-warning** — unblocks a large fraction of
+1. **`.control` block skip-with-warning** — unblocks a large fraction of
    real-world ngspice decks without implementing the shell.
-3. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-4. Everything else in §1–§2 is a clean error and can wait for a use case.
+3. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document
 

@@ -268,9 +268,7 @@ pub fn ac_analysis_opts(
     // Build the RHS for AC: voltage sources contribute to the stub row; current sources to node rows.
     // Voltage source in MNA: stamps A[vi][p]=+1, A[vi][n]=-1, A[p][vi]=+1, A[n][vi]=-1, b[vi]=V_ac.
     // For the AC analysis, we set V_ac = 1 for the chosen source(s).
-    // Unit amplitude is only the fallback for a deck that declares no `AC` spec
-    // anywhere; a declared spec wins. See `build_ac_rhs`.
-    let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source, 1.0);
+    let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source).ok_or(SimError::NoAcSource)?;
 
     // --- Sweep (parallel across frequencies) ---
     //
@@ -400,33 +398,23 @@ fn dc_op(
 /// vector, `mag·sin φ` into the imaginary one. Voltage sources drive their
 /// auxiliary row; current sources drive their node rows.
 ///
-/// **Two regimes, and the deck chooses.** When any source declares an `AC` spec,
-/// the deck is read strictly: declared sources drive at their own magnitude and
-/// phase, and undeclared ones contribute nothing — ngspice's rule. When *no*
-/// source declares one, every source (or the one named by `ac_source`) drives at
-/// `fallback_mag` with zero phase, which is what fairchild has always done and
-/// what a transfer-function sweep wants; there is no declared intent to
-/// contradict, so nothing is lost.
+/// SPICE semantics, and only those: a source without an `AC` spec is not an AC
+/// source and contributes nothing. There is deliberately no "drive everything at
+/// unit amplitude" fallback — that is what fairchild used to do, and it silently
+/// excited every DC bias source in the circuit as though it were a signal
+/// generator. A deck with no AC source at all is an error rather than a quiet
+/// zero, because that is a deck that cannot mean what it says.
 ///
-/// The regime split matters because the old code ignored `AC` entirely and drove
-/// *everything* at unit amplitude. A deck pairing an `AC 1` drive with a plain
-/// DC bias source therefore excited the bias source too — wrong, and silent.
+/// Returns `None` when no source in the netlist declares a spec.
 fn build_ac_rhs(
     topo: &CircuitTopology,
     netlist: &Netlist,
     ac_source: Option<&str>,
-    fallback_mag: f64,
-) -> (Vec<f64>, Vec<f64>) {
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let n_nodes = topo.n_nodes();
     let mut re = vec![0.0f64; topo.size];
     let mut im = vec![0.0f64; topo.size];
-
-    let strict = netlist.elements.iter().any(|el| {
-        matches!(
-            el,
-            Element::VoltageSource { ac: Some(_), .. } | Element::CurrentSource { ac: Some(_), .. }
-        )
-    });
+    let mut any = false;
 
     for el in &netlist.elements {
         let (name, ac, nodes) = match el {
@@ -436,17 +424,13 @@ fn build_ac_rhs(
             } => (name, ac, Some((pos, neg))),
             _ => continue,
         };
+        let Some(spec) = ac else { continue };
+        any = true;
         if !ac_source.is_none_or(|s| s.eq_ignore_ascii_case(name)) {
             continue;
         }
-        let (mag, phase_deg) = match ac {
-            Some(spec) => (spec.mag, spec.phase_deg),
-            // Declared nothing in a deck that declares elsewhere: not a source.
-            None if strict => continue,
-            None => (fallback_mag, 0.0),
-        };
-        let phase = phase_deg.to_radians();
-        let (er, ei) = (mag * phase.cos(), mag * phase.sin());
+        let phase = spec.phase_deg.to_radians();
+        let (er, ei) = (spec.mag * phase.cos(), spec.mag * phase.sin());
 
         match nodes {
             None => {
@@ -468,7 +452,7 @@ fn build_ac_rhs(
             }
         }
     }
-    (re, im)
+    any.then_some((re, im))
 }
 
 #[cfg(test)]
@@ -482,9 +466,7 @@ mod tests {
     #[test]
     fn ac_spec_on_a_source_sets_magnitude_and_phase() {
         let deck = |spec: &str| {
-            format!(
-                "* ac spec\nV1 in 0 {spec}\nR1 in out 1k\nC1 out 0 159.15n\n                 .ac lin 1 1k 1k\n.end\n"
-            )
+            format!("* ac spec\nV1 in 0 {spec}\nR1 in out 1k\nC1 out 0 159.15n\n.end\n")
         };
         let run = |spec: &str| {
             let nl = parse_spice(&deck(spec)).unwrap();
@@ -509,22 +491,30 @@ mod tests {
         assert!((mag - 0.7071178).abs() < 1e-6, "|V(out)| = {mag:.7}");
         assert!((ph - 45.0).abs() < 0.01, "phase {ph:.4} != +45");
 
-        // A deck that declares nothing keeps the legacy unit drive, which is
-        // what the one in-tree `.ac` example relies on.
-        let (mag, _) = run("DC 0");
-        assert!(
-            (mag - 0.7071178).abs() < 1e-6,
-            "no-spec fallback broke: {mag:.7}"
-        );
+        // A deck with no AC source at all is an error, not a quiet zero and
+        // certainly not a unit drive on every source in the circuit.
+        let nl = parse_spice(&deck("DC 0")).unwrap();
+        match ac_analysis(&nl, &[1e3], None, &DeviceRegistry::new()) {
+            Err(SimError::NoAcSource) => {}
+            Err(e) => panic!("expected NoAcSource, got {e:?}"),
+            Ok(_) => panic!("a deck with no AC spec should not run at all"),
+        }
     }
 
-    /// Once any source declares an `AC` spec the deck is read strictly, so a
-    /// plain DC bias source is no longer treated as a second AC drive. That
-    /// silent double-excitation is what the old unconditional unit drive did.
+    /// A plain DC bias source is not an AC source. fairchild used to drive every
+    /// source at unit amplitude, so a bias rail was silently excited as though it
+    /// were a signal generator — which is both wrong and, in a circuit with
+    /// several rails, wrong in a way no single number would reveal.
     #[test]
     fn a_declared_ac_spec_makes_undeclared_sources_quiet() {
         let nl = parse_spice(
-            "* two sources, one AC\n             V1 in 0 DC 0 AC 1\n             Vbias b 0 DC 2.5\n             R1 in out 1k\n             Rb b out 1k\n             C1 out 0 1n\n             .ac lin 1 1k 1k\n.end\n",
+            "* two sources, one AC\n\
+             V1 in 0 DC 0 AC 1\n\
+             Vbias b 0 DC 2.5\n\
+             R1 in out 1k\n\
+             Rb b out 1k\n\
+             C1 out 0 1n\n\
+             .end\n",
         )
         .unwrap();
         let reg = DeviceRegistry::new();
@@ -545,7 +535,7 @@ mod tests {
     #[test]
     fn rc_lowpass_cutoff() {
         let net = parse_spice(
-            "* RC low-pass\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.ac DEC 10 1k 10Meg\n.end\n",
+            "* RC low-pass\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.ac DEC 10 1k 10Meg\n.end\n",
         )
         .unwrap();
         let registry = DeviceRegistry::new();
@@ -583,7 +573,7 @@ mod tests {
     fn diode_junction_cap_appears_in_ac() {
         let net = parse_spice(
             "* reverse-biased diode Cj lowpass\n\
-             Vac c 0 DC 1\n\
+             Vac c 0 DC 1 AC 1\n\
              Rs c out 10k\n\
              D1 0 out DMOD\n\
              .model DMOD D IS=1e-14 CJO=2p VJ=0.8 M=0.5\n\
@@ -624,7 +614,8 @@ mod tests {
 
     #[test]
     fn write_csv_ac() {
-        let net = parse_spice("* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
+        let net =
+            parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
@@ -637,7 +628,8 @@ mod tests {
 
     #[test]
     fn write_nutmeg_ac() {
-        let net = parse_spice("* RC\nVin in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
+        let net =
+            parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();

@@ -22,6 +22,8 @@ pub enum ParseError {
         "unsupported directive '{directive}' on line {line} (not yet implemented by fairchild)"
     )]
     UnsupportedDirective { directive: String, line: usize },
+    #[error("line {line}: unsupported {what}")]
+    UnsupportedForm { what: String, line: usize },
     #[error(
         "line {line}: subckt '{name}' called with {got} port(s) but definition has {expected}"
     )]

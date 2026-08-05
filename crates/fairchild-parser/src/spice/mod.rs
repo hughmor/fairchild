@@ -731,6 +731,81 @@ mod tests {
         }
     }
 
+    /// The four linear controlled sources desugar onto the B-element, so the
+    /// test is that each one produces the right behavioural expression: `V=` for
+    /// the two voltage-output kinds, `I=` for the current-output ones, a node
+    /// difference for the voltage-controlled pair and a branch current for the
+    /// current-controlled pair.
+    #[test]
+    fn controlled_sources_desugar_onto_the_b_element() {
+        use crate::expr::{BinOp, Expr};
+        let cases = [
+            ("E1 out 0 in 0 2.0", BehavioralKind::Voltage, true),
+            ("G1 out 0 in 0 1m", BehavioralKind::Current, true),
+            ("H1 out 0 Vs 500", BehavioralKind::Voltage, false),
+            ("F1 out 0 Vs 3.0", BehavioralKind::Current, false),
+        ];
+        for (line, want_kind, voltage_controlled) in cases {
+            let nl = parse_spice(&format!(
+                "* cs\nVin in 0 DC 1\nVs a 0 DC 1\n{line}\nRl out 0 1k\n.op\n.end\n"
+            ))
+            .unwrap();
+            let el = nl
+                .elements
+                .iter()
+                .find(|e| matches!(e, Element::Behavioral { .. }))
+                .unwrap_or_else(|| panic!("{line}: no behavioural element produced"));
+            let Element::Behavioral {
+                pos,
+                neg,
+                kind,
+                expr,
+                ..
+            } = el
+            else {
+                unreachable!()
+            };
+            assert_eq!((pos.as_str(), neg.as_str()), ("out", "0"), "{line}: nodes");
+            assert_eq!(
+                std::mem::discriminant(kind),
+                std::mem::discriminant(&want_kind),
+                "{line}: V= vs I="
+            );
+            let Expr::Bin(BinOp::Mul, gain, control) = expr else {
+                panic!("{line}: expected gain*control, got {expr:?}");
+            };
+            assert!(matches!(**gain, Expr::Num(_)), "{line}: gain not a literal");
+            if voltage_controlled {
+                assert!(
+                    matches!(&**control, Expr::NodeDiffV(a, b) if a == "in" && b == "0"),
+                    "{line}: control should be V(in,0), got {control:?}"
+                );
+            } else {
+                // Lower-cased, or the branch lookup misses and reads zero.
+                assert!(
+                    matches!(&**control, Expr::BranchI(n) if n == "vs"),
+                    "{line}: control should be I(vs), got {control:?}"
+                );
+            }
+        }
+    }
+
+    /// `POLY`, `VALUE` and `TABLE` are real SPICE spellings of E/F/G/H that mean
+    /// something quite different. They must be refused by name, not read as a
+    /// node called `POLY(1)`.
+    #[test]
+    fn controlled_source_poly_form_is_refused() {
+        let err = parse_spice(
+            "* poly\nVin in 0 DC 1\nE1 out 0 POLY(1) in 0 0 2\nRl out 0 1k\n.op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("POLY") && msg.contains("B-element"),
+            "the POLY refusal should name POLY and point at the B-element: {msg}"
+        );
+    }
+
     #[test]
     fn parse_diode_instance_params() {
         let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n.end\n";

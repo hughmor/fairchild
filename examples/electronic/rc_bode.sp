@@ -9,7 +9,7 @@
 *              d = np.loadtxt('/tmp/bode.csv', delimiter=',', skiprows=1); \
 *              plt.semilogx(d[:,0], 20*np.log10(d[:,1])); plt.show()"
 
-V1 in 0 DC 1
+V1 in 0 DC 1 AC 1
 R1 in out 1k
 C1 out 0 1u
 .ac dec 50 1 1Meg
