@@ -118,6 +118,11 @@ pub struct ActiveOpticalDevice {
     elec_nodes: Vec<NodeId>,
     /// Scratch for the finite difference, reused to avoid per-iteration allocs.
     dpert_dv: Vec<(f64, f64, f64)>,
+    /// Smallest valid terminal count, recorded when `setup_instance` is handed a
+    /// count it cannot use. Without it `num_terminals()` would report the
+    /// unconfigured segment's 0 optical wires, and the caller's error message
+    /// would quote a nonsense expectation.
+    min_terminals: Option<usize>,
 }
 
 impl ActiveOpticalDevice {
@@ -127,12 +132,18 @@ impl ActiveOpticalDevice {
             model,
             elec_nodes: Vec::new(),
             dpert_dv: Vec::new(),
+            min_terminals: None,
         }
     }
 }
 
 impl Device for ActiveOpticalDevice {
     fn num_terminals(&self) -> usize {
+        // A refused setup leaves the segment with zero optical wires, so report
+        // the smallest count that would have worked instead of a misleading 0+N.
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.seg.num_optical_wires() + self.model.num_electrical_terminals()
     }
 
@@ -145,11 +156,15 @@ impl Device for ActiveOpticalDevice {
         let wpc = ctx.wires_per_channel();
         let n_elec = self.model.num_electrical_terminals();
         let stride = 2 * wpc;
-        assert!(
-            terminals.len() >= stride + n_elec && (terminals.len() - n_elec).is_multiple_of(stride),
-            "ActiveOpticalDevice: terminal count must be {stride}·N + {n_elec} (wpc={wpc}); got {}",
-            terminals.len()
-        );
+        // A mis-wired instance used to panic here, which crosses the pyo3
+        // boundary as a PanicException and tells the user nothing about which
+        // element is wrong. Leave the device unconfigured instead; the terminal
+        // count is checked against num_terminals() in build_devices_with_
+        // footprints, which can name the element and fail cleanly.
+        if terminals.len() < stride + n_elec || !(terminals.len() - n_elec).is_multiple_of(stride) {
+            self.min_terminals = Some(stride + n_elec);
+            return;
+        }
         let optical_len = terminals.len() - n_elec;
         self.seg.setup_instance(&terminals[..optical_len], ctx);
         self.model.set_terminals(&terminals[optical_len..]);

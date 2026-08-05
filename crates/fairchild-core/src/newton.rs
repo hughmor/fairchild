@@ -277,10 +277,10 @@ pub fn build_devices_with_footprints(
                 push_device(&mut devices, &mut foot, topo, &[], Box::new(dev));
             }
             Element::XOsdi {
+                name,
                 nets,
                 model_name,
                 params,
-                ..
             } => {
                 let factory = registry
                     .get(model_name)
@@ -296,11 +296,18 @@ pub fn build_devices_with_footprints(
                 let dev = factory(&terminals, &ps, ctx);
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
-                    eprintln!(
-                        "warning: XOsdi '{model_name}': netlist provides {} net(s) but model \
-                         expects {expected} terminal(s); extra terminals default to ground",
+                    // Used to be a warning that grounded the missing terminals
+                    // and carried on, which is how a mis-wired photonic device
+                    // reached its own assert! and panicked out through pyo3 —
+                    // or worse, silently simulated a circuit nobody drew. A
+                    // wrong port count is a netlist error, so say so.
+                    return Err(SimError::ParameterError(format!(
+                        "X{name}: '{model_name}' expects {expected} terminal(s) but the \
+                         netlist gives {}. Check the element's port order against the \
+                         model's card — for photonic devices the optical ports come \
+                         first, then the electrical ones.",
                         terminals.len()
-                    );
+                    )));
                 }
                 for key in ps.unconsumed() {
                     eprintln!(
@@ -435,6 +442,49 @@ fn report_matrix_stats(
             }
             if d < diag_min {
                 diag_min = d;
+            }
+        }
+    }
+    // Structurally empty rows and columns, named. A singular matrix is
+    // otherwise almost impossible to localise from the outside: the failure
+    // surfaces as an unsatisfied *linear* row somewhere else entirely, because
+    // the solve returns garbage for the whole system. gmin is stamped first so
+    // node rows that only float are not reported — what is left is a row no
+    // device ever wrote to, or an unknown nothing depends on.
+    {
+        let mut a = mat.a.clone();
+        topo.stamp_gmin(&mut a, opts.gmin.max(1e-12));
+        let mut empty_rows: Vec<usize> = Vec::new();
+        let mut col_nz = vec![0usize; n];
+        // Rows are sparse: iterating yields the stored (column, value) pairs, so
+        // count structural entries directly rather than scanning n columns.
+        for (i, row) in a.iter().enumerate() {
+            let mut row_nz = 0usize;
+            for (j, v) in row.iter() {
+                if v != 0.0 {
+                    row_nz += 1;
+                    col_nz[j] += 1;
+                }
+            }
+            if row_nz == 0 {
+                empty_rows.push(i);
+            }
+        }
+        let empty_cols: Vec<usize> = (0..n).filter(|&j| col_nz[j] == 0).collect();
+        for (what, rows) in [("row", &empty_rows), ("column", &empty_cols)] {
+            if rows.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "info: {} structurally empty MNA {what}(s) — the matrix is \
+                       singular and every solve from it is meaningless:",
+                rows.len()
+            );
+            for &r in rows.iter().take(12) {
+                eprintln!("info:   {r:>6}  {}", row_name(topo, r));
+            }
+            if rows.len() > 12 {
+                eprintln!("info:   … and {} more", rows.len() - 12);
             }
         }
     }
