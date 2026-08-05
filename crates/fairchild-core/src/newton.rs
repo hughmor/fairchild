@@ -871,8 +871,12 @@ fn report_failure(
         "info: NR did NOT converge in {phase} (residual L2 = {l2:.3e}, \
                source_scale={source_scale:.3}, gmin_extra={gmin_extra:.2e})"
     );
-    eprintln!("info: top 5 residual rows:");
-    for &r in idx.iter().take(5) {
+    // 5 rows is too few on a large circuit: the voltage-source KVL rows carry
+    // the biggest |b| and crowd out every device row, which is exactly the
+    // wrong picture when the sources are fine and a device is the problem.
+    let show = if opts.verbose { 20 } else { 5 };
+    eprintln!("info: top {show} residual rows:");
+    for &r in idx.iter().take(show) {
         let owner = match row_owner[r] {
             Some(d) if d < dev_names.len() => dev_names[d].as_str(),
             _ => "(linear stamp)",
@@ -1274,7 +1278,14 @@ fn gmin_stepping(
                 }
                 gmin_extra = (gmin_extra * 0.1).max(target);
             }
-            Err(_) => {
+            Err(e) => {
+                // A singular matrix is not a convergence problem, and reporting
+                // it as one sends the user hunting for a bias point that cannot
+                // exist. Two voltage sources in parallel with different values,
+                // or a voltage-source loop, reach here after every homotopy
+                // stage has failed the same way — continuation cannot rescue a
+                // topology that has no solution, so pass the real diagnosis up.
+                let singular = matches!(e, SimError::SingularMatrix);
                 if opts.verbose {
                     eprintln!(
                         "info: gmin-stepping FAILED at gmin_extra={gmin_extra:.2e} \
@@ -1294,6 +1305,9 @@ fn gmin_stepping(
                         &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"),
                         plan,
                     );
+                }
+                if singular {
+                    return Err(SimError::SingularMatrix);
                 }
                 return Err(SimError::NoConvergence { iters: opts.itl1 });
             }
