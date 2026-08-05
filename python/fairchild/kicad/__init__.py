@@ -756,7 +756,7 @@ class LiveSchematic:
                 if any(s.path[:len(p)] == p for p in paths)]
 
     def deck(self, analysis: str = ".op", title: str | None = None,
-             scope: str | None = None) -> str:
+             scope: str | None = None, symbols: list | None = None) -> str:
         """Emit a fairchild netlist. Positional ports follow KiCad pin number order.
 
         `scope` restricts the deck to one hierarchical sheet's subtree, so a
@@ -764,12 +764,17 @@ class LiveSchematic:
         Boundary nets of the subtree come out undriven — that is the point of
         isolating it, but it does mean the operating point is not the one the
         block sees in situ.
+
+        `symbols` overrides both and emits exactly the instances given, which is
+        what makes additive bisection possible: start from a deck that solves and
+        add groups until it stops.
         """
         title = title or (self.doc.project.name if self.doc else "kicad")
         lines = [f"* fairchild deck from live KiCad schematic: {title}",
                  f"* kicad {self.k.version}", ""]
         import collections
-        symbols = self.scoped(scope) if scope else self.symbols
+        if symbols is None:
+            symbols = self.scoped(scope) if scope else self.symbols
         if scope:
             lines[0] += f"  [scope: {scope}, {len(symbols)} symbols]"
         widths = self._bundle_widths()
