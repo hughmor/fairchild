@@ -17,17 +17,29 @@ use fairchild_core::error::SimError;
 use fairchild_core::{dc_op_nr_with_registry_opts, options::SimOptions, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
-/// 1 mA forced through a photodetector's shunt. The shunt is stamped correctly,
-/// so there is a well-defined answer near 1 mA × 20 kΩ — the solver just cannot
-/// walk to it while the line search is stalling.
+/// 1 mA forced through a photodetector's shunt. There is a well-defined answer
+/// at 1 mA × `r_shunt` — the solver just cannot walk to it while the line
+/// search is stalling.
+///
+/// `r_shunt=1T` rather than the original 20k, and that is load-bearing. Until
+/// `0c24510` the shunt was stamped into the Jacobian but cancelled out of the
+/// residual, so `p` carried no conductance at all and sat at `I/gmin`; 20 kΩ
+/// reproduced the stall only because it was inert. Now that it conducts, 20 kΩ
+/// converges in a handful of iterations and this file would test nothing. 1 TΩ
+/// puts the target back at 1e9 V, out of reach of a `vmax/16` walk, which is
+/// the condition the guard exists for.
 const STALLS: &str = "* current source into a photodetector shunt\n\
      .optical_port a\n\
-     XPD a p n fc_photodetector r_shunt=20k\n\
+     XPD a p n fc_photodetector r_shunt=1T\n\
      I1 0 p DC 1m\n\
      Rn n 0 1\n.op\n.end\n";
 
-/// Same circuit with the shunt duplicated as an ordinary resistor, which the
-/// solver handles without stalling. This is the reference value.
+/// What `STALLS` would settle at if it ever did: 1 mA × 1 TΩ.
+const STALLS_ANSWER: f64 = 1e9;
+
+/// Same circuit with an ordinary 20 kΩ resistor added in parallel, which the
+/// solver handles without stalling. Since `0c24510` made the shunt conduct as
+/// well as stamp, the two are genuinely in parallel: 10 kΩ, not 20.
 const REFERENCE: &str = "* same, plus an explicit parallel resistor\n\
      .optical_port a\n\
      XPD a p n fc_photodetector r_shunt=20k\n\
@@ -48,8 +60,10 @@ fn solve(deck: &str, itl1: usize) -> Result<f64, SimError> {
 fn the_reference_circuit_gives_the_expected_operating_point() {
     let v = solve(REFERENCE, 150).expect("explicit parallel resistor must solve");
     assert!(
-        (v - 20.0).abs() < 0.5,
-        "expected ~20 V for 1 mA through ~20 kΩ, got {v}"
+        (v - 10.0).abs() < 0.5,
+        "expected ~10 V for 1 mA through 20 kΩ ∥ 20 kΩ, got {v}. Reading ~20 V \
+         means the detector's r_shunt is inert again — it must conduct in the \
+         residual, not only appear in the Jacobian (0c24510)."
     );
 }
 
@@ -66,11 +80,11 @@ fn a_stalled_line_search_reports_failure_not_a_wrong_answer() {
                 // If a future change makes this converge, that is welcome — but
                 // only to the right answer.
                 assert!(
-                    (v - 20.0).abs() < 0.5,
+                    (v - STALLS_ANSWER).abs() < 1e-3 * STALLS_ANSWER,
                     "itl1={itl1}: converged to {v} V, but the operating point is \
-                     ~20 V. A step of vmax/16 marching until reltol*|x| catches \
-                     up lands near 31.25 V, which is what this test exists to \
-                     catch."
+                     {STALLS_ANSWER} V. A step of vmax/16 marching until \
+                     reltol*|x| catches up lands near 31.25 V, which is what \
+                     this test exists to catch."
                 );
             }
         }
@@ -90,6 +104,9 @@ fn the_stopping_point_must_not_depend_on_the_iteration_limit() {
             (va - vb).abs() < 1e-6 * va.abs().max(1.0),
             "converged answers differ with the iteration limit: {va} vs {vb}"
         );
-        assert!((va - 20.0).abs() < 0.5, "converged to the wrong value {va}");
+        assert!(
+            (va - STALLS_ANSWER).abs() < 1e-3 * STALLS_ANSWER,
+            "converged to the wrong value {va}"
+        );
     }
 }
