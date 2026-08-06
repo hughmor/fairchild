@@ -30,6 +30,28 @@ pub struct CircuitTopology {
     pub size: usize,
 }
 
+/// How the assembler should treat an inductor that has no companion state.
+///
+/// There is no single right answer, which is why it is a parameter: a DC
+/// operating point needs the short (an ideal inductor is 0 Ω at DC), while `.ac`
+/// and `.noise` build only the *real* part here and add `jωL` themselves, so for
+/// them the inductor must contribute nothing. Stamping the short unconditionally
+/// shunts every inductor in an AC sweep and flattens LC resonance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InductorDc {
+    /// DC / operating point: an ideal inductor is a short.
+    Short,
+    /// `.ac` / `.noise`: reactance is added by the caller, so contribute nothing.
+    Reactive,
+}
+
+/// Conductance used to realise an ideal inductor's DC short (S).
+///
+/// 1 µΩ: three orders above the largest conductance a real circuit presents, so
+/// the node pair is effectively tied, and nine orders below 1/f64::EPSILON, so
+/// the factorisation stays sound.
+const G_DC_SHORT: f64 = 1e6;
+
 impl CircuitTopology {
     pub fn build(netlist: &Netlist) -> CircuitTopology {
         let (node_index, vsrc_index) = index_circuit(netlist);
@@ -618,8 +640,9 @@ pub fn stamp_netlist_scaled_in_place(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
-    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state, plan);
+    stamp_netlist_in_place(mat, topo, netlist, 0.0, cap_state, ind_state, plan, ind_dc);
     if (source_scale - 1.0).abs() < 1e-15 {
         return;
     }
@@ -665,8 +688,9 @@ pub fn stamp_netlist_scaled(
     source_scale: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    ind_dc: InductorDc,
 ) -> MnaMatrix {
-    let mut mat = stamp_netlist(topo, netlist, 0.0, cap_state, ind_state);
+    let mut mat = stamp_netlist(topo, netlist, 0.0, cap_state, ind_state, ind_dc);
     if (source_scale - 1.0).abs() < 1e-15 {
         return mat;
     }
@@ -720,9 +744,10 @@ pub fn stamp_netlist_in_place(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
     mat.clear();
-    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state, plan);
+    stamp_netlist_into(mat, topo, netlist, t, cap_state, ind_state, plan, ind_dc);
 }
 
 /// Allocating variant: produces a fresh `MnaMatrix`.  Kept for non-hot
@@ -737,9 +762,12 @@ pub fn stamp_netlist(
     t: f64,
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
+    ind_dc: InductorDc,
 ) -> MnaMatrix {
     let mut mat = MnaMatrix::new(topo.size);
-    stamp_netlist_into(&mut mat, topo, netlist, t, cap_state, ind_state, None);
+    stamp_netlist_into(
+        &mut mat, topo, netlist, t, cap_state, ind_state, None, ind_dc,
+    );
     mat
 }
 
@@ -753,6 +781,7 @@ fn stamp_netlist_into(
     cap_state: &IndexMap<String, (f64, f64)>,
     ind_state: &IndexMap<String, (f64, f64)>,
     plan: Option<&StampPlan>,
+    ind_dc: InductorDc,
 ) {
     use std::collections::HashMap;
 
@@ -831,8 +860,31 @@ fn stamp_netlist_into(
                     }
                     // Always stamp history current source.
                     stamp_current_source_at(&mut mat.b, p, n, i_hist);
+                } else if ind_dc == InductorDc::Short {
+                    // No companion state means this is a DC solve, and at DC an
+                    // ideal inductor is a SHORT — the dual of the capacitor's
+                    // open above. It used to be left open, which silently cut
+                    // every DC path through an inductor: a source feeding a load
+                    // through a choke or a bondwire read 0 V, and a *current*
+                    // source into one left its node with nothing but gmin on the
+                    // diagonal, so the first Newton step demanded I/gmin volts
+                    // (1e9 V for 1 mA). On giona_fc that collapsed the vmax trust
+                    // region and took every optical phase with it.
+                    //
+                    // Enforced as a large conductance rather than a branch
+                    // constraint because a branch row would change topo.size, and
+                    // the sparsity pattern / symbolic LU cache are built from it.
+                    // G_DC_SHORT is far above any physical circuit conductance and
+                    // far below 1/eps, so the node pair is tied without wrecking
+                    // the conditioning.
+                    let (p, n) = resolved.unwrap_or_else(|| {
+                        (
+                            topo.node_index.get(pos).copied(),
+                            topo.node_index.get(neg).copied(),
+                        )
+                    });
+                    stamp_conductance_at(&mut mat.a, p, n, G_DC_SHORT);
                 }
-                // If not in ind_state (no transient yet), inductor = open circuit at DC.
             }
             Element::CoupledInductors {
                 l1, l2, coupling, ..

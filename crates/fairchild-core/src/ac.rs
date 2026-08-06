@@ -181,7 +181,14 @@ pub fn ac_analysis_opts(
 
     // --- Small-signal G matrix (real, from DC Jacobian at x0) ---
     // Re-stamp the linear passive network.
-    let mat0 = stamp_netlist_scaled(&topo, netlist, 1.0, &empty, &empty);
+    let mat0 = stamp_netlist_scaled(
+        &topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Reactive,
+    );
     // Add device linearization (Jacobian at x0).
     let mut g_mat = mat0.a;
     for dev in devices.iter_mut() {
@@ -360,7 +367,14 @@ fn dc_op(
     let mut x = vec![0.0f64; topo.size];
 
     for _ in 0..opts.itl1 {
-        let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+        let mut mat = stamp_netlist_scaled(
+            topo,
+            netlist,
+            1.0,
+            &empty,
+            &empty,
+            crate::mna::InductorDc::Reactive,
+        );
         for dev in devices.iter_mut() {
             dev.eval(&x, EvalFlags::dc(), ctx);
             dev.load_residual(&mut mat.b);

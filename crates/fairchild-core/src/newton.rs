@@ -277,10 +277,10 @@ pub fn build_devices_with_footprints(
                 push_device(&mut devices, &mut foot, topo, &[], Box::new(dev));
             }
             Element::XOsdi {
+                name,
                 nets,
                 model_name,
                 params,
-                ..
             } => {
                 let factory = registry
                     .get(model_name)
@@ -296,11 +296,18 @@ pub fn build_devices_with_footprints(
                 let dev = factory(&terminals, &ps, ctx);
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
-                    eprintln!(
-                        "warning: XOsdi '{model_name}': netlist provides {} net(s) but model \
-                         expects {expected} terminal(s); extra terminals default to ground",
+                    // Used to be a warning that grounded the missing terminals
+                    // and carried on, which is how a mis-wired photonic device
+                    // reached its own assert! and panicked out through pyo3 —
+                    // or worse, silently simulated a circuit nobody drew. A
+                    // wrong port count is a netlist error, so say so.
+                    return Err(SimError::ParameterError(format!(
+                        "X{name}: '{model_name}' expects {expected} terminal(s) but the \
+                         netlist gives {}. Check the element's port order against the \
+                         model's card — for photonic devices the optical ports come \
+                         first, then the electrical ones.",
                         terminals.len()
-                    );
+                    )));
                 }
                 for key in ps.unconsumed() {
                     eprintln!(
@@ -404,7 +411,14 @@ fn report_matrix_stats(
     }
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let x0 = vec![0.0f64; topo.size];
-    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(&x0, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -435,6 +449,49 @@ fn report_matrix_stats(
             }
             if d < diag_min {
                 diag_min = d;
+            }
+        }
+    }
+    // Structurally empty rows and columns, named. A singular matrix is
+    // otherwise almost impossible to localise from the outside: the failure
+    // surfaces as an unsatisfied *linear* row somewhere else entirely, because
+    // the solve returns garbage for the whole system. gmin is stamped first so
+    // node rows that only float are not reported — what is left is a row no
+    // device ever wrote to, or an unknown nothing depends on.
+    {
+        let mut a = mat.a.clone();
+        topo.stamp_gmin(&mut a, opts.gmin.max(1e-12));
+        let mut empty_rows: Vec<usize> = Vec::new();
+        let mut col_nz = vec![0usize; n];
+        // Rows are sparse: iterating yields the stored (column, value) pairs, so
+        // count structural entries directly rather than scanning n columns.
+        for (i, row) in a.iter().enumerate() {
+            let mut row_nz = 0usize;
+            for (j, v) in row.iter() {
+                if v != 0.0 {
+                    row_nz += 1;
+                    col_nz[j] += 1;
+                }
+            }
+            if row_nz == 0 {
+                empty_rows.push(i);
+            }
+        }
+        let empty_cols: Vec<usize> = (0..n).filter(|&j| col_nz[j] == 0).collect();
+        for (what, rows) in [("row", &empty_rows), ("column", &empty_cols)] {
+            if rows.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "info: {} structurally empty MNA {what}(s) — the matrix is \
+                       singular and every solve from it is meaningless:",
+                rows.len()
+            );
+            for &r in rows.iter().take(12) {
+                eprintln!("info:   {r:>6}  {}", row_name(topo, r));
+            }
+            if rows.len() > 12 {
+                eprintln!("info:   … and {} more", rows.len() - 12);
             }
         }
     }
@@ -500,7 +557,14 @@ fn validate_devices_finite(
     x: &[f64],
 ) {
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(x, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -789,7 +853,14 @@ fn report_failure(
     // Recompute the residual at the failed iterate `x` so we can attribute
     // rows to devices.
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
-    let mut mat = stamp_netlist_scaled(topo, netlist, source_scale, &empty, &empty);
+    let mut mat = stamp_netlist_scaled(
+        topo,
+        netlist,
+        source_scale,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Short,
+    );
     for dev in devices.iter_mut() {
         dev.eval(x, EvalFlags::dc(), ctx);
         dev.load_residual(&mut mat.b);
@@ -821,8 +892,12 @@ fn report_failure(
         "info: NR did NOT converge in {phase} (residual L2 = {l2:.3e}, \
                source_scale={source_scale:.3}, gmin_extra={gmin_extra:.2e})"
     );
-    eprintln!("info: top 5 residual rows:");
-    for &r in idx.iter().take(5) {
+    // 5 rows is too few on a large circuit: the voltage-source KVL rows carry
+    // the biggest |b| and crowd out every device row, which is exactly the
+    // wrong picture when the sources are fine and a device is the problem.
+    let show = if opts.verbose { 20 } else { 5 };
+    eprintln!("info: top {show} residual rows:");
+    for &r in idx.iter().take(show) {
         let owner = match row_owner[r] {
             Some(d) if d < dev_names.len() => dev_names[d].as_str(),
             _ => "(linear stamp)",
@@ -875,6 +950,7 @@ fn residual_l2(
         &empty,
         &empty,
         plan,
+        crate::mna::InductorDc::Short,
     );
     for dev in devices.iter_mut() {
         dev.set_source_scale(source_scale);
@@ -929,8 +1005,23 @@ fn nr_inner(
     // search actually runs (it needs a clamped step first).
     let mut trial: Option<crate::mna::MnaMatrix> = None;
     let mut first_stamp = true;
+    // Which rows are λ wires (metres), so the volt-scaled trust region can skip
+    // them. Same membership test as `Tolerances::build`: gated on optical_nets
+    // so an electrical net merely *named* like a λ wire keeps volt semantics.
+    let lambda_rows = {
+        let mut m = vec![false; topo.size];
+        for net in &netlist.optical_nets {
+            if fairchild_parser::is_lambda_wire(net) {
+                if let Some(&r) = topo.node_index.get(net) {
+                    m[r] = true;
+                }
+            }
+        }
+        m
+    };
+    let mut warned_clamp = false;
 
-    for _ in 0..opts.itl1 {
+    for _iter in 0..opts.itl1 {
         crate::mna::stamp_netlist_scaled_in_place(
             &mut mat,
             topo,
@@ -939,6 +1030,7 @@ fn nr_inner(
             &empty,
             &empty,
             plan,
+            crate::mna::InductorDc::Short,
         );
 
         for dev in devices.iter_mut() {
@@ -998,12 +1090,21 @@ fn nr_inner(
             }
         };
 
-        let max_dv = x_new
-            .iter()
-            .zip(x.iter())
-            .take(n_nodes)
-            .map(|(n, o)| (n - o).abs())
-            .fold(0.0f64, f64::max);
+        // `vmax` is a limit in VOLTS, so only rows carrying volts may set it.
+        // A λ wire is metres (~1.55e-6) and a step of a whole wavelength is
+        // normal, not a trust-region violation.
+        let mut max_dv = 0.0f64;
+        let mut max_dv_row = 0usize;
+        for i in 0..n_nodes {
+            if lambda_rows[i] {
+                continue;
+            }
+            let d = (x_new[i] - x[i]).abs();
+            if d > max_dv {
+                max_dv = d;
+                max_dv_row = i;
+            }
+        }
 
         // Damping path. When the proposed Newton step is small enough that
         // every node's update is below the `vmax` clamp threshold, take it
@@ -1021,15 +1122,56 @@ fn nr_inner(
         // passes on each clamped iteration.  ‖f(x)‖ itself is free — `mat` is
         // already stamped there.
         //
+        // Declared per iteration: a value carried over from an earlier clamped
+        // step would block convergence for the rest of the solve.
+        let mut armijo_fell_back = false;
         let x_next: Vec<f64> = if max_dv > opts.vmax {
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
+            // λ rows take the full step. λ is a label propagated from the
+            // sources, not a dynamical state that needs damping, and scaling it
+            // is actively destructive: it enters the phase as 2π·n·L/λ, so a
+            // λ scaled by 5e-13 makes every optical phase in the circuit wrong
+            // by twelve orders of magnitude. On giona_fc one under-constrained
+            // heater node wanting 1e12 V dragged every λ to 1e-19 m, and no
+            // iteration could recover because the clamp reproduced it exactly
+            // every time.
             let delta: Vec<f64> = x
                 .iter()
                 .zip(x_new.iter())
-                .map(|(o, n)| scale * (n - o))
+                .enumerate()
+                .map(|(i, (o, n))| {
+                    if lambda_rows[i] {
+                        n - o
+                    } else {
+                        scale * (n - o)
+                    }
+                })
                 .collect();
+            // A scale this small means the step carries no information: the
+            // offending row is almost certainly under-constrained rather than
+            // merely fast. Say which row, because "did not converge" sends the
+            // reader looking at the physics instead.
+            if scale < 1e-6 && !warned_clamp {
+                warned_clamp = true;
+                // Describe the symptom and let the reader draw the conclusion:
+                // the first version of this asserted "no resistive path to
+                // ground", which was wrong on the very circuit that prompted it
+                // (the path existed; the inductors on it were being stamped open).
+                eprintln!(
+                    "warning: node '{}' wants to move {max_dv:.3e} V in one Newton \
+                     step, so the vmax={:.3e} trust region shrinks every unknown by \
+                     {scale:.3e} — including unknowns in other units. A step this \
+                     small carries almost no information, so the solve will crawl \
+                     or stall. I/gmin ({:.3e} V at gmin={:.1e}) is what a node \
+                     carrying no conductance at all would show.",
+                    row_name(topo, max_dv_row),
+                    opts.vmax,
+                    1.0 / opts.gmin,
+                    opts.gmin
+                );
+            }
 
             // `mat` still holds J(x) and b(x) from the stamp at the top of this
             // iteration, so ‖f(x)‖ is free — no restamp.
@@ -1061,6 +1203,7 @@ fn nr_inner(
             let mut alpha = 1.0_f64;
             let mut x_trial: Vec<f64>;
             loop {
+                armijo_fell_back = alpha <= ALPHA_MIN;
                 x_trial = x
                     .iter()
                     .zip(delta.iter())
@@ -1088,7 +1231,20 @@ fn nr_inner(
             x_new
         };
 
-        let converged = tol.converged(&x_next, &x);
+        // Never call it converged on a step the line search could not justify.
+        //
+        // When no alpha satisfies Armijo the loop falls through at ALPHA_MIN, so
+        // the step becomes a CONSTANT vmax/16 — independent of the Newton
+        // direction's magnitude. The iterate then marches at fixed velocity, and
+        // the relative test `|dx| < abstol + reltol*|x|` is satisfied as soon as
+        // |x| passes (vmax/16)/reltol ~ 31 V. That is not convergence, it is the
+        // tolerance catching up with a stalled walk, and it returned a +56% wrong
+        // operating point as a success: a photodetector shunt fed by a current
+        // source read 31.25 V where the answer is 19.985 V, at every iteration
+        // limit, because the stopping point depends on reltol rather than on the
+        // circuit. Refusing to converge here turns a confidently wrong answer
+        // into an honest failure that the homotopy can then try to fix.
+        let converged = tol.converged(&x_next, &x) && !armijo_fell_back;
 
         x = x_next;
         if converged {
@@ -1224,7 +1380,14 @@ fn gmin_stepping(
                 }
                 gmin_extra = (gmin_extra * 0.1).max(target);
             }
-            Err(_) => {
+            Err(e) => {
+                // A singular matrix is not a convergence problem, and reporting
+                // it as one sends the user hunting for a bias point that cannot
+                // exist. Two voltage sources in parallel with different values,
+                // or a voltage-source loop, reach here after every homotopy
+                // stage has failed the same way — continuation cannot rescue a
+                // topology that has no solution, so pass the real diagnosis up.
+                let singular = matches!(e, SimError::SingularMatrix);
                 if opts.verbose {
                     eprintln!(
                         "info: gmin-stepping FAILED at gmin_extra={gmin_extra:.2e} \
@@ -1244,6 +1407,9 @@ fn gmin_stepping(
                         &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"),
                         plan,
                     );
+                }
+                if singular {
+                    return Err(SimError::SingularMatrix);
                 }
                 return Err(SimError::NoConvergence { iters: opts.itl1 });
             }

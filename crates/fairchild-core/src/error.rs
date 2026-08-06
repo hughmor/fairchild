@@ -4,7 +4,12 @@ use thiserror::Error;
 pub enum SimError {
     #[error("parse error: {0}")]
     Parse(#[from] fairchild_parser::ParseError),
-    #[error("singular matrix — circuit may be floating or have no DC path to ground")]
+    #[error(
+        "singular matrix — the circuit has no unique DC solution. Common causes: \
+         a node with no DC path to ground, voltage sources in parallel with \
+         different values, or a loop of voltage sources / inductors. Run with \
+         verbose to list structurally empty MNA rows by name."
+    )]
     SingularMatrix,
     #[error("no .op analysis requested")]
     NoAnalysis,

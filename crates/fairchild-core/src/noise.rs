@@ -319,7 +319,15 @@ pub fn noise_analysis(
     let x0 = run_dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
 
     // Real (G) and imaginary-coefficient (C, L⁻¹) parts of Y(jω) = G + j(ωC − L⁻¹/ω).
-    let mut g_mat = stamp_netlist_scaled(&topo, netlist, 1.0, &empty, &empty).a;
+    let mut g_mat = stamp_netlist_scaled(
+        &topo,
+        netlist,
+        1.0,
+        &empty,
+        &empty,
+        crate::mna::InductorDc::Reactive,
+    )
+    .a;
     for dev in devices.iter_mut() {
         // tran() flags so device small-signal cap caches populate (see ac.rs).
         dev.eval(&x0, EvalFlags::tran(), &ctx);
@@ -515,7 +523,14 @@ fn run_dc_op(
     let mut x = vec![0.0f64; topo.size];
 
     for _ in 0..opts.itl1 {
-        let mut mat = stamp_netlist_scaled(topo, netlist, 1.0, &empty, &empty);
+        let mut mat = stamp_netlist_scaled(
+            topo,
+            netlist,
+            1.0,
+            &empty,
+            &empty,
+            crate::mna::InductorDc::Reactive,
+        );
         for dev in devices.iter_mut() {
             dev.eval(&x, EvalFlags::dc(), ctx);
             dev.load_residual(&mut mat.b);

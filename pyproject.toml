@@ -16,6 +16,15 @@ dependencies = ["numpy"]
 # Taken from crates/fairchild-py/Cargo.toml, which inherits [workspace.package].
 dynamic = ["version"]
 
+# Keep this table LAST in [project]: a `[project.x]` header ends the [project]
+# table, so any bare key after it (e.g. `dynamic`) silently lands in the wrong
+# table and maturin then refuses to build for want of version information.
+[project.optional-dependencies]
+# Live KiCad schematic capture over the IPC API (fairchild.kicad). grpcio-tools
+# is only needed to run python/fairchild/kicad/regen_protos.sh; pynng and
+# protobuf are needed at runtime.
+kicad = ["pynng", "protobuf", "grpcio-tools"]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 manifest-path = "crates/fairchild-py/Cargo.toml"
