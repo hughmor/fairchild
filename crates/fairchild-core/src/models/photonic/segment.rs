@@ -11,8 +11,8 @@
 //! math in one place and lets new device physics be a new perturbation source
 //! rather than a new copy of the stamp loop.
 //!
-//! See `_notes/optical_abstraction_design.md` for the layering rationale and
-//! the future device classes this is designed to admit.
+//! `docs/photonic-models.md` documents the devices this builds, and the user
+//! guide's "Writing custom devices" section walks through adding one.
 
 use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
 use crate::delay::DelayLine;

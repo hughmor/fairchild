@@ -65,7 +65,9 @@ pub const C0: f64 = 299_792_458.0;
 pub(super) fn dB_per_cm_to_neper_per_m(alpha_db_cm: f64) -> f64 {
     // POWER nepers: P(L) = P0·exp(−α·L) ≡ P0·10^(−(dB/cm)·L_cm/10). The
     // segment applies exp(−α·L/2) to the FIELD, so power decays by the full
-    // specified dB. (/20 here was the historic half-loss bug — sotu §F.)
+    // specified dB. `/20` here instead of `/10` is the classic half-loss bug:
+    // it double-counts the field/power conversion the segment already does, and
+    // every device comes out at the square root of its specified loss.
     alpha_db_cm * 100.0 * std::f64::consts::LN_10 / 10.0
 }
 

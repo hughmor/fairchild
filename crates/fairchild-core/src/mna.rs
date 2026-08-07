@@ -86,9 +86,13 @@ impl CircuitTopology {
     /// by DC/Newton, transient, AC, and noise assembly. Callers pass the value
     /// they want stamped: `opts.gmin` for the steady floor, or
     /// `opts.gmin + gmin_extra` during gmin-stepping homotopy. The internal-row
-    /// floor is what keeps degenerate OSDI/optical potential rows non-singular;
-    /// the deliberate divergence from ngspice (which applies gmin across
-    /// junctions only) is discussed in `_notes/sotu.md §E`.
+    /// floor is what keeps degenerate OSDI/optical potential rows non-singular.
+    ///
+    /// This diverges from ngspice deliberately: ngspice stamps gmin across
+    /// junctions only, which is enough for a circuit whose every row is a node
+    /// voltage. An optical potential row is a field-equality constraint with no
+    /// junction anywhere near it, so a junction-only floor leaves exactly the
+    /// rows most likely to be degenerate with nothing on the diagonal.
     ///
     /// Operates on any row-major dense matrix (`mat.a`, the AC/noise real
     /// `g_mat`, or a condition-estimate copy).
