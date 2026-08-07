@@ -2,12 +2,12 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/logos/logo_dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/logos/logo.svg">
-    <img alt="fairchild — circuit and photonic simulator" src="docs/logos/logo.svg" width="440">
+    <img alt="fairchild — electro-optic circuit simulator" src="docs/logos/logo.svg" width="600">
   </picture>
 </p>
 
 <p align="center">
-  <strong>A SPICE simulator that solves electronics and photonics in the same Newton iteration.</strong>
+  <strong>A SPICE simulator that solves both electronics and photonics in the same Newton iteration.</strong>
 </p>
 
 <p align="center">
@@ -19,24 +19,17 @@
 
 ---
 
-Optical fields are ordinary MNA unknowns here, not a separate solver bolted on
-the side. A photodiode's current is available to the transimpedance amplifier in
-the same timestep, and that amplifier's output is available to the modulator
-driving the light — inside one convergent solve, with no co-simulation handshake
-and no fixed-point iteration between two tools.
+fairchild is an MNA engine written in rust.
+Optical fields are treated as ordinary MNA unknowns, not handled with a separate solver.
+A photodiode's current is available to a TIA in the same timestep, and that amp's output is available to drive an optical modulator.
+This is all done inside one convergent solve, with no co-simulation and no fixed-point iteration between two tools.
+This means that link budgeting, noise analysis, and circuit optimization can all take place in the same tool.
 
-That matters because the interesting failures in an electro-optic link are the
-ones that cross the boundary: a receiver whose bandwidth depends on the
-photocurrent it is receiving, a ring whose resonance moves with the heat its own
-absorption generates, a laser modulated by a driver that its own detector
-controls. Split the simulation in two and those loops are exactly what you lose.
+Most open-source photonic simulators available today are frequency-domain S-matrix, which works to generate spectra, but doesn't support native electro-optic simulation.
+Cadence and Synopsys' time-domain electro-optic tools are bloated, outdated, and don't interface with open-source layout workflows.
+fairchild aims to be a credible open alternative.
 
-Every open-source photonic simulator available today is frequency-domain
-S-matrix — excellent for what it does, and structurally unable to express a
-feedback loop through a nonlinear transistor. The commercial time-domain
-electro-optic tools cost about as much per seat per year as an engineer.
-fairchild aims to be a credible open alternative, built on a real SPICE engine
-rather than a photonic tool that grew an electrical afterthought.
+## An example noisy signal chain
 
 ```spice
 * A directly-modulated 10 Gb/s link, end to end, in one deck.
@@ -52,9 +45,6 @@ Cpd  a 0 10f
 .tran 1p 4n
 ```
 
-One voltage source is the whole transmitter, laser RIN and detector shot noise
-are in the waveform, and `V(a)` is what a scope would see.
-
 <p align="center">
   <img alt="A noisy eye diagram, and .noise agreeing with .tran rail by rail" src="docs/plots/noisy_eye_and_ber.png" width="90%">
 </p>
@@ -63,7 +53,14 @@ are in the waveform, and `V(a)` is what a scope would see.
 
 ## Install
 
-**Python** — the usual way to drive it.
+**CLI**
+
+```bash
+cargo build --release
+./target/release/fairchild -f examples/electronic/rc_step.sp
+```
+
+**Python**
 
 ```bash
 pip install maturin
@@ -81,13 +78,6 @@ import matplotlib.pyplot as plt
 plt.plot(r.time(), r["V(pd_anode)"])
 ```
 
-**CLI**
-
-```bash
-cargo build --release
-./target/release/fairchild -f examples/electronic/rc_step.sp
-```
-
 **Embedding** — `libfairchild_c` exposes both a batch API and host-driven
 transient stepping for mixed-signal co-simulation, where your program owns the
 clock. See [`crates/fairchild-c/`](crates/fairchild-c/).
@@ -97,7 +87,7 @@ builds the SuiteSparse KLU backend, which is the fastest on large circuits.
 
 ---
 
-## What it does
+## Features
 
 ### SPICE
 
