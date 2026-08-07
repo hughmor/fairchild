@@ -1,5 +1,11 @@
 # fairchild
 
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logos/logo.svg">
+  <img src="docs/images/logo.svg" alt="logo" width="400">
+</picture>
+
 A SPICE-compatible analog circuit simulator written in Rust, with a native
 time-domain electro-optic co-simulation discipline.
 

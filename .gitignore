@@ -48,3 +48,7 @@ __pycache__/
 
 # Generated from a KiCad source checkout by python/fairchild/kicad/regen_protos.sh
 python/fairchild/kicad/_proto/
+
+
+# Old logo workspace
+docs/logos/mockups
