@@ -41,7 +41,7 @@ use crate::mna::MnaMatrix;
 /// would have been filtered out by any real photodiode.
 ///
 /// The transmission is a *static* coefficient evaluated at each channel's
-/// carrier — the exact narrowband limit. See `docs/photonic_awgr.md` for the
+/// carrier — the exact narrowband limit. See `docs/photonic-models.md` for the
 /// error bound and for what this deliberately cannot model (sideband shaping,
 /// PM→AM off a detuned slope, channel skew).
 ///
@@ -108,7 +108,7 @@ use crate::mna::MnaMatrix;
 /// Analytic modes produce **purely real** transmission — every crosstalk term
 /// adds in phase, which is the pessimistic bound on coherent crosstalk. A
 /// synthetic random-phase mode for sampling the crosstalk-penalty distribution
-/// is not implemented; see `docs/photonic_awgr.md` §"Not implemented". Table
+/// is not implemented; see `docs/photonic-models.md` §4, "Not implemented, deliberately". Table
 /// mode does honour measured phase from `t_<i>_<j>_deg` columns.
 ///
 /// # Not supported

@@ -22,7 +22,7 @@ These decks set no solver options.  They used to need a tight `vntol`, because
 the lambda wires carry ~1.55e-6 and a *voltage* tolerance of 1e-6 let Newton
 stop with lambda ~10 pm out -- a real detuning for a 40 GHz passband.  Lambda
 rows now carry their own `lambdatol` in the solver, so the deck no longer has to
-know about it.  See docs/photonic_awgr.md, "Solver tolerance".
+know about it.  See docs/photonic-models.md, `fc_awgr`.
 """
 import argparse
 import sys
