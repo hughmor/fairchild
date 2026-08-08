@@ -376,8 +376,13 @@ fn light_far_outside_the_band_is_dark_rather_than_aliased() {
 
 /// A bad port/channel-count combination must fail loudly at build time rather
 /// than mis-parse into a differently shaped router.
+///
+/// It used to `assert!` inside `setup_instance`, which runs inside the registry
+/// factory — so it aborted the process, and crossed pyo3 as a `PanicException`
+/// naming no element. It now declines the instance and lets
+/// `build_devices_with_footprints` raise a `ParameterError` that names the
+/// refdes, the model, and both counts.
 #[test]
-#[should_panic(expected = "2·wpc·N²")]
 fn a_terminal_count_that_is_not_two_wpc_n_squared_is_rejected() {
     // 30 wires: 30/(2·3) = 5 channels per side, and 5 is not a perfect square.
     // (24 would *not* be an error — it is exactly a 2×2 router.)
@@ -387,7 +392,19 @@ fn a_terminal_count_that_is_not_two_wpc_n_squared_is_rejected() {
         deck.push_str(&format!(" n{t}"));
     }
     deck.push_str(" fc_awgr\n.op\n.end\n");
-    let _ = solve(&deck);
+
+    let net = parse_spice(&deck).expect("parse");
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&net.models);
+    // NrResult has no Debug, so expect_err is unavailable.
+    let Err(err) = dc_op_nr_with_registry(&net, &reg) else {
+        panic!("a router with 30 terminals is not 2·3·N² for any N; this must fail");
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("xr") && msg.contains("fc_awgr") && msg.contains("30"),
+        "the error must name the element, the model and the count it got: {msg}"
+    );
 }
 
 /// Measured-table mode: a `.model` card pointing at an `N×N` CSV of measured

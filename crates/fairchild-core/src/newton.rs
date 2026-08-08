@@ -302,7 +302,7 @@ pub fn build_devices_with_footprints(
                     // or worse, silently simulated a circuit nobody drew. A
                     // wrong port count is a netlist error, so say so.
                     return Err(SimError::ParameterError(format!(
-                        "X{name}: '{model_name}' expects {expected} terminal(s) but the \
+                        "{name}: '{model_name}' expects {expected} terminal(s) but the \
                          netlist gives {}. Check the element's port order against the \
                          model's card — for photonic devices the optical ports come \
                          first, then the electrical ones.",

@@ -32,6 +32,12 @@ pub struct NativeDirectionalCoupler {
     length_m: f64,
     n_channels: usize,
     wpc: usize, // 3 or 5
+    /// Smallest terminal count that would have been usable, recorded when
+    /// `setup_instance` is handed one it cannot use. `num_terminals()` reads
+    /// `nodes.len()`, which a refused setup leaves at 0 — a misleading number
+    /// to quote back at the user. Declining rather than panicking is what lets
+    /// `build_devices_with_footprints` name the element and both counts.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     lam_src: LambdaSelect,
@@ -56,6 +62,7 @@ impl NativeDirectionalCoupler {
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
+            min_terminals: None,
             branches: Vec::new(),
             lam_src: LambdaSelect::default(),
         }
@@ -70,6 +77,9 @@ impl Default for NativeDirectionalCoupler {
 
 impl Device for NativeDirectionalCoupler {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -81,11 +91,11 @@ impl Device for NativeDirectionalCoupler {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
         let stride = 4 * wpc; // 4 ports per channel
-        assert!(
-            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
-            "fc_dcoupler: terminal count must be {stride}·N (wpc={wpc}); got {}",
-            terminals.len()
-        );
+        if terminals.is_empty() || !terminals.len().is_multiple_of(stride) {
+            self.min_terminals = Some(stride);
+            return;
+        }
+        self.min_terminals = None;
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
