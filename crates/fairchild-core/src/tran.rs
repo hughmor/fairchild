@@ -212,8 +212,15 @@ fn run_tran_mode(
 
     // No devices on this path — it is the linear-only integrator — but the
     // reactive history is the same shared machinery the nonlinear ones use.
-    let no_devices: Vec<Box<dyn Device>> = Vec::new();
-    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &no_devices, &x0);
+    // The context is only there for the device pre-eval, and there are none.
+    let mut no_devices: Vec<Box<dyn Device>> = Vec::new();
+    let mut reactive = crate::reactive::ReactiveState::new(
+        netlist,
+        &topo,
+        &mut no_devices,
+        &crate::device::SimContext::default(),
+        &x0,
+    );
 
     let mut t = step;
     let mut x;
@@ -521,7 +528,7 @@ pub fn tran_nr_with_registry_var_opts(
     // All reactive history — netlist C/L and device-declared branches alike —
     // in the one representation `crate::reactive` owns.  Physical state, so the
     // companion can be rebuilt for whatever `h` this step turns out to use.
-    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &devices, &x);
+    let mut reactive = crate::reactive::ReactiveState::new(netlist, &topo, &mut devices, &ctx, &x);
     // Track previous accepted timestep for non-uniform BDF-2 (h_prev_accepted
     // is the step that took us from t_{n-1} to t_n; distinct from h_prev which
     // is the trial step for predictor extrapolation).
