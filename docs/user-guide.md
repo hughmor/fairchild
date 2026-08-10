@@ -496,8 +496,8 @@ is captured.
 > not have one.** Shot noise follows the current and RIN follows the optical
 > power, so a link's `1` rail can be tens of times noisier than its `0` rail.
 > Run `.noise` on a deck whose sources idle at zero and you get the idle
-> answer — in `examples/photonic/noisy_eye_and_ber.py` that is 68× low on the
-> `1` rail. Bias the deck at the level you care about, one run per rail. This is
+> answer — in `examples/photonic/noisy_eye_and_ber.py` the two rails are 22×
+> apart. Bias the deck at the level you care about, one run per rail. This is
 > also why the Q-factor formula has two sigmas in it:
 > `Q = (µ₁ − µ₀)/(σ₁ + σ₀)`.
 
@@ -582,18 +582,21 @@ number.
 
 **`noisescale` is only exactly linear while the circuit is.** A doubled
 amplitude doubles σ as long as the circuit still responds linearly to it. Push
-it far enough and it will not: in `noisy_eye_and_ber.py` the quiet rail tracks
-`noisescale` to 0.1 %, while the RIN-limited rail runs ~5 % superlinear by 4×,
-because a ±40 % optical-power swing is outside the photodiode's square law being
-approximately linear. A BER extrapolated that way errs conservative, which is
-the direction you want, but check the scaling rather than assuming it.
+it far enough and it will not — once the injected amplitude is a large fraction
+of the signal, a square-law detector stops being small-signal about it. In
+`noisy_eye_and_ber.py` the quiet rail tracks `noisescale` to 0.03 % out to 16×
+and the loud one to 2 %, because even at 16× the noise is only a few per cent of
+that rail. A BER
+extrapolated from a scaled run errs conservative when the scaling does bend,
+which is the direction you want, but check it rather than assuming it: the
+example asserts the slope.
 
 #### Worked examples
 
 | Script | Shows |
 |---|---|
 | `examples/photonic/receiver_noise_budget.py` | `.noise` only — thermal / shot / RIN vs optical power, and the SNR ceiling `1/(RIN·B)` |
-| `examples/photonic/noisy_eye_and_ber.py` | Both — a 10 Gb/s eye with injected noise, Q and BER, and each rail checked against its own `.noise` integral |
+| `examples/photonic/noisy_eye_and_ber.py` | Both — NRZ and PAM-4 eyes through an MZM built from primitives, Q and BER, and each rail checked against its own `.noise` integral *and* the closed form |
 
 #### What neither analysis models
 

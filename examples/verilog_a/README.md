@@ -1,6 +1,6 @@
 # Verilog-A in fairchild
 
-Five worked examples and eight models, plus what the support amounts to.
+Five worked examples and nine models, plus what the support amounts to.
 The authoring guide is `docs/user-guide.md` §14; this is the worked set.
 
 ```sh
@@ -119,6 +119,26 @@ with `--param` / `set_param`.
 
 **dB is power dB, so amplitude divides by 20.** `10^(−dB/20)`. Everything
 under `legacy/` predates the `0f689cb` fix and is a factor of two out.
+
+---
+
+## `va_prbs.va` — uncompiled
+
+`models/va_prbs.va` is a maximal-length PRBS generator: an LFSR clocked at
+`1/t_bit`, driving one terminal, so a link deck can carry its own stimulus
+rather than a several-thousand-point `PWL` string emitted by whatever script
+wrote the netlist.
+
+**It has never been compiled or run.** OpenVAF-Reloaded was not available when
+it was written, so it is the shape the model takes rather than a working one.
+`build.sh` will pick it up; `check.py` does not cover it. The header says what
+to verify first — the `timer`-driven register update is the part most likely to
+need reworking, and the fallback that certainly works (recomputing the sequence
+from `$abstime` with no state) is written out there too.
+
+The sequence itself is not in doubt: `examples/photonic/noisy_eye_and_ber.py`
+generates the identical one in Python — same taps, same all-ones seed — and is
+what the committed results use. Compare against that.
 
 ---
 

@@ -31,23 +31,39 @@ fairchild aims to be a credible open alternative.
 
 ## An example noisy signal chain
 
+A 10 Gb/s link, end to end, in one deck: CW laser → Mach-Zehnder modulator →
+photodiode → load. The modulator is not a behavioural block — it is two
+directional couplers and two reverse-biased PN phase shifters, the devices you
+would actually place in a layout, driven push-pull.
+
 ```spice
-* A directly-modulated 10 Gb/s link, end to end, in one deck.
-.optical_port beam
-.optical_port far
-Vdrv drv 0       PULSE(0 1.8 0 30p 30p 70p 200p)
-XLD  beam drv 0  fc_driven_laser slope_w_v=1.5m v_th=0.9 r_in=1e12 rin_db_hz=-155
-XWG  beam far    fc_waveguide l_um=2000 alpha_dB_cm=2
-XPD  far a 0     fc_photodetector responsivity=0.9
-Rl   a 0 1k
-Cpd  a 0 10f
-.options trannoise=1 variable_step=0
-.tran 1p 4n
+* the modulator, from primitives
+Xc1   lin dark a1 a2   fc_dcoupler kappa_L=0.785        ; 50/50 split
+Xarm1 a1 b1 p 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
+Xarm2 a2 b2 n 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
+Xc2   b1 b2 out unused fc_dcoupler kappa_L=0.785        ; recombine
+
+Xlas  lin fc_cw_laser power_mW=2 rin_db_hz=-145         ; laser RIN
+Xpd   out det 0 fc_photodetector responsivity=0.9       ; shot noise
+Rl    det 0 1k
+Cpd   det 0 15f
+.options trannoise=1                                    ; noise in the waveform
+.tran 1p 51.1n
 ```
 
 <p align="center">
-  <img alt="A noisy eye diagram, and .noise agreeing with .tran rail by rail" src="docs/plots/noisy_eye_and_ber.png" width="90%">
+  <img alt="NRZ and PAM-4 eyes, the link's measured bandwidth, and the noise checked three ways" src="docs/plots/noisy_eye_and_ber.png" width="90%">
 </p>
+
+Everything in that figure is measured from the circuit. The eyes are a real
+PRBS-9 through the modulator above; the bottom-left panel is the link's
+electro-optic response from `.ac`, so the 3 dB point is a result rather than a
+parameter; and the bottom-right panel checks the noise three independent ways —
+sampled from `.tran`, integrated from `.noise` at that rail, and against the
+closed form `σ/μ = √(RIN·B)`. They agree to 4 %.
+
+Run it yourself: `python3 examples/photonic/noisy_eye_and_ber.py`, or
+`--selftest` to assert the physics instead of plotting it.
 
 ---
 

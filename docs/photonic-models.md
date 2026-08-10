@@ -1206,9 +1206,39 @@ X<name>  in  out  sig  gnd  fc_mzm  [param=val …]
 T(V_mod) = α · [(1 − 1/E_r) · (1 + cos(π V_mod / V_π)) / 2  +  1/E_r]
 ```
 ranges from `α` (bright, V_mod=0) to `α/E_r` (dark, V_mod=V_π). Amplitude
-transmission `t_amp = √T`. Use this as the source-side MZM in a
-testbench schematic; for a chip-level MZI you'd combine
-`fc_splitter` + two `fc_pn_th_ps` arms + a second `fc_splitter`.
+transmission `t_amp = √T`.
+
+**This is a behavioural block, and `f_c` is not implemented** — the drive path
+is instantaneous, so the device has no bandwidth and cannot show you the one
+tradeoff that decides a real modulator's design. Use it when you want a
+known-good optical waveform from a voltage and do not care how a real device
+would get there.
+
+For anything where the bandwidth matters, build the modulator from primitives:
+
+```spice
+Xc1   in dark a1 a2    fc_dcoupler kappa_L=0.785      ; 50/50 split
+Xarm1 a1 b1 p 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
+Xarm2 a2 b2 n 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
+Xc2   b1 b2 out unused fc_dcoupler kappa_L=0.785      ; recombine
+```
+
+Two couplers and two reverse-biased PN arms, driven push-pull. That version has
+a real `C_j(V)` per arm, so its bandwidth falls out of the circuit rather than
+being a parameter, and `.ac` measures it. Measured on the arm length:
+
+| Arms | `C_j0` | Driver | `f_3dB` | `V_π`/arm |
+|---|---|---|---|---|
+| 1 mm | 250 fF | 25 Ω | 52.0 GHz | 12.0 V |
+| 2 mm | 500 fF | 25 Ω | 26.0 GHz | 6.0 V |
+| 2 mm | 500 fF | 50 Ω | 13.2 GHz | 6.0 V |
+| 3 mm | 750 fF | 25 Ω | 17.3 GHz | 4.0 V |
+| 5 mm | 1250 fF | 25 Ω | 10.4 GHz | 2.4 V |
+
+Both `f_3dB` and `V_π` go as `1/L`, which is the lumped modulator's central
+tradeoff and the reason travelling-wave electrodes exist.
+`examples/photonic/noisy_eye_and_ber.py` builds this link, runs a PRBS through
+it, and reproduces the table with `--sweep`.
 
 ### Declarative models, no recompile — `fc_phase_shifter_expr`
 
@@ -1311,8 +1341,9 @@ derivation and how long to run.
 
 One trap specific to links: **`.noise` linearises about one bias, and a
 modulated link does not have one.** Run it on a pattern deck and you get the
-idle answer — 68× low on the "1" rail in the worked example, because both RIN
-and shot follow the optical power. Bias the deck at each rail and run it twice.
+idle answer, because both RIN and shot follow the optical power. Bias the deck
+at each rail and run it twice — the worked example does, and the two rails come
+out 22× apart.
 
 ![Noisy eye and BER](plots/noisy_eye_and_ber.png)
 

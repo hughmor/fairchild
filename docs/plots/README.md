@@ -38,7 +38,7 @@ cp examples/photonic/{receiver_noise_budget,noisy_eye_and_ber,native_mrr_wavelen
 | File | What |
 |---|---|
 | `receiver_noise_budget.png` | thermal / shot / RIN crossovers and the SNR ceiling at `1/(RIN·B)` |
-| `noisy_eye_and_ber.png` | a transient-noise eye, and `.noise` agreeing with `.tran` rail by rail |
+| `noisy_eye_and_ber.png` | NRZ and PAM-4 eyes through an MZM built from primitives, the link's measured electro-optic response, and `.noise` / `.tran` / closed form agreeing rail by rail |
 | `native_mrr_wavelength_sweep.png` | micro-ring through-port transmission, resonance shifting under bias |
 | `native_weight_bank.png` | a 4-channel WDM weight bank: per-channel weights, passivity, balanced readout |
 
