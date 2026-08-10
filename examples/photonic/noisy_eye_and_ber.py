@@ -500,7 +500,13 @@ def main() -> int:
 
     import matplotlib.pyplot as plt
 
-    eye_scale = 8.0
+    # Pick the eye's noisescale from the measured noise rather than hard-coding
+    # it: enough fuzz to see in print, not enough to close the eye. The two
+    # front ends are an order of magnitude apart in sigma/separation — 0.76 %
+    # for the resistor, 5.3 % for the TIA — so one constant cannot serve both,
+    # and the one tuned for the resistor buries the TIA's eye completely.
+    target = 0.06
+    eye_scale = float(np.clip(round(target / (sig1[0] / (mu1 - mu0))), 1.0, 16.0))
     q_at_eye = float(np.interp(eye_scale, scales, q))
     _, v_nrz = run_tran(nrz, trannoise=True, seed=seeds[0], scale=eye_scale, use_tia=use_tia)
     _, v_pam = run_tran(pam, trannoise=True, seed=seeds[0], scale=eye_scale, use_tia=use_tia)
