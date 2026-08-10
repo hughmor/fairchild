@@ -272,7 +272,7 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 | `.dc` | ✅ | ✅ ngspice |
 | `.tran` (BE / TR / GEAR, fixed and variable step) | ✅ | ✅ ngspice (RC, RL, RLC, diode, BJT, CMOS, ring oscillator, switch) |
 | `.ac` | ✅ magnitude **and** phase (see §2) | ✅ ngspice magnitude + phase on an RC corner; analytic RC Bode and RLC resonance |
-| `.noise` | ✅ | ⚠️ RC thermal vs analytic + an ngspice spot check; device noise unvalidated externally |
+| `.noise` | ✅ incl. Verilog-A `white_noise` / `flicker_noise` via OSDI | ⚠️ RC thermal vs analytic + an ngspice spot check; the Verilog-A path is pinned against `(i_n·z_t)²` in `examples/verilog_a/check.py`; device noise unvalidated externally |
 | `.temp`, `.alter` | ✅ | ⚠️ transitively |
 | `.tf`, `.pz`, `.disto`, `.sens` | ❌ | — |
 | `.mc` Monte Carlo | ❌ (use `Circuit.sweep()` from Python) | — |

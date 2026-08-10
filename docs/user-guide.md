@@ -1359,7 +1359,7 @@ is the supported route to foundry compact models — BSIM, PSP, HiCUM — which
 fairchild will never hand-write in Rust, and it is equally the route to your
 own models, electrical or optical.
 
-Worked examples and eight ready models live in `examples/verilog_a/`.
+Worked examples and nine ready models live in `examples/verilog_a/`.
 
 ### 14.1 Writing a model
 
@@ -1370,6 +1370,8 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | `I(a,b) <+ expr` | yes | the resistive branch |
 | `V(a,b) <+ expr` | yes | adds an internal branch unknown |
 | `ddt(q)` | yes | transient **and** `.ac`/`.noise` |
+| `white_noise(pwr, "name")` | yes | reaches `.noise` **and** `.options trannoise=1` |
+| `flicker_noise(k, af, …)` | ⚠️ | exact in `.noise`; transient injects white samples and can only realise one density, so it probes mid-band and warns |
 | internal nodes | yes | `num_nodes > num_terminals`; fairchild allocates the MNA rows |
 | `analog function` | yes | |
 | `$abstime` | yes | reads the transient clock; 0 in DC and AC |
@@ -1378,6 +1380,7 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | `$limit(v, "pnjlim", …)` | yes | installed into the library's `OSDI_LIM_TABLE` at load |
 | other `$limit` functions | degrades | identity limiter + a warning; runs unlimited, never crashes |
 | `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
+| `@(timer(…))` | **no** | OpenVAF 23.5 parses only `initial_step`/`final_step`, so a model cannot clock itself |
 | `$strobe`, `$finish` | no | |
 
 `ddt` is integrated with whatever `.options method` selects, through the same

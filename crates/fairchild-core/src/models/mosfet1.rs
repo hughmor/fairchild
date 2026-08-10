@@ -575,7 +575,7 @@ impl Device for Mosfet1 {
         self.vds_eff_prev = self.polarity * (vd - vs);
     }
 
-    fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         if self.gm.abs() < 1e-18 {
             return Vec::new();
         }

@@ -311,7 +311,7 @@ impl Device for NativePhotodetector {
     ///
     /// ponytail: no excess-noise factor.  An APD needs `F(M)·M²`, which is a
     /// second parameter and a second model — add it with the APD, not here.
-    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, _ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         let s_i = 2.0 * Q_ELECTRON * self.i_ph.abs();
         if s_i == 0.0 {
             return Vec::new();

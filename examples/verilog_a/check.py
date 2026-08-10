@@ -49,6 +49,45 @@ if not sorted((HERE / "build").glob("*.osdi")):
     )
 
 
+def run_blocks(netlist):
+    """Every CSV block a deck emits, one per analysis.
+
+    fairchild writes one header + rows per analysis, so a deck carrying both
+    `.op` and `.noise` produces two blocks and a plain DictReader reads the
+    second header as a data row.
+    """
+    exe = next(
+        (p for p in (ROOT / "target/release/fairchild", ROOT / "target/debug/fairchild")
+         if p.exists()),
+        None,
+    )
+    out = subprocess.run([str(exe), "-f", str(HERE / netlist), "--format", "csv"],
+                         cwd=HERE, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"{netlist} failed:\n{out.stderr}")
+    blocks, cur = [], []
+    for line in out.stdout.splitlines():
+        if line and not line[0].isdigit() and not line.startswith("dc_op"):
+            if cur:
+                blocks.append(cur)
+            cur = [line]
+        elif cur:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    parsed = []
+    for b in blocks:
+        rows = list(csv.DictReader(io.StringIO("\n".join(b))))
+        cols = {}
+        for k in rows[0]:
+            try:
+                cols[k] = [float(r[k]) for r in rows]
+            except (ValueError, TypeError):
+                pass
+        parsed.append(cols)
+    return parsed
+
+
 def close(a, b, tol, what):
     assert abs(a - b) <= tol, f"{what}: {a:.6g} != {b:.6g} (tol {tol:g})"
     print(f"  ok  {what}: {a:.6g}")
@@ -139,5 +178,28 @@ close(va, native, 1e-9, "detected power, Verilog-A vs native")
 # V = responsivity * P * R_load, so P/P_in = V / (0.8 A/W * 1k) with P_in = 1 mW.
 close(va / (0.8 * 1e3) / 1e-3, 10 ** (-0.3 / 10), 2e-4,
       "1 mm at 3 dB/cm passes 10^(-0.3/10)")
+
+print("tia_receiver.sp — native photodiode read by a Verilog-A TIA")
+# DC: the photocurrent is R*P + I_dark, the summing node sits at I*r_in, and
+# the output is z_t*I halved by the r_out / R_load divider.
+i_ph = 0.9 * 0.02e-3 + 10e-9
+z_eff = 2000.0 * 50.0 / (50.0 + 50.0)      # z_t through the output divider
+op, nz = run_blocks("tia_receiver.sp")
+close(op["V(sum)"][0], i_ph * 50.0, 1e-3, "summing node sits at I_ph * r_in")
+close(op["V(tout)"][0], z_eff * i_ph, 1e-3, "output = z_t * I_ph through the divider")
+
+# **The check that matters.** The amplifier's own input-referred current noise
+# has to reach `.noise` through OSDI's `load_noise`; before that was wired, a
+# model could call `white_noise()` and contribute nothing at all. In band the
+# output density is i_n_in * z_eff, with the photodiode's shot noise the only
+# other term that registers.
+i_n_in, q_e = 15e-12, 1.602176634e-19
+want = (i_n_in * z_eff) ** 2 + 2 * q_e * i_ph * z_eff ** 2
+close(nz["onoise_v2hz"][0], want, 2e-2,
+      "output PSD = (i_n_in*z_t)^2 + 2q*I_ph*z_t^2")
+frac = (i_n_in * z_eff) ** 2 / want
+assert frac > 0.9, f"the TIA should dominate this receiver, but it is only {100*frac:.0f} %"
+print(f"  ok  TIA is {100 * frac:.1f} % of the noise power — a real receiver, "
+      f"not a RIN-limited one")
 
 print("\nall checks passed")

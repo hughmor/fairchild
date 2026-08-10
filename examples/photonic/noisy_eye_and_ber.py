@@ -36,20 +36,29 @@ of how much light lands on the detector. The budget printed below comes out
     thermal      0.2 %
 
 which is the correct answer for these numbers and *not* how a real receiver is
-usually built. RIN scales as `I²` while shot goes as `I` and thermal not at all,
-so RIN wins whenever the photocurrent is large — and a milliamp of photocurrent
-into a kilohm is a 1.5 V swing, which no real front end wants. A production link
-detects 10 to 100x less power and reads it with a transimpedance amplifier whose
-input-referred current noise (10-20 pA/√Hz, so 1-2 µA over this bandwidth) then
-dominates everything here. There is no TIA model in fairchild yet, so this
-example uses a load resistor, and a load resistor big enough to give a readable
-voltage is what puts the link in the RIN-limited corner.
+built. RIN scales as `I²` while shot goes as `I` and thermal not at all, so RIN
+wins whenever the photocurrent is large — and a milliamp into a kilohm is a
+1.5 V swing, which no real front end wants. A load resistor big enough to give a
+readable voltage is what puts a link in the RIN-limited corner, and it is slow
+for the same reason: `1/(2πRC)` and `4kT/R` pull opposite ways.
 
-That is worth knowing before quoting these sigmas as a link budget: the
-machinery is right, the operating point is deliberately extreme. Drop
-`P_LASER_MW` to 0.2 and the same budget reads 54 % / 35 % / 12 % — a receiver
-where all three terms matter, which is the regime most published link budgets
-sit in.
+**`--tia` is the answer to that**, and it is worth running:
+
+    receiver              sigma_1    sigma_0    dominant term
+    load resistor        11839 uV     547 uV    RIN, 94 %
+    Verilog-A TIA         4114 uV    4001 uV    amplifier input noise, 93 %
+
+A transimpedance amplifier holds the summing node at a virtual ground, so the
+diode's capacitance no longer sets the bandwidth and a real receiver can detect
+50 µW instead of 2 mW. Its own input-referred current noise — 15 pA/√Hz here —
+then sets the floor. Note the second column: with the TIA the two rails have
+*the same* noise, because the dominant generator is in the amplifier and does
+not care how much light arrived. That is what leaving the RIN-limited regime
+looks like, and it is why published eye diagrams do not show noise riding the
+one rail the way the resistor version does.
+
+`--tia` needs `examples/verilog_a/build/va_tia.osdi`, which means OpenVAF; the
+default front end is a resistor so the example runs with no toolchain at all.
 
 Note also that the modulator is perfectly balanced, so the extinction ratio is
 numerically infinite (the 70+ dB below is the solver's floor, not a spec). A real
@@ -76,7 +85,8 @@ BIT_S = 100e-12                 # 10 Gb/s (and 10 GBd for PAM-4)
 STEP_S = 1e-12
 EDGE_FRAC = 0.25                # driver rise/fall as a fraction of a bit
 
-P_LASER_MW = 2.0
+P_LASER_MW = 2.0             # resistor front end
+P_LASER_MW_TIA = 0.05        # a real receiver detects far less
 RIN_DB_HZ = -145.0              # a decent DFB; -155 is a good one, -130 a cheap one
 
 L_ARM_UM = 3000.0               # 3 mm arms
@@ -90,6 +100,19 @@ V_CENTRE = -3.0                 # both arms reverse-biased
 RESPONSIVITY = 0.9
 R_LOAD = 1.0e3
 C_PD = 15e-15                   # tau = 15 ps
+
+# ── receiver front end ───────────────────────────────────────────────────────
+# Two of them, and the difference is the point. The resistor is what you can
+# run with no toolchain; the TIA is what a real link uses. See `--tia`.
+TIA_OSDI = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "verilog_a", "build", "va_tia.osdi")
+)
+TIA_ZT = 2.0e3                  # V/A
+TIA_RIN = 50.0                  # ohm — the virtual ground the diode sees
+TIA_F3DB = 12e9                 # Hz
+TIA_IN = 15e-12                 # A/sqrt(Hz), input-referred
+TIA_ROUT = 50.0
+TIA_RLOAD = 1.0e6               # high-Z probe, so z_t is not divided
 
 V_PI = V_PI_L / (L_ARM_UM * 1e-6)      # per arm
 SWING = V_PI / 4.0                     # per arm; differential swings V_pi
@@ -171,7 +194,22 @@ PORTS = "".join(
 )
 
 
-def link(drive_p: str, drive_n: str, trannoise=False, seed=1, scale=1.0, extra="") -> str:
+def receiver(use_tia: bool) -> tuple:
+    """`(preamble, netlist_fragment, probe_node)` for the chosen front end."""
+    if not use_tia:
+        return "", (f"Rl det 0 {R_LOAD}\nCl det 0 {C_PD}\n"), "det"
+    return (
+        f".osdi {TIA_OSDI}\n",
+        f"Cpd det 0 {C_PD}\n"
+        f"Xtia det tout 0 va_tia z_t={TIA_ZT} r_in={TIA_RIN} f_3db={TIA_F3DB} "
+        f"i_n_in={TIA_IN} v_out_dc=0 v_swing=1.5 r_out={TIA_ROUT}\n"
+        f"Rl tout 0 {TIA_RLOAD}\n",
+        "tout",
+    )
+
+
+def link(drive_p: str, drive_n: str, trannoise=False, seed=1, scale=1.0,
+         use_tia=False) -> str:
     """CW laser → 50/50 coupler → two PN arms → 50/50 coupler → photodiode."""
     noise = (
         f".options trannoise=1 noiseseed={seed} noisescale={scale} variable_step=0\n"
@@ -182,8 +220,10 @@ def link(drive_p: str, drive_n: str, trannoise=False, seed=1, scale=1.0, extra="
         f"fc_pn_ps_cap l_um={L_ARM_UM} v_pi_l={V_PI_L} c_j0={C_J0} "
         f"v_bi={V_BI} m_j={M_J} alpha_dB_cm={ALPHA_DB_CM} pin_at_ref=1"
     )
+    pre, rx, _ = receiver(use_tia)
+    p_mw = P_LASER_MW_TIA if use_tia else P_LASER_MW
     return f"""* 10 Gb/s MZM link
-{noise}{PORTS}Xlas lin fc_cw_laser power_mW={P_LASER_MW} rin_db_hz={RIN_DB_HZ}
+{noise}{pre}{PORTS}Xlas lin fc_cw_laser power_mW={p_mw} rin_db_hz={RIN_DB_HZ}
 Vp pd 0 {drive_p}
 Vn nd 0 {drive_n}
 Rp pd p {R_DRV}
@@ -193,18 +233,16 @@ Xps1 a1 b1 p 0 {arm}
 Xps2 a2 b2 n 0 {arm}
 Xc2 b1 b2 obar ocross fc_dcoupler kappa_L={KL_3DB}
 Xpd obar det 0 fc_photodetector responsivity={RESPONSIVITY} r_shunt=1Meg i_dark_a=0
-Rl det 0 {R_LOAD}
-Cl det 0 {C_PD}
-{extra}.end
+{rx}.end
 """
 
 
-def run_tran(fracs, trannoise=False, seed=1, scale=1.0):
+def run_tran(fracs, trannoise=False, seed=1, scale=1.0, use_tia=False):
     stop = len(fracs) * BIT_S
     c = fairchild.Circuit()
-    c.load_str(link(pwl(fracs, +1), pwl(fracs, -1), trannoise, seed, scale))
+    c.load_str(link(pwl(fracs, +1), pwl(fracs, -1), trannoise, seed, scale, use_tia))
     r = c.run("tran", step=STEP_S, stop=stop)
-    return np.asarray(r.time()), np.asarray(r["V(det)"])
+    return np.asarray(r.time()), np.asarray(r[f"V({receiver(use_tia)[2]})"])
 
 
 def bandwidth(l_um=L_ARM_UM, c_j0=C_J0, r_drv=R_DRV, c_pd=C_PD):
@@ -246,7 +284,7 @@ Cl det 0 {c_pd}
     return f, db, f3
 
 
-def noise_sigma(frac: float) -> float:
+def noise_sigma(frac: float, use_tia: bool = False) -> float:
     """RMS output noise with the modulator parked at drive fraction `frac`.
 
     `.noise` linearises about ONE bias. A modulated link does not have one — RIN
@@ -256,8 +294,9 @@ def noise_sigma(frac: float) -> float:
     dp = f"DC {V_CENTRE + 2 * SWING * frac}"
     dn = f"DC {V_CENTRE - 2 * SWING * frac}"
     c = fairchild.Circuit()
-    c.load_str(link(dp, dn))
-    r = c.run("noise", out="det", src="Vp", fstart=1e3, fstop=1e13, points=40, variation="dec")
+    c.load_str(link(dp, dn, use_tia=use_tia))
+    r = c.run("noise", out=receiver(use_tia)[2], src="Vp",
+              fstart=1e3, fstop=1e13, points=40, variation="dec")
     return math.sqrt(np.trapezoid(np.asarray(r["onoise"]), np.asarray(r.freq())))
 
 
@@ -298,6 +337,9 @@ def eye_traces(t, v, n_sym, n_show=220):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--tia", action="store_true",
+                    help="read the diode with the Verilog-A TIA instead of a load "
+                         "resistor (needs examples/verilog_a/build/va_tia.osdi)")
     ap.add_argument("--sweep", action="store_true",
                     help="measure the length/bandwidth/V_pi tradeoff and exit")
     ap.add_argument("--png", default="noisy_eye_and_ber.png")
@@ -313,6 +355,13 @@ def main() -> int:
                   f"{f3m / 1e9:>11.1f} GHz{V_PI_L / (l_um * 1e-6):>9.1f} V")
         return 0
 
+    use_tia = args.tia
+    if use_tia and not os.path.exists(TIA_OSDI):
+        sys.exit(f"--tia needs {TIA_OSDI}\n"
+                 "  build it:  cd examples/verilog_a && OPENVAF=... ./build.sh")
+    rx_name = "Verilog-A TIA" if use_tia else "load resistor"
+    probe = receiver(use_tia)[2]
+
     bits = prbs(PRBS_ORDER, N_SYM)
     nrz = [float(b) for b in bits]
     sym4 = pam4_levels(prbs(PRBS_ORDER, 2 * (N_SYM // 2)))
@@ -321,13 +370,14 @@ def main() -> int:
     # The modulator on its own (receiver pole pushed far out), then the link.
     _, _, f3_mod = bandwidth(c_pd=1e-18)
     f_ac, db_ac, f3 = bandwidth()
+    print(f"receiver:  {rx_name}, probing V({probe})")
     print(f"modulator: V_pi = {V_PI:.1f} V/arm, f_3dB = {f3_mod / 1e9:.1f} GHz "
           f"({L_ARM_UM / 1000:.0f} mm arms, {C_J0 * 1e15:.0f} fF, {R_DRV:.0f} ohm driver)")
     print(f"link (modulator + receiver): f_3dB = {f3 / 1e9:.1f} GHz, against a "
           f"{1 / (2 * BIT_S) / 1e9:.0f} GHz Nyquist")
 
     # Clean run: the deterministic waveform, for levels and for subtracting.
-    t0, v0 = run_tran(nrz)
+    t0, v0 = run_tran(nrz, use_tia=use_tia)
     idx, s0 = sample_at(t0, v0, N_SYM, settled=bits)
     ones0 = s0[[bits[k] == 1 for k in idx]]
     zeros0 = s0[[bits[k] == 0 for k in idx]]
@@ -336,7 +386,7 @@ def main() -> int:
           f"ER = {10 * math.log10(mu1 / max(mu0, 1e-12)):.1f} dB")
 
     # `.noise` per rail.
-    sig1_ac, sig0_ac = noise_sigma(1.0), noise_sigma(0.0)
+    sig1_ac, sig0_ac = noise_sigma(1.0, use_tia), noise_sigma(0.0, use_tia)
 
     # Transient noise, pooled over seeds, at several amplitudes.
     scales = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
@@ -345,7 +395,7 @@ def main() -> int:
     for sc in scales:
         hi, lo = [], []
         for sd in seeds:
-            _, v = run_tran(nrz, trannoise=True, seed=sd, scale=float(sc))
+            _, v = run_tran(nrz, trannoise=True, seed=sd, scale=float(sc), use_tia=use_tia)
             _, s = sample_at(t0, v, N_SYM, settled=bits)
             hi.append(s[[bits[k] == 1 for k in idx]] - ones0)
             lo.append(s[[bits[k] == 0 for k in idx]] - zeros0)
@@ -357,24 +407,30 @@ def main() -> int:
     # second measurement of the same thing. In the RIN-limited regime
     # sigma/mu = sqrt(RIN·B_n) with B_n the receiver's noise bandwidth.
     rin = 10 ** (RIN_DB_HZ / 10.0)
-    b_n = (math.pi / 2) / (2 * math.pi * R_LOAD * C_PD)
-    sig1_cf = mu1 * math.sqrt(rin * b_n)
+    b_n = ((math.pi / 2) * TIA_F3DB if use_tia
+           else (math.pi / 2) / (2 * math.pi * R_LOAD * C_PD))
+    sig1_cf = 0.0   # filled once the budget below is assembled
 
     # Which term dominates, and by how much. This is the part that decides
     # whether an eye looks RIN-limited, and it is set by the photocurrent.
     q_e, k_b, t_k = 1.602176634e-19, 1.380649e-23, 300.0
-    i_ph = mu1 / R_LOAD
-    terms = {
-        "thermal 4kT/R_L": 4 * k_b * t_k / R_LOAD,
-        "shot 2qI": 2 * q_e * i_ph,
-        "RIN·I²": rin * i_ph * i_ph,
-    }
+    if use_tia:
+        z_eff = TIA_ZT * TIA_RLOAD / (TIA_ROUT + TIA_RLOAD)
+        i_ph, b_n = mu1 / z_eff, (math.pi / 2) * TIA_F3DB
+        terms = {"TIA input-referred": TIA_IN ** 2}
+    else:
+        z_eff = R_LOAD
+        i_ph = mu1 / R_LOAD
+        terms = {"thermal 4kT/R_L": 4 * k_b * t_k / R_LOAD}
+    terms["shot 2qI"] = 2 * q_e * i_ph
+    terms["RIN·I²"] = rin * i_ph * i_ph
     tot = sum(terms.values())
-    print(f"\nnoise budget at the 1 rail (I_ph = {i_ph * 1e3:.2f} mA, "
-          f"B_n = {b_n / 1e9:.1f} GHz):")
+    sig1_cf = math.sqrt(tot * b_n) * z_eff
+    print(f"\nnoise budget at the 1 rail — {rx_name} "
+          f"(I_ph = {i_ph * 1e6:.1f} uA, B_n = {b_n / 1e9:.1f} GHz):")
     for name, psd in sorted(terms.items(), key=lambda kv: -kv[1]):
-        print(f"  {name:<16}{psd:9.2e} A²/Hz   {100 * psd / tot:5.1f} %   "
-              f"σ = {math.sqrt(psd * b_n) * R_LOAD * 1e6:7.0f} uV")
+        print(f"  {name:<20}{psd:9.2e} A²/Hz  {100 * psd / tot:5.1f} %   "
+              f"σ = {math.sqrt(psd * b_n) * z_eff * 1e6:7.0f} uV")
 
     rel1 = abs(sig1[0] - sig1_ac) / sig1_ac
     rel0 = abs(sig0[0] - sig0_ac) / sig0_ac
@@ -388,8 +444,12 @@ def main() -> int:
     print(f"  .tran vs closed form on the 1 rail: {100 * rel_cf:+.1f} %")
     print(f"  RIN-limited SNR ceiling 1/(RIN·B) = {10 * math.log10(1 / (rin * b_n)):.1f} dB "
           f"in B_n = {b_n / 1e9:.1f} GHz")
-    print(f"  sigma_1/mu_1 = {100 * sig1[0] / mu1:.2f} %  (sqrt(RIN·B) = "
-          f"{100 * math.sqrt(rin * b_n):.2f} %)")
+    print(f"  sigma_1/mu_1 = {100 * sig1[0] / mu1:.2f} %,  sigma_1/sigma_0 = "
+          f"{sig1[0] / sig0[0]:.1f}x")
+    if use_tia:
+        print("  sigma_1 ~ sigma_0 because the dominant generator is the amplifier's own\n"
+              "  input noise, which does not care how much light arrived. That is what\n"
+              "  leaving the RIN-limited regime looks like.")
 
     q = (mu1 - mu0) / (sig1 + sig0)
     ber = 0.5 * np.array([math.erfc(x / math.sqrt(2.0)) for x in q])
@@ -398,7 +458,7 @@ def main() -> int:
         print(f"{sc:>11.0f}{h * 1e6:>9.0f} uV{l * 1e6:>8.0f} uV{qq:>8.1f}{bb:>11.1e}")
 
     # PAM-4.
-    tp, vp = run_tran(pam)
+    tp, vp = run_tran(pam, use_tia=use_tia)
     _, sp = sample_at(tp, vp, len(pam))
     lv = [sp[[sym4[k] == L for k in range(SKIP, len(pam))]].mean() for L in range(4)]
     print(f"\nPAM-4 levels (mV): " + ", ".join(f"{x * 1e3:.0f}" for x in lv))
@@ -413,7 +473,7 @@ def main() -> int:
         assert f3 > 0.7 / BIT_S, f"the link must carry 10 Gb/s: f_3dB = {f3 / 1e9:.1f} GHz"
         assert rel1 < 0.12, f"1 rail: .noise vs .tran differ by {100 * rel1:.1f} %"
         assert rel0 < 0.12, f"0 rail: .noise vs .tran differ by {100 * rel0:.1f} %"
-        assert rel_cf < 0.15, f"1 rail vs closed form: {100 * rel_cf:.1f} %"
+        assert rel_cf < 0.10, f"1 rail vs closed form: {100 * rel_cf:.1f} %"
         # The quiet rail is the linearity check: it is thermal-dominated, so it
         # scales exactly. The loud one is RIN-dominated and bends slightly by
         # 16x, which is the square-law detector and not a defect.
@@ -422,6 +482,16 @@ def main() -> int:
         assert 0.98 < slope1 < 1.10, f"loud rail should be near-linear: {slope1:.3f}"
         assert 10 * math.log10(mu1 / max(mu0, 1e-12)) > 15.0, "extinction ratio too low"
         assert q[0] > 6.0, f"the 1x eye should be open: Q = {q[0]:.1f}"
+        if use_tia:
+            # The whole point of the TIA: the noise stops tracking the signal.
+            assert sig1[0] / sig0[0] < 1.5, \
+                f"a TIA-limited receiver's rails should have similar noise: " \
+                f"{sig1[0] / sig0[0]:.1f}x"
+            assert terms["TIA input-referred"] / tot > 0.8, \
+                "the TIA should dominate its own receiver"
+        else:
+            assert sig1[0] > 10.0 * sig0[0], \
+                "a RIN-limited receiver should be visibly level-dependent"
         assert (gaps.max() - gaps.min()) / gaps.mean() < 0.20, \
             "pre-distorted PAM-4 openings should be within 20 % of each other"
         print("\nselftest OK — modulator carries 10 Gb/s, both noise analyses agree "
@@ -432,8 +502,8 @@ def main() -> int:
 
     eye_scale = 8.0
     q_at_eye = float(np.interp(eye_scale, scales, q))
-    _, v_nrz = run_tran(nrz, trannoise=True, seed=seeds[0], scale=eye_scale)
-    _, v_pam = run_tran(pam, trannoise=True, seed=seeds[0], scale=eye_scale)
+    _, v_nrz = run_tran(nrz, trannoise=True, seed=seeds[0], scale=eye_scale, use_tia=use_tia)
+    _, v_pam = run_tran(pam, trannoise=True, seed=seeds[0], scale=eye_scale, use_tia=use_tia)
 
     fig, ax = plt.subplots(2, 2, figsize=(11.5, 7.4), constrained_layout=True)
 

@@ -535,6 +535,43 @@ impl Device for OsdiDevice {
         self.accumulate_spice_rhs(b, &self.x_cache, None, 1.0);
     }
 
+    /// The model's `white_noise()` / `flicker_noise()` contributions.
+    ///
+    /// OSDI splits this in two: the descriptor's `noise_sources` array names
+    /// each generator and the node pair it drives, and `load_noise` fills an
+    /// array of `num_noise_src` densities at a given frequency. So the node
+    /// pairing is static and only the magnitude is evaluated per point, which
+    /// is exactly the shape `Device::noise_sources` wants.
+    ///
+    /// Densities come back in A²/Hz — Verilog-A noise contributions are
+    /// current contributions on a branch — which is what the caller expects,
+    /// so nothing is converted.
+    ///
+    /// Before this existed a model could call `white_noise()`, compile, run,
+    /// and contribute nothing to either noise analysis. That is worse than
+    /// having no noise support at all: the model says it has noise and the
+    /// simulator quietly disagrees.
+    fn noise_sources(&self, _ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {
+        let desc = self.desc();
+        let n = desc.num_noise_src as usize;
+        let (Some(load), true) = (desc.load_noise, n > 0) else {
+            return Vec::new();
+        };
+        let mut dens = vec![0.0f64; n];
+        unsafe {
+            load(self.inst_ptr(), self.model_ptr(), freq, dens.as_mut_ptr());
+        }
+        (0..n)
+            .filter_map(|i| {
+                let src = unsafe { &*desc.noise_sources.add(i) };
+                let p = *self.mna_nodes.get(src.nodes.node_1 as usize)?;
+                let q = *self.mna_nodes.get(src.nodes.node_2 as usize)?;
+                let s = dens[i];
+                (s.is_finite() && s > 0.0).then_some((p, q, s))
+            })
+            .collect()
+    }
+
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let desc = self.desc();
         let n_resist = desc.num_resistive_jacobian_entries as usize;
