@@ -462,3 +462,85 @@ fn capturing_the_adjoint_state_does_not_perturb_the_run() {
         assert_eq!(v, out[k], "value at timepoint {k} diverged");
     }
 }
+
+/// **A device-declared reactive branch — the one parameter class no other test
+/// here covers, and the one that is measurably wrong.**
+///
+/// Every other transient test perturbs a netlist `R`/`C`, which never goes
+/// through `TranStepper::set_device_param`, or a device parameter that is
+/// purely resistive. Deleting the history re-seed in `set_device_param`
+/// entirely leaves all of them green.
+///
+/// `fc_pn_ps_cap`'s `c_j0` is a *bias-dependent* junction capacitance the
+/// device declares, so it reaches the objective only through the charge path:
+/// `c_j0` → drive RC → phase trajectory → power. Measured against a full
+/// re-solve on the MZI below:
+///
+/// ```text
+/// alpha_dB_cm  (segment, resistive)      9e-9   ok
+/// v_pi_l       (drive,   resistive)      2e-6   ok
+/// c_j0         (drive,   REACTIVE)       1.6e-1 WRONG
+/// ```
+///
+/// Suspected cause: `prepare` builds the companion from `reactive_branches()`,
+/// whose value is whatever the device's last `eval` cached — one step stale.
+/// The forward solve tolerates that; the adjoint differentiates the discrete
+/// system as actually solved, and the replay's lag does not reproduce the
+/// forward run's, so the charge term comes out biased rather than absent.
+///
+/// The interferometer matters: a *single* phase shifter's output power does not
+/// depend on phase at all, so `c_j0` legitimately has zero gradient there and a
+/// test built that way passes while proving nothing. That was the first version
+/// of this test.
+#[test]
+#[ignore = "known-wrong: 16% error on a device-declared bias-dependent \
+            capacitance; see the doc comment. Un-ignore when fixed."]
+fn a_device_declared_capacitance_gradient_matches_a_full_resolve() {
+    const SRC: &str = ".optical_port in0\n.optical_port dk\n.optical_port a1\n\
+                       .optical_port a2\n.optical_port b1\n.optical_port b2\n\
+                       .optical_port out0\n.optical_port ou\n\
+                       Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+                       Xc1 in0 dk a1 a2 fc_dcoupler kappa_L=0.7853981634\n\
+                       Xps a1 b1 drv 0 fc_pn_ps_cap l_um=3000 v_pi_l=0.012 \
+                         c_j0=750f v_bi=0.917 m_j=0.5 alpha_dB_cm=2.0 pin_at_ref=1\n\
+                       Xref a2 b2 0 0 fc_pn_ps_cap l_um=3000 v_pi_l=0.012 \
+                         c_j0=750f v_bi=0.917 m_j=0.5 alpha_dB_cm=2.0 pin_at_ref=1\n\
+                       Xc2 b1 b2 out0 ou fc_dcoupler kappa_L=0.7853981634\n\
+                       Rd drv nd 25\n\
+                       Vsig nd 0 PULSE(-3 -1 0 40p 40p 1 2)\n\
+                       .tran 4p 200p\n.end\n";
+    // Sample while the edge is still moving: once the drive has settled, the
+    // capacitance has no influence left on the final value and the reference
+    // difference quotient is pure noise.
+    let (step, stop) = (4e-12, 6e-11);
+    let out = Output::OpticalPower {
+        net: "out0".into(),
+        channel: 0,
+    };
+    let nominal = 750e-15;
+
+    let r = run(SRC, "be", step, stop);
+    let n = r.adj.time().len();
+    let (_, seeds) = r.adj.weighted(&out, &at_end(n)).unwrap();
+    let s = r
+        .adj
+        .gradient(&r.reg, &seeds, &[ParamRef::new("Xps", "c_j0")])
+        .unwrap();
+    assert!(s.reached[0], "Xps.c_j0 was not reached");
+
+    // Reference: set it on the netlist and re-solve from scratch — a path that
+    // never touches `set_device_param`, which is what makes this an anchor
+    // rather than two copies of one mistake agreeing.
+    let solve = |c: f64| {
+        let mut net = parse_spice(SRC).unwrap();
+        assert!(fairchild_core::netlist_edit::set_element_param(
+            &mut net, "Xps", "c_j0", c
+        ));
+        let a = TranAdjoint::run(&net, &registry_for(&net), &opts("be"), step, stop).unwrap();
+        let m = a.time().len();
+        a.weighted(&out, &at_end(m)).unwrap().0
+    };
+    let d = nominal * 1e-3;
+    let fd = (solve(nominal + d) - solve(nominal - d)) / (2.0 * d);
+    assert_close("dP(out0)/dc_j0", s.grad[0], fd, 1e-3);
+}

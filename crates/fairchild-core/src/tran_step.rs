@@ -446,14 +446,25 @@ impl TranStepper {
     /// the old one.  Leaving it stale would make the gradient with respect to
     /// that parameter miss its entire history path.
     ///
+    /// This used to re-`eval` every device by hand first, because a
+    /// bias-dependent capacitance reports whatever its last eval cached and
+    /// seeding from a stale one is silently wrong.  `18b5744` hit the same
+    /// hazard from the other direction — a transient starting from a DC point
+    /// its devices had never been evaluated at — and fixed it inside
+    /// `ReactiveState::new`, which now takes `&mut` and evaluates for itself.
+    /// One place interprets it, so the loop here is gone.
+    ///
     /// Returns whether the device recognised the parameter.
     pub(crate) fn set_device_param(&mut self, i: usize, name: &str, value: f64) -> bool {
         let ok = self.devices[i].set_real_param(name, value);
         self.ctx.discretisation = None;
-        for dev in &mut self.devices {
-            dev.eval(&self.x, EvalFlags::dc(), &self.ctx);
-        }
-        self.reactive = ReactiveState::new(&self.netlist, &self.topo, &self.devices, &self.x);
+        self.reactive = ReactiveState::new(
+            &self.netlist,
+            &self.topo,
+            &mut self.devices,
+            &self.ctx,
+            &self.x,
+        );
         ok
     }
 
