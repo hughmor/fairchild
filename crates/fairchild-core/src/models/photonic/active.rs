@@ -397,6 +397,9 @@ pub struct PnDrive {
     da_dv: f64,
     // Per-eval cache: C_j(V_pn) at the current iterate.
     c_j_cached: f64,
+    /// `dC_j/dV_pn` at the cached bias — the Jacobian term the charge branch
+    /// needs and the residual does not.  See `ReactiveBranchSpec::dvalue_dstate`.
+    dc_j_dv_cached: f64,
     anode: NodeId,
     cathode: NodeId,
 }
@@ -413,6 +416,7 @@ impl PnDrive {
             m_j: 0.5,
             da_dv: 0.0,
             c_j_cached: 0.0,
+            dc_j_dv_cached: 0.0,
             anode: None,
             cathode: None,
         }
@@ -423,6 +427,7 @@ impl PnDrive {
         PnDrive {
             c_j0: 20e-15,
             c_j_cached: 20e-15,
+            dc_j_dv_cached: 0.0,
             ..Self::new()
         }
     }
@@ -457,13 +462,18 @@ impl PhotonicActiveModel for PnDrive {
         // and keep the NR Jacobian smooth (only meaningful when c_j0 > 0).
         if self.c_j0 > 0.0 {
             let v_knee = 0.5 * self.v_bi;
-            self.c_j_cached = if v_pn < v_knee {
-                self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j)
+            if v_pn < v_knee {
+                let c = self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j);
+                self.c_j_cached = c;
+                // d/dv [c_j0·(1 − v/v_bi)^−m] = C·m/(v_bi − v)
+                self.dc_j_dv_cached = c * self.m_j / (self.v_bi - v_pn);
             } else {
                 let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
                 let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
-                c_knee + dc_dv * (v_pn - v_knee)
-            };
+                self.c_j_cached = c_knee + dc_dv * (v_pn - v_knee);
+                // Linear past the knee, so the slope is the tangent's own.
+                self.dc_j_dv_cached = dc_dv;
+            }
         }
 
         // Reverse-bias FCA loss: Δα = (dα/dV)·max(0, −V_pn).
@@ -488,6 +498,7 @@ impl PhotonicActiveModel for PnDrive {
             pos: self.anode,
             neg: self.cathode,
             value: self.c_j_cached,
+            dvalue_dstate: self.dc_j_dv_cached,
         }]
     }
 
@@ -558,6 +569,8 @@ pub struct Injection {
     g_d_cached: f64,
     i_eq_cached: f64,
     c_d_cached: f64,
+    /// `dC_d/dV` at the cached bias; see `ReactiveBranchSpec::dvalue_dstate`.
+    dc_d_dv_cached: f64,
 }
 
 impl Injection {
@@ -573,6 +586,7 @@ impl Injection {
             g_d_cached: 1e-9,
             i_eq_cached: 0.0,
             c_d_cached: 0.0,
+            dc_d_dv_cached: 0.0,
         }
     }
 }
@@ -604,6 +618,9 @@ impl PhotonicActiveModel for Injection {
         self.g_d_cached = self.i_sat * e / vt;
         self.i_eq_cached = i_diode - self.g_d_cached * v_pn;
         self.c_d_cached = self.tau_carrier * self.g_d_cached;
+        // g_d is Shockley, so dg_d/dv = g_d/vt (vt already carries n_diode) and
+        // the diffusion cap inherits that slope exactly.
+        self.dc_d_dv_cached = self.c_d_cached / vt;
         // Normalised injected carrier density (≥ 0; reverse bias contributes 0).
         let inj = (e - 1.0).max(0.0);
         OpticalPerturbation {
@@ -632,6 +649,7 @@ impl PhotonicActiveModel for Injection {
             pos: self.anode,
             neg: self.cathode,
             value: self.c_d_cached,
+            dvalue_dstate: self.dc_d_dv_cached,
         }]
     }
 
@@ -709,6 +727,8 @@ pub struct FullPnDrive {
     g_pn_cached: f64,
     i_eq_cached: f64,
     c_eff_cached: f64,
+    /// `dC_eff/dV` at the cached bias; see `ReactiveBranchSpec::dvalue_dstate`.
+    dc_eff_dv_cached: f64,
 }
 
 impl FullPnDrive {
@@ -738,6 +758,7 @@ impl FullPnDrive {
             g_pn_cached: 1e-9,
             i_eq_cached: 0.0,
             c_eff_cached: 1.375e-13,
+            dc_eff_dv_cached: 0.0,
         }
     }
 }
@@ -794,17 +815,25 @@ impl PhotonicActiveModel for FullPnDrive {
         self.i_eq_cached = i_diode - g_eff * v_pn;
 
         // Depletion C_j(V_j) (linear past the V_bi/2 knee) + diffusion C_d.
-        let c_j_v = {
+        let (c_j_v, dc_j_dvj) = {
             let v_knee = 0.5 * self.v_bi;
             if v_junc < v_knee {
-                self.c_j0 / (1.0 - v_junc / self.v_bi).powf(self.m_j)
+                let c = self.c_j0 / (1.0 - v_junc / self.v_bi).powf(self.m_j);
+                (c, c * self.m_j / (self.v_bi - v_junc))
             } else {
                 let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
                 let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
-                c_knee + dc_dv * (v_junc - v_knee)
+                (c_knee + dc_dv * (v_junc - v_knee), dc_dv)
             }
         };
         self.c_eff_cached = c_j_v + self.tau_carrier * g_d;
+        // Both terms are functions of the *junction* voltage, and the branch is
+        // stamped across the terminals.  With `r_series = 0` those are the same
+        // node pair and this is exact; with series resistance they differ by
+        // `dv_junc/dv_pn = 1/(1 + g_d·r_series)`, which is applied here so the
+        // derivative is against the branch's own state either way.
+        let dvj_dv = 1.0 / (1.0 + g_d * self.r_series);
+        self.dc_eff_dv_cached = (dc_j_dvj + self.tau_carrier * g_d / vt) * dvj_dv;
 
         // Optical intensity (channel 0) drives TPA + self-heating back-action.
         let intensity = intensity_w.first().copied().unwrap_or(0.0).max(0.0);
@@ -848,6 +877,7 @@ impl PhotonicActiveModel for FullPnDrive {
             pos: self.anode,
             neg: self.cathode,
             value: self.c_eff_cached,
+            dvalue_dstate: self.dc_eff_dv_cached,
         }]
     }
 

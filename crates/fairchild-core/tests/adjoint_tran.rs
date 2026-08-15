@@ -464,37 +464,26 @@ fn capturing_the_adjoint_state_does_not_perturb_the_run() {
 }
 
 /// **A device-declared reactive branch — the one parameter class no other test
-/// here covers, and the one that is measurably wrong.**
+/// here covered, and the one that was wrong.**
 ///
-/// Every other transient test perturbs a netlist `R`/`C`, which never goes
+/// Every other transient test perturbs a netlist `R`/`C`, which never routes
 /// through `TranStepper::set_device_param`, or a device parameter that is
-/// purely resistive. Deleting the history re-seed in `set_device_param`
-/// entirely leaves all of them green.
+/// purely resistive. Deleting the history re-seed entirely left all of them
+/// green, and this gradient came out 16 % wrong with nothing to say so.
 ///
-/// `fc_pn_ps_cap`'s `c_j0` is a *bias-dependent* junction capacitance the
-/// device declares, so it reaches the objective only through the charge path:
-/// `c_j0` → drive RC → phase trajectory → power. Measured against a full
-/// re-solve on the MZI below:
-///
-/// ```text
-/// alpha_dB_cm  (segment, resistive)      9e-9   ok
-/// v_pi_l       (drive,   resistive)      2e-6   ok
-/// c_j0         (drive,   REACTIVE)       1.6e-1 WRONG
-/// ```
-///
-/// Suspected cause: `prepare` builds the companion from `reactive_branches()`,
-/// whose value is whatever the device's last `eval` cached — one step stale.
-/// The forward solve tolerates that; the adjoint differentiates the discrete
-/// system as actually solved, and the replay's lag does not reproduce the
-/// forward run's, so the charge term comes out biased rather than absent.
+/// The cause was not the re-seed. `stamp_device_branches` stamped `α·C(v)`
+/// where the branch carries `q = C(v)·v`, so the true derivative is
+/// `α·(C + v·dC/dv)`. Newton converges either way — the missing term is
+/// absorbed by successive substitution — so the forward answer was right and
+/// only the Jacobian was short. The adjoint needs the real `∂f/∂x`, and
+/// `jacobian_check_tran` now measures it: the term was 22 % of the drive
+/// node's diagonal, and `v·dC/dv/h` predicted the gap to six figures.
 ///
 /// The interferometer matters: a *single* phase shifter's output power does not
 /// depend on phase at all, so `c_j0` legitimately has zero gradient there and a
 /// test built that way passes while proving nothing. That was the first version
-/// of this test.
+/// of this test, and its "reference" was two near-identical numbers over 1e-18.
 #[test]
-#[ignore = "known-wrong: 16% error on a device-declared bias-dependent \
-            capacitance; see the doc comment. Un-ignore when fixed."]
 fn a_device_declared_capacitance_gradient_matches_a_full_resolve() {
     const SRC: &str = ".optical_port in0\n.optical_port dk\n.optical_port a1\n\
                        .optical_port a2\n.optical_port b1\n.optical_port b2\n\

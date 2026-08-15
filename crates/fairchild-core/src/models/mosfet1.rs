@@ -530,6 +530,10 @@ impl Device for Mosfet1 {
             pos,
             neg,
             value,
+            // These feed `.ac`/`.noise`, which want the small-signal C itself
+            // and not the charge branch's `∂q/∂v`, so zero is correct here
+            // rather than merely conservative.
+            dvalue_dstate: 0.0,
         };
         let mut v = Vec::new();
         if self.cgs_eval != 0.0 {

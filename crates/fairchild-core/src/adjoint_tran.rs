@@ -714,3 +714,138 @@ fn reject_inductance(netlist: &Netlist, st: &TranStepper) -> Result<(), SimError
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Jacobian completeness, in the transient
+// ---------------------------------------------------------------------------
+
+/// Compare the Jacobian a transient step stamps against `∂G_k/∂x_k` taken
+/// numerically, at one timepoint.
+///
+/// [`crate::adjoint::jacobian_check`] does this for an operating point, and it
+/// is a precondition of the DC adjoint for the reason spelled out there: a
+/// device may converge Newton with an approximate Jacobian and still reach the
+/// right answer, but every gradient path through a missing block is silently
+/// zero. The transient adjoint needs the same guarantee at every step, and had
+/// no way to ask for it.
+///
+/// **What is held fixed matters, and defines what this proves.** The reactive
+/// companion is built once per step by [`TranStepper::prepare`] and then held
+/// across the Newton loop, so the system a step actually solves is
+///
+/// ```text
+///     G_k(x) = F(x, p) + G_eq·x − I_eq        (G_eq, I_eq from the history)
+/// ```
+///
+/// and this checks exactly that: `prepare` runs once, then every probe is a
+/// bare `stamp_at`. A clean result therefore says the stamps are consistent
+/// with the system being solved — **not** that the system is the intended
+/// discretisation. Those are different claims, and the second one is
+/// [`charge_lag`].
+///
+/// `t_at` is the time to stop at and probe; the run is stepped there first so
+/// the history is the real one and not a `t = 0` artefact.
+pub fn jacobian_check_tran(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    step: f64,
+    t_at: f64,
+    rtol: f64,
+    atol: f64,
+) -> Result<Vec<crate::adjoint::JacobianMismatch>, SimError> {
+    let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
+    st.advance_to(t_at)?;
+    let x = st.solution().to_vec();
+    let n = x.len();
+
+    let mode = st.step_mode();
+    let t = st.time();
+    // One `prepare`, then never again: the companion is what the Newton loop
+    // held fixed, so freezing it here is what makes the comparison the one the
+    // solver actually faced.
+    st.prepare(t, mode, step);
+    st.stamp_at(&x);
+    let stamped = CircuitTopology::to_dense(&st.matrix().a, n);
+
+    let frozen = frozen_columns(netlist, st.topology(), st.devices());
+    let mut f_plus = vec![0.0; n];
+    let mut f_minus = vec![0.0; n];
+    let mut probe = x.clone();
+    let mut out = Vec::new();
+
+    for col in 0..n {
+        let h = default_step(x[col]).max(6.0554545e-9);
+        probe[col] = x[col] + h;
+        st.stamp_at(&probe);
+        st.matrix().residual_into(&probe, &mut f_plus);
+        probe[col] = x[col] - h;
+        st.stamp_at(&probe);
+        st.matrix().residual_into(&probe, &mut f_minus);
+        probe[col] = x[col];
+
+        for row in 0..n {
+            let numeric = (f_plus[row] - f_minus[row]) / (2.0 * h);
+            let s = stamped[row][col];
+            if s.abs().max(numeric.abs()) < atol {
+                continue;
+            }
+            let m = crate::adjoint::JacobianMismatch {
+                row,
+                col,
+                stamped: s,
+                numeric,
+                frozen: frozen.contains(&col),
+            };
+            if m.rel_err() > rtol {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// How far the companion a step stamps is from the one the *intended*
+/// discretisation asks for, per reactive branch.
+///
+/// [`jacobian_check_tran`] holds the companion fixed, because that is the
+/// system Newton solved. This asks the other question: was that the right
+/// system? Backward Euler on `q(v)` wants `i_k = (q(x_k) − q(x_{k−1}))/h`, so
+/// the conductance is `∂i/∂v = (C + v·dC/dv)/h` evaluated **at `x_k`**. What
+/// gets stamped is `C/h` with `C` read from the device's last `eval`, which at
+/// `prepare` time is the previous step's — so a bias-dependent capacitance is
+/// stamped one step stale *and* missing its `v·dC/dv` term.
+///
+/// A constant `C` makes both effects vanish, which is why a netlist capacitor
+/// never shows this and why it went unnoticed.
+///
+/// Returns `(name, stamped_g, refreshed_g)` per branch, where `refreshed_g` is
+/// the same companion rebuilt after evaluating the devices at `x_k`. They agree
+/// exactly for a linear branch; the gap for a nonlinear one is the lag.
+pub fn charge_lag(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    step: f64,
+    t_at: f64,
+) -> Result<Vec<(String, f64, f64)>, SimError> {
+    let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
+    st.advance_to(t_at)?;
+    let x = st.solution().to_vec();
+    let (mode, t) = (st.step_mode(), st.time());
+
+    // As stamped: `prepare` reads whatever the last eval cached.
+    st.prepare(t, mode, step);
+    let before = st.device_branch_conductances();
+
+    // As intended: evaluate at this step's own solution first, then rebuild.
+    st.stamp_at(&x);
+    st.prepare(t, mode, step);
+    let after = st.device_branch_conductances();
+
+    Ok(before
+        .into_iter()
+        .zip(after)
+        .map(|((name, g0), (_, g1))| (name, g0, g1))
+        .collect())
+}

@@ -151,6 +151,22 @@ pub struct ReactiveBranchSpec {
     /// Current capacitance (F) or inductance (H) at the device's cached
     /// operating point.  Re-queried per NR iteration.
     pub value: f64,
+    /// `dC/dv` (F/V), or `dL/di` (H/A), at that same operating point.  Zero for
+    /// a branch whose value does not depend on its own state, which is most of
+    /// them — and the default, so a device that has no bias dependence says
+    /// nothing.
+    ///
+    /// **Load-bearing for the Jacobian, not for the residual.**  The branch
+    /// carries `q = value·v`, so its current is `α·(C(v)·v − C_prev·v_prev)`
+    /// and the true derivative is `α·(C + v·dC/dv)`.  Stamping `α·C` alone
+    /// converges — Newton reaches the same fixed point by successive
+    /// substitution on the missing term — so a forward run looks correct and
+    /// only pays in iterations.  What it is not is the *true* `∂f/∂x`, and the
+    /// adjoint needs that: `dL/dp = −λᵀ·∂f/∂p` is the total derivative only if
+    /// `Jᵀλ = ∂L/∂x` was solved with the real `J`.  Measured on an MZI with a
+    /// `fc_pn_ps_cap` arm, the missing term is 22 % of the drive node's
+    /// diagonal and put the parameter gradient 16 % out.
+    pub dvalue_dstate: f64,
 }
 
 /// Bit-flags controlling which contributions `eval` should compute.

@@ -398,6 +398,7 @@ impl TranStepper {
             &self.devices,
             &self.reactive.dev_state,
             &mut self.mat,
+            probe,
             d.h,
             d.mode,
             None,
@@ -432,6 +433,29 @@ impl TranStepper {
 
     pub(crate) fn devices(&self) -> &[Box<dyn Device>] {
         &self.devices
+    }
+
+    /// The conductance each device-declared reactive branch is currently
+    /// stamping, labelled by its owning element.
+    ///
+    /// Only `crate::adjoint_tran::charge_lag` wants this: it rebuilds the
+    /// companion after evaluating at the step's own solution and compares, which
+    /// is how you see a bias-dependent capacitance being stamped one `eval`
+    /// stale.
+    pub(crate) fn device_branch_conductances(&self) -> Vec<(String, f64)> {
+        let names = crate::newton::device_element_names(&self.netlist);
+        let mut out = Vec::new();
+        for (d, dev) in self.devices.iter().enumerate() {
+            let n_br = dev.reactive_branches().len();
+            for b in 0..n_br {
+                let label = names
+                    .get(d)
+                    .map_or_else(|| format!("device[{d}]"), |n| n.clone());
+                let g = self.reactive.dev_state[d][b].0;
+                out.push((format!("{label}#{b}"), g));
+            }
+        }
+        out
     }
 
     /// Impose a solution rather than solving for one — the replay's whole point.
