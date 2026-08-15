@@ -393,12 +393,35 @@ pub struct ReactiveState {
 
 impl ReactiveState {
     /// Seed every branch — netlist and device alike — from an operating point.
+    /// Seed every reactive branch's history from the operating point `x`.
+    ///
+    /// `devices` is `&mut` for one reason, and it is load-bearing: a
+    /// bias-dependent capacitance reports its value through
+    /// `reactive_branches()` from whatever its last `eval` cached, and the
+    /// transient builds **fresh** device instances that the DC solve never
+    /// touched. Seeding without evaluating first therefore recorded the
+    /// constructor's default — `c_j_cached: 0.0` for a depletion junction —
+    /// so `q_prev` came out zero while the first step's companion used the real
+    /// `C_j(V_op)`. The branch then had to acquire its entire charge in one
+    /// timestep: measured on a PN phase shifter reverse-biased at −2.93 V
+    /// through 25 Ω, the anode jumped to −0.26 V on the first 1 ps step and
+    /// took ~10 ps to recover, identically under BE, TR and GEAR — which is
+    /// what says it is the initial charge and not the integrator.
+    ///
+    /// Evaluating here rather than at the call sites is deliberate: there are
+    /// two of them, they are the only places that can get this wrong, and
+    /// `&mut` makes it impossible to call this without the eval happening.
     pub fn new(
         netlist: &Netlist,
         topo: &CircuitTopology,
-        devices: &[Box<dyn Device>],
+        devices: &mut [Box<dyn Device>],
+        ctx: &crate::device::SimContext,
         x: &[f64],
     ) -> Self {
+        for dev in devices.iter_mut() {
+            dev.eval(x, crate::device::EvalFlags::dc(), ctx);
+        }
+        let devices: &[Box<dyn Device>] = devices;
         let mut elems = Vec::new();
         let mut cap_state = IndexMap::new();
         let mut ind_state = IndexMap::new();

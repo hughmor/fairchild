@@ -74,23 +74,29 @@ impl NoiseSources {
         Self { resistors }
     }
 
-    /// Visit `(taps, psd)` for every generator at the devices' current bias.
+    /// Visit `(taps, psd)` for every generator at the devices' current bias and
+    /// at frequency `freq` (Hz).
     ///
     /// `psd` is one-sided, in A²/Hz for an injection into a node row and in the
     /// square of the enforced potential's unit for a branch row. Taps belonging
     /// to one generator are driven by one random process and must be combined
     /// coherently by the caller.
+    ///
+    /// Every native generator here is flat, so `freq` changes nothing for them.
+    /// It exists because an OSDI model may call `flicker_noise()`, and a hook
+    /// that cannot express frequency dependence would silently flatten it.
     pub fn for_each(
         &self,
         devices: &[Box<dyn Device>],
         ctx: &SimContext,
+        freq: f64,
         mut f: impl FnMut(&[(NodeId, NodeId, f64)], f64),
     ) {
         for &(p, n, s_i) in &self.resistors {
             f(&[(p, n, 1.0)], s_i);
         }
         for dev in devices {
-            for (p, n, s_i) in dev.noise_sources(ctx) {
+            for (p, n, s_i) in dev.noise_sources(ctx, freq) {
                 f(&[(p, n, 1.0)], s_i);
             }
             for src in dev.correlated_noise_sources(ctx) {
@@ -199,6 +205,8 @@ pub struct TransientNoise {
     /// RHS contribution for the current step. Frozen across Newton iterations —
     /// see [`TransientNoise::draw`].
     rhs: Vec<f64>,
+    /// The flatness probe in `draw` runs once, not once per timestep.
+    flatness_checked: bool,
 }
 
 impl TransientNoise {
@@ -213,6 +221,7 @@ impl TransientNoise {
             rng: Rng::new(opts.noiseseed),
             scale: opts.noisescale,
             rhs: vec![0.0; topo.size],
+            flatness_checked: false,
         })
     }
 
@@ -225,11 +234,22 @@ impl TransientNoise {
     /// converges. Freezing the sample also makes it what it physically is: one
     /// noise realisation held across the step.
     pub fn draw(&mut self, devices: &[Box<dyn Device>], ctx: &SimContext, h: f64) {
+        // A held i.i.d. sample sequence is white by construction, so there is
+        // exactly one density it can realise. Probe mid-band of what this step
+        // resolves — [0, 1/2h], so 1/4h — and check once that the generators
+        // really are flat across it. Every native source is; an OSDI model
+        // calling `flicker_noise()` is not, and silently flattening it is the
+        // shape of bug this file exists to avoid.
+        let f_mid = 1.0 / (4.0 * h);
+        if !self.flatness_checked {
+            self.flatness_checked = true;
+            self.warn_if_not_flat(devices, ctx, h);
+        }
         self.rhs.fill(0.0);
         let rng = &mut self.rng;
         let scale = self.scale;
         let rhs = &mut self.rhs;
-        self.sources.for_each(devices, ctx, |taps, psd| {
+        self.sources.for_each(devices, ctx, f_mid, |taps, psd| {
             if psd <= 0.0 {
                 return;
             }
@@ -246,6 +266,41 @@ impl TransientNoise {
                 }
             }
         });
+    }
+
+    /// Warn once if any generator's density varies across the resolved band.
+    ///
+    /// A held sample sequence is white, so a sloped density cannot be realised
+    /// by this injector at all — the honest options are to say so or to refuse,
+    /// and a warning naming the ratio lets the user decide whether the band
+    /// they care about is flat enough. `.noise` handles such a source exactly;
+    /// it is only the time-domain injection that cannot.
+    fn warn_if_not_flat(&self, devices: &[Box<dyn Device>], ctx: &SimContext, h: f64) {
+        let (f_lo, f_hi) = (1.0 / (20.0 * h), 1.0 / (2.2 * h));
+        let mut lo = Vec::new();
+        self.sources
+            .for_each(devices, ctx, f_lo, |_, psd| lo.push(psd));
+        let mut worst = 1.0_f64;
+        let mut i = 0;
+        self.sources.for_each(devices, ctx, f_hi, |_, psd| {
+            if let Some(&a) = lo.get(i) {
+                if a > 0.0 && psd > 0.0 {
+                    worst = worst.max((psd / a).max(a / psd));
+                }
+            }
+            i += 1;
+        });
+        if worst > 1.05 {
+            eprintln!(
+                "warning: a noise generator varies by {worst:.2}x across the band this \
+                 timestep resolves ({:.3e} to {:.3e} Hz), but transient noise injects a \
+                 white sample sequence and can only realise one density — it uses the \
+                 mid-band value. `.noise` handles the frequency dependence exactly; for \
+                 the time domain, either shorten the step so the band sits where the \
+                 density is flat, or treat the result as the mid-band approximation it is.",
+                f_lo, f_hi
+            );
+        }
     }
 
     /// This step's RHS contribution, to be added after every netlist stamp.
@@ -477,7 +532,7 @@ pub fn noise_analysis(
         // so a multi-tap generator interferes with itself instead of adding in
         // quadrature — laser RIN is the case; see `CorrelatedNoise`.
         let mut s_v_out = 0.0_f64;
-        sources.for_each(&devices, &ctx, |taps, psd| {
+        sources.for_each(&devices, &ctx, f, |taps, psd| {
             let mut z_re = 0.0;
             let mut z_im = 0.0;
             for &(p_idx, n_idx, w) in taps {

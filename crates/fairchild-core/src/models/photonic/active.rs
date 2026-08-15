@@ -9,8 +9,8 @@
 //! Pockels, photoconductive back-action, an externally-tabulated model — is a
 //! new `PhotonicActiveModel`, not a new copy of the optical stamp loop.
 //!
-//! See `_notes/optical_abstraction_design.md` for the full design and the
-//! future device classes this admits.
+//! `docs/photonic-models.md` documents every device built this way, including
+//! the tier tables for the phase-shifter families.
 
 use super::segment::OpticalSegment;
 use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
@@ -1280,9 +1280,10 @@ impl EvalContext for VarCtx {
 /// dalpha="8.0" g_pn=1m`, re-runs, and gets new physics with no recompile. The
 /// expressions are parsed once at setup and evaluated per NR-iterate.
 ///
-/// Covers the closed-form-map 80% case (PN/thermal/EO maps); stateful physics
-/// (carrier ODEs, lookup tables) is the future Tier-2 (Rhai) / Tier-3 (plugin
-/// ABI) work. See `_notes/sotu.md §C3`.
+/// Covers the closed-form-map case — any drive expressible as `Δn(V)` and
+/// `Δα(V)`, which is most PN, thermal and Pockels maps. Stateful physics
+/// (carrier rate equations, lookup tables) still needs a compiled
+/// `PhotonicActiveModel`, because an expression has nowhere to keep state.
 pub struct ExprDrive {
     dneff: Option<Expr>,
     dalpha: Option<Expr>,

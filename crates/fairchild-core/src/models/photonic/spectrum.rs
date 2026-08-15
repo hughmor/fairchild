@@ -24,7 +24,7 @@
 //! `≈ 4·ln2·Δ·B/FWHM²` when the carrier is detuned by `Δ`. It therefore
 //! reproduces insertion loss, detuning penalty and crosstalk exactly, and
 //! cannot reproduce sideband shaping (ISI), PM→AM conversion off a detuned
-//! passband slope, or differential channel skew. See `docs/photonic_awgr.md`.
+//! passband slope, or differential channel skew. See `docs/photonic-models.md` §4.
 
 use super::C0;
 

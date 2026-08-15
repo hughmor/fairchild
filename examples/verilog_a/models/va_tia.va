@@ -1,0 +1,122 @@
+// va_tia — transimpedance amplifier, behavioural but honest about specs.
+//
+// The front end a photodiode actually drives. A load resistor big enough to
+// give a readable voltage has a bandwidth of 1/(2*pi*R*C) and a noise of
+// 4kT/R, and those two pull in opposite directions — which is why a real
+// receiver uses a TIA instead: the feedback holds the input node at a virtual
+// ground, so the diode's capacitance no longer sets the bandwidth, and the
+// amplifier's own input-referred current noise sets the floor instead.
+//
+// Terminals (order matters — it is the netlist terminal order):
+//   inp                summing node; connect the photodiode here
+//   out                single-ended output
+//   gnd                reference for both
+//
+// What is modelled, and why each one earns its place:
+//
+//   z_t         transimpedance gain (V/A). The headline spec.
+//   r_in        input impedance. NOT cosmetic: it is what the photodiode's
+//               junction capacitance forms its pole against, so it sets how
+//               much of the diode's own RC survives into the response. A real
+//               TIA gets r_in = r_f/(1+A) — tens of ohms — which is the whole
+//               reason the front end is fast.
+//   f_3db       dominant pole, as a single real pole. A real TIA is 2nd-order
+//               (the feedback loop against C_in) and can peak; see below.
+//   i_n_in      input-referred current noise density (A/sqrt(Hz)). The spec
+//               that decides a receiver's sensitivity. 10-20 pA/sqrt(Hz) is a
+//               typical 10 Gb/s part.
+//   k_f, a_f    flicker (1/f) noise on the same input branch, off by default.
+//   v_os        input-referred offset voltage. Appears at the summing node, so
+//               it also drives a DC current through the photodiode's shunt —
+//               which is how a real offset turns into a real error current.
+//   v_out_dc    output operating point, so the output is not centred on 0 V.
+//   v_swing     output saturation. Soft, because a hard min/max has a
+//               discontinuous derivative and is a reliable way to stall Newton
+//               on a large signal — but NOT tanh, which compresses 1.3 % at a
+//               fifth of the swing and would quietly cost gain accuracy
+//               everywhere. `v/(1+(v/vs)^n)^(1/n)` is linear until it
+//               approaches the rail: 0.04 % error at the same point, and it
+//               still saturates smoothly.
+//   r_out       output impedance, for driving a real load.
+//   polarity    +1 or -1. A real TIA is inverting; +1 keeps eye diagrams the
+//               right way up for a demo, which is a presentation choice and
+//               is called out here rather than hidden.
+//
+// NOT modelled, deliberately:
+//   * Second-order response and gain peaking. A real TIA's bandwidth depends
+//     on the total input capacitance it sees, so replacing a photodiode
+//     changes the frequency response; here f_3db is a parameter and does not.
+//     That is the biggest simplification in this file.
+//   * Slew-rate limiting, and any nonlinearity before the output clip.
+//   * Noise that varies with gain setting, temperature, or bias.
+//   * Input common-mode range, supply rails, PSRR.
+//
+// The noise is real, not decorative: `white_noise()` reaches fairchild's
+// `.noise` analysis and its transient noise injector through OSDI's
+// `load_noise`, so this model's `i_n_in` shows up in an eye diagram.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module va_tia(inp, out, gnd);
+    inout inp, out, gnd;
+    electrical inp, out, gnd;
+    // Internal node carrying the single-pole roll-off, so the pole is a real
+    // state in the MNA rather than a filter applied after the fact.
+    electrical filt;
+
+    parameter real z_t      = 2k    from (0:inf);   // V/A
+    parameter real r_in     = 50.0  from (0:inf);   // ohm
+    parameter real f_3db    = 10G   from (0:inf);   // Hz
+    parameter real i_n_in   = 15p   from [0:inf);   // A/sqrt(Hz)
+    parameter real k_f      = 0.0   from [0:inf);   // flicker coefficient
+    parameter real a_f      = 1.0   from (0:inf);   // flicker exponent
+    parameter real v_os     = 0.0;                  // V, input-referred
+    parameter real v_out_dc = 0.0;                  // V
+    parameter real v_swing  = 1.0   from (0:inf);   // V, |out - v_out_dc| limit
+    parameter real clip_n   = 4.0   from [2:inf);   // clip sharpness; see above
+    parameter real r_out    = 50.0  from (0:inf);   // ohm
+    parameter integer polarity = 1  from [-1:1] exclude 0;
+
+    real i_sig, v_ideal, v_clip, v_norm, tau;
+
+    analog begin
+        tau = 1.0 / (`M_TWO_PI * f_3db);
+
+        // ── input stage ──────────────────────────────────────────────────
+        // The summing node sits at the offset voltage and presents r_in. The
+        // photocurrent arriving from outside flows through that resistance,
+        // so V(inp,gnd) - v_os = i_signal * r_in and the current is
+        // recoverable without needing to probe a branch that belongs to
+        // another device.
+        I(inp, gnd) <+ (V(inp, gnd) - v_os) / r_in;
+
+        // Input-referred noise, injected exactly where the signal enters, so
+        // it is referred correctly by construction: the same transfer function
+        // carries both. `white_noise` takes a POWER density, hence the square.
+        if (i_n_in > 0.0)
+            I(inp, gnd) <+ white_noise(i_n_in * i_n_in, "input");
+        if (k_f > 0.0)
+            I(inp, gnd) <+ flicker_noise(k_f, a_f, "flicker");
+
+        i_sig = (V(inp, gnd) - v_os) / r_in;
+
+        // ── gain and pole ────────────────────────────────────────────────
+        // One real pole, as an RC on an internal node: 1 S in parallel with
+        // `tau` farads, so V(filt) tracks v_ideal with time constant tau.
+        v_ideal = v_out_dc + polarity * z_t * i_sig;
+        I(filt, gnd) <+ (V(filt, gnd) - v_ideal) * 1.0;
+        I(filt, gnd) <+ tau * ddt(V(filt, gnd));
+
+        // ── output stage ─────────────────────────────────────────────────
+        // Soft saturation about the DC operating point, then a source
+        // impedance. `u/(1+u^n)^(1/n)` is flat-topped rather than tanh-shaped:
+        // linear to 0.04 % at a fifth of the swing where tanh already costs
+        // 1.3 %, and still smooth, so the Jacobian stays continuous through
+        // the clip.
+        v_norm = (V(filt, gnd) - v_out_dc) / v_swing;
+        v_clip = v_out_dc + v_swing * v_norm
+                 / pow(1.0 + pow(abs(v_norm), clip_n), 1.0 / clip_n);
+        I(out, gnd) <+ (V(out, gnd) - v_clip) / r_out;
+    end
+endmodule

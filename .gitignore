@@ -43,8 +43,13 @@ run_*.sp
 __pycache__/
 *.pyc
 
-# claude
+# claude — CLAUDE.md is public (contributor-facing); the .local one is not.
 .claude/
+CLAUDE.local.md
 
 # Generated from a KiCad source checkout by python/fairchild/kicad/regen_protos.sh
 python/fairchild/kicad/_proto/
+
+
+# Old logo workspace
+docs/logos/mockups

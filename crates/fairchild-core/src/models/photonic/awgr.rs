@@ -41,7 +41,7 @@ use crate::mna::MnaMatrix;
 /// would have been filtered out by any real photodiode.
 ///
 /// The transmission is a *static* coefficient evaluated at each channel's
-/// carrier — the exact narrowband limit. See `docs/photonic_awgr.md` for the
+/// carrier — the exact narrowband limit. See `docs/photonic-models.md` for the
 /// error bound and for what this deliberately cannot model (sideband shaping,
 /// PM→AM off a detuned slope, channel skew).
 ///
@@ -108,7 +108,7 @@ use crate::mna::MnaMatrix;
 /// Analytic modes produce **purely real** transmission — every crosstalk term
 /// adds in phase, which is the pessimistic bound on coherent crosstalk. A
 /// synthetic random-phase mode for sampling the crosstalk-penalty distribution
-/// is not implemented; see `docs/photonic_awgr.md` §"Not implemented". Table
+/// is not implemented; see `docs/photonic-models.md` §4, "Not implemented, deliberately". Table
 /// mode does honour measured phase from `t_<i>_<j>_deg` columns.
 ///
 /// # Not supported
@@ -120,6 +120,9 @@ use crate::mna::MnaMatrix;
 pub struct NativeAwgr {
     n: usize,
     wpc: usize,
+    /// Smallest terminal count that would have worked, recorded when
+    /// `setup_instance` refuses; see the other photonic devices.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
 
@@ -169,6 +172,7 @@ impl NativeAwgr {
         Self {
             n: 0,
             wpc: 3,
+            min_terminals: None,
             nodes: Vec::new(),
             branches: Vec::new(),
             lambda0_m: 1.55e-6,
@@ -391,6 +395,9 @@ impl NativeAwgr {
 
 impl Device for NativeAwgr {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -401,24 +408,32 @@ impl Device for NativeAwgr {
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
         let wpc = ctx.wires_per_channel();
-        assert!(
-            wpc == 3,
-            "fc_awgr: bidirectional propagation is not supported (wpc={wpc}); the \
-             backward-travelling fields would need the transposed routing. Drop \
-             `.options enable_bidirectional=1`."
-        );
+        if wpc != 3 {
+            // The caller reports a terminal-count mismatch, which is true but
+            // not the cause: with 5 wires per channel the netlist simply cannot
+            // supply the 2·3·N² this device wants. Name the real fix here.
+            eprintln!(
+                "warning: fc_awgr does not support bidirectional propagation (wpc={wpc}); \
+                 the backward-travelling fields would need the transposed routing. Drop \
+                 `.options enable_bidirectional=1`. The terminal-count error that follows \
+                 is a consequence of it."
+            );
+            self.min_terminals = Some(2 * 3);
+            return;
+        }
         self.wpc = wpc;
         self.lambda0_m = ctx.lambda_center_m;
         let len = terminals.len();
         // 2 sides × N ports × N channels × wpc wires.
         let per_side = len as f64 / (2.0 * wpc as f64);
         let n = per_side.sqrt().round() as usize;
-        assert!(
-            n > 0 && 2 * wpc * n * n == len,
-            "fc_awgr: terminal count must be 2·wpc·N² (wpc={wpc}) — N input ports then N \
-             output ports, each carrying N channels; got {len}, which is not 2·{wpc}·N² for \
-             any N. Every port must declare the same channel count as the port count."
-        );
+        if n == 0 || 2 * wpc * n * n != len {
+            // Not 2·wpc·N² for any N — most often because the ports do not all
+            // declare the same channel count as the port count.
+            self.min_terminals = Some(2 * wpc);
+            return;
+        }
+        self.min_terminals = None;
         self.n = n;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; BRANCHES_PER_SLOT * n * n];

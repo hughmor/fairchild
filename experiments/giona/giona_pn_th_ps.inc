@@ -33,9 +33,10 @@
 * The parser has no .include yet: concatenate this file ahead of the netlist
 * (fit scripts do card + netlist via load_str).
 *
-* Units: the historic factor-2 loss bug (sotu.md section F) is FIXED —
-* alpha_db_cm is physical power dB/cm. Alphas fitted pre-fix were halved to
-* convert (21.4 pre-fix == 10.7 physical).
+* Units: alpha_db_cm is physical POWER dB/cm. An early build applied the dB
+* conversion to the field without accounting for the segment's own field/power
+* step, so every loss came out at its square root; alphas fitted against that
+* build were halved to convert (21.4 pre-fix == 10.7 physical).
 
 .model giona_ps fc_pn_th_ps LEVEL=4
 + l_m=2.5378e-5 n_g=4.2 n_eff=2.2810 pin_at_ref=0 alpha_db_cm=10.7

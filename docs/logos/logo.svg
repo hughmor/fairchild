@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="150mm"
+   height="60mm"
+   viewBox="0 0 150 59.999909"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.2 (ebf0e940, 2025-05-08)"
+   sodipodi:docname="logo_working.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#edebe4"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="0.67997322"
+     inkscape:cx="245.59791"
+     inkscape:cy="255.15711"
+     inkscape:window-width="1728"
+     inkscape:window-height="1382"
+     inkscape:window-x="1720"
+     inkscape:window-y="30"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <g
+       id="use20"
+       fill="none"
+       stroke-width="5"
+       stroke-linecap="butt"
+       transform="matrix(0.13515455,0,0,0.13515455,25.849882,22.661751)">
+      <path
+         d="M 22,98 H 98 V 22"
+         stroke="#20242b"
+         id="path1" />
+      <path
+         d="M 22,98 V 46 Q 22,22 46,22 h 52"
+         stroke="#e9a63c"
+         id="path4" />
+      <circle
+         cx="22"
+         cy="98"
+         r="7.5"
+         fill="#20242b"
+         stroke="none"
+         id="circle5" />
+      <circle
+         cx="98"
+         cy="22"
+         r="7.5"
+         fill="#20242b"
+         stroke="none"
+         id="circle6" />
+    </g>
+    <text
+       x="46.601879"
+       y="32.316711"
+       font-size="11.6417px"
+       letter-spacing="6"
+       font-weight="500"
+       fill="#20242b"
+       id="text36"
+       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:11.6417px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:1.98438px;fill:#20242b;stroke-width:0.264583">FAIRCHILD</text>
+    <text
+       x="47.131046"
+       y="38.137543"
+       font-size="2.77813px"
+       letter-spacing="2.6"
+       fill="#6a6f78"
+       id="text37"
+       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:2.77813px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0.743479px;fill:#6a6f78;stroke-width:0.264583">CIRCUIT AND PHOTONIC SIMULATOR</text>
+  </g>
+</svg>

@@ -88,9 +88,16 @@ Xcirc p0 p1 p2 fc_circulator
     );
 }
 
-/// Circulator must refuse to instantiate without bidir mode.
+/// Circulator must refuse to instantiate without bidir mode — as an error the
+/// caller can handle, not a panic.
+///
+/// It used to `panic!` inside `setup_instance`, which runs inside the registry
+/// factory: that aborts the CLI with a backtrace and crosses pyo3 as a
+/// `PanicException`. Now it declines, and `build_devices_with_footprints`
+/// raises a `ParameterError` naming the element. The count in that error is
+/// real — 9 wires supplied against the 15 a bidirectional circulator needs —
+/// but it is a symptom, so the device also warns with the actual fix.
 #[test]
-#[should_panic(expected = "fc_circulator requires bidirectional propagation")]
 fn circulator_requires_bidir() {
     let netlist = "\
 .optical_port p0
@@ -101,5 +108,12 @@ Xcirc p0 p1 p2 fc_circulator
 .end
 ";
     let net = parse_spice(netlist).unwrap();
-    let _ = dc_op_nr_with_registry(&net, &DeviceRegistry::new());
+    let Err(err) = dc_op_nr_with_registry(&net, &DeviceRegistry::new()) else {
+        panic!("a circulator without enable_bidirectional=1 must not build");
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("xcirc") && msg.contains("fc_circulator"),
+        "the error must name the element and the model: {msg}"
+    );
 }

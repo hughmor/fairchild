@@ -11,8 +11,8 @@
 //! math in one place and lets new device physics be a new perturbation source
 //! rather than a new copy of the stamp loop.
 //!
-//! See `_notes/optical_abstraction_design.md` for the layering rationale and
-//! the future device classes this is designed to admit.
+//! `docs/photonic-models.md` documents the devices this builds, and the user
+//! guide's "Writing custom devices" section walks through adding one.
 
 use super::{dB_per_cm_to_neper_per_m, n_eff_at_lambda, stamp_potential_eq, C0};
 use crate::delay::DelayLine;
@@ -42,6 +42,11 @@ pub struct OpticalSegment {
     /// Bootstrap λ for the first NR iterate (x = 0): `wl_ref_m`.
     lambda_bootstrap_m: f64,
     n_channels: usize,
+    /// Smallest optical wire count that would have been usable, recorded when
+    /// `setup_instance` is handed one it cannot use. Without it
+    /// `num_optical_wires()` would report the unconfigured segment's 0 and the
+    /// caller's error would quote a nonsense expectation.
+    min_wires: Option<usize>,
     wpc: usize, // wires per channel: 3 (unidir) or 5 (bidir)
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
@@ -86,6 +91,7 @@ impl OpticalSegment {
             tau_g_s: length_m * n_g / C0,
             lambda_bootstrap_m: 1.55e-6,
             n_channels: 0,
+            min_wires: None,
             wpc: 3,
             nodes: Vec::new(),
             branches: Vec::new(),
@@ -136,12 +142,26 @@ impl OpticalSegment {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
         let stride = 2 * wpc; // in + out
-        assert!(
-            !optical_terminals.is_empty() && optical_terminals.len().is_multiple_of(stride),
-            "OpticalSegment: optical wire count must be {stride}·N for N ≥ 1 channels \
-             (wpc={wpc}); got {}",
-            optical_terminals.len()
-        );
+
+        // A mis-wired instance used to `assert!` here, which crosses the pyo3
+        // boundary as a PanicException naming no element, and aborts the CLI
+        // with a backtrace instead of a diagnosis. Leave the segment
+        // unconfigured instead: the count is checked against `num_terminals()`
+        // in `build_devices_with_footprints`, which can name the element, the
+        // model and both counts. `ActiveOpticalDevice` guards before reaching
+        // here; passive segment devices (the waveguide) rely on this.
+        //
+        // The common way to land here is an optical net that was never given
+        // its own `.optical_port`, so it stays one scalar wire instead of
+        // expanding to `wpc`.
+        if optical_terminals.is_empty() || !optical_terminals.len().is_multiple_of(stride) {
+            self.min_wires = Some(stride);
+            self.n_channels = 0;
+            self.nodes.clear();
+            self.branches.clear();
+            return;
+        }
+        self.min_wires = None;
         let n = optical_terminals.len() / stride;
         self.n_channels = n;
         self.nodes = optical_terminals.to_vec();
@@ -167,7 +187,13 @@ impl OpticalSegment {
     }
 
     /// Number of optical bundle wires this segment occupies (`2·wpc·N`).
+    ///
+    /// A refused setup leaves the segment with zero channels, so report the
+    /// smallest count that would have worked rather than a misleading 0.
     pub fn num_optical_wires(&self) -> usize {
+        if let Some(min) = self.min_wires {
+            return min;
+        }
         2 * self.wpc * self.n_channels
     }
 

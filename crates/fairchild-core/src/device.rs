@@ -312,7 +312,15 @@ pub trait Device: Send + Sync {
     /// connected between those two terminal node indices.  Default is empty
     /// (resistor thermal noise is iterated as `Element::Resistor` in
     /// `noise_analysis`, not through this hook).
-    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    ///
+    /// `freq` is the analysis frequency in Hz.  Every native device here is
+    /// flat and ignores it — shot noise and RIN do not care — but an OSDI model
+    /// may call `flicker_noise()`, whose density is a function of frequency, so
+    /// the argument has to reach the hook.  `.noise` passes the sweep point.
+    /// Transient noise realises a *white* sample sequence and cannot represent
+    /// a sloped density at all, so it probes mid-band and warns if the source
+    /// turns out to vary; see [`crate::noise::TransientNoise`].
+    fn noise_sources(&self, _ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         Vec::new()
     }
 

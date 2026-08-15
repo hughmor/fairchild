@@ -1,6 +1,6 @@
 # Model status — what is parsed, what is stamped, what is validated
 
-*Audited against the source on 2026-08-01. If you find a disagreement between
+*Audited against the source on 2026-08-07. If you find a disagreement between
 this table and the simulator, the simulator is the bug.*
 
 This document exists because "supported" is not a binary. A parameter can be
@@ -30,8 +30,7 @@ Legend: ✅ yes · ⚠️ partial (see the note) · ❌ no.
   or RTS noise.
 - The photonic models are validated against analytic forms and against
   themselves, never against an external simulator. That is the biggest gap in
-  this document; see `_notes/sotu.md` §I.
-- `.ac` ignores source phase, and there is no `AC <mag>` spec on source lines.
+  this document — see §9.
 
 ---
 
@@ -68,15 +67,17 @@ expansion is checked in-tree against the hand-written equivalent network.
 `V` and `I` accept `DC`, `PULSE`, `PWL`, `SIN`, `EXP`, `SFFM`, `AM`. All are
 parsed, evaluated, and exercised by the transient goldens.
 
-⚠️ **There is no `AC <mag> [phase]` spec on the source line.** The AC excitation
-magnitude is an argument of the analysis, not a property of the source, and by
-default *every* independent source is driven at that magnitude; pass a source
-name to select one. A netlist written the SPICE way — `V1 in 0 DC 0 AC 1` —
-parses, but the `AC 1` is not what sets the excitation.
+✅ **`AC <mag> [phase]` is honoured**, magnitude and phase both, and the spec may
+sit anywhere after the nodes — before or after a DC value or a transient
+function. Verified against ngspice: on an RC at its corner, `AC 1 90` gives
++45.0009° where `AC 1 0` gives −44.9991°.
 
-⚠️ **The AC phase argument is accepted and ignored** (`build_ac_rhs` takes
-`_phase_rad`). Every AC source is driven at zero phase, so a multi-source AC
-analysis with intended relative phase is wrong.
+The rule is ngspice's, and it is strict on purpose: **a source with no `AC` spec
+is not an AC source and contributes nothing** to `.ac`. A deck with no `AC` spec
+anywhere is `SimError::NoAcSource` rather than a quiet zero. Before 0.3.0 an
+unspecified deck drove *every* source at unit amplitude, which excited DC bias
+rails as though they were signal generators — wrong in a way no single number
+reveals.
 
 ---
 
@@ -224,12 +225,15 @@ Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 All native Rust, all using the slowly-varying-envelope `(re, im, λ)`
 representation. **None of these is validated against an external simulator** —
 the tests are analytic closed forms, bit-for-bit characterisation pins, and
-equivalence tests between two spellings of the same circuit. That is a real gap
-and it is tracked in `_notes/sotu.md` §I; a SAX cross-check for the linear
-passives is the cheapest way to close it.
+equivalence tests between two spellings of the same circuit. That is a real
+gap. The cheapest way to close it is a cross-check of the linear passives
+against a frequency-domain S-matrix tool such as SAX, which shares no code and
+no author with this one; the active devices have no obvious external reference,
+since a time-domain electro-optic simulator is what fairchild exists to be.
 
 Every parameter listed here is both parsed and stamped unless the note says
-otherwise.
+otherwise. What each parameter *means*, and which tier to pick, is in
+[Photonic models](photonic-models.md).
 
 | Device | Parameters | Validated |
 |---|---|---|
@@ -267,8 +271,8 @@ otherwise.
 | `.op` | ✅ | ✅ ngspice |
 | `.dc` | ✅ | ✅ ngspice |
 | `.tran` (BE / TR / GEAR, fixed and variable step) | ✅ | ✅ ngspice (RC, RL, RLC, diode, BJT, CMOS, ring oscillator, switch) |
-| `.ac` | ⚠️ magnitude only — the phase argument is ignored (see §2) | ⚠️ analytic only (RC Bode, RLC resonance) — no ngspice waveform comparison |
-| `.noise` | ✅ | ⚠️ RC thermal vs analytic + an ngspice spot check; device noise unvalidated externally |
+| `.ac` | ✅ magnitude **and** phase (see §2) | ✅ ngspice magnitude + phase on an RC corner; analytic RC Bode and RLC resonance |
+| `.noise` | ✅ incl. Verilog-A `white_noise` / `flicker_noise` via OSDI | ⚠️ RC thermal vs analytic + an ngspice spot check; the Verilog-A path is pinned against `(i_n·z_t)²` in `examples/verilog_a/check.py`; device noise unvalidated externally |
 | `.temp`, `.alter` | ✅ | ⚠️ transitively |
 | `.tf`, `.pz`, `.disto`, `.sens` | ❌ | — |
 | `.mc` Monte Carlo | ❌ (use `Circuit.sweep()` from Python) | — |

@@ -100,6 +100,10 @@ pub struct NativeCwLaser {
     /// which is the default because 0 dB/Hz is not a sane fallback.
     rin_db_hz: Option<f64>,
     wpc: usize, // 3 (unidir) or 5 (bidir)
+    /// Smallest terminal count that would have worked, recorded when
+    /// `setup_instance` refuses. `num_terminals()` otherwise reports the
+    /// unconfigured 0, which the caller would quote back as the expectation.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
 }
@@ -121,6 +125,7 @@ impl NativeCwLaser {
             src_scale: 1.0,
             rin_db_hz: None,
             wpc: 3,
+            min_terminals: None,
             nodes: Vec::new(),
             branches: Vec::new(),
         }
@@ -129,6 +134,9 @@ impl NativeCwLaser {
 
 impl Device for NativeCwLaser {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -140,12 +148,13 @@ impl Device for NativeCwLaser {
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
-        debug_assert_eq!(
-            terminals.len(),
-            wpc,
-            "fc_cw_laser: expected {wpc} terminals (one channel × wpc); got {}",
-            terminals.len()
-        );
+        // debug_assert, so a release build sailed past a mis-wired instance and
+        // indexed whatever `nodes` happened to hold. Decline instead.
+        if terminals.len() != wpc {
+            self.min_terminals = Some(wpc);
+            return;
+        }
+        self.min_terminals = None;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc];
     }
@@ -297,12 +306,19 @@ pub struct NativeDrivenLaser {
     slope_w_v: f64,
     v_th: f64,
     p_floor_w: f64,
+    /// Width of the threshold knee in volts — see `power_and_slope`. Set to 0
+    /// for the old hard corner, which is a worse Jacobian and no more physical.
+    v_knee_v: f64,
     r_in: f64,
     phi_0: f64,
     wavelen_m: f64,
     rin_db_hz: Option<f64>,
     src_scale: f64,
     wpc: usize,
+    /// Smallest terminal count that would have worked, recorded when
+    /// `setup_instance` refuses. `num_terminals()` otherwise reports the
+    /// unconfigured 0, which the caller would quote back as the expectation.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     /// Linearisation about the previous iterate: amplitude, its derivative
@@ -324,12 +340,14 @@ impl NativeDrivenLaser {
             slope_w_v: 1e-3,
             v_th: 0.0,
             p_floor_w: 1e-12,
+            v_knee_v: 1e-3,
             r_in: 1e6,
             phi_0: 0.0,
             wavelen_m: 1550e-9,
             rin_db_hz: None,
             src_scale: 1.0,
             wpc: 3,
+            min_terminals: None,
             nodes: Vec::new(),
             branches: Vec::new(),
             a_op: 0.0,
@@ -342,10 +360,63 @@ impl NativeDrivenLaser {
     fn drive_nodes(&self) -> (NodeId, NodeId) {
         (self.nodes[self.wpc], self.nodes[self.wpc + 1])
     }
+
+    /// Optical power and `dP/dV` at drive `v`, with a **smooth** threshold:
+    ///
+    /// ```text
+    /// P(V) = p_floor + slope · s · softplus((V − V_th)/s),   s = v_knee
+    /// ```
+    ///
+    /// The knee is physical — a diode laser's L-I curve bends over a few mV as
+    /// spontaneous emission gives way to stimulated, it does not corner — but
+    /// it is here because a corner does not converge.
+    ///
+    /// A hard `max(0, ·)` makes `dP/dV` jump from `0` to `slope` at threshold,
+    /// so `dA/dV = slope/(2√P)` jumps from `0` to `slope/(2√p_floor)`: at the
+    /// default 1 pW floor that is ~750 for a 1.5 mW/V laser, three orders above
+    /// anything else in the Jacobian, and it flips on and off as Newton steps
+    /// across the threshold. The iterate ping-pongs and never converges. It
+    /// only ever appeared to work because a load capacitance adds `C/h` to the
+    /// detector diagonal and damps it — remove the capacitor and a link that
+    /// modulates through threshold fails at the falling edge with no diagnostic.
+    ///
+    /// With the softplus, `dP/dV = slope·σ((V−V_th)/s)` is continuous and `P`
+    /// at the knee is at least `p_floor + slope·s·ln2`, so `dA/dV` is bounded
+    /// by roughly `½·√(slope/(4·s·ln2))` — 0.37 for the same laser, 2000×
+    /// smaller. Away from the knee by more than ~20·s the two forms agree to
+    /// machine precision, so nothing above threshold moves.
+    fn power_and_slope(&self, v: f64) -> (f64, f64) {
+        let s = self.v_knee_v;
+        let x = v - self.v_th;
+        if s <= 0.0 {
+            // Explicitly opted out of the smoothing; the hard corner is back.
+            let above = self.slope_w_v * x;
+            let p = self.p_floor_w + above.max(0.0);
+            return (p, if x > 0.0 { self.slope_w_v } else { 0.0 });
+        }
+        let u = x / s;
+        // ln(1+eᵘ) overflows for large u and underflows to 0 for very negative
+        // u; both limits are exact, so take them rather than computing them.
+        let softplus = if u > 40.0 {
+            u
+        } else if u < -40.0 {
+            0.0
+        } else {
+            u.exp().ln_1p()
+        };
+        let sigma = 1.0 / (1.0 + (-u).exp());
+        (
+            self.p_floor_w + self.slope_w_v * s * softplus,
+            self.slope_w_v * sigma,
+        )
+    }
 }
 
 impl Device for NativeDrivenLaser {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -357,13 +428,11 @@ impl Device for NativeDrivenLaser {
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
-        assert_eq!(
-            terminals.len(),
-            wpc + 2,
-            "fc_driven_laser: expected {} terminals (one optical channel + p, n); got {}",
-            wpc + 2,
-            terminals.len()
-        );
+        if terminals.len() != wpc + 2 {
+            self.min_terminals = Some(wpc + 2);
+            return;
+        }
+        self.min_terminals = None;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc];
     }
@@ -382,6 +451,7 @@ impl Device for NativeDrivenLaser {
             "slope_mw_v" => self.slope_w_v = value * 1e-3,
             "v_th" | "vth" => self.v_th = value,
             "p_floor_w" => self.p_floor_w = value.max(0.0),
+            "v_knee_v" | "v_knee" => self.v_knee_v = value.max(0.0),
             "r_in" => self.r_in = value,
             "phi_0_deg" | "phase_deg" => self.phi_0 = value.to_radians(),
             "wavelength_nm" => self.wavelen_m = value * 1e-9,
@@ -399,14 +469,12 @@ impl Device for NativeDrivenLaser {
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         let (p_node, n_node) = self.drive_nodes();
         let v = p_node.map_or(0.0, |i| x[i]) - n_node.map_or(0.0, |i| x[i]);
-        let above = self.slope_w_v * (v - self.v_th);
-        let power = self.p_floor_w + above.max(0.0);
+        let (power, dp_dv) = self.power_and_slope(v);
         self.a_op = power.sqrt();
-        // Below threshold the power is pinned at the floor, so dA/dV is zero
-        // there — not merely small.  Above it, dA/dV = slope / (2√P), which the
-        // floor keeps finite through the corner.
-        self.da_dv = if above > 0.0 && self.a_op > 0.0 {
-            self.slope_w_v / (2.0 * self.a_op)
+        // dA/dV = (dP/dV) / (2√P).  Both factors are continuous, so this is too
+        // — see `power_and_slope` for why that is load-bearing.
+        self.da_dv = if self.a_op > 0.0 {
+            dp_dv / (2.0 * self.a_op)
         } else {
             0.0
         };

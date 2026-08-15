@@ -327,7 +327,7 @@ impl Device for ShockleyDiode {
     /// Uses the bias-point Id cached by the most recent `eval()`.  Returns
     /// nothing when the junction is essentially off (|Id| < 1e-18 A) so the
     /// matrix doesn't pick up vanishing entries from leakage.
-    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, _ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         let id_mag = self.id_junction.abs();
         if id_mag < 1e-18 {
             return Vec::new();

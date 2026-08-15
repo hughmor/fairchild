@@ -28,6 +28,12 @@ use crate::mna::MnaMatrix;
 pub struct NativeCirculator {
     n_channels: usize,
     wpc: usize,
+    /// Smallest terminal count that would have been usable, recorded when
+    /// `setup_instance` is handed one it cannot use. `num_terminals()` reads
+    /// `nodes.len()`, which a refused setup leaves at 0 — a misleading number
+    /// to quote back at the user. Declining rather than panicking is what lets
+    /// `build_devices_with_footprints` name the element and both counts.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
 }
@@ -44,6 +50,7 @@ impl NativeCirculator {
             n_channels: 0,
             wpc: 5,
             nodes: Vec::new(),
+            min_terminals: None,
             branches: Vec::new(),
         }
     }
@@ -51,6 +58,9 @@ impl NativeCirculator {
 
 impl Device for NativeCirculator {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -59,19 +69,28 @@ impl Device for NativeCirculator {
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
-        if ctx.wires_per_channel() != 5 {
-            panic!(
-                "fc_circulator requires bidirectional propagation; \
-                    set `.options enable_bidirectional=1` (or via CLI / Python)"
-            );
-        }
         self.wpc = 5;
         let stride = 3 * 5; // 3 ports × 5 wires per channel
-        assert!(
-            !terminals.is_empty() && terminals.len().is_multiple_of(stride),
-            "fc_circulator: terminal count must be {stride}·N for N ≥ 1 channels; got {}",
-            terminals.len()
-        );
+        if ctx.wires_per_channel() != 5 {
+            // Unidirectional: the netlist supplied 3·3·N wires and this device
+            // needs 3·5·N, so the caller's terminal-count error fires with true
+            // numbers. It cannot know *why*, so say it here — the count is a
+            // symptom of the missing option, not an independent mistake.
+            eprintln!(
+                "warning: fc_circulator requires bidirectional propagation; set \
+                 `.options enable_bidirectional=1` (or via CLI / Python). Without it \
+                 each optical port carries {} wires per channel instead of 5, which \
+                 is the terminal-count error that follows.",
+                ctx.wires_per_channel()
+            );
+            self.min_terminals = Some(stride);
+            return;
+        }
+        if terminals.is_empty() || !terminals.len().is_multiple_of(stride) {
+            self.min_terminals = Some(stride);
+            return;
+        }
+        self.min_terminals = None;
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();

@@ -35,6 +35,12 @@ pub struct NativePhotodetector {
     r_series: f64,
     n_channels: usize,
     wpc: usize, // 3 (unidir) or 5 (bidir)
+    /// Smallest terminal count that would have been usable, recorded when
+    /// `setup_instance` is handed one it cannot use. `num_terminals()` reads
+    /// `nodes.len()`, which a refused setup leaves at 0 — a misleading number
+    /// to quote back at the user. Declining rather than panicking is what lets
+    /// `build_devices_with_footprints` name the element and both counts.
+    min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     v_int_idx: Option<usize>,
     has_internal: bool,
@@ -70,6 +76,7 @@ impl NativePhotodetector {
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
+            min_terminals: None,
             v_int_idx: None,
             has_internal: false,
             i_ph: 0.0,
@@ -88,6 +95,9 @@ impl NativePhotodetector {
 
 impl Device for NativePhotodetector {
     fn num_terminals(&self) -> usize {
+        if let Some(min) = self.min_terminals {
+            return min;
+        }
         self.nodes.len()
     }
 
@@ -99,11 +109,11 @@ impl Device for NativePhotodetector {
         let wpc = ctx.wires_per_channel();
         self.wpc = wpc;
         // Layout: wpc·N (bundle inputs) + 2 (anode, cathode).
-        assert!(
-            terminals.len() >= wpc + 2 && (terminals.len() - 2).is_multiple_of(wpc),
-            "fc_photodetector: terminal count must be {wpc}·N + 2 for N ≥ 1 channels; got {}",
-            terminals.len()
-        );
+        if terminals.len() < wpc + 2 || !(terminals.len() - 2).is_multiple_of(wpc) {
+            self.min_terminals = Some(wpc + 2);
+            return;
+        }
+        self.min_terminals = None;
         let n = (terminals.len() - 2) / wpc;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
@@ -301,7 +311,7 @@ impl Device for NativePhotodetector {
     ///
     /// ponytail: no excess-noise factor.  An APD needs `F(M)·M²`, which is a
     /// second parameter and a second model — add it with the APD, not here.
-    fn noise_sources(&self, _ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, _ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         let s_i = 2.0 * Q_ELECTRON * self.i_ph.abs();
         if s_i == 0.0 {
             return Vec::new();

@@ -141,7 +141,7 @@ impl TranStepper {
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);
 
-        let reactive = ReactiveState::new(&netlist, &topo, &devices, &x);
+        let reactive = ReactiveState::new(&netlist, &topo, &mut devices, &ctx, &x);
         let mat = MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
 
         // The parser already lower-cases element names, so this is keyed as-is.

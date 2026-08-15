@@ -589,7 +589,7 @@ impl Device for GummelPoonBjt {
             .advance(disc, q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc));
     }
 
-    fn noise_sources(&self, ctx: &SimContext) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         // Shot noise on B-E and B-C junctions.
         // i_n_be² = 2q|IB|, flows base→emitter.
         // i_n_ce² = 2q|IC| (collector shot noise), flows collector→emitter.

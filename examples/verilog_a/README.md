@@ -1,6 +1,6 @@
 # Verilog-A in fairchild
 
-Five worked examples and eight models, plus what the support amounts to.
+Six worked examples and nine models, plus what the support amounts to.
 The authoring guide is `docs/user-guide.md` §14; this is the worked set.
 
 ```sh
@@ -69,6 +69,7 @@ work.
 | `eam_link.sp` | a Verilog-A modulator inside an otherwise native photonic link |
 | `va_link.sp` | a Mach-Zehnder where *every* optical device is Verilog-A |
 | `wg_compare.sp` | Verilog-A vs native waveguide, same deck, must agree |
+| `tia_receiver.sp` | a native photodiode read by a Verilog-A TIA — including its noise |
 
 ### `rectifier.sp`
 
@@ -122,9 +123,36 @@ under `legacy/` predates the `0f689cb` fix and is a factor of two out.
 
 ---
 
+## `tia_receiver.sp`
+
+A native `fc_photodetector` feeding `va_tia`, which is the front end a real
+link uses. A load resistor big enough to give a readable voltage is both slow
+and noisy — `1/(2*pi*R*C)` and `4kT/R` pull opposite ways — and a TIA breaks
+that trade by holding the summing node at a virtual ground.
+
+It is also the example where Verilog-A earns its place rather than merely
+working: the model carries `z_t`, `r_in`, `f_3db`, an output soft-clip, an
+input-referred offset, and **`i_n_in`, an input-referred current noise density
+that reaches `.noise`**. `check.py` pins the output PSD against
+`(i_n_in·z_t)² + 2q·I_ph·z_t²` and asserts the amplifier dominates, which is
+what makes the receiver realistic instead of RIN-limited.
+
+That noise path had to be built: `OsdiDevice` did not implement
+`Device::noise_sources`, so a model could call `white_noise()`, compile, run,
+and contribute exactly nothing. It now reads the descriptor's noise-source
+table and calls `load_noise` per frequency point.
+
 ## Limitations
 
 All measured, not inferred:
+
+- **`@(timer(...))` is rejected**, so a model cannot clock itself: OpenVAF 23.5
+  parses only `initial_step` and `final_step` in an event control. Rewriting the
+  same thing as a pure function of `$abstime` with a data-dependent loop bound
+  then *crashes* the compiler (a bitset panic in its MIR). A self-clocking
+  pattern generator is therefore not available; generate the pattern in Python
+  and feed it as a `PWL`, which is what
+  `examples/photonic/noisy_eye_and_ber.py` does.
 
 - **`pnjlim` is the only limiting function implemented.** `$limit` names are
   not a fixed vocabulary — OpenVAF forwards whatever string the model wrote —
