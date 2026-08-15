@@ -1,5 +1,6 @@
 pub mod ac;
 pub mod adjoint;
+pub mod adjoint_ac;
 pub mod adjoint_tran;
 pub mod behavioral;
 pub mod connectivity;
