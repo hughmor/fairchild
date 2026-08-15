@@ -1345,7 +1345,12 @@ idle answer, because both RIN and shot follow the optical power. Bias the deck
 at each rail and run it twice — the worked example does, and the two rails come
 out 22× apart.
 
-![Noisy eye and BER](plots/noisy_eye_and_ber.png)
+![A RIN-limited eye: noise rides the 1 rail, the 0 rail is clean](plots/noisy_eye_rin_limited.png)
+
+Read the same link through a transimpedance amplifier instead and the two rails
+carry the *same* noise, because the dominant generator moves into the amplifier
+and stops caring how much light arrived — `plots/noisy_eye_and_ber.png`, and
+`examples/photonic/noisy_eye_and_ber.py --tia`.
 
 Neither analysis models laser relaxation-oscillation peaking, APD excess noise,
 flicker (1/f), or RTS noise.

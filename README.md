@@ -32,38 +32,49 @@ fairchild aims to be a credible open alternative.
 ## An example noisy signal chain
 
 A 10 Gb/s link, end to end, in one deck: CW laser → Mach-Zehnder modulator →
-photodiode → load. The modulator is not a behavioural block — it is two
-directional couplers and two reverse-biased PN phase shifters, the devices you
-would actually place in a layout, driven push-pull.
+photodiode → transimpedance amplifier. Nothing here is a behavioural block. The
+modulator is two directional couplers and two reverse-biased PN phase shifters
+driven push-pull — the devices you would place in a layout — and the TIA is a
+Verilog-A model compiled to OSDI, carrying its own input-referred current noise.
 
 ```spice
-* the modulator, from primitives
-Xc1   lin dark a1 a2   fc_dcoupler kappa_L=0.785        ; 50/50 split
+* the modulator, from primitives — its bandwidth falls out of C_j(V), not a parameter
+Xc1   lin dark a1 a2   fc_dcoupler kappa_L=0.785           ; 50/50 split
 Xarm1 a1 b1 p 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
 Xarm2 a2 b2 n 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
-Xc2   b1 b2 out unused fc_dcoupler kappa_L=0.785        ; recombine
+Xc2   b1 b2 out unused fc_dcoupler kappa_L=0.785           ; recombine
 
-Xlas  lin fc_cw_laser power_mW=2 rin_db_hz=-145         ; laser RIN
-Xpd   out det 0 fc_photodetector responsivity=0.9       ; shot noise
-Rl    det 0 1k
+.osdi build/va_tia.osdi                                    ; Verilog-A, via OpenVAF
+Xlas  lin fc_cw_laser power_mW=0.05 rin_db_hz=-145         ; laser RIN
+Xpd   out det 0 fc_photodetector responsivity=0.9          ; shot noise
 Cpd   det 0 15f
-.options trannoise=1                                    ; noise in the waveform
+Xtia  det tout 0 va_tia z_t=2k r_in=50 f_3db=12G i_n_in=15p ; amplifier noise
+Rl    tout 0 1meg
+.options trannoise=1                                       ; noise in the waveform
 .tran 1p 51.1n
 ```
 
 <p align="center">
-  <img alt="NRZ and PAM-4 eyes, the link's measured bandwidth, and the noise checked three ways" src="docs/plots/noisy_eye_and_ber.png" width="90%">
+  <img alt="NRZ and PAM-4 eyes through an MZM built from primitives, the link's measured bandwidth, and the noise checked three ways" src="docs/plots/noisy_eye_and_ber.png" width="90%">
 </p>
 
-Everything in that figure is measured from the circuit. The eyes are a real
-PRBS-9 through the modulator above; the bottom-left panel is the link's
-electro-optic response from `.ac`, so the 3 dB point is a result rather than a
-parameter; and the bottom-right panel checks the noise three independent ways —
-sampled from `.tran`, integrated from `.noise` at that rail, and against the
-closed form `σ/μ = √(RIN·B)`. They agree to 4 %.
+Everything in that figure is measured from the circuit, and the noise is at its
+true amplitude — no scaling. The eyes are a real PRBS-9 through the modulator
+above, PAM-4 with its drive levels pre-distorted through the modulator's `sin²`
+transfer the way a real transmitter's DAC does. The bottom-left panel is the
+link's electro-optic response from `.ac`, so the 3 dB point is a result rather
+than a parameter. The bottom-right panel checks the noise three independent ways
+— sampled from `.tran`, integrated from `.noise` at that operating point, and
+against the closed-form budget — and they agree to 4 %.
 
-Run it yourself: `python3 examples/photonic/noisy_eye_and_ber.py`, or
-`--selftest` to assert the physics instead of plotting it.
+Both rails carry the same noise here, which is the signature of a receiver
+limited by its amplifier rather than by the light. Swap the TIA for a load
+resistor and the noise piles onto the `1` rail instead:
+[`docs/plots/noisy_eye_rin_limited.png`](docs/plots/noisy_eye_rin_limited.png).
+
+Run it yourself: `python3 examples/photonic/noisy_eye_and_ber.py --tia`, or
+`--selftest` to assert the physics instead of plotting it. Without `--tia` it
+uses a load resistor and needs no toolchain at all.
 
 ---
 

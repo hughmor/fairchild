@@ -29,16 +29,23 @@ the physics rather than plotting it.
 
 ```bash
 python3 examples/photonic/receiver_noise_budget.py
-python3 examples/photonic/noisy_eye_and_ber.py
 python3 examples/photonic/native_mrr_wavelength_sweep.py
 python3 examples/photonic/native_weight_bank.py
-cp examples/photonic/{receiver_noise_budget,noisy_eye_and_ber,native_mrr_wavelength_sweep,native_weight_bank}.png docs/plots/
+cp examples/photonic/{receiver_noise_budget,native_mrr_wavelength_sweep,native_weight_bank}.png docs/plots/
+
+# The eye example twice, once per receiver front end. `--tia` needs
+# examples/verilog_a/build/va_tia.osdi, so build the Verilog-A models first.
+python3 examples/photonic/noisy_eye_and_ber.py --tia --png eye_tia.png
+python3 examples/photonic/noisy_eye_and_ber.py       --png eye_res.png
+cp examples/photonic/eye_tia.png docs/plots/noisy_eye_and_ber.png
+cp examples/photonic/eye_res.png docs/plots/noisy_eye_rin_limited.png
 ```
 
 | File | What |
 |---|---|
 | `receiver_noise_budget.png` | thermal / shot / RIN crossovers and the SNR ceiling at `1/(RIN·B)` |
-| `noisy_eye_and_ber.png` | NRZ and PAM-4 eyes through an MZM built from primitives, the link's measured electro-optic response, and `.noise` / `.tran` / closed form agreeing rail by rail |
+| `noisy_eye_and_ber.png` | The headline figure: NRZ and PAM-4 eyes through an MZM built from primitives, read by the Verilog-A TIA. Noise at true amplitude — both rails equal, because the amplifier dominates |
+| `noisy_eye_rin_limited.png` | The same link through a load resistor instead. Noise piles onto the `1` rail, which is what RIN-limited looks like and why the rails must be measured separately |
 | `native_mrr_wavelength_sweep.png` | micro-ring through-port transmission, resonance shifting under bias |
 | `native_weight_bank.png` | a 4-channel WDM weight bank: per-channel weights, passivity, balanced readout |
 
