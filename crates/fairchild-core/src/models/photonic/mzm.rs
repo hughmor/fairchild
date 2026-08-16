@@ -201,4 +201,16 @@ impl Device for NativeMzm {
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
         self.load_jacobian(mat);
     }
+
+    /// `t_amp_cached` is frozen at the previous Newton iterate, so nothing
+    /// stamps `∂(out_re)/∂v_mod = in_re · dt/dV`.  The drive pair is therefore
+    /// invisible to the adjoint unless it is declared here.
+    fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        let elec_base = 2 * self.wpc * self.n_channels;
+        self.nodes[elec_base..elec_base + 2]
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
 }

@@ -218,7 +218,13 @@ impl Device for NativePhotodetector {
                     self.g_re_bw[k] * self.v_re_bw_op[k] + self.g_im_bw[k] * self.v_im_bw_op[k];
             }
         }
-        let i_eq = -nonlin_remainder - (self.v_j_op / self.r_shunt);
+        // The shunt is *linear*, so it belongs in the Jacobian and nowhere else.
+        // Subtracting `v_j_op/r_shunt` here as well cancelled the stamped `g_sh`
+        // at the solution: the load saw `v = I_ph·R` with `r_shunt` inert, while
+        // `∂f/∂x` still carried the conductance.  Newton did not care — the two
+        // errors agree at the fixed point — but the adjoint did, because a
+        // gradient through the detector came out wrong by `R_load/r_shunt`.
+        let i_eq = -nonlin_remainder;
         let elec_base = wpc * n;
         let v_j_node = self.v_int_idx.or(self.nodes[elec_base]);
         if let Some(j) = v_j_node {

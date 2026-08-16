@@ -138,34 +138,56 @@ pub fn freq_oct(start_hz: f64, stop_hz: f64, points_per_octave: usize) -> Vec<f6
         .collect()
 }
 
-/// Run a small-signal AC sweep.
+/// The frequency-independent half of an `.ac` assembly.
 ///
-/// `ac_source` — name of the voltage source to use as the AC stimulus (amplitude 1 V,
-///               phase 0°).  Pass `None` to drive all voltage sources simultaneously
-///               with 1 V (useful for transfer-function sweeps with a single source).
-pub fn ac_analysis(
-    netlist: &Netlist,
-    freqs: &[f64],
-    ac_source: Option<&str>,
-    registry: &DeviceRegistry,
-) -> Result<AcResult, SimError> {
-    ac_analysis_opts(
-        netlist,
-        freqs,
-        ac_source,
-        registry,
-        &SimOptions::from_netlist(netlist),
-    )
+/// `G`, `C`, `L` and the excitation vector are built once at the operating
+/// point and then reused at every frequency — only `B = ωC − L/ω` and the
+/// 2n×2n block assembly depend on `ω`. Factored out because
+/// [`crate::adjoint_ac`] needs exactly the same system: a gradient that
+/// differentiates a *different* assembly than the one that was solved is not a
+/// gradient of anything, and two copies of this would drift.
+pub(crate) struct AcSystem {
+    pub topo: CircuitTopology,
+    pub g_mat: Vec<crate::mna::SparseRow>,
+    pub c_mat: Vec<Vec<f64>>,
+    pub l_mat: Vec<Vec<f64>>,
+    pub b_re: Vec<f64>,
+    pub b_im: Vec<f64>,
+    /// The operating point the small-signal matrices were linearised about.
+    pub x0: Vec<f64>,
 }
 
-/// AC analysis with explicit `SimOptions`.
-pub fn ac_analysis_opts(
+impl AcSystem {
+    /// `[G −B; B G]` and `[b_re; b_im]` at one frequency.
+    pub(crate) fn at(&self, f: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let size = self.topo.size;
+        let omega = 2.0 * std::f64::consts::PI * f;
+        let n2 = 2 * size;
+        let mut a2 = vec![vec![0.0f64; n2]; n2];
+        let mut rhs = vec![0.0f64; n2];
+        for i in 0..size {
+            for j in 0..size {
+                let b = omega * self.c_mat[i][j] - self.l_mat[i][j] / omega;
+                a2[i][j] = self.g_mat[i][j];
+                a2[i][size + j] = -b;
+                a2[size + i][j] = b;
+                a2[size + i][size + j] = self.g_mat[i][j];
+            }
+            rhs[i] = self.b_re[i];
+            rhs[size + i] = self.b_im[i];
+        }
+        (a2, rhs)
+    }
+}
+
+/// Assemble [`AcSystem`] for `netlist` — the shared half of `.ac` and the AC
+/// adjoint.
+pub(crate) fn assemble_ac(
     netlist: &Netlist,
-    freqs: &[f64],
     ac_source: Option<&str>,
     registry: &DeviceRegistry,
     opts: &SimOptions,
-) -> Result<AcResult, SimError> {
+) -> Result<AcSystem, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let mut topo = CircuitTopology::build(netlist);
@@ -177,7 +199,6 @@ pub fn ac_analysis_opts(
     let dc_solver = opts.linear_solver(size);
     let x0 = dc_op(&topo, netlist, &mut devices, &ctx, opts, &*dc_solver)?;
     // The AC system is 2N×2N (real-block of complex); build a sized solver.
-    let ac_solver = opts.linear_solver(2 * size);
 
     // --- Small-signal G matrix (real, from DC Jacobian at x0) ---
     // Re-stamp the linear passive network.
@@ -276,6 +297,58 @@ pub fn ac_analysis_opts(
     // Voltage source in MNA: stamps A[vi][p]=+1, A[vi][n]=-1, A[p][vi]=+1, A[n][vi]=-1, b[vi]=V_ac.
     // For the AC analysis, we set V_ac = 1 for the chosen source(s).
     let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source).ok_or(SimError::NoAcSource)?;
+
+    Ok(AcSystem {
+        topo,
+        g_mat,
+        c_mat,
+        l_mat,
+        b_re: b_ac_re,
+        b_im: b_ac_im,
+        x0,
+    })
+}
+/// Run a small-signal AC sweep.
+///
+/// `ac_source` — name of the voltage source to use as the AC stimulus (amplitude 1 V,
+///               phase 0°).  Pass `None` to drive all voltage sources simultaneously
+///               with 1 V (useful for transfer-function sweeps with a single source).
+pub fn ac_analysis(
+    netlist: &Netlist,
+    freqs: &[f64],
+    ac_source: Option<&str>,
+    registry: &DeviceRegistry,
+) -> Result<AcResult, SimError> {
+    ac_analysis_opts(
+        netlist,
+        freqs,
+        ac_source,
+        registry,
+        &SimOptions::from_netlist(netlist),
+    )
+}
+
+/// AC analysis with explicit `SimOptions`.
+pub fn ac_analysis_opts(
+    netlist: &Netlist,
+    freqs: &[f64],
+    ac_source: Option<&str>,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+) -> Result<AcResult, SimError> {
+    let sys = assemble_ac(netlist, ac_source, registry, opts)?;
+    let AcSystem {
+        topo,
+        g_mat,
+        c_mat,
+        l_mat,
+        b_re: b_ac_re,
+        b_im: b_ac_im,
+        x0,
+    } = sys;
+    let size = topo.size;
+    let ac_solver = opts.linear_solver(2 * size);
+    let _ = &x0;
 
     // --- Sweep (parallel across frequencies) ---
     //

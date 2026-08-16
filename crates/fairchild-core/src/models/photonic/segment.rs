@@ -384,6 +384,18 @@ impl OpticalSegment {
         !self.ctrl_nodes.is_empty() && self.dc_dv.len() == self.n_channels * self.ctrl_nodes.len()
     }
 
+    /// Control columns whose `∂(out)/∂V` this segment did *not* stamp, because
+    /// its drive model supplied no derivatives and the coefficient stayed
+    /// frozen.  Empty when the cross-terms are armed, which is the usual case.
+    /// See `Device::frozen_jacobian_columns`.
+    pub fn unstamped_control_columns(&self) -> Vec<usize> {
+        if self.has_sens() {
+            Vec::new()
+        } else {
+            self.ctrl_nodes.iter().flatten().copied().collect()
+        }
+    }
+
     /// ∂(out_re)/∂V and ∂(out_im)/∂V for channel `k`, control node `i`.
     fn dout_dv(&self, k: usize, i: usize) -> (f64, f64) {
         let nc = self.ctrl_nodes.len();

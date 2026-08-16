@@ -304,6 +304,14 @@ impl Device for ShockleyDiode {
             pos: self.anode,
             neg: self.cathode,
             value: self.cj_total,
+            // ponytail: 0 leaves the Jacobian one term short for a *bias-
+            // dependent* junction cap — `cj_total` carries both the depletion
+            // C_j(V) and the transit-time TT·g_d, so its true `dC/dV` is
+            // non-zero. That costs Newton iterations, not accuracy, and makes
+            // an adjoint gradient through a diode's charge path wrong the way
+            // `fc_pn_ps_cap`'s was (16 %). `jacobian_check_tran` finds it; do
+            // the same thing here as `PnCapDrive` does when someone needs it.
+            dvalue_dstate: 0.0,
         }]
     }
 

@@ -1,4 +1,7 @@
 pub mod ac;
+pub mod adjoint;
+pub mod adjoint_ac;
+pub mod adjoint_tran;
 pub mod behavioral;
 pub mod connectivity;
 pub mod dc_sweep;
@@ -21,6 +24,8 @@ pub mod tran;
 pub mod tran_step;
 
 pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, AcResult};
+pub use adjoint::{dc_sensitivity, Output, ParamRef, Sensitivities};
+pub use adjoint_tran::{TranAdjoint, TranSensitivities};
 pub use connectivity::check_connectivity;
 pub use dc_sweep::{dc_sweep_with_registry, dc_sweep_with_registry_opts, DcSweepResult, SweepAxis};
 pub use delay::DelayLine;
@@ -30,7 +35,7 @@ pub use error::SimError;
 pub use measure::{evaluate_measurements, MeasureResult};
 pub use mna::CircuitTopology;
 pub use models::{GummelPoonBjt, Mosfet1, ShockleyDiode};
-pub use netlist_edit::{set_element_param, set_source_pwl};
+pub use netlist_edit::{get_element_param, set_element_param, set_source_pwl};
 pub use newton::{
     build_devices, dc_op_nr, dc_op_nr_opts, dc_op_nr_with_devices, dc_op_nr_with_devices_opts,
     dc_op_nr_with_registry, dc_op_nr_with_registry_opts, NrResult,

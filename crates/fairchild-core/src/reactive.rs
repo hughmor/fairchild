@@ -632,6 +632,7 @@ pub fn stamp_device_branches(
     devices: &[Box<dyn Device>],
     dev_state: &[Vec<(f64, f64)>],
     mat: &mut MnaMatrix,
+    x: &[f64],
     h: f64,
     mode: IntegratorMode,
     gear2_h_prev: Option<f64>,
@@ -639,7 +640,24 @@ pub fn stamp_device_branches(
     for (d, dev) in devices.iter().enumerate() {
         for (b, br) in dev.reactive_branches().iter().enumerate() {
             let (_g_old, i_hist) = dev_state[d][b];
-            let g_eq = conductance(br.kind, br.value, mode, h, gear2_h_prev);
+            // `g_val` is the residual's coefficient: the branch carries
+            // `q = value·v`, so its current is `g_val·v − i_hist`.
+            let g_val = conductance(br.kind, br.value, mode, h, gear2_h_prev);
+            // `g_jac` is `∂(current)/∂v`, which for a bias-dependent value picks
+            // up a second term.  `conductance` is linear in `value` for every
+            // mode, so the extra derivative scales the same way and can go
+            // through the same helper.
+            let g_jac = if br.dvalue_dstate == 0.0 {
+                g_val
+            } else {
+                let v = branch_voltage(br, x);
+                g_val + v * conductance(br.kind, br.dvalue_dstate, mode, h, gear2_h_prev)
+            };
+            // Norton: stamp the true derivative into `A`, and put the difference
+            // back on the RHS so the *residual* `A·x − b` is unchanged. Getting
+            // this wrong would move the answer, not just the iteration count.
+            let v0 = branch_voltage(br, x);
+            let comp = (g_jac - g_val) * v0;
             // For an inductor the current is i = G_eq·v + I_hist, so the history
             // adds rather than subtracts.
             let i_sign = match br.kind {
@@ -647,18 +665,18 @@ pub fn stamp_device_branches(
                 ReactiveKind::Inductor => -1.0,
             };
             if let Some(p) = br.pos {
-                mat.a[p][p] += g_eq;
+                mat.a[p][p] += g_jac;
                 if let Some(n) = br.neg {
-                    mat.a[p][n] -= g_eq;
+                    mat.a[p][n] -= g_jac;
                 }
-                mat.b[p] += i_sign * i_hist;
+                mat.b[p] += i_sign * i_hist + comp;
             }
             if let Some(n) = br.neg {
-                mat.a[n][n] += g_eq;
+                mat.a[n][n] += g_jac;
                 if let Some(p) = br.pos {
-                    mat.a[n][p] -= g_eq;
+                    mat.a[n][p] -= g_jac;
                 }
-                mat.b[n] -= i_sign * i_hist;
+                mat.b[n] -= i_sign * i_hist + comp;
             }
         }
     }

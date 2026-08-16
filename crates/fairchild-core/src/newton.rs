@@ -91,23 +91,36 @@ impl NrResult {
 }
 
 /// Return refdes/instance names for each device in the order that
-/// `build_devices` produces them.  Used by the verbose failure-reporter
-/// to attribute residual rows to a named device.
+/// `build_devices` produces them.  Used by the verbose failure-reporter to
+/// attribute residual rows to a named device, and by `crate::adjoint` to map a
+/// `ParamRef`'s element name onto a live device.
+///
+/// **This must stay arm-for-arm parallel with `build_devices_with_footprints`.**
+/// It was not: switches and transmission lines became devices and never got a
+/// name here, so every device after one in the list was attributed to the wrong
+/// element.  `device_element_names` below is the same walk over element names
+/// alone, and `names_stay_parallel_to_devices` pins both against a netlist that
+/// exercises every arm.
 pub fn build_device_names(netlist: &Netlist) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for el in &netlist.elements {
         match el {
             Element::Diode {
                 name, model_name, ..
-            } => {
-                names.push(format!("{name} ({model_name})"));
             }
-            Element::Mosfet {
+            | Element::Mosfet {
                 name, model_name, ..
-            } => {
-                names.push(format!("{name} ({model_name})"));
             }
-            Element::Bjt {
+            | Element::Bjt {
+                name, model_name, ..
+            }
+            | Element::XOsdi {
+                name, model_name, ..
+            }
+            | Element::VoltageSwitch {
+                name, model_name, ..
+            }
+            | Element::CurrentSwitch {
                 name, model_name, ..
             } => {
                 names.push(format!("{name} ({model_name})"));
@@ -115,11 +128,28 @@ pub fn build_device_names(netlist: &Netlist) -> Vec<String> {
             Element::Behavioral { name, kind, .. } => {
                 names.push(format!("{name} ({kind:?})"));
             }
-            Element::XOsdi {
-                name, model_name, ..
-            } => {
-                names.push(format!("{name} ({model_name})"));
+            Element::TransmissionLine { name, .. } => {
+                names.push(format!("{name} (T)"));
             }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The bare element name for each device, same order as `build_devices`.
+pub fn device_element_names(netlist: &Netlist) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for el in &netlist.elements {
+        match el {
+            Element::Diode { name, .. }
+            | Element::Mosfet { name, .. }
+            | Element::Bjt { name, .. }
+            | Element::XOsdi { name, .. }
+            | Element::VoltageSwitch { name, .. }
+            | Element::CurrentSwitch { name, .. }
+            | Element::Behavioral { name, .. }
+            | Element::TransmissionLine { name, .. } => names.push(name.clone()),
             _ => {}
         }
     }
@@ -928,8 +958,10 @@ fn report_failure(
 /// photonic solve.  ‖f(x)‖ at the *current* iterate needs none of this: the
 /// NR loop's own matrix is already stamped there, so call
 /// `MnaMatrix::residual_norm` on it directly.
+/// Leaves `scratch` holding the linearisation at `x` — `crate::adjoint`
+/// relies on that to read the Jacobian back out without a second stamp.
 #[allow(clippy::too_many_arguments)]
-fn residual_l2(
+pub(crate) fn residual_l2(
     scratch: &mut crate::mna::MnaMatrix,
     topo: &CircuitTopology,
     netlist: &Netlist,

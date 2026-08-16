@@ -535,18 +535,33 @@ impl MnaMatrix {
     /// is the linearisation at whichever `x` was last stamped.
     pub fn residual_norm(&self, x: &[f64]) -> f64 {
         let mut sumsq = 0.0_f64;
-        // O(nnz) by construction now — the row *is* its own sparsity pattern,
-        // so this needs no separate `pattern` branch.
-        for (i, row) in self.a.iter().enumerate() {
-            let (cols, vals) = row.entries();
-            let mut acc = 0.0_f64;
-            for (&j, &v) in cols.iter().zip(vals.iter()) {
-                acc += v * x[j as usize];
-            }
-            let f = acc - self.b[i];
+        for i in 0..self.a.len() {
+            let f = self.row_residual(i, x);
             sumsq += f * f;
         }
         sumsq.sqrt()
+    }
+
+    /// The same residual as [`MnaMatrix::residual_norm`], written out per row.
+    ///
+    /// The adjoint method needs `f` itself rather than its norm: `∂f/∂p` is
+    /// what the parameter gradient contracts against.  Shares
+    /// [`MnaMatrix::row_residual`] with the norm so the two cannot drift.
+    pub fn residual_into(&self, x: &[f64], out: &mut [f64]) {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = self.row_residual(i, x);
+        }
+    }
+
+    /// Row `i` of `A·x − b`.  O(nnz in the row) — the row *is* its own
+    /// sparsity pattern, so this needs no separate `pattern` branch.
+    fn row_residual(&self, i: usize, x: &[f64]) -> f64 {
+        let (cols, vals) = self.a[i].entries();
+        let mut acc = 0.0_f64;
+        for (&j, &v) in cols.iter().zip(vals.iter()) {
+            acc += v * x[j as usize];
+        }
+        acc - self.b[i]
     }
 
     /// Debug-only check that the attached pattern really covers every non-zero

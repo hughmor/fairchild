@@ -151,6 +151,22 @@ pub struct ReactiveBranchSpec {
     /// Current capacitance (F) or inductance (H) at the device's cached
     /// operating point.  Re-queried per NR iteration.
     pub value: f64,
+    /// `dC/dv` (F/V), or `dL/di` (H/A), at that same operating point.  Zero for
+    /// a branch whose value does not depend on its own state, which is most of
+    /// them — and the default, so a device that has no bias dependence says
+    /// nothing.
+    ///
+    /// **Load-bearing for the Jacobian, not for the residual.**  The branch
+    /// carries `q = value·v`, so its current is `α·(C(v)·v − C_prev·v_prev)`
+    /// and the true derivative is `α·(C + v·dC/dv)`.  Stamping `α·C` alone
+    /// converges — Newton reaches the same fixed point by successive
+    /// substitution on the missing term — so a forward run looks correct and
+    /// only pays in iterations.  What it is not is the *true* `∂f/∂x`, and the
+    /// adjoint needs that: `dL/dp = −λᵀ·∂f/∂p` is the total derivative only if
+    /// `Jᵀλ = ∂L/∂x` was solved with the real `J`.  Measured on an MZI with a
+    /// `fc_pn_ps_cap` arm, the missing term is 22 % of the drive node's
+    /// diagonal and put the parameter gradient 16 % out.
+    pub dvalue_dstate: f64,
 }
 
 /// Bit-flags controlling which contributions `eval` should compute.
@@ -379,5 +395,35 @@ pub trait Device: Send + Sync {
     /// default — keeps the conservative clique.
     fn stamp_pairs(&self) -> Option<Vec<(usize, usize)>> {
         None
+    }
+
+    /// MNA columns whose `∂f/∂x` this device deliberately does **not** stamp.
+    ///
+    /// A device may linearise about a coefficient it freezes at the previous
+    /// Newton iterate rather than differentiating it.  Successive substitution
+    /// reaches the same fixed point, so the converged answer is identical — and
+    /// for a term like `∂φ/∂λ ≈ 2.7e9 rad/m` freezing is the only thing that
+    /// converges at all.  Newton is content with any iteration matrix that
+    /// contracts; it does not need the exact derivative.
+    ///
+    /// The adjoint method does.  `dL/dp = −λᵀ·∂f/∂p` is the total derivative
+    /// only if `Jᵀλ = ∂L/∂x` used the true `J`, so a frozen block does not make
+    /// the gradient approximate — it makes every path through that block
+    /// silently contribute **zero**.  For an electro-optic device that is the
+    /// path the user cares about most.
+    ///
+    /// Report those columns here.  `crate::adjoint` re-derives them numerically
+    /// for the adjoint solve alone and leaves the Newton iteration matrix
+    /// untouched, so declaring a column costs nothing at solve time.
+    ///
+    /// λ wires do not need declaring — the adjoint finds them from the netlist,
+    /// since every optical device freezes those and there is no point making
+    /// fourteen models say so.  Declare the *electrical* columns an optical
+    /// device reads: drive voltages, control wires, thermal nodes.
+    ///
+    /// `crate::adjoint::jacobian_check` is the oracle for this: any mismatch in
+    /// an undeclared column is a missing declaration or a wrong stamp.
+    fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        Vec::new()
     }
 }

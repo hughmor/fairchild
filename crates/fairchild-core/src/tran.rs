@@ -690,6 +690,7 @@ pub fn tran_nr_with_registry_var_opts(
                 &devices,
                 &reactive.dev_state,
                 &mut mat,
+                &x_try,
                 h_actual,
                 step_mode,
                 gear2,
