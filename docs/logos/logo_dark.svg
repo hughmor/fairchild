@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- Fairchild logo — dark mode variant. Transparent background: place on #20242b or similar. -->
+
 <svg
    width="150mm"
    height="60mm"
@@ -22,13 +23,13 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#16191e"
      inkscape:document-units="mm"
-     inkscape:zoom="0.67997322"
-     inkscape:cx="245.59791"
-     inkscape:cy="255.15711"
-     inkscape:window-width="1728"
-     inkscape:window-height="1382"
-     inkscape:window-x="1720"
-     inkscape:window-y="30"
+     inkscape:zoom="2.0843418"
+     inkscape:cx="280.18438"
+     inkscape:cy="138.65288"
+     inkscape:window-width="1512"
+     inkscape:window-height="921"
+     inkscape:window-x="0"
+     inkscape:window-y="33"
      inkscape:window-maximized="0"
      inkscape:current-layer="layer1" />
   <defs
@@ -82,6 +83,6 @@
        letter-spacing="2.6"
        fill="#9ea4ae"
        id="text37"
-       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:2.77813px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0.743479px;fill:#9ea4ae;stroke-width:0.264583">CIRCUIT AND PHOTONIC SIMULATOR</text>
+       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:2.77813px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0.743479px;fill:#9ea4ae;stroke-width:0.264583">ELECTRO-OPTIC CIRCUIT SIMULATOR</text>
   </g>
 </svg>
