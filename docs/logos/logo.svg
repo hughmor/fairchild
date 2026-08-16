@@ -8,7 +8,7 @@
    version="1.1"
    id="svg1"
    inkscape:version="1.4.2 (ebf0e940, 2025-05-08)"
-   sodipodi:docname="logo_working.svg"
+   sodipodi:docname="logo.svg"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns="http://www.w3.org/2000/svg"
@@ -23,13 +23,13 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
-     inkscape:zoom="0.67997322"
-     inkscape:cx="245.59791"
-     inkscape:cy="255.15711"
-     inkscape:window-width="1728"
-     inkscape:window-height="1382"
-     inkscape:window-x="1720"
-     inkscape:window-y="30"
+     inkscape:zoom="1.66"
+     inkscape:cx="202.40964"
+     inkscape:cy="172.28916"
+     inkscape:window-width="1512"
+     inkscape:window-height="921"
+     inkscape:window-x="0"
+     inkscape:window-y="33"
      inkscape:window-maximized="0"
      inkscape:current-layer="layer1" />
   <defs
@@ -83,6 +83,6 @@
        letter-spacing="2.6"
        fill="#6a6f78"
        id="text37"
-       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:2.77813px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0.743479px;fill:#6a6f78;stroke-width:0.264583">CIRCUIT AND PHOTONIC SIMULATOR</text>
+       style="font-style:normal;font-variant:normal;font-weight:500;font-stretch:normal;font-size:2.77813px;font-family:Futura;-inkscape-font-specification:'Futura, Medium';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0.743479px;fill:#6a6f78;stroke-width:0.264583">ELECTRO-OPTIC CIRCUIT SIMULATOR</text>
   </g>
 </svg>
