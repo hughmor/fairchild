@@ -15,6 +15,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use fairchild_core::adjoint::dc_sensitivity;
+use fairchild_core::adjoint_ac::{AcAdjoint, AcOutput};
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
@@ -723,6 +725,177 @@ impl Circuit {
         })
     }
 
+    /// Operating-point sensitivities: every probe's value and its gradient
+    /// with respect to every parameter, from one solve.
+    ///
+    /// The DC counterpart of `tran_adjoint` / `ac_adjoint`. It is a single call
+    /// rather than a forward/backward pair because an operating point has one
+    /// solve to differentiate — there is no trajectory to seed.
+    ///
+    /// ```python
+    /// r = ckt.dc_adjoint(probes={"p": ("power", "bar", 0)},
+    ///                    wrt=["Vh.dc"])
+    /// r.values["p"]        # W
+    /// r.grad["p"]          # dP/dVh, one entry per parameter
+    /// ```
+    ///
+    /// Raises if a parameter reaches nothing, for the same reason the other two
+    /// do: a placeholder zero is indistinguishable from a real insensitivity.
+    /// `wrt` is the list of `"element.param"` names to differentiate against.
+    /// It is deliberately not called `params`: that kwarg is already taken, on
+    /// all three of these entry points, by the per-run value overrides an
+    /// optimiser's inner loop uses.
+    #[pyo3(signature = (probes, wrt, **kwargs))]
+    pub fn dc_adjoint(
+        &self,
+        py: Python<'_>,
+        probes: &Bound<'_, PyDict>,
+        wrt: Vec<String>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<DcAdjointResult> {
+        let netlist = self
+            .netlist
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
+        let mut nl = netlist.clone();
+        apply_overrides(&mut nl, &self.overrides);
+        apply_source_overrides(&mut nl, &self.source_overrides);
+        if let Some(kw) = kwargs {
+            if let Some(p) = kw.get_item("params")? {
+                let per_run: HashMap<String, f64> = p.extract()?;
+                let lowered = per_run
+                    .into_iter()
+                    .map(|(k, v)| (k.to_lowercase(), v))
+                    .collect();
+                apply_overrides(&mut nl, &lowered);
+            }
+        }
+        let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
+        let opts = build_sim_options(&nl, kwargs)?;
+
+        let declared: Vec<(String, Output)> = probes
+            .iter()
+            .map(|(k, v)| Ok((k.extract::<String>()?, parse_probe(&v)?)))
+            .collect::<PyResult<_>>()?;
+        if declared.is_empty() {
+            return Err(PyRuntimeError::new_err(
+                "dc_adjoint needs at least one probe; nothing else can be differentiated",
+            ));
+        }
+        let outs: Vec<Output> = declared.iter().map(|(_, o)| o.clone()).collect();
+        let refs: Vec<ParamRef> = wrt
+            .iter()
+            .map(|p| parse_param(p))
+            .collect::<PyResult<_>>()?;
+
+        let s = dc_sensitivity(&nl, &registry, &opts, &outs, &refs).map_err(sim_err)?;
+
+        let unreached: Vec<&String> = wrt
+            .iter()
+            .zip(s.reached.iter())
+            .filter(|(_, ok)| !**ok)
+            .map(|(p, _)| p)
+            .collect();
+        if !unreached.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "these parameters reach nothing in the equations, so their gradient is a \
+                 placeholder zero rather than a computed one: {unreached:?}"
+            )));
+        }
+        let shaky: Vec<(&String, f64)> = wrt
+            .iter()
+            .zip(s.fd_error.iter())
+            .filter(|(_, e)| **e > 1e-3)
+            .map(|(p, e)| (p, *e))
+            .collect();
+        if !shaky.is_empty() {
+            let warnings = py.import_bound("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (format!(
+                    "fairchild: the gradient for {shaky:?} could not be resolved to better \
+                     than the relative error shown; pass a step explicitly if you know one."
+                ),),
+            )?;
+        }
+
+        Ok(DcAdjointResult {
+            names: declared.into_iter().map(|(n, _)| n).collect(),
+            values: s.values,
+            grad: s.grad,
+        })
+    }
+
+    /// Run an `.ac` sweep that can be differentiated, and return the run.
+    ///
+    /// The frequency-domain counterpart of `tran_adjoint`, and the one a filter
+    /// design wants: "put the resonance here", "flatten this passband" are
+    /// least-squares fits of a response against a target.
+    ///
+    /// ```python
+    /// run = ckt.ac_adjoint(node="out0_re_0", fstart=1e8, fstop=1e11,
+    ///                      points=40, src="Vd")
+    /// y = run.response                              # |V|^2 per frequency
+    /// g = run.backward(2 * (y - target),            # dL/dy per frequency
+    ///                  ["Xps.l_um", "Vd.dc"])       # -> (2,) numpy
+    /// ```
+    ///
+    /// `node` is the net to read. `quantity` picks what is read off it:
+    /// `"mag2"` (default, `|V|^2` — smooth even at a null, which `|V|` is not),
+    /// `"re"`, or `"im"`.
+    ///
+    /// Everything else is the same kwargs as `run("ac", ...)`.
+    #[pyo3(signature = (node, quantity=None, **kwargs))]
+    pub fn ac_adjoint(
+        &self,
+        node: &str,
+        quantity: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<AcAdjointRun> {
+        let netlist = self
+            .netlist
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
+
+        let (freqs, src) = parse_ac_kwargs(kwargs)?;
+
+        let mut nl = netlist.clone();
+        apply_overrides(&mut nl, &self.overrides);
+        apply_source_overrides(&mut nl, &self.source_overrides);
+        if let Some(kw) = kwargs {
+            if let Some(p) = kw.get_item("params")? {
+                let per_run: HashMap<String, f64> = p.extract()?;
+                let lowered = per_run
+                    .into_iter()
+                    .map(|(k, v)| (k.to_lowercase(), v))
+                    .collect();
+                apply_overrides(&mut nl, &lowered);
+            }
+        }
+
+        let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
+        let opts = build_sim_options(&nl, kwargs)?;
+
+        let out = match quantity.unwrap_or("mag2") {
+            "mag2" | "mag_squared" | "power" => AcOutput::MagSquared { node: node.into() },
+            "re" | "real" => AcOutput::Real { node: node.into() },
+            "im" | "imag" => AcOutput::Imag { node: node.into() },
+            other => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "unknown quantity '{other}'; use 'mag2', 're' or 'im'"
+                )))
+            }
+        };
+
+        let inner =
+            AcAdjoint::run(&nl, &registry, &opts, &freqs, src.as_deref()).map_err(sim_err)?;
+        Ok(AcAdjointRun {
+            inner,
+            registry,
+            out,
+        })
+    }
+
     /// Run a parametric sweep over scalar element parameters.
     ///
     /// Calls `run(analysis, **kwargs)` once per value in `values`, each time
@@ -1179,6 +1352,34 @@ fn parse_param(name: &str) -> PyResult<ParamRef> {
     Ok(ParamRef::new(element, param))
 }
 
+/// A parameter spec from Python: `"El.param"`, or `("El.param", step)` to pin
+/// the finite-difference step `∂G/∂p` is taken with.
+///
+/// The step exists because the automatic choice cannot always work. `∂G/∂p` is
+/// differenced numerically, and the default `∛ε·|p|` assumes the residual
+/// varies on the parameter's own scale — an optical length does not, since it
+/// moves the propagation phase by ~17 rad/µm and a power objective is then a
+/// near-total cancellation between two much larger terms. The gradient warns
+/// when it could not resolve one; without this there was no way to act on that.
+fn parse_param_spec(spec: &Bound<'_, PyAny>) -> PyResult<ParamRef> {
+    if let Ok(name) = spec.extract::<String>() {
+        return parse_param(&name);
+    }
+    let (name, step): (String, f64) = spec.extract().map_err(|_| {
+        PyRuntimeError::new_err(
+            "a parameter is 'element.param', or a ('element.param', step) tuple",
+        )
+    })?;
+    Ok(parse_param(&name)?.with_step(step))
+}
+
+/// The display name for a spec, for error and warning messages.
+fn param_spec_name(spec: &Bound<'_, PyAny>) -> String {
+    spec.extract::<String>()
+        .or_else(|_| spec.extract::<(String, f64)>().map(|(n, _)| n))
+        .unwrap_or_else(|_| "<unparsable>".to_string())
+}
+
 /// A transient run that can be differentiated.
 ///
 /// Holds the trajectory plus the per-timestep state the backward pass needs, so
@@ -1317,6 +1518,133 @@ impl TranAdjointRun {
     }
 }
 
+#[pyclass]
+pub struct DcAdjointResult {
+    names: Vec<String>,
+    values: Vec<f64>,
+    grad: Vec<Vec<f64>>,
+}
+
+#[pymethods]
+impl DcAdjointResult {
+    /// `{probe: value}` at the operating point.
+    #[getter]
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new_bound(py);
+        for (n, v) in self.names.iter().zip(self.values.iter()) {
+            d.set_item(n, *v)?;
+        }
+        Ok(d)
+    }
+
+    /// `{probe: array}` — `dprobe/dp`, one entry per parameter, in the order
+    /// the parameters were given.
+    #[getter]
+    fn grad<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new_bound(py);
+        for (n, g) in self.names.iter().zip(self.grad.iter()) {
+            d.set_item(n, PyArray1::from_slice_bound(py, g))?;
+        }
+        Ok(d)
+    }
+}
+
+#[pyclass(unsendable)]
+pub struct AcAdjointRun {
+    inner: AcAdjoint,
+    registry: DeviceRegistry,
+    out: AcOutput,
+}
+
+#[pymethods]
+impl AcAdjointRun {
+    /// The swept frequencies, in Hz.
+    #[getter]
+    fn freqs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_slice_bound(py, self.inner.freqs())
+    }
+
+    /// The chosen quantity at each frequency.
+    #[getter]
+    fn response<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let r = self.inner.response(&self.out).map_err(sim_err)?;
+        Ok(PyArray1::from_vec_bound(py, r))
+    }
+
+    /// `dL/dp` for each named parameter, given `dL/d(response)` per frequency.
+    ///
+    /// `cotangent` is an array of `len(freqs)` — the derivative of your loss
+    /// with respect to the response at each frequency. Build the loss in numpy
+    /// however you like; this only needs its derivative. For a least-squares
+    /// fit against a target that is `2*(response - target)`.
+    ///
+    /// Raises if a parameter reaches nothing in the equations: a silent zero is
+    /// indistinguishable from a real insensitivity and would stall an optimiser
+    /// somewhere that merely looks stationary. Warns rather than silently
+    /// returning a number when the finite difference behind `∂A/∂p` could not
+    /// be resolved well.
+    fn backward<'py>(
+        &self,
+        py: Python<'py>,
+        cotangent: PyReadonlyArray1<f64>,
+        params: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let weights: Vec<f64> = cotangent.as_array().to_vec();
+        let n_f = self.inner.freqs().len();
+        if weights.len() != n_f {
+            return Err(PyRuntimeError::new_err(format!(
+                "cotangent has length {} but the sweep has {n_f} frequencies",
+                weights.len()
+            )));
+        }
+        let (_, seeds) = self.inner.weighted(&self.out, &weights).map_err(sim_err)?;
+        let refs: Vec<ParamRef> = params
+            .iter()
+            .map(parse_param_spec)
+            .collect::<PyResult<_>>()?;
+        let names: Vec<String> = params.iter().map(param_spec_name).collect();
+        let s = self
+            .inner
+            .gradient(&self.registry, &seeds, &refs)
+            .map_err(sim_err)?;
+
+        let unreached: Vec<&String> = names
+            .iter()
+            .zip(s.reached.iter())
+            .filter(|(_, ok)| !**ok)
+            .map(|(p, _)| p)
+            .collect();
+        if !unreached.is_empty() {
+            return Err(PyRuntimeError::new_err(format!(
+                "these parameters reach nothing in the equations, so their gradient is a \
+                 placeholder zero rather than a computed one: {unreached:?}.  Either the name \
+                 is wrong, or the model does not accept that parameter at runtime (see \
+                 docs/model_status.md)"
+            )));
+        }
+
+        let shaky: Vec<(&String, f64)> = names
+            .iter()
+            .zip(s.fd_error.iter())
+            .filter(|(_, e)| **e > 1e-3)
+            .map(|(p, e)| (p, *e))
+            .collect();
+        if !shaky.is_empty() {
+            let warnings = py.import_bound("warnings")?;
+            warnings.call_method1(
+                "warn",
+                (format!(
+                    "fairchild: the gradient for {shaky:?} could not be resolved to better than \
+                     the relative error shown.  The parameter's scale and the objective's \
+                     disagree; pass a step explicitly if you know a better one."
+                ),),
+            )?;
+        }
+
+        Ok(PyArray1::from_vec_bound(py, s.grad))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module entry point
 // ---------------------------------------------------------------------------
@@ -1327,5 +1655,7 @@ fn fairchild(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SimResult>()?;
     m.add_class::<WaveformSource>()?;
     m.add_class::<TranAdjointRun>()?;
+    m.add_class::<AcAdjointRun>()?;
+    m.add_class::<DcAdjointResult>()?;
     Ok(())
 }

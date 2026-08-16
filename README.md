@@ -250,8 +250,10 @@ cargo test --workspace
 
 Runnable examples live in [`examples/`](examples): `electronic/` for plain
 SPICE, `photonic/` for links, rings, WDM and noise, `verilog_a/` for OSDI
-models, `optimization/` for gradient-based design. Most photonic examples take
-`--selftest`, which asserts the physics instead of plotting it.
+models, and [`optimization/`](examples/optimization) for gradient-based design —
+a DC bias trim, an AC bandwidth fit, and two transient co-design problems, each
+checking its adjoint gradient against a full re-solve. Most photonic examples
+take `--selftest`, which asserts the physics instead of plotting it.
 
 ---
 

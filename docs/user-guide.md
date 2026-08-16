@@ -917,9 +917,9 @@ c.set_param("Rload", "resistance", 2e3)
 op    = c.run("op")
 tran  = c.run("tran", step=1e-9, stop=1e-6,
               method="gear", reltol=1e-5, variable_step=True)
-ac    = c.run("ac", points="dec", n=20, fstart=1, fstop=1e6)
-noise = c.run("noise", points="dec", n=20, fstart=1, fstop=1e6,
-              v_out_pos="out", input_src="V1")
+ac    = c.run("ac", variation="dec", points=20, fstart=1, fstop=1e6)
+noise = c.run("noise", variation="dec", points=20, fstart=1, fstop=1e6,
+              out_pos="out", src="V1")
 
 # Parametric sweep — equivalent of Monte Carlo / corner runs.
 results = c.sweep("Rload.resistance", [1e3, 2e3, 5e3], "tran",
@@ -933,6 +933,53 @@ meas = tran.measurements        # dict of name → value from .measure
 
 `Circuit.set_source(name, WaveformSource.pulse(0, 1, 0, 1e-9, 1e-9, 10e-9, 20e-9))`
 replaces a source's waveform without re-parsing.
+
+### Gradients — `dc_adjoint`, `ac_adjoint`, `tran_adjoint`
+
+Each of the three analyses can report **`dL/dp`**: how a scalar you care about
+moves when a design parameter moves. The cost is one extra solve regardless of
+how many parameters you ask about, which is what makes it usable inside an
+optimiser.
+
+```python
+# DC — value and gradient from a single solve.
+r = c.dc_adjoint(probes={"p": ("power", "bar", 0)},
+                 wrt=["Vh.dc"],
+                 params={"Vh.dc": 2.5})       # per-run overrides
+r.values["p"], r.grad["p"][0]
+
+# AC — one backward pass covers the whole sweep.
+run = c.ac_adjoint("out", quantity="mag2", variation="dec", points=8,
+                   fstart=1e8, fstop=1e11, src="V1")
+y = np.asarray(run.response)                   # per frequency; a property
+g = run.backward(2 * (y - target),             # dL/dy, one weight per point
+                 ["R1.r", ("Xps.l_um", 0.1)])  # (name, step) pins the FD step
+
+# Transient — a functional of the waveform.
+run = c.tran_adjoint({"v": "out",                  # node voltage
+                      "p": ("power", "out0", 0)},  # optical power, W
+                     step=1e-11, stop=2e-9)
+y = run.probes["v"]
+g = run.backward({"v": 2 * (y - target)},          # dL/dy per timepoint
+                 ["R1.r", "C1.c"])
+```
+
+`wrt` and `params` are separate on purpose: `params` overrides values for this
+run, `wrt` names what to differentiate with respect to.
+
+Three things to know before you rely on the numbers:
+
+- **The result is a partial with respect to a netlist parameter.** If your
+  design variable moves several netlist parameters at once — an optical length
+  that sets both phase and junction capacitance — the chain rule onto the design
+  variable is yours to apply, or JAX's if you wrap it in `custom_vjp`.
+- **`reached` is reported, not assumed.** A misspelled parameter, or a device
+  that ignores the write, comes back flagged rather than as a confident zero.
+- **Check the gradient, and not at the optimum.** The gradient is zero there, so
+  agreeing about zero proves nothing.
+
+Worked examples for all three, each checking itself against a full re-solve:
+[`examples/optimization/`](../examples/optimization).
 
 ---
 
