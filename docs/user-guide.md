@@ -370,7 +370,12 @@ voltages + branch currents.
 ```
 
 Sweeps `src` (a voltage or current source) over the range, optionally nested
-with a second source.
+with a second source. Names are case-insensitive.
+
+A name that matches no source in the netlist is an error naming the sources you
+could have meant, on either axis. It is worth saying explicitly because the
+alternative is not obviously wrong: sweeping nothing still produces a table of
+the right shape, one operating point repeated down every column.
 
 ### Transient
 
