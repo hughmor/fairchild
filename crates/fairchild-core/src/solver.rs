@@ -160,6 +160,7 @@ impl NoCacheFactorisation {
             backend: Box::new(DenseSolver),
         }
     }
+    #[cfg(feature = "klu")]
     fn with_backend(backend: Box<dyn LinearSolver>) -> Self {
         Self { backend }
     }
@@ -203,11 +204,83 @@ impl LinearSolver for DenseSolver {
     }
 
     fn factorise(&self, _a: &[SparseRow]) -> Result<Box<dyn Factorisation>, SimError> {
-        // No-op cache for dense: re-running partial_piv_lu is cheap
-        // enough that caching the column permutation does not pay.
-        Ok(Box::new(NoCacheFactorisation::with_backend(Box::new(
-            DenseSolver,
-        ))))
+        Ok(Box::new(DenseFactorisation::new()))
+    }
+}
+
+/// Dense LU that survives an unchanged matrix.
+///
+/// The cache here is the **numeric factors**, not the pivot order — caching the
+/// pivots alone genuinely does not pay, which is what the no-op cache this
+/// replaced was reasoning about. Reusing the factors is a different trade: an LU
+/// is O(n³) and the triangular solves that follow are O(n²), so on a run where
+/// `A` holds still (a linear circuit at fixed timestep, where the MNA matrix is
+/// constant for the whole transient) this turns every step after the first into
+/// solves alone.
+struct DenseFactorisation {
+    /// Row-major values the cached factors were built from.
+    values: Vec<f64>,
+    n: usize,
+    lu: Option<faer::linalg::solvers::PartialPivLu<f64>>,
+}
+
+impl DenseFactorisation {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            n: 0,
+            lu: None,
+        }
+    }
+}
+
+impl Factorisation for DenseFactorisation {
+    fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let n = b.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        if self.n != n {
+            self.n = n;
+            self.values = vec![f64::NAN; n * n]; // NAN != anything, so this reads as changed
+            self.lu = None;
+        }
+
+        // One walk that both refreshes the cache and notices whether it moved.
+        // Same `row[j]` access the one-shot `solve` uses, so the two paths
+        // cannot disagree about what the matrix is.
+        let mut changed = false;
+        for (row, dst) in a.iter().zip(self.values.chunks_mut(n)) {
+            for (j, slot) in dst.iter_mut().enumerate() {
+                let v = row[j];
+                changed |= *slot != v;
+                *slot = v;
+            }
+        }
+
+        if changed || self.lu.is_none() {
+            let a_mat = Mat::<f64>::from_fn(n, n, |i, j| self.values[i * n + j]);
+            self.lu = Some(a_mat.partial_piv_lu());
+        }
+        let lu = self.lu.as_ref().expect("just populated");
+        let b_col = Col::<f64>::from_fn(n, |i| b[i]);
+        let x_col = lu.solve(b_col.as_ref());
+        let x: Vec<f64> = (0..n).map(|i| x_col[i]).collect();
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(SimError::SingularMatrix);
+        }
+        Ok(x)
+    }
+
+    fn refactor_and_solve_transpose(
+        &mut self,
+        a: &[SparseRow],
+        b: &[f64],
+    ) -> Result<Vec<f64>, SimError> {
+        // Deliberately uncached. The adjoint paths are cold, and routing Aᵀ
+        // through the forward cache would make A and Aᵀ evict each other on
+        // every alternation — slower than not caching, for no gain.
+        DenseSolver.solve_transpose(a, b)
     }
 }
 
@@ -309,10 +382,26 @@ struct FaerSparseFactorisation {
     slot: Vec<u32>,
     values: Vec<f64>,
     symbolic: Option<faer::sparse::linalg::solvers::SymbolicLu<usize>>,
+    /// Numeric factors of the matrix currently in `values`.  `None` means they
+    /// are stale (or never computed) and the next solve must factorise.
+    numeric: Option<faer::sparse::linalg::solvers::Lu<usize, f64>>,
 }
 
 /// `slot` entry for a structural cell that is not in the active set.
 const NO_SLOT: u32 = u32::MAX;
+
+/// What a [`FaerSparseFactorisation::refill`] pass found, and therefore how much
+/// of the cache survives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refill {
+    /// The structural pattern changed — both symbolic and numeric are stale.
+    Rebuild,
+    /// Same pattern, at least one value moved — numeric factors are stale.
+    Changed,
+    /// Not one value moved.  The numeric factors are still exact; skip
+    /// factorising and go straight to the triangular solves.
+    Unchanged,
+}
 
 impl FaerSparseFactorisation {
     fn new(zero_threshold: f64) -> Self {
@@ -323,6 +412,7 @@ impl FaerSparseFactorisation {
             slot: Vec::new(),
             values: Vec::new(),
             symbolic: None,
+            numeric: None,
         }
     }
 
@@ -374,15 +464,23 @@ impl FaerSparseFactorisation {
         self.row_idx = row_idx;
         self.slot = slot;
         self.values = values;
+        self.numeric = None; // new pattern — any cached factors are meaningless
         Ok(())
     }
 
-    /// Copy current values into the cached CSC.  Returns true if a structural
-    /// cell outside the active set has become non-zero, meaning the caller must
-    /// rebuild before factorising.
-    fn refill(&mut self, a: &[SparseRow]) -> bool {
+    /// Copy current values into the cached CSC, reporting what that implies for
+    /// the cached factors.
+    ///
+    /// The `Unchanged` case is the one worth having: an LU depends only on `A`,
+    /// so if not one value moved, the existing factors are still exactly right
+    /// and only the triangular solves need re-running.  Detecting it costs one
+    /// comparison per stored value — negligible against the factorisation it
+    /// skips, and it *checks* rather than assuming, so no caller can be wrong
+    /// about whether its matrix is constant.
+    fn refill(&mut self, a: &[SparseRow]) -> Refill {
         let thr = self.zero_threshold;
         let mut grew = false;
+        let mut changed = false;
         let mut k = 0usize;
         // Positional: `slot` was built by this same walk, so reading the row's
         // own values needs no column lookup. Indexing `row[j]` here instead
@@ -392,25 +490,45 @@ impl FaerSparseFactorisation {
             for &v in vals {
                 match self.slot.get(k).copied() {
                     Some(NO_SLOT) => grew |= v.abs() > thr,
-                    Some(s) => self.values[s as usize] = v,
-                    None => return true,
+                    Some(s) => {
+                        let slot = &mut self.values[s as usize];
+                        // Bit-exact: a value that moved by any amount at all
+                        // invalidates the factors.  Nothing here should tolerate
+                        // "close enough" — that would silently reuse factors for
+                        // a matrix they were not computed from.
+                        changed |= *slot != v;
+                        *slot = v;
+                    }
+                    None => return Refill::Rebuild,
                 }
                 k += 1;
             }
         }
-        grew || k != self.slot.len()
+        if grew || k != self.slot.len() {
+            Refill::Rebuild
+        } else if changed {
+            Refill::Changed
+        } else {
+            Refill::Unchanged
+        }
     }
 
-    fn solve_cached(&self, b: &[f64]) -> Result<Vec<f64>, SimError> {
+    /// Solve with the cached factors, computing them first if they are absent.
+    fn solve_cached(&mut self, b: &[f64]) -> Result<Vec<f64>, SimError> {
         use faer::sparse::linalg::solvers::Lu;
         use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 
         let n = b.len();
-        let symbolic = self.symbolic.as_ref().ok_or(SimError::SingularMatrix)?;
-        let sym = SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
-        let mat = SparseColMatRef::<usize, f64>::new(sym, &self.values);
-        let lu = Lu::try_new_with_symbolic(symbolic.clone(), mat)
-            .map_err(|_| SimError::SingularMatrix)?;
+        if self.numeric.is_none() {
+            let symbolic = self.symbolic.clone().ok_or(SimError::SingularMatrix)?;
+            let sym =
+                SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
+            let mat = SparseColMatRef::<usize, f64>::new(sym, &self.values);
+            self.numeric = Some(
+                Lu::try_new_with_symbolic(symbolic, mat).map_err(|_| SimError::SingularMatrix)?,
+            );
+        }
+        let lu = self.numeric.as_ref().expect("just populated");
         let b_col = Col::<f64>::from_fn(n, |i| b[i]);
         let x_col = lu.solve(b_col.as_ref());
         let x: Vec<f64> = (0..n).map(|i| x_col[i]).collect();
@@ -425,8 +543,15 @@ impl Factorisation for FaerSparseFactorisation {
     fn refactor_and_solve(&mut self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         // `refill` indexes the cached slot map, so it is only valid once
         // `rebuild` has run; short-circuit ordering matters here.
-        if self.symbolic.is_none() || self.refill(a) {
+        if self.symbolic.is_none() {
             self.rebuild(a)?;
+        } else {
+            match self.refill(a) {
+                Refill::Rebuild => self.rebuild(a)?,
+                Refill::Changed => self.numeric = None,
+                // Factors still describe this exact matrix — keep them.
+                Refill::Unchanged => {}
+            }
         }
         self.solve_cached(b)
     }
@@ -591,46 +716,65 @@ impl KluFactorisation {
         Ok(())
     }
 
-    /// Copy current values into the cached CSC. Returns true if a cell outside
-    /// the active set has turned non-zero, so the caller must rebuild first.
+    /// Copy current values into the cached CSC, reporting how much of the cache
+    /// survives — same contract as [`FaerSparseFactorisation::refill`].
     ///
     /// Purely positional: `slot` was built by this same walk order, so no
     /// column lookup happens here at all.
-    fn refill(&mut self, a: &[SparseRow]) -> bool {
+    fn refill(&mut self, a: &[SparseRow]) -> Refill {
         let thr = self.zero_threshold;
         let mut grew = false;
+        let mut changed = false;
         let mut k = 0usize;
         for row in a {
             let (_, vals) = row.entries();
             for &v in vals {
                 match self.slot.get(k).copied() {
                     Some(NO_SLOT) => grew |= v.abs() > thr,
-                    Some(s) => self.ax[s as usize] = v,
+                    Some(s) => {
+                        let slot = &mut self.ax[s as usize];
+                        changed |= *slot != v;
+                        *slot = v;
+                    }
                     // The row grew a column since the rebuild — only possible
                     // on a patternless matrix, and it means rebuild anyway.
-                    None => return true,
+                    None => return Refill::Rebuild,
                 }
                 k += 1;
             }
         }
         // Fewer cells than the slot map expects: same conclusion.
-        grew || k != self.slot.len()
+        if grew || k != self.slot.len() {
+            Refill::Rebuild
+        } else if changed {
+            Refill::Changed
+        } else {
+            Refill::Unchanged
+        }
     }
 
-    /// Numeric refactor on the cached pattern, then solve. `transpose` picks
-    /// `klu_tsolve` for the adjoint path.
-    fn refactor_then(&mut self, b: &[f64], transpose: bool) -> Result<Vec<f64>, SimError> {
+    /// Solve on the cached pattern, numerically refactoring first only when the
+    /// matrix actually moved. `transpose` picks `klu_tsolve` for the adjoint
+    /// path.
+    fn refactor_then(
+        &mut self,
+        b: &[f64],
+        transpose: bool,
+        needs_refactor: bool,
+    ) -> Result<Vec<f64>, SimError> {
         let symbolic = self.symbolic.as_ref().ok_or(SimError::SingularMatrix)?;
         let numeric = self.numeric.as_mut().ok_or(SimError::SingularMatrix)?;
-        numeric
-            .refactor(
-                &mut self.ap,
-                &mut self.ai,
-                &mut self.ax,
-                symbolic,
-                &mut self.common,
-            )
-            .map_err(|_| SimError::SingularMatrix)?;
+        if needs_refactor {
+            numeric
+                .refactor(
+                    &mut self.ap,
+                    &mut self.ai,
+                    &mut self.ax,
+                    symbolic,
+                    &mut self.common,
+                )
+                .map_err(|_| SimError::SingularMatrix)?;
+        }
         let mut x = b.to_vec();
         // `klu_tsolve` solves Aᵀx = b from A's own factorisation, so the
         // adjoint path reuses the cache instead of materialising a dense
@@ -653,10 +797,22 @@ impl KluFactorisation {
         b: &[f64],
         transpose: bool,
     ) -> Result<Vec<f64>, SimError> {
-        if self.symbolic.is_none() || self.refill(a) {
+        // `rebuild` ends in a fresh `klu_factor` over the current values, so
+        // both rebuild paths leave the numeric factors already valid.
+        let needs_refactor = if self.symbolic.is_none() {
             self.rebuild(a)?;
-        }
-        self.refactor_then(b, transpose)
+            false
+        } else {
+            match self.refill(a) {
+                Refill::Rebuild => {
+                    self.rebuild(a)?;
+                    false
+                }
+                Refill::Changed => true,
+                Refill::Unchanged => false,
+            }
+        };
+        self.refactor_then(b, transpose, needs_refactor)
     }
 }
 
@@ -679,6 +835,26 @@ impl Factorisation for KluFactorisation {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+/// Largest system `Auto` hands to the dense backend.
+///
+/// Measured, both directions, best of 3 (2026-08-17). `n` is a stand-in for the
+/// thing that actually decides this — how sparse the matrix is — and the two
+/// circuit families bracket it: a ring oscillator's MOSFETs couple four nodes
+/// each, an RC ladder is tridiagonal.
+///
+/// | nodes | nonlinear: cost of sparse | linear: cost of dense |
+/// |---|---|---|
+/// | ~7–11 | +35 % | +9…16 % |
+/// | ~21–23 | +12 % | +47 % |
+/// | ~43 | −3 % (sparse ahead) | +115 % |
+///
+/// So the crossover sits near 20, not the 50 this used to be: past ~20 the
+/// penalty for guessing sparse is small and bounded while the penalty for
+/// guessing dense keeps growing with sparsity. Below it, dense's fit is real
+/// enough to keep. Both backends reuse numeric factors now, so this is a
+/// judgement about algorithmic fit to `n` and nothing else.
+const AUTO_DENSE_MAX: usize = 20;
+
 /// Construct a solver for a system of the given estimated size.  Drives
 /// `SolverKind::Auto`'s dense / sparse crossover.
 pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
@@ -697,7 +873,7 @@ pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
             )
         }
         SolverKind::Auto => {
-            if n < 50 {
+            if n < AUTO_DENSE_MAX {
                 Box::new(DenseSolver)
             } else {
                 Box::new(FaerSparseSolver::default())
@@ -1033,5 +1209,89 @@ mod tests {
         let mut fact = eq.factorise(&sp(&a)).unwrap();
         let x = fact.refactor_and_solve(&sp(&a), &[5.0, 8.0]).unwrap();
         assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 2.0).abs() < 1e-12);
+    }
+
+    /// `refill` must distinguish "not one value moved" from "a value moved",
+    /// because that is the only thing standing between reusing the numeric
+    /// factors and reusing them when they are stale.
+    #[test]
+    fn refill_reports_unchanged_only_when_nothing_moved() {
+        let a = vec![vec![4.0, -1.0], vec![-1.0, 3.0]];
+        let mut f = FaerSparseFactorisation::new(0.0);
+        f.rebuild(&sp(&a)).unwrap();
+
+        assert_eq!(f.refill(&sp(&a)), Refill::Unchanged, "identical matrix");
+
+        let moved = vec![vec![4.0, -1.0], vec![-1.0, 3.0 + 1e-15]];
+        assert_eq!(
+            f.refill(&sp(&moved)),
+            Refill::Changed,
+            "a 1e-15 move is still a different matrix"
+        );
+
+        // A cell outside the active set turning non-zero needs the pattern back.
+        let grown = vec![vec![4.0, -1.0], vec![-1.0, 3.0]];
+        let mut g = FaerSparseFactorisation::new(1.0); // threshold hides the -1s
+        g.rebuild(&sp(&grown)).unwrap();
+        let big = vec![vec![4.0, -2.0], vec![-2.0, 3.0]];
+        assert_eq!(g.refill(&sp(&big)), Refill::Rebuild, "pattern grew");
+    }
+
+    /// Every backend that caches factors, by name, so a failure says which one.
+    /// Dense is included deliberately: it caches nothing, and these two
+    /// properties must hold for it too.
+    fn caching_backends() -> Vec<(&'static str, Box<dyn LinearSolver>)> {
+        #[allow(unused_mut)] // `mut` is only needed with the `klu` feature on
+        let mut v: Vec<(&'static str, Box<dyn LinearSolver>)> = vec![
+            ("dense", Box::new(DenseSolver)),
+            ("faer-sparse", Box::new(FaerSparseSolver::default())),
+        ];
+        #[cfg(feature = "klu")]
+        v.push(("klu", Box::new(KluSolver)));
+        v
+    }
+
+    /// The reuse must cache **factors**, not answers: same `A`, three different
+    /// right-hand sides, each answer checked against the analytic solution.
+    /// Caching a solution instead would pass a single-solve test and fail here.
+    #[test]
+    fn reused_factors_still_solve_new_right_hand_sides() {
+        // [[2,0],[0,4]] — diagonal, so x = [b0/2, b1/4] by inspection.
+        let a = vec![vec![2.0, 0.0], vec![0.0, 4.0]];
+        for (name, solver) in caching_backends() {
+            let mut fact = solver.factorise(&sp(&a)).unwrap();
+            for (b, want) in [
+                ([2.0, 4.0], [1.0, 1.0]),
+                ([6.0, 8.0], [3.0, 2.0]),
+                ([-4.0, 2.0], [-2.0, 0.5]),
+            ] {
+                let x = fact.refactor_and_solve(&sp(&a), &b).unwrap();
+                assert!(
+                    (x[0] - want[0]).abs() < 1e-12 && (x[1] - want[1]).abs() < 1e-12,
+                    "{name}: b={b:?} got {x:?} want {want:?}"
+                );
+            }
+        }
+    }
+
+    /// And when `A` *does* change between solves, the answer must follow it.
+    /// This is the failure the reuse could introduce: stale factors give a
+    /// plausible number for the previous matrix.
+    #[test]
+    fn changed_matrix_is_refactorised() {
+        let two = sp(&[vec![2.0, 0.0], vec![0.0, 2.0]]);
+        let four = sp(&[vec![4.0, 0.0], vec![0.0, 4.0]]);
+        for (name, solver) in caching_backends() {
+            let mut fact = solver.factorise(&two).unwrap();
+            let x = fact.refactor_and_solve(&two, &[2.0, 2.0]).unwrap();
+            assert!((x[0] - 1.0).abs() < 1e-12, "{name}: 2x=2 => x=1, got {x:?}");
+
+            // Same pattern, different values: x must be 0.5, not the cached 1.0.
+            let x = fact.refactor_and_solve(&four, &[2.0, 2.0]).unwrap();
+            assert!(
+                (x[0] - 0.5).abs() < 1e-12,
+                "{name}: 4x=2 => x=0.5, got {x:?}"
+            );
+        }
     }
 }
