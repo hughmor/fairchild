@@ -151,14 +151,52 @@ fn linspace(start: f64, stop: f64, step: f64) -> Vec<f64> {
     v
 }
 
+/// Does this element answer to `src` as a `.dc` sweep target?
+///
+/// The single place that decides what a sweep name matches. [`sweep_source_exists`]
+/// and [`override_source_dc`] must agree about this or one of them becomes a
+/// silent no-op, which is exactly the fault this predicate was extracted to
+/// prevent.
+fn is_named_source(el: &Element, src: &str) -> bool {
+    match el {
+        Element::VoltageSource { name, .. } | Element::CurrentSource { name, .. } => {
+            name.eq_ignore_ascii_case(src)
+        }
+        _ => false,
+    }
+}
+
+/// Whether any element in the netlist would be swept by the name `src`.
+fn sweep_source_exists(netlist: &Netlist, src: &str) -> bool {
+    netlist.elements.iter().any(|el| is_named_source(el, src))
+}
+
+/// Every name a `.dc` could legally sweep, for the error message when one
+/// does not resolve.
+fn sweepable_sources(netlist: &Netlist) -> Vec<&str> {
+    netlist
+        .elements
+        .iter()
+        .filter_map(|el| match el {
+            Element::VoltageSource { name, .. } | Element::CurrentSource { name, .. } => {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Override a named voltage- or current-source's DC value in a netlist clone.
+///
+/// Matching nothing is not an error here — callers validate the name once, up
+/// front, rather than per sweep point.
 fn override_source_dc(netlist: &mut Netlist, src_lc: &str, value: f64) {
     for el in &mut netlist.elements {
+        if !is_named_source(el, src_lc) {
+            continue;
+        }
         match el {
-            Element::VoltageSource { name, waveform, .. } if name.eq_ignore_ascii_case(src_lc) => {
-                *waveform = Waveform::Dc(value);
-            }
-            Element::CurrentSource { name, waveform, .. } if name.eq_ignore_ascii_case(src_lc) => {
+            Element::VoltageSource { waveform, .. } | Element::CurrentSource { waveform, .. } => {
                 *waveform = Waveform::Dc(value);
             }
             _ => {}
@@ -181,6 +219,26 @@ pub fn dc_sweep_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<DcSweepResult, SimError> {
+    // A sweep name that matches nothing used to sweep nothing: every point
+    // re-solved the unmodified circuit, so `.dc VNOPE 0 1 0.1` returned a full
+    // table of the operating point repeated down the column — the right shape,
+    // plausible numbers, and no relation to the sweep that was asked for. A
+    // typo in a source name is the common way to get here.
+    for name in std::iter::once(src).chain(nested.map(|(n, ..)| n)) {
+        if !sweep_source_exists(netlist, name) {
+            let mut available = sweepable_sources(netlist);
+            available.sort_unstable();
+            return Err(SimError::ParameterError(format!(
+                ".dc: no source named '{name}' in the netlist (sweepable sources: {})",
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                }
+            )));
+        }
+    }
+
     let outer_vals = linspace(start, stop, step);
     let inner = nested.map(|(name, a, b, s)| SweepAxis {
         src: name.to_lowercase(),
@@ -318,6 +376,76 @@ mod tests {
         for (v_in, &v) in r.outer.values.iter().zip(v_out.iter()) {
             assert!((v - 0.5 * v_in).abs() < 1e-6, "V(in)={v_in} V(out)={v}");
         }
+    }
+
+    #[test]
+    fn dc_sweep_on_an_unknown_source_is_an_error() {
+        // The bug this guards: sweeping a name that matches nothing solved the
+        // unmodified circuit at every point and returned it as a sweep. The
+        // anchor is absolute, not an agreement between two code paths — the
+        // request is impossible to satisfy, so the only correct answer is a
+        // refusal, and any table of numbers is wrong.
+        let net = parse_spice(
+            "* typo\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.dc VNOPE 0 1 0.1\n.end\n",
+        )
+        .unwrap();
+        let reg = DeviceRegistry::new();
+        let Err(err) = dc_sweep_with_registry(&net, "vnope", 0.0, 1.0, 0.1, None, &reg) else {
+            panic!("sweeping a source that does not exist must fail, not return a table");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vnope"),
+            "message does not name the source: {msg}"
+        );
+        // The message must name the fix, not just the fault.
+        assert!(
+            msg.contains("v1"),
+            "message does not list what is sweepable: {msg}"
+        );
+    }
+
+    #[test]
+    fn dc_sweep_nested_axis_is_validated_too() {
+        // The inner axis goes through the same override and had the same hole.
+        let net = parse_spice(
+            "* nested typo\nV1 in 0 DC 0\nVB b 0 DC 0\nR1 in out 1k\nR2 out b 1k\n\
+             .dc V1 0 1 0.5 VNOPE 0 1 0.5\n.end\n",
+        )
+        .unwrap();
+        let reg = DeviceRegistry::new();
+        let Err(err) = dc_sweep_with_registry(
+            &net,
+            "v1",
+            0.0,
+            1.0,
+            0.5,
+            Some(("vnope", 0.0, 1.0, 0.5)),
+            &reg,
+        ) else {
+            panic!("a nested sweep on a missing source must fail");
+        };
+        assert!(err.to_string().contains("vnope"), "{err}");
+    }
+
+    #[test]
+    fn dc_sweep_accepts_a_current_source_and_ignores_case() {
+        // `.dc` sweeps I sources too, and SPICE names are case-insensitive —
+        // a validation that only knew about V, or only about lowercase, would
+        // reject decks that used to work.
+        let net =
+            parse_spice("* isweep\nI1 0 a DC 0\nR1 a 0 1k\n.dc I1 0 1m 0.5m\n.end\n").unwrap();
+        let reg = DeviceRegistry::new();
+        let r = dc_sweep_with_registry(&net, "I1", 0.0, 1e-3, 5e-4, None, &reg)
+            .expect("sweeping a current source by an upper-case name must work");
+        let v_a = r.node_voltages.get("a").unwrap();
+        // 1 mA into 1 k = 1 V, and the sweep must actually move the source.
+        assert!((v_a[0]).abs() < 1e-9, "V(a) at I=0 is {}", v_a[0]);
+        assert!(
+            (v_a[v_a.len() - 1] - 1.0).abs() < 1e-6,
+            "V(a) at I=1mA is {}",
+            v_a[v_a.len() - 1]
+        );
     }
 
     #[test]
