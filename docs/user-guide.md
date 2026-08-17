@@ -900,8 +900,14 @@ fairchild -f circuit.sp --check
 ## 9. Python bindings
 
 ```bash
-pip install fairchild     # once published; until then, see crates/fairchild-py/README
+pip install fairchild-sim
 ```
+
+The distribution name is `fairchild-sim` and the import name is `fairchild` —
+the same split as `pip install pillow` / `import PIL`. The wheel is
+self-contained: no Rust toolchain, no compiler, and it installs the `fairchild`
+command alongside the module, so a deck you run from the shell and a deck you
+run from Python are running exactly the same build.
 
 ```python
 import fairchild

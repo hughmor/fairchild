@@ -101,6 +101,41 @@ Describe what you verified and how. "Tests pass" says less than "measured
 −0.05 % against the closed form on three receivers, each dominated by a
 different noise term".
 
+## Releasing
+
+Three channels ship from one tag, because they serve different people:
+**PyPI** (`fairchild-sim` — wheels, both the module and the `fairchild`
+command, no toolchain needed), **crates.io** (source, for Rust consumers),
+**GitHub Releases** (prebuilt CLI binaries and the C library, which has nowhere
+else to live).
+
+The version lives in exactly one editable place, `[workspace.package]` in the
+root `Cargo.toml`. Everything else derives from it: crates via
+`version.workspace = true`, the wheel via `dynamic = ["version"]`. The internal
+dependency versions in `[workspace.dependencies]` are unavoidable copies —
+Cargo has no inheritance there and crates.io will not publish without them —
+so `scripts/check_versions.sh` exists to make a stale copy fail CI rather than
+ship. Run it any time; it takes no arguments.
+
+To cut a release:
+
+1. Bump `[workspace.package] version`; open it as a PR.
+2. **Merge it, then tag the merged commit.** Not before. A squash-merge
+   rewrites the commit, so a tag pushed from the branch is left pointing at
+   something that never reaches `master` — this has already happened once.
+3. `git push origin vX.Y.Z`. `release.yml` does the rest, and refuses to
+   publish anything if the tag and the workspace version disagree.
+
+Exercise the pipeline without publishing via **Actions → Release → Run
+workflow** with `dry_run` checked. Everything builds and the wheel is
+install-tested; nothing is uploaded. Worth doing before any release you care
+about — a wheel job that only breaks on macOS is otherwise discovered on
+announcement day.
+
+Versions are permanent. crates.io cannot delete a published version, only yank
+it, and PyPI will not accept a re-upload of the same number. There is no
+untagging a mistake, only a follow-up release.
+
 ## Licence
 
 Contributions are accepted under the [Apache License 2.0](LICENSE).

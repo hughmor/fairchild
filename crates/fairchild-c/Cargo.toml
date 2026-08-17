@@ -17,9 +17,9 @@ name = "fairchild_c"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-fairchild-core   = { path = "../fairchild-core" }
-fairchild-parser = { path = "../fairchild-parser" }
-fairchild-osdi   = { path = "../fairchild-osdi", optional = true }
+fairchild-core   = { workspace = true }
+fairchild-parser = { workspace = true }
+fairchild-osdi   = { workspace = true, optional = true }
 
 [features]
 default = ["osdi"]

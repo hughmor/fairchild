@@ -6,19 +6,28 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Python bindings for the fairchild electro-optic circuit simulator."
+# Not on crates.io: this crate only ever builds a CPython extension module, so
+# `cargo add fairchild-py` gets you something that cannot link. It ships as a
+# wheel on PyPI (`fairchild-sim`) instead — see .github/workflows/release.yml.
+publish = false
 
 [lib]
 name = "fairchild"
 crate-type = ["cdylib"]
 
 [dependencies]
-fairchild-core   = { path = "../fairchild-core" }
-fairchild-parser = { path = "../fairchild-parser" }
-fairchild-osdi   = { path = "../fairchild-osdi", optional = true }
+fairchild-core   = { workspace = true }
+fairchild-parser = { workspace = true }
+fairchild-osdi   = { workspace = true, optional = true }
+# For `_cli_main`: the wheel puts a `fairchild` command on PATH by calling the
+# CLI through this module, so a pip install needs no Rust toolchain to get it.
+fairchild-cli    = { workspace = true }
 pyo3             = { version = "0.22", features = ["extension-module"] }
 numpy            = "0.22"
 
 [features]
 default = ["osdi"]
-osdi = ["dep:fairchild-osdi"]
-klu = ["fairchild-core/klu"]
+# Forward to fairchild-cli too: without this the bundled `fairchild` command
+# would silently lose OSDI support that the same wheel's `import fairchild` has.
+osdi = ["dep:fairchild-osdi", "fairchild-cli/osdi"]
+klu = ["fairchild-core/klu", "fairchild-cli/klu"]

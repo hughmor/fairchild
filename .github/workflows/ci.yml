@@ -54,6 +54,12 @@ jobs:
       - name: Assert ngspice is on PATH
         run: command -v ngspice
 
+      # Cheap, and the thing it guards is expensive: a drifted internal
+      # dependency version publishes a crate pinned to an older sibling that is
+      # already on crates.io, so it resolves and compiles and is simply wrong.
+      - name: Version strings agree
+        run: ./scripts/check_versions.sh
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -81,12 +87,15 @@ jobs:
       # cargo test --workspace builds fairchild-py as a plain lib, which never
       # exercises the extension-module build or python/fairchild/__init__.py.
       # A renamed pyo3 export breaks `import fairchild` with every Rust test green.
+      #
+      # `fairchild-sim` is the distribution name; `fairchild` is what you
+      # import. Plain `fairchild` on PyPI belongs to an unrelated project.
       - name: Python bindings — build wheel, import, run a transient (Linux)
         if: runner.os == 'Linux'
         run: |
           python3 -m pip install --upgrade maturin numpy
           maturin build --release --out dist
-          python3 -m pip install --no-index --find-links dist fairchild
+          python3 -m pip install --no-index --find-links dist fairchild-sim
           python3 - <<'PY'
           import fairchild
           c = fairchild.Circuit()
@@ -102,6 +111,28 @@ jobs:
           # time constant of charging: 1 - 1/e = 0.6321.
           assert 0.60 < v.max() < 0.66, v.max()
           print(f"ok: {len(v)} points, vmax={v.max():.4f}")
+          PY
+
+      # The same wheel also installs the `fairchild` command, via a console
+      # script that calls the Rust CLI through the extension module.  Nothing
+      # else here would notice that entry point breaking, and a wheel whose
+      # advertised command is missing is a broken release.
+      - name: Python bindings — the wheel's `fairchild` command (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          printf '* rc\nV1 in 0 PULSE(0 1 0 1n 1n 1u 2u)\nR1 in out 1k\nC1 out 0 1n\n.tran 1e-8 2e-6\n.end\n' > /tmp/rc.sp
+          fairchild --version
+          fairchild --file /tmp/rc.sp --check
+          fairchild --file /tmp/rc.sp --probe "V(out)" --output /tmp/rc.csv
+          head -2 /tmp/rc.csv
+          python3 - <<'PY'
+          # The reason fairchild_cli::run returns codes instead of calling
+          # process::exit: from inside CPython, exiting kills the interpreter.
+          # This asserts the whole error path stays survivable.
+          from fairchild.fairchild import _cli_main
+          assert _cli_main(["fairchild", "--file", "/no/such.sp"]) == 1
+          assert _cli_main(["fairchild", "--not-a-flag"]) == 2
+          print("cli error paths ok, interpreter alive")
           PY
 
       # The C header is hand-written, so nothing in the Rust tests catches it

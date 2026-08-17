@@ -1646,6 +1646,28 @@ impl AcAdjointRun {
 }
 
 // ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+/// Run the `fairchild` command line and return its exit code.
+///
+/// This is what puts a `fairchild` command on `PATH` after `pip install`: the
+/// wheel's console script (`fairchild.__main__:main`) forwards `sys.argv` here.
+/// Shipping the CLI this way rather than as a second binary means one compiled
+/// artifact per wheel, and no Rust toolchain on the user's machine either way.
+///
+/// Returns rather than exits — `fairchild_cli::run` is written to never call
+/// `std::process::exit`, because doing so from inside the interpreter would
+/// take the whole Python process down with no traceback.
+#[pyfunction]
+#[pyo3(signature = (argv))]
+fn _cli_main(py: Python<'_>, argv: Vec<String>) -> i32 {
+    // Release the GIL: the solver is pure Rust and rayon parallelises the
+    // `.alter` × `.temp` grid across threads that must not need it.
+    py.allow_threads(|| fairchild_cli::run(argv))
+}
+
+// ---------------------------------------------------------------------------
 // Module entry point
 // ---------------------------------------------------------------------------
 
@@ -1657,5 +1679,6 @@ fn fairchild(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TranAdjointRun>()?;
     m.add_class::<AcAdjointRun>()?;
     m.add_class::<DcAdjointResult>()?;
+    m.add_function(wrap_pyfunction!(_cli_main, m)?)?;
     Ok(())
 }

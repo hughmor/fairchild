@@ -80,18 +80,35 @@ uses a load resistor and needs no toolchain at all.
 
 ## Install
 
-**CLI**
+One wheel carries both interfaces — the `fairchild` command and the `fairchild`
+module — and needs no Rust toolchain:
+
+```bash
+pip install fairchild-sim
+fairchild -f examples/electronic/rc_step.sp
+```
+
+The distribution is `fairchild-sim`; what you import is `fairchild`. (Plain
+`fairchild` on PyPI is an unrelated project.)
+
+**From source**, for the CLI alone or to work on the solver:
 
 ```bash
 cargo build --release
 ./target/release/fairchild -f examples/electronic/rc_step.sp
+
+cargo install fairchild-cli        # or straight from crates.io
 ```
 
-**Python**
+**C**: prebuilt `libfairchild_c` + header are attached to each
+[release](https://github.com/hughmor/fairchild/releases); see
+[`crates/fairchild-c/README.md`](crates/fairchild-c/README.md).
+
+**Python, from a clone** (what contributors use):
 
 ```bash
 pip install maturin
-maturin develop --release        # from a clone; wheels are not yet on PyPI
+maturin develop --release
 ```
 
 ```python

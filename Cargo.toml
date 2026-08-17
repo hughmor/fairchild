@@ -25,10 +25,17 @@ keywords = ["spice", "simulation", "photonics", "circuit", "eda"]
 categories = ["science", "simulation"]
 
 [workspace.dependencies]
-fairchild-core   = { path = "crates/fairchild-core" }
-fairchild-parser = { path = "crates/fairchild-parser" }
-fairchild-osdi   = { path = "crates/fairchild-osdi" }
-fairchild-klu    = { path = "crates/fairchild-klu" }
+# The `version` on each internal dependency is what crates.io needs and a
+# path-only workspace never does: publishing strips `path` and puts the version
+# requirement in its place, so `cargo publish` refuses a dependency without one.
+# Cargo has no `version.workspace = true` for [workspace.dependencies], so these
+# five copies of the version are unavoidable — `scripts/check_versions.sh`
+# exists because they are, and CI runs it.
+fairchild-core   = { path = "crates/fairchild-core",   version = "0.3.1" }
+fairchild-parser = { path = "crates/fairchild-parser", version = "0.3.1" }
+fairchild-osdi   = { path = "crates/fairchild-osdi",   version = "0.3.1" }
+fairchild-klu    = { path = "crates/fairchild-klu",    version = "0.3.1" }
+fairchild-cli    = { path = "crates/fairchild-cli",    version = "0.3.1", default-features = false }
 
 faer        = "0.24"
 rayon       = "1"

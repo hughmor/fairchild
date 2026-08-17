@@ -10,6 +10,17 @@ over the same solver:
 
 The full contract is in [`include/fairchild.h`](include/fairchild.h).
 
+## Install
+
+Prebuilt for Linux and macOS, x86_64 and arm64 — the header and both library
+forms, no Rust toolchain:
+
+```sh
+# from https://github.com/hughmor/fairchild/releases
+tar xzf libfairchild_c-<version>-<platform>.tar.gz
+cc -O2 -o prog prog.c -Iinclude -Llib -lfairchild_c
+```
+
 ## Build
 
 ```sh
