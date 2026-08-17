@@ -38,6 +38,11 @@ than the sources rather than answering from stale code; the fix is that same
 command. The Rust toolchain is pinned by `rust-toolchain.toml`; do not pin a
 version anywhere else.
 
+The release version lives only in `[workspace.package]` of the root
+`Cargo.toml`. `scripts/check_versions.sh` (run by CI) fails on any copy that
+drifts, including the unavoidable ones in `[workspace.dependencies]` that
+crates.io requires. `CONTRIBUTING.md` has the release procedure.
+
 ## Where things live
 
 | Path | What |

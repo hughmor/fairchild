@@ -8,11 +8,12 @@
 //! One binary, not one per file. Cargo compiles and links each `tests/*.rs` as
 //! its own binary against the whole crate, so a file per subject is a link per
 //! subject — the reason `crates/*/tests/<subject>/main.rs` is the pattern
-//! everywhere else in this tree. These three were two separate binaries before
-//! `transient_noise_flatness` would have made a third.
+//! everywhere else in this tree. These were separate binaries before
+//! `transient_noise_flatness` would have made another.
 
 mod dialect;
 mod dropped_parameters;
+mod exit_codes;
 mod output_formats;
 mod quiet;
 mod transient_noise_flatness;
