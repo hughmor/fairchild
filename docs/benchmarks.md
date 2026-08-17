@@ -86,8 +86,43 @@ Reading the plot:
   ahead of KLU on this matrix structure.
 - **All three fairchild backends beat ngspice** at every size, by 1.3–3× —
   largest on small circuits (lower startup overhead) and holding through 999
-  nodes. The `Auto` policy picks dense below 50 nodes and sparse above; pass
+  nodes. The `Auto` policy picks dense below 20 nodes and sparse above; pass
   `--solver klu` to opt into KLU.
+
+**This family is entirely nonlinear, and that flatters us.** Every circuit in
+the scaling table is a MOSFET ring oscillator, where much of the per-step cost
+is device evaluation — which is where we are genuinely leaner than ngspice. It
+is not a claim about linear circuits, and it was never tested on one; see the
+next section, which was added because it had not been.
+
+### Linear circuits, and numeric factorisation reuse
+
+An RC ladder (tridiagonal, no nonlinear devices) is the opposite extreme: at a
+fixed timestep with no nonlinear devices the MNA matrix is **constant for the
+whole transient**, so every factorisation after the first is redundant. Both
+backends now detect an unchanged matrix and reuse the numeric factors, running
+only the triangular solves.
+
+40-stage RC ladder, 43 unknowns, 3000 timesteps, solve time:
+
+| | before reuse | after reuse | ngspice |
+|---|---|---|---|
+| dense LU | 103.6 ms | 52.8 ms | — |
+| sparse LU | 102.1 ms | **30.6 ms** | 40 ms |
+
+Which flips the result: we were 2.5× *slower* than ngspice on this circuit and
+are now 1.3× faster. Two things worth knowing:
+
+- **ngspice's per-step cost tracks how hard the circuit is; ours barely did.**
+  Going from the ring oscillator to the ladder, ngspice's cost per timestep
+  drops ~12×. Before the reuse ours dropped 1.7×, because the dominant term was
+  a factorisation we performed whether or not the matrix had moved.
+- **The reuse is a check, not an assumption.** It compares stored values
+  bit-exactly rather than inferring "this circuit is linear" from the netlist, so
+  no caller can be wrong about it. Verified byte-identical output against the
+  un-cached path across 3000×43 values. On nonlinear circuits, where the matrix
+  moves every iteration, the comparison costs ~3% at the largest sizes and
+  nothing measurable below.
 
 ---
 
@@ -96,6 +131,10 @@ Reading the plot:
 - These are synthetic reference circuits (RC/RLC, diode rectifier, CMOS/BJT
   switching, ring-oscillator family), chosen for clear ground truth — not a
   real-PDK corpus.
+- The **scaling** table covers one circuit shape only. Performance is as
+  sensitive to matrix sparsity and to how much of the step is device evaluation
+  as it is to node count, and a single family cannot show that. The dense/sparse
+  numbers above disagree by 3× depending on which family you measure.
 - Numbers above are from macOS developer hardware. CI numbers (ubuntu-latest)
   differ; see Actions → Benchmarks for the nightly run.
 - The MOSFET (Meyer gate + depletion junction caps) and BJT Gummel-Poon

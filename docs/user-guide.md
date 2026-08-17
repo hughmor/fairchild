@@ -370,7 +370,12 @@ voltages + branch currents.
 ```
 
 Sweeps `src` (a voltage or current source) over the range, optionally nested
-with a second source.
+with a second source. Names are case-insensitive.
+
+A name that matches no source in the netlist is an error naming the sources you
+could have meant, on either axis. It is worth saying explicitly because the
+alternative is not obviously wrong: sweeping nothing still produces a table of
+the right shape, one operating point repeated down every column.
 
 ### Transient
 
@@ -1000,6 +1005,24 @@ library. Always emits the full signal set.
 fairchild -f circuit.sp --format nutmeg -o waveforms.raw
 ngspice -c "rawread waveforms.raw; plot V(out)"
 ```
+
+Every analysis in the deck writes one plot, appended to the same file in deck
+order, using ngspice's plot names so a reader can classify them:
+
+| Analysis | `Plotname:` | `Flags:` | Sweep variable |
+|---|---|---|---|
+| `.op` | `Operating Point` | `real` | — (one point) |
+| `.dc` | `DC transfer characteristic` | `real` | sweep source name |
+| `.ac` | `AC Analysis` | `complex` | `frequency` |
+| `.tran` | `Transient Analysis` | `real` | `time` |
+| `.noise` | `Noise Spectral Density Curves` | `real` | `frequency` |
+
+**`.noise` units differ between the two formats, deliberately.** The rawfile
+emits `onoise_spectrum` / `inoise_spectrum` as amplitude density in **V/√Hz** —
+that is what ngspice puts under those names, and what a reader assumes. The CSV
+gives both, with the units in the column names (`onoise_v2hz`, `onoise_vrthz`).
+Where the input-referred PSD is not computable (the transfer function is too
+small to invert) both formats write `NaN` rather than `0`.
 
 ---
 

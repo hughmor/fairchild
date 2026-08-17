@@ -53,3 +53,7 @@ python/fairchild/kicad/_proto/
 
 # Old logo workspace
 docs/logos/mockups
+
+# Local maintenance tooling — useful while working on the tree, no reason to
+# ship it to users or carry it in the published wheel.
+scripts/find_unreachable.py
