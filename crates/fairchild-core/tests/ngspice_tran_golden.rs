@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 
-use fairchild_core::run_tran;
+use fairchild_core::{tran_nr_with_registry_opts, DeviceRegistry, IntegratorMode, SimOptions};
 use fairchild_parser::parse_spice;
 
 const REL_TOL: f64 = 0.01; // 1% relative tolerance
@@ -81,7 +81,18 @@ fn fairchild_tran_at(
     at_times: &[f64],
 ) -> Vec<f64> {
     let netlist = parse_spice(netlist_str).expect("parse failed");
-    let result = run_tran(&netlist, step, stop).expect("transient failed");
+    // Backward Euler explicitly: the tolerance below is derived from BE's
+    // truncation error at this step size, so the integrator is part of what
+    // this test pins. Routed through the Newton path because that is the one a
+    // user's `.tran` actually reaches.
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&netlist.models);
+    let opts = SimOptions {
+        method: IntegratorMode::BackwardEuler,
+        ..SimOptions::from_netlist(&netlist)
+    };
+    let result = tran_nr_with_registry_opts(&netlist, step, stop, &registry, &opts)
+        .expect("transient failed");
     at_times
         .iter()
         .map(|&t| result.voltage_at(node, t).expect("node not found"))

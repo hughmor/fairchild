@@ -1,20 +1,23 @@
-/// Transient integrators: fixed-step BE/TR (linear) and variable-step BE+LTE (nonlinear).
+/// Transient integrators: fixed-step BE/TR/GEAR and variable-step BE+LTE.
 ///
-/// `run_tran` / `run_tran_tr` — linear-only (R, L, C, V, I).
-/// `tran_nr` / `tran_nr_tr`   — fixed-step nonlinear.
-/// `tran_nr_var`              — variable-step nonlinear with LTE control.
+/// `tran_nr` / `tran_nr_tr` — fixed-step, Newton-Raphson.
+/// `tran_nr_var`            — variable-step with LTE control.
+///
+/// All of them go through `TranStepper`, which handles a linear circuit as the
+/// degenerate case of a nonlinear one: two Newton iterations, the second only
+/// confirming convergence, over a matrix the solver's factorisation cache then
+/// recognises as unchanged.
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags};
+use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist, CircuitTopology};
+use crate::mna::CircuitTopology;
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
-use crate::solver::lu_solve;
 use crate::tran_step::TranStepper;
 
 /// Transient integration method.
@@ -167,95 +170,8 @@ fn interp(xs: &[f64], ys: &[f64], x: f64) -> Option<f64> {
     Some(ys[i] + t * (ys[i + 1] - ys[i]))
 }
 
-/// Run a fixed-step Backward Euler transient simulation (linear circuits only).
-///
-/// `step` and `stop` come from the `.tran` directive.
-/// Initial conditions: V_C = 0, I_L = 0 for all reactive elements.
-pub fn run_tran(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
-    run_tran_mode(netlist, step, stop, IntegratorMode::BackwardEuler)
-}
-
-/// Run a fixed-step Trapezoidal Rule transient simulation (linear circuits only).
-///
-/// Second-order accurate; preferred over `run_tran` for smooth waveforms.
-pub fn run_tran_tr(netlist: &Netlist, step: f64, stop: f64) -> Result<TranResult, SimError> {
-    run_tran_mode(netlist, step, stop, IntegratorMode::Trapezoidal)
-}
-
-fn run_tran_mode(
-    netlist: &Netlist,
-    step: f64,
-    stop: f64,
-    mode: IntegratorMode,
-) -> Result<TranResult, SimError> {
-    let topo = CircuitTopology::build(netlist);
-    // True initial conditions: all zeros (IC for sources not yet active).
-    let x0 = vec![0.0f64; topo.size];
-
-    let n_steps = ((stop / step).ceil() as usize) + 2;
-    let mut result = TranResult {
-        time: Vec::with_capacity(n_steps),
-        node_voltages: topo
-            .node_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
-            .collect(),
-        vsrc_currents: topo
-            .vsrc_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
-            .collect(),
-    };
-
-    // Store the true IC at t=0 before any integration.
-    push_timepoint(&mut result, 0.0, &topo, &x0);
-
-    // No devices on this path — it is the linear-only integrator — but the
-    // reactive history is the same shared machinery the nonlinear ones use.
-    // The context is only there for the device pre-eval, and there are none.
-    let mut no_devices: Vec<Box<dyn Device>> = Vec::new();
-    let mut reactive = crate::reactive::ReactiveState::new(
-        netlist,
-        &topo,
-        &mut no_devices,
-        &crate::device::SimContext::default(),
-        &x0,
-    );
-
-    let mut t = step;
-    let mut x;
-    let mut first_step = true;
-    loop {
-        // TR takes its first step with BE, for stability across t=0.
-        let step_mode = if first_step && matches!(mode, IntegratorMode::Trapezoidal) {
-            IntegratorMode::BackwardEuler
-        } else {
-            mode
-        };
-        reactive.build(&no_devices, step_mode, step, None);
-        let mat = stamp_netlist(
-            &topo,
-            netlist,
-            t,
-            &reactive.cap_state,
-            &reactive.ind_state,
-            crate::mna::InductorDc::Short,
-        );
-        x = lu_solve(&mat.a, &mat.b)?;
-        push_timepoint(&mut result, t, &topo, &x);
-        if t >= stop {
-            break;
-        }
-        reactive.accept(&no_devices, &x);
-        first_step = false;
-        t = (t + step).min(stop);
-    }
-
-    Ok(result)
-}
-
 // ---------------------------------------------------------------------------
-// Helpers shared by run_tran and tran_nr
+// Helpers shared by the transient solvers
 // ---------------------------------------------------------------------------
 
 /// Currents through a coupled inductor pair after a solved step.
@@ -825,24 +741,20 @@ mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
 
-    // ---------- tran_nr tests ----------
-
-    #[test]
-    fn tran_nr_matches_linear_for_rc() {
-        // Pure RC (no diode): tran_nr and run_tran should agree within 0.1%.
-        let netlist = parse_spice(
-            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n.end\n"
-        ).unwrap();
-        let r_linear = run_tran(&netlist, 1e-6, 2e-3).unwrap();
-        let r_nr = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
-
-        let v_lin = r_linear.voltage_at("out", 1e-3).unwrap();
-        let v_nr = r_nr.voltage_at("out", 1e-3).unwrap();
-        assert!(
-            (v_lin - v_nr).abs() < 1e-4,
-            "tran_nr diverges from run_tran at t=1ms: linear={v_lin:.6}  nr={v_nr:.6}"
-        );
+    /// Backward Euler through the Newton path. `tran_nr` takes its method from
+    /// the netlist, which defaults to trapezoidal, and several tests below pin
+    /// BE's error behaviour specifically.
+    fn tran_be(netlist: &Netlist, step: f64, stop: f64) -> TranResult {
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&netlist.models);
+        let opts = SimOptions {
+            method: IntegratorMode::BackwardEuler,
+            ..SimOptions::from_netlist(netlist)
+        };
+        tran_nr_with_registry_opts(netlist, step, stop, &registry, &opts).unwrap()
     }
+
+    // ---------- tran_nr tests ----------
 
     #[test]
     fn tran_nr_diode_steady_state() {
@@ -864,7 +776,7 @@ mod tests {
         );
     }
 
-    // ---------- run_tran regression tests ----------
+    // ---------- fixed-step regression tests ----------
 
     #[test]
     fn rc_step_response_shape() {
@@ -873,7 +785,7 @@ mod tests {
             "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n.end\n"
         ).unwrap();
 
-        let result = run_tran(&netlist, 1e-6, 5e-3).unwrap();
+        let result = tran_be(&netlist, 1e-6, 5e-3);
 
         let v_1tau = result.voltage_at("out", 1e-3).unwrap();
         let v_5tau = result.voltage_at("out", 5e-3).unwrap();
@@ -894,7 +806,7 @@ mod tests {
             "* RL step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nL1 out 0 1\n.tran 1u 5m\n.end\n"
         ).unwrap();
 
-        let result = run_tran(&netlist, 1e-6, 5e-3).unwrap();
+        let result = tran_be(&netlist, 1e-6, 5e-3);
 
         let v_1tau = result.voltage_at("out", 1e-3).unwrap();
         let v_5tau = result.voltage_at("out", 5e-3).unwrap();
@@ -914,15 +826,18 @@ mod tests {
         // Use a large step (h = τ/5) so BE error is visible.
         // RC: R=1kΩ C=1µF → τ=1ms; test at t=τ.
         // Exact V(t=τ) = 1 − e^−1 ≈ 0.6321.
+        // The source must *start* at 0: SPICE computes an operating point
+        // before the transient, and a plain `DC 1` would charge the cap through
+        // its open circuit at t=0, leaving nothing to integrate.
         let netlist = parse_spice(
-            "* RC step\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n.end\n",
+            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n.end\n",
         )
         .unwrap();
         let h = 200e-6; // 5 steps per τ — large enough to show BE error
         let exact = 1.0 - (-1.0_f64).exp(); // ≈ 0.6321
 
-        let r_be = run_tran(&netlist, h, 5e-3).unwrap();
-        let r_tr = run_tran_tr(&netlist, h, 5e-3).unwrap();
+        let r_be = tran_be(&netlist, h, 5e-3);
+        let r_tr = tran_nr_tr(&netlist, h, 5e-3).unwrap();
 
         let v_be = r_be.voltage_at("out", 1e-3).unwrap();
         let v_tr = r_tr.voltage_at("out", 1e-3).unwrap();
@@ -934,23 +849,6 @@ mod tests {
         assert!(
             err_tr < 0.01,
             "TR error at t=τ should be < 1%: {err_tr:.4e}"
-        );
-    }
-
-    #[test]
-    fn tran_nr_tr_matches_linear_tr() {
-        // For a pure RC (no nonlinear device), tran_nr_tr and run_tran_tr should agree.
-        let netlist = parse_spice(
-            "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 100u 2m\n.end\n"
-        ).unwrap();
-        let r_lin = run_tran_tr(&netlist, 100e-6, 2e-3).unwrap();
-        let r_nr = tran_nr_tr(&netlist, 100e-6, 2e-3).unwrap();
-
-        let v_lin = r_lin.voltage_at("out", 1e-3).unwrap();
-        let v_nr = r_nr.voltage_at("out", 1e-3).unwrap();
-        assert!(
-            (v_lin - v_nr).abs() < 1e-3,
-            "tran_nr_tr vs run_tran_tr at t=1ms: lin={v_lin:.6} nr={v_nr:.6}"
         );
     }
 
@@ -1454,7 +1352,7 @@ mod tests {
         let netlist =
             parse_spice("* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n")
                 .unwrap();
-        let result = run_tran(&netlist, 1e-6, 10e-6).unwrap();
+        let result = tran_be(&netlist, 1e-6, 10e-6);
         let mut buf = Vec::new();
         result.write_nutmeg(&mut buf, "test").unwrap();
         let s = String::from_utf8(buf).unwrap();

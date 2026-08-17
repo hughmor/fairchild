@@ -882,14 +882,6 @@ pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
     }
 }
 
-/// Solve `A·x = b` with the historic dense default.  Kept as a free
-/// function so existing analyses compile unchanged; new analyses should
-/// prefer constructing a `Box<dyn LinearSolver>` from `make_solver()` and
-/// calling its methods directly.
-pub fn lu_solve(a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
-    DenseSolver.solve(a, b)
-}
-
 // ---------------------------------------------------------------------------
 // Matrix equilibration (two-sided Ruiz scaling)
 // ---------------------------------------------------------------------------
