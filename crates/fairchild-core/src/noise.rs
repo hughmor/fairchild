@@ -320,6 +320,21 @@ pub struct NoiseResult {
     pub inoise_psd: Vec<f64>,
 }
 
+/// One-sided PSD (V²/Hz) → amplitude density (V/√Hz), the form every rawfile
+/// reader expects under `voltage-density`.
+///
+/// A tiny negative PSD is numerical dust and clamps to zero; a NaN stays NaN.
+/// The distinction matters: `inoise_psd` is deliberately NaN where the transfer
+/// function is too small to invert, and reporting that as `0` would claim a
+/// noiseless input — a plausible-looking number in place of "not computable".
+fn amplitude_density(psd: f64) -> f64 {
+    if psd.is_nan() {
+        f64::NAN
+    } else {
+        psd.max(0.0).sqrt()
+    }
+}
+
 impl NoiseResult {
     /// Write a CSV with columns `freq_hz, onoise_v2hz, onoise_vrthz, inoise_v2hz, inoise_vrthz`.
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
@@ -335,10 +350,42 @@ impl NoiseResult {
                 "{:.6e},{:.6e},{:.6e},{:.6e},{:.6e}",
                 self.freq[i],
                 on,
-                on.max(0.0).sqrt(),
+                amplitude_density(on),
                 in_,
-                in_.max(0.0).sqrt()
+                amplitude_density(in_)
             )?;
+        }
+        Ok(())
+    }
+
+    /// Write the noise sweep as an ngspice-compatible Nutmeg ASCII rawfile.
+    ///
+    /// **Values are amplitude densities in V/√Hz, not the PSDs in V²/Hz that
+    /// this struct stores.**  That is not a choice: the Nutmeg variable type
+    /// `voltage-density` means V/√Hz, and `onoise_spectrum` / `inoise_spectrum`
+    /// are the names every rawfile reader expects those units under.  Emitting
+    /// the stored PSD under these names would be wrong by a square, and wrong
+    /// in the way that looks plausible — a reader has no way to tell V/√Hz from
+    /// V²/Hz by inspection, so nothing downstream would report a fault.  The
+    /// CSV writer keeps both, since its column names say which is which.
+    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
+        let n_pts = self.freq.len();
+        writeln!(w, "Title: {title}")?;
+        writeln!(w, "Plotname: Noise Spectral Density Curves")?;
+        writeln!(w, "Flags: real")?;
+        writeln!(w, "No. Variables: 3")?;
+        writeln!(w, "No. Points: {n_pts}")?;
+        writeln!(w, "Variables:")?;
+        writeln!(w, "\t0\tfrequency\tfrequency")?;
+        writeln!(w, "\t1\tonoise_spectrum\tvoltage-density")?;
+        writeln!(w, "\t2\tinoise_spectrum\tvoltage-density")?;
+        writeln!(w, "Values:")?;
+        for i in 0..n_pts {
+            // Point index on the first variable's line only, as in the other
+            // analyses' writers.
+            writeln!(w, " {i}\t{:.6e}", self.freq[i])?;
+            writeln!(w, "\t{:.6e}", amplitude_density(self.onoise_psd[i]))?;
+            writeln!(w, "\t{:.6e}", amplitude_density(self.inoise_psd[i]))?;
         }
         Ok(())
     }
@@ -688,5 +735,74 @@ mod tests {
             (s - expected).abs() / expected < 0.1,
             "diode shot S_V_out={s:.3e} expected≈{expected:.3e}"
         );
+    }
+
+    /// The Nutmeg writer must emit **amplitude density (V/√Hz)**, not the
+    /// V²/Hz PSD it stores, because that is what `voltage-density` /
+    /// `onoise_spectrum` mean to a rawfile reader.
+    ///
+    /// Anchored on the analytic value — √(4kT·500Ω) ≈ 2.879 nV/√Hz — rather
+    /// than on `onoise_psd`, so the assertion still holds if both the solver
+    /// and the writer are wrong together.  The second half is the real guard:
+    /// it fails if anyone emits the PSD under these names, which no unit tag
+    /// in the file would reveal.
+    #[test]
+    fn write_nutmeg_emits_amplitude_density_not_psd() {
+        let net = parse_spice(
+            "* thermal\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n\
+             .noise V(out) V1 DEC 1 1k 1k\n.end\n",
+        )
+        .unwrap();
+        let mut registry = crate::device_registry::DeviceRegistry::new();
+        registry.register_builtin_models(&net.models);
+        let opts = SimOptions::default();
+        let r = noise_analysis(&net, &[1e3], "out", "0", "v1", &registry, &opts).unwrap();
+
+        let mut buf = Vec::new();
+        r.write_nutmeg(&mut buf, "thermal test").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        assert!(
+            s.contains("Plotname: Noise Spectral Density Curves"),
+            "plotname: {s}"
+        );
+        assert!(s.contains("Flags: real"), "flags: {s}");
+        assert!(s.contains("frequency\tfrequency"), "freq var: {s}");
+        assert!(
+            s.contains("onoise_spectrum\tvoltage-density"),
+            "onoise var: {s}"
+        );
+        assert!(
+            s.contains("inoise_spectrum\tvoltage-density"),
+            "inoise var: {s}"
+        );
+
+        // Values block: point index + frequency, then onoise, then inoise.
+        let values = s.split("Values:").nth(1).unwrap();
+        let rows: Vec<&str> = values.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(rows.len(), 3, "one point => three lines: {values}");
+        let emitted: f64 = rows[1].trim().parse().unwrap();
+
+        let psd = 4.0 * KB * opts.temp_k * 500.0; // analytic 4kT·(R1||R2)
+        let expected_vrthz = psd.sqrt(); // ≈ 2.879e-9
+        assert!(
+            (emitted - expected_vrthz).abs() / expected_vrthz < 0.01,
+            "emitted={emitted:.4e} expected≈{expected_vrthz:.4e} V/√Hz"
+        );
+        // Emitting the PSD instead would be ~9 orders of magnitude off.
+        assert!(
+            (emitted - psd).abs() / expected_vrthz > 0.5,
+            "emitted the V²/Hz PSD ({psd:.4e}) where V/√Hz was required"
+        );
+    }
+
+    /// A NaN input-referred PSD must survive to the output as NaN, not become
+    /// zero.  `inoise_psd` is NaN by design where the transfer function is too
+    /// small to invert, and `0` there would read as a noiseless input.
+    #[test]
+    fn amplitude_density_preserves_nan_and_clamps_negatives() {
+        assert!(amplitude_density(f64::NAN).is_nan());
+        assert_eq!(amplitude_density(-1e-30), 0.0, "numerical dust clamps");
+        assert_eq!(amplitude_density(4.0), 2.0);
     }
 }

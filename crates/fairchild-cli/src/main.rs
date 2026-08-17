@@ -985,12 +985,21 @@ fn run_corner_analyses_ctx(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                let mut buf = Vec::new();
-                result
-                    .write_csv(&mut buf)
-                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-                w.write_all(&buf)
-                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                match ctx.format {
+                    Format::Csv => {
+                        let mut buf = Vec::new();
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(&buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Format::Nutmeg => {
+                        result
+                            .write_nutmeg(&mut *w, title)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
                 ran_something = true;
             }
         }

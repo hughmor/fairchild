@@ -82,7 +82,12 @@ impl DcSweepResult {
             1 + self.inner.is_some() as usize + self.node_voltages.len() + self.vsrc_currents.len();
         let n_pts = self.n_points();
         writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: DC Sweep")?;
+        // ngspice's own name for this plot.  Readers classify a Nutmeg plot by
+        // its `Plotname`, and the ones that don't recognise a name fall back to
+        // heuristics — commonly "one point means it's an operating point", which
+        // silently mislabels a single-point sweep (`.dc V1 1 1 1`) as an `.op`.
+        // Using the conventional name removes the guess.
+        writeln!(w, "Plotname: DC transfer characteristic")?;
         writeln!(w, "Flags: real")?;
         writeln!(w, "No. Variables: {n_vars}")?;
         writeln!(w, "No. Points: {n_pts}")?;
@@ -358,5 +363,30 @@ mod tests {
         assert!(s.contains("V(out)"), "{s}");
         // 3 sweep points → 3 data rows + 1 header.
         assert_eq!(s.lines().count(), 4, "{s}");
+    }
+
+    /// The Nutmeg plot must carry ngspice's conventional name.  A reader that
+    /// doesn't recognise the name falls back to guessing from the point count,
+    /// and a single-point sweep then looks exactly like an operating point —
+    /// so this name is load-bearing, not cosmetic.  Written with one point on
+    /// purpose: that is the case the name has to disambiguate.
+    #[test]
+    fn write_nutmeg_uses_conventional_plotname() {
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.end\n").unwrap();
+        let reg = DeviceRegistry::new();
+        let r = dc_sweep_with_registry(&net, "v1", 1.0, 1.0, 1.0, None, &reg).unwrap();
+        let mut buf = Vec::new();
+        r.write_nutmeg(&mut buf, "divider").unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        assert!(
+            s.contains("Plotname: DC transfer characteristic"),
+            "plotname: {s}"
+        );
+        assert!(s.contains("No. Points: 1"), "one-point sweep: {s}");
+        // The sweep source is the first variable, so the axis is identifiable.
+        assert!(s.contains("\t0\tv1\t"), "sweep axis: {s}");
+        assert!(s.contains("v(out)\tvoltage"), "v(out): {s}");
     }
 }
