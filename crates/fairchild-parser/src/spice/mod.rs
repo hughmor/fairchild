@@ -2201,6 +2201,81 @@ R1 a 0 1k
     }
 
     #[test]
+    fn control_block_is_skipped_not_interpreted() {
+        // The verbs inside look like elements (`let`, `plot`) and directives
+        // (`save`); none of them may reach pass 2. What survives is the circuit
+        // and the cards outside the block.
+        let input = "\
+* ngspice deck with a control block
+V1 in 0 PULSE(0 1 0 1n 1n 1u 2u)
+R1 in out 1k
+C1 out 0 1n
+.tran 1e-8 2e-6
+.control
+run
+let vpk = max(v(out))
+save v(out)
+write rc.raw v(out)
+plot v(out)
+.endc
+.end
+";
+        let netlist = parse_spice(input).unwrap();
+        assert_eq!(netlist.elements.len(), 3, "control lines became elements");
+        assert_eq!(netlist.analyses.len(), 1, "the .tran card outside survived");
+        assert!(netlist.models.is_empty());
+    }
+
+    #[test]
+    fn control_block_without_endc_is_an_error() {
+        // Guessing where the block ended would silently discard the rest of the
+        // deck — the failure mode where a circuit loses half its elements and
+        // still runs.
+        let input = "* unterminated\nV1 in 0 DC 1\nR1 in 0 1k\n.control\nrun\n.end\n";
+        let err = parse_spice(input).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Syntax { msg, .. } if msg.contains(".endc")),
+            "expected a Syntax error naming .endc, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn stray_endc_is_an_error() {
+        let input = "* stray\nV1 in 0 DC 1\nR1 in 0 1k\n.endc\n.op\n.end\n";
+        let err = parse_spice(input).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Syntax { msg, .. } if msg.contains(".control")),
+            "expected a Syntax error naming .control, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn control_block_inside_a_deck_with_subckts() {
+        // Both block-strippers run in the same pass; a deck with one of each must
+        // not have the control block's lines land in the subckt body, or vice
+        // versa.
+        let input = "\
+* both kinds of block
+.subckt rcpair a b r=1k
+R1 a b {r}
+C1 b 0 1n
+.ends
+X1 in out rcpair r=2k
+V1 in 0 DC 1
+.control
+run
+plot v(out)
+.endc
+.op
+.end
+";
+        let netlist = parse_spice(input).unwrap();
+        // X1 flattens to R1 + C1, plus V1.
+        assert_eq!(netlist.elements.len(), 3, "{:?}", netlist.elements);
+        assert_eq!(netlist.analyses.len(), 1);
+    }
+
+    #[test]
     fn select_directives_load_instead_of_erroring() {
         // `.save` and `.width` were hard errors while `.print` and `.probe` were
         // ignored — the same class of directive failing two different ways. All

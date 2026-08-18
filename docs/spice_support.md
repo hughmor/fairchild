@@ -100,7 +100,7 @@ expression source as a `B` element instead.
 | `.csparam` | constant → control variable | ❌ | error |
 | `.table` | lookup table | ❌ | error |
 | `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ❌ | error |
-| `.control` / `.endc` | interactive control block | ❌ | error |
+| `.control` / `.endc` | interactive control block | ⚠️ skipped, **warns once** | §4.7 |
 | `.op` | operating point | ✅ | §4.4 |
 | `.dc` | DC sweep | ✅ nested, parallel | §4.4 |
 | `.ac` | AC small-signal | ✅ magnitude and phase honoured | §4.4 |
@@ -125,10 +125,9 @@ expression source as a `B` element instead.
 | `.backanno` | (LTspice) back-annotation | ⚠️ silently ignored | §4.6 |
 
 `.control` blocks deserve a note: a great many ngspice decks in the wild wrap the
-whole run in `.control … .endc`, so this single gap blocks loading those decks
-outright. It is an error rather than a silent skip, which is correct — but if
-loading third-party decks matters, skipping the block with a warning would get
-further than refusing the file.
+whole run in `.control … .endc`. The block is now skipped with a warning rather
+than refusing the file — see §4.7 for what that does and does not buy you. It is
+**not** interpreted, and will not be.
 
 **fairchild extensions** (not ngspice): `.osdi`, `.optical`, `.optical_port`,
 `.optical_bus`, `.electrical_port`, and `.alter` (which is HSPICE's).
@@ -156,6 +155,9 @@ list rather than as a `TRNOISE` source function.
 ## 4. The silent set — all five now fixed
 
 Kept as the record. Each was found by running a deck, not by reading code.
+§4.6 and §4.7 were never in the silent set — `.save` and `.control` were loud
+errors — but they are recorded here because the same audit turned them up and one
+rule decided all three: who owns the decision, the deck or the caller.
 
 ### 4.1 `AC <mag> [phase]` on a source line was discarded — FIXED
 
@@ -316,18 +318,66 @@ mechanism to point at.
 This is the Select class of the directive rule — see
 [who owns the run](user-guide.md#who-owns-the-run--the-deck-or-the-caller).
 
+### 4.7 `.control` refused to load the deck — FIXED, and it will never be interpreted
+
+```spice
+.control
+run
+let vpk = maximum(v(out))
+write rc.raw v(out)
+plot v(out)
+.endc
+```
+
+A great many ngspice decks in the wild wrap the whole run in a block like this.
+Refusing the file over it blocked loading a large share of third-party decks for
+a construct that, in the large majority of real blocks, contains only
+`run`/`write`/`plot` — all three of which the frontend already does.
+
+**Fixed by skipping, not by interpreting.** The block is consumed in pass 1,
+never reaches the parser proper, and the commands found in it are named once on
+stderr:
+
+```
+warning: .control block skipped — its commands are not interpreted (run, let,
+write, plot). fairchild is not an ngspice shell: control flow belongs in Python
+(fairchild.Circuit) or in CLI flags, and output selection is --probe. An analysis
+that existed only inside the block will not run: give the deck a
+.tran/.ac/.dc/.op card, or drive the run from Python
+(see docs/spice_support.md §4.7)
+```
+
+A `.control` with no `.endc`, and an `.endc` with no `.control`, are both hard
+errors. Guessing where an unterminated block ended would discard the rest of the
+deck silently, which is how a circuit loses half its elements and still runs.
+
+**What this does not buy you.** If the deck's only analysis was a `tran`/`ac`
+command *inside* the block, nothing runs — you get this warning and then "no
+analyses found in netlist". Add a real `.tran` card, or drive the analysis from
+Python. Nothing is silently substituted.
+
+**Why it will not be interpreted.** `.control` is imperative script: `run`,
+`let`, `write`, `alter`, loops, conditionals. The Python bindings exist so that
+control flow lives in Python. A second scripting language inside the simulator
+would be the largest single item on this list *and* would compete with the
+feature it duplicates. This is the Script class of the directive rule — the one
+class fairchild declines rather than honours; see
+[who owns the run](user-guide.md#who-owns-the-run--the-deck-or-the-caller).
+
 ---
 
 ## 5. What is left
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **`.control` block skip-with-warning** — unblocks a large fraction of
-   real-world ngspice decks without implementing the shell.
-2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-3. Everything else in §1–§2 is a clean error and can wait for a use case.
+2. **`.func`** — used pervasively by HSPICE-format PDK model libraries, so it
+   gates foundry decks more tightly than anything else left here.
+3. **`.global`** — a net resolving to the same node in every subcircuit scope.
+   Needed by CDL and foundry decks fed to us directly.
+4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document
 

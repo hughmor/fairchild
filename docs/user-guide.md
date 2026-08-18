@@ -977,8 +977,11 @@ Directives outside that list divide the same way. `.model`, `.param`, `.subckt`,
 always honoured identically in both frontends. `.print`, `.plot`, `.probe`, `.save` and
 `.width` select *what to report*, which the frontend owns — use `--probe` from
 the CLI, or index the returned result. They load and warn rather than narrowing
-anything: every signal is available either way. `.control` is imperative script; control flow belongs in
-this API, so it is declined rather than interpreted.
+anything: every signal is available either way. `.control` is imperative script —
+`run`, `let`, `write`, loops — and control flow belongs in this API, so the block
+is skipped with a warning naming the commands in it rather than interpreted. That
+is permanent, not pending: if the deck's only analysis was a `tran` command inside
+the block, declare a `.tran` card or pass the timing here instead.
 
 ### Gradients — `dc_adjoint`, `ac_adjoint`, `tran_adjoint`
 
