@@ -114,11 +114,11 @@ expression source as a `B` element instead.
 | `.sp` | S-parameter | ❌ | error (verified) |
 | `.ic` | initial conditions | ✅ (honoured with `UIC`) | — |
 | `.nodeset` | DC solution hint | ✅ | — |
-| `.save` | select saved vectors | ❌ | error |
-| `.print` | tabular output | ⚠️ **silently ignored** | §4.6 |
-| `.plot` | line-printer plot | ⚠️ **silently ignored** | §4.6 |
-| `.probe` | select probes | ⚠️ **silently ignored** | §4.6 |
-| `.width` | output width | ❌ | error |
+| `.save` | select saved vectors | ⚠️ ignored, **warns once** | §4.6 |
+| `.print` | tabular output | ⚠️ ignored, **warns once** | §4.6 |
+| `.plot` | line-printer plot | ⚠️ ignored, **warns once** | §4.6 |
+| `.probe` | select probes | ⚠️ ignored, **warns once** | §4.6 |
+| `.width` | output width | ⚠️ ignored, **warns once** | §4.6 |
 | `.measure` / `.meas` | measurements | ✅ (tran; see model_status §10) | — |
 | `.options` / `.option` | simulator options | ✅ known keys; unknown keys **warn** | — |
 | `.temp` | temperature (incl. sweep) | ✅ | — |
@@ -284,11 +284,37 @@ and it deserves to say so.
 as Level 1 and that currents and capacitances will differ from the intended
 model — not merely in the unset parameters. `LEVEL=1` stays quiet.
 
-### 4.6 `.print` / `.plot` / `.probe` / `.backanno` are ignored by design — no change
+### 4.6 Output-selection directives were ignored in silence, or not at all — FIXED
 
-Output selection is `--probe` instead, so these have nowhere to go. Benign, but
-undocumented until now: a deck whose `.print tran V(out)` you expect to narrow
-the output gets every node instead.
+```spice
+.print tran V(out)      ← ignored, silently; you get every node
+.probe V(out)           ← ignored, silently
+.save V(out)            ← hard error
+.width out=80           ← hard error
+```
+
+Output selection is `--probe` (CLI) or indexing the returned result (Python), so
+a deck's version has nowhere to go — every signal is available either way. That
+part is by design. Two things were not: it happened in silence, so a deck whose
+`.print tran V(out)` you expect to narrow the output gets every node instead;
+and `.save`/`.width`, which are the *same class of directive*, failed a
+different way — refusing to load a deck the others accept. Nobody chose that
+split either.
+
+**Fixed.** All five load and warn, once per directive however many lines of it a
+deck carries:
+
+```
+warning: .print is ignored — output selection belongs to the frontend, not the
+deck: use --probe (CLI) or index the returned result (Python). Every signal is
+available either way (see docs/spice_support.md §4.6)
+```
+
+`.backanno` (LTspice) stays silent: it selects nothing and there is no fairchild
+mechanism to point at.
+
+This is the Select class of the directive rule — see
+[who owns the run](user-guide.md#who-owns-the-run--the-deck-or-the-caller).
 
 ---
 

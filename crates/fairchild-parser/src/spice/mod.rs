@@ -27,7 +27,7 @@ use bundles::{expand_bundle_ports, scan_bidirectional};
 use common::{canon_node, expand_bus_vectors, parse_port_decl, parse_value};
 use directives::{
     is_silent_directive, parse_ac, parse_dc, parse_measure, parse_node_assignments, parse_noise,
-    parse_options_directive, parse_tran,
+    parse_options_directive, parse_tran, select_directive,
 };
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
@@ -95,6 +95,9 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
     // Pass 2: parse main body.
     let mut expanding: HashSet<String> = HashSet::new();
     let mut current_alter: Option<crate::AlterBlock> = None;
+    // One warning per Select directive, however many lines of it a deck carries:
+    // a PDK deck with forty `.print` lines has one thing wrong with it, not forty.
+    let mut select_warned: HashSet<&'static str> = HashSet::new();
 
     for (lineno, line) in &main_lines {
         let trimmed = line.trim();
@@ -226,6 +229,15 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
             // .measure or .meas — both accepted.  Parse failure here is
             // surfaced as a Syntax error, not silently ignored.
             netlist.measurements.push(parse_measure(trimmed, *lineno)?);
+        } else if let Some(select) = select_directive(&lc) {
+            if select_warned.insert(select) {
+                eprintln!(
+                    "warning: {select} is ignored — output selection belongs to the \
+                     frontend, not the deck: use --probe (CLI) or index the returned \
+                     result (Python). Every signal is available either way \
+                     (see docs/spice_support.md §4.6)"
+                );
+            }
         } else if lc.starts_with('.') {
             if !is_silent_directive(&lc) {
                 let directive = lc.split_whitespace().next().unwrap_or(&lc).to_string();
@@ -2186,6 +2198,39 @@ R1 a 0 1k
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 2);
+    }
+
+    #[test]
+    fn select_directives_load_instead_of_erroring() {
+        // `.save` and `.width` were hard errors while `.print` and `.probe` were
+        // ignored — the same class of directive failing two different ways. All
+        // five now load and warn; the deck is otherwise unaffected.
+        for d in [
+            ".print tran V(a)",
+            ".plot V(a)",
+            ".probe V(a)",
+            ".save V(a) I(V1)",
+            ".width out=80",
+        ] {
+            let input = format!("* select\nV1 a 0 DC 1\nR1 a 0 1k\n{d}\n.op\n.end\n");
+            let netlist = parse_spice(&input).unwrap_or_else(|e| panic!("{d} failed to load: {e}"));
+            assert_eq!(netlist.elements.len(), 2, "{d} changed the circuit");
+            assert_eq!(netlist.analyses.len(), 1, "{d} changed the analyses");
+        }
+    }
+
+    #[test]
+    fn select_directive_matches_only_output_selection() {
+        // The dispatch is prefix-matched, so this guards the neighbours: a
+        // Define-class directive whose name starts inside one of the Select
+        // tokens must not be swallowed by the warning arm.
+        assert_eq!(select_directive(".print v(a)"), Some(".print"));
+        assert_eq!(select_directive(".save all"), Some(".save"));
+        assert_eq!(select_directive(".param x=1"), None);
+        assert_eq!(select_directive(".probe"), Some(".probe"));
+        assert_eq!(select_directive(".plot"), Some(".plot"));
+        // Still an error, not a warning: it is not output selection.
+        assert_eq!(select_directive(".pz"), None);
     }
 
     #[test]

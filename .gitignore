@@ -43,6 +43,12 @@ run_*.sp
 __pycache__/
 *.pyc
 
+# uv's dev environment. `.venv/` self-ignores (uv writes a `*` gitignore into
+# it); the lockfile follows Cargo.lock above and stays out: this tree publishes
+# a wheel and a crate, so nothing consumes a pinned dev environment, and CI
+# installs with pip + maturin. A lockfile nothing reads goes stale in silence.
+uv.lock
+
 # claude — CLAUDE.md is public (contributor-facing); the .local one is not.
 .claude/
 CLAUDE.local.md

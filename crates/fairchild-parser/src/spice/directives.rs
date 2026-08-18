@@ -4,11 +4,26 @@ use crate::{
     AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, ParseError,
 };
 
+/// `.backanno` (LTspice schematic back-annotation) is the one directive still
+/// ignored without a word: it selects nothing, changes nothing, and there is no
+/// fairchild mechanism to point a warning at.
 pub(super) fn is_silent_directive(lc: &str) -> bool {
-    lc.starts_with(".print")
-        || lc.starts_with(".plot")
-        || lc.starts_with(".probe")
-        || lc.starts_with(".backanno")
+    lc.starts_with(".backanno")
+}
+
+/// Directives that select *what to report* rather than what the circuit is or
+/// what to run.  Returns the directive token, for the warning that names it.
+///
+/// Output selection belongs to the frontend here — `--probe` on the CLI, numpy
+/// indexing in Python — and every signal is available either way, so a deck's
+/// version has nowhere to land.  They are ignored, but not in silence: a deck
+/// whose `.print tran V(out)` you expect to narrow the output gets every node
+/// instead, and that is worth one line of stderr.  `.save` and `.width` used to
+/// be hard errors, which is the same class of directive failing a different way
+/// for no reason anyone chose.
+pub(super) fn select_directive(lc: &str) -> Option<&'static str> {
+    const SELECT: &[&str] = &[".print", ".plot", ".probe", ".save", ".width"];
+    SELECT.iter().copied().find(|d| lc.starts_with(d))
 }
 
 /// Parse a `.measure` / `.meas` directive into a `Measurement`.
