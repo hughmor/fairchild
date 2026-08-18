@@ -1,6 +1,7 @@
 use super::common::{canon_node, parse_value};
 use super::directives::is_silent_directive;
 use super::element::{parse_element_expanded, parse_model};
+use crate::warn_user;
 use crate::{Element, ModelCard, ParseError};
 use std::collections::{HashMap, HashSet};
 
@@ -42,12 +43,26 @@ impl SubcktDef {
 ///
 /// Returns `(subckt_defs, global_params, main_lines)`.  Nested `.subckt`
 /// definitions and a stray `.ends` are both hard errors.
+///
+/// `.control … .endc` is consumed here too, and warned about once.  It is
+/// imperative script — `run`, `let`, `write`, loops, conditionals — and this is
+/// not a shell: a second scripting language inside the simulator would do the job
+/// the Python bindings exist for, worse.  Skipping the block costs nothing for
+/// the large majority of real blocks, which hold only `run`/`write`/`plot`, all
+/// three of which the frontend already does.  What it costs when the block is the
+/// only place an analysis was declared is the warning's job to say.
 pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResult, ParseError> {
     let mut subckt_defs: HashMap<String, SubcktDef> = HashMap::new();
     let mut global_params: HashMap<String, f64> = HashMap::new();
     let mut main_lines: Vec<(usize, String)> = Vec::new();
 
     let mut in_subckt = false;
+    // `.control` state. The verbs are collected only to name them in the
+    // warning — nothing reads them, and nothing should start to.
+    let mut in_control = false;
+    let mut control_lineno = 0usize;
+    let mut control_verbs: Vec<String> = Vec::new();
+    let mut saw_control = false;
     let mut current_name = String::new();
     let mut current_def = SubcktDef {
         ports: vec![],
@@ -63,6 +78,31 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         }
 
         let lc = trimmed.to_lowercase();
+
+        // Inside a `.control` block nothing else applies: its lines are shell
+        // commands that may look like elements or directives and are neither.
+        if in_control {
+            if lc.starts_with(".endc") {
+                in_control = false;
+            } else if let Some(verb) = lc.split_whitespace().next() {
+                if !control_verbs.iter().any(|v| v == verb) {
+                    control_verbs.push(verb.to_string());
+                }
+            }
+            continue;
+        }
+        if lc.starts_with(".control") {
+            in_control = true;
+            saw_control = true;
+            control_lineno = lineno;
+            continue;
+        }
+        if lc.starts_with(".endc") {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: ".endc without a matching .control".into(),
+            });
+        }
 
         if lc == ".end" {
             // End-of-file marker: stop collecting.
@@ -115,6 +155,30 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             line: 0,
             msg: format!(".subckt '{current_name}' has no matching .ends"),
         });
+    }
+    if in_control {
+        // Not recoverable by guessing where the block ended: everything after it
+        // would be silently discarded, which is how a deck loses half its
+        // circuit and still runs.
+        return Err(ParseError::Syntax {
+            line: control_lineno,
+            msg: ".control block has no matching .endc".into(),
+        });
+    }
+    if saw_control {
+        let verbs = if control_verbs.is_empty() {
+            "empty".to_string()
+        } else {
+            control_verbs.join(", ")
+        };
+        warn_user!(
+            ".control block skipped — its commands are not interpreted \
+             ({verbs}). fairchild is not an ngspice shell: control flow belongs in \
+             Python (fairchild.Circuit) or in CLI flags, and output selection is \
+             --probe. An analysis that existed only inside the block will not run: \
+             give the deck a .tran/.ac/.dc/.op card, or drive the run from Python \
+             (see docs/spice_support.md §4.7)"
+        );
     }
 
     Ok((subckt_defs, global_params, main_lines))

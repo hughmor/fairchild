@@ -6,6 +6,7 @@
 //! and Python kwargs all merge into one of these and pass it into the analysis
 //! entry points.
 
+use crate::warn_user;
 use fairchild_parser::Netlist;
 
 use crate::device::SimContext;
@@ -244,8 +245,8 @@ impl SimOptions {
             // that made `.options trtol=7` — a real ngspice option — a silent
             // no-op, indistinguishable from one that took effect.
             if !opts.set(k, v) {
-                eprintln!(
-                    "warning: .options '{k}' is not recognised and has no effect \
+                warn_user!(
+                    ".options '{k}' is not recognised and has no effect \
                      (see docs/spice_support.md)"
                 );
             }

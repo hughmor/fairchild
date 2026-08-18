@@ -18,6 +18,7 @@
 //!
 //! Silenced by `.options nosanitycheck=1` (or `sanity_check=0`).
 
+use crate::warn_user;
 use std::collections::HashMap;
 
 use fairchild_parser::{Element, Netlist, Waveform};
@@ -64,12 +65,12 @@ pub fn check_netlist_sanity(netlist: &Netlist) -> usize {
         let group = &by_cat[cat];
         if group.len() <= SHOW_FULL {
             for w in group {
-                eprintln!("warning: sanity-check: {}", w.detail);
+                warn_user!("sanity-check: {}", w.detail);
             }
         } else {
             // Print first SHOW_FULL verbatim, then a coalesced tail.
             for w in &group[..SHOW_FULL] {
-                eprintln!("warning: sanity-check: {}", w.detail);
+                warn_user!("sanity-check: {}", w.detail);
             }
             let extras: Vec<&str> = group[SHOW_FULL..]
                 .iter()
@@ -84,8 +85,8 @@ pub fn check_netlist_sanity(netlist: &Netlist) -> usize {
             } else {
                 extras.join(", ")
             };
-            eprintln!(
-                "warning: sanity-check: …and {} more with the same issue \
+            warn_user!(
+                "sanity-check: …and {} more with the same issue \
                        ('{cat}'): {truncated}",
                 extras.len()
             );

@@ -23,6 +23,13 @@ pub mod tolerance;
 pub mod tran;
 pub mod tran_step;
 
+// The warning switch lives in the parser (the crate everything else depends on)
+// and is re-exported here so a frontend needs one import, not two, to make
+// `--quiet` mean what it says.
+pub use fairchild_parser::warn;
+pub use fairchild_parser::warn::set_quiet;
+pub use fairchild_parser::warn_user;
+
 pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, AcResult};
 pub use adjoint::{dc_sensitivity, Output, ParamRef, Sensitivities};
 pub use adjoint_tran::{TranAdjoint, TranSensitivities};

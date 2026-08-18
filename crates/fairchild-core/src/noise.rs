@@ -15,6 +15,7 @@
 //! thermal noise (4kT/R).  Diode shot noise and MOSFET channel noise land in
 //! the next commit once the Device trait grows a `noise_sources()` hook.
 
+use crate::warn_user;
 use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
@@ -291,14 +292,15 @@ impl TransientNoise {
             i += 1;
         });
         if worst > 1.05 {
-            eprintln!(
-                "warning: a noise generator varies by {worst:.2}x across the band this \
+            warn_user!(
+                "a noise generator varies by {worst:.2}x across the band this \
                  timestep resolves ({:.3e} to {:.3e} Hz), but transient noise injects a \
                  white sample sequence and can only realise one density — it uses the \
                  mid-band value. `.noise` handles the frequency dependence exactly; for \
                  the time domain, either shorten the step so the band sits where the \
                  density is flat, or treat the result as the mid-band approximation it is.",
-                f_lo, f_hi
+                f_lo,
+                f_hi
             );
         }
     }

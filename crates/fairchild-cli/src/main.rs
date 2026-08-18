@@ -344,8 +344,8 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
 
     #[cfg(not(feature = "osdi"))]
     if !netlist.osdi_paths.is_empty() {
-        eprintln!(
-            "warn: netlist references {} .osdi file(s) but this build was compiled without \
+        fairchild_core::warn_user!(
+            "netlist references {} .osdi file(s) but this build was compiled without \
              OSDI support (--features osdi). Those libraries will be ignored.",
             netlist.osdi_paths.len()
         );
@@ -358,6 +358,13 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
 
 fn main() {
     let cli = Cli::parse();
+
+    // Before the first parse: `--quiet` promises to suppress *all* warnings, and
+    // most of them come from inside the parser and the solver rather than from
+    // here. Set it before anything can warn.
+    if cli.quiet {
+        fairchild_core::set_quiet(true);
+    }
 
     let mut netlist = parse_spice_file(&cli.file).unwrap_or_else(|e| {
         eprintln!("error: {e}");

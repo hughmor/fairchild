@@ -1,6 +1,7 @@
 mod error;
 pub mod expr;
 mod spice;
+pub mod warn;
 
 pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
