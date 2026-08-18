@@ -1,6 +1,7 @@
 use super::common::{canon_node, parse_value};
 use super::directives::is_silent_directive;
 use super::element::{parse_element_expanded, parse_model};
+use crate::warn_user;
 use crate::{Element, ModelCard, ParseError};
 use std::collections::{HashMap, HashSet};
 
@@ -170,8 +171,8 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         } else {
             control_verbs.join(", ")
         };
-        eprintln!(
-            "warning: .control block skipped — its commands are not interpreted \
+        warn_user!(
+            ".control block skipped — its commands are not interpreted \
              ({verbs}). fairchild is not an ngspice shell: control flow belongs in \
              Python (fairchild.Circuit) or in CLI flags, and output selection is \
              --probe. An analysis that existed only inside the block will not run: \

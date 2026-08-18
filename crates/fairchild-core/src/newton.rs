@@ -1,3 +1,4 @@
+use crate::warn_user;
 use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
@@ -340,9 +341,7 @@ pub fn build_devices_with_footprints(
                     )));
                 }
                 for key in ps.unconsumed() {
-                    eprintln!(
-                        "warning: '{model_name}' instance: unknown parameter '{key}' ignored"
-                    );
+                    warn_user!("'{model_name}' instance: unknown parameter '{key}' ignored");
                 }
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:
@@ -1191,8 +1190,8 @@ fn nr_inner(
                 // the first version of this asserted "no resistive path to
                 // ground", which was wrong on the very circuit that prompted it
                 // (the path existed; the inductors on it were being stamped open).
-                eprintln!(
-                    "warning: node '{}' wants to move {max_dv:.3e} V in one Newton \
+                warn_user!(
+                    "node '{}' wants to move {max_dv:.3e} V in one Newton \
                      step, so the vmax={:.3e} trust region shrinks every unknown by \
                      {scale:.3e} — including unknowns in other units. A step this \
                      small carries almost no information, so the solve will crawl \

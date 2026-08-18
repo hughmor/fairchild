@@ -32,6 +32,7 @@ use directives::{
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
 
+use crate::warn_user;
 use crate::{Analysis, Element, Netlist, ParseError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -231,8 +232,8 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
             netlist.measurements.push(parse_measure(trimmed, *lineno)?);
         } else if let Some(select) = select_directive(&lc) {
             if select_warned.insert(select) {
-                eprintln!(
-                    "warning: {select} is ignored — output selection belongs to the \
+                warn_user!(
+                    "{select} is ignored — output selection belongs to the \
                      frontend, not the deck: use --probe (CLI) or index the returned \
                      result (Python). Every signal is available either way \
                      (see docs/spice_support.md §4.6)"

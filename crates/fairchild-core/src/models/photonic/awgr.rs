@@ -2,6 +2,7 @@ use super::spectrum::{AwgSpectrum, ChannelGrid, SpectrumTable};
 use super::{stamp_potential_eq, C0};
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+use crate::warn_user;
 
 // ────────────────────────────────────────────────────────────────────────
 // Arrayed-waveguide grating router (`fc_awgr`)
@@ -381,8 +382,8 @@ impl NativeAwgr {
         };
         if p > 1.0 + 1e-9 {
             self.warned_gain = true;
-            eprintln!(
-                "warning: fc_awgr input {} channel {} sends {:.4}× its power to the outputs \
+            warn_user!(
+                "fc_awgr input {} channel {} sends {:.4}× its power to the outputs \
                  (>1). Raise il_db or lower xt_adj_db/xt_bg_db; in a feedback path this grows \
                  without bound.",
                 idx / self.n,
@@ -412,8 +413,8 @@ impl Device for NativeAwgr {
             // The caller reports a terminal-count mismatch, which is true but
             // not the cause: with 5 wires per channel the netlist simply cannot
             // supply the 2·3·N² this device wants. Name the real fix here.
-            eprintln!(
-                "warning: fc_awgr does not support bidirectional propagation (wpc={wpc}); \
+            warn_user!(
+                "fc_awgr does not support bidirectional propagation (wpc={wpc}); \
                  the backward-travelling fields would need the transposed routing. Drop \
                  `.options enable_bidirectional=1`. The terminal-count error that follows \
                  is a consequence of it."

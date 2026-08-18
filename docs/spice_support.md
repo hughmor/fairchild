@@ -15,7 +15,7 @@ Three failure modes, and only one of them is dangerous:
 | | meaning |
 |---|---|
 | **error** | Parse or setup fails, non-zero exit, named directive/letter and line number. Safe: you cannot get a wrong number out of it. |
-| **warn** | Runs, prints to **stderr**. Safe only if you are reading stderr — note the CSV goes to stdout. |
+| **warn** | Runs, prints to **stderr**. Safe only if you are reading stderr — note the CSV goes to stdout, and `--quiet` silences every one of them. |
 | **SILENT** | Runs, says nothing, and the answer may be wrong. **These are bugs.** |
 
 The good news up front: every unimplemented element letter and every

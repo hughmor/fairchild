@@ -881,7 +881,7 @@ fairchild [OPTIONS] --file <FILE>
 | `--no-pnjlim` | Disable junction limiting |
 | `--check` | Parse + discipline-check only |
 | `--list-nodes` / `--list-models` | Inspect parsed netlist, then exit |
-| `-v` / `-q` | Verbose / quiet |
+| `-v` / `-q` | Verbose / quiet. `-q` silences every warning, including the ones raised inside the parser and the solver — a skipped `.control` block, an ignored `.print`, an unrecognised `.options` key, a MOSFET card asking for an unimplemented level. Errors are unaffected |
 
 Examples:
 

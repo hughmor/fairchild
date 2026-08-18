@@ -1,3 +1,4 @@
+use crate::warn_user;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -289,7 +290,7 @@ impl DeviceRegistry {
                         continue; // instance line wins
                     }
                     if !dev.set_real_param(k, *v) {
-                        eprintln!("warning: .model '{label}': unknown parameter '{k}' ignored");
+                        warn_user!(".model '{label}': unknown parameter '{k}' ignored");
                     }
                 }
                 dev
@@ -307,8 +308,8 @@ impl DeviceRegistry {
             // Warn once per model card about params that aren't yet implemented.
             let (_, unknown) = ShockleyDiode::from_params(&params);
             if !unknown.is_empty() {
-                eprintln!(
-                    "warning: diode model '{}' params not yet implemented (using defaults): {}",
+                warn_user!(
+                    "diode model '{}' params not yet implemented (using defaults): {}",
                     card.name,
                     unknown.join(", ")
                 );
@@ -337,8 +338,8 @@ impl DeviceRegistry {
             };
             // Warn once per card, matching the diode/MOSFET/BJT convention.
             match crate::models::Switch::from_model_params(is_current, &card.params, false) {
-                Ok((_, unknown)) if !unknown.is_empty() => eprintln!(
-                    "warning: switch model '{}' params not recognised (using defaults): {}",
+                Ok((_, unknown)) if !unknown.is_empty() => warn_user!(
+                    "switch model '{}' params not recognised (using defaults): {}",
                     card.name,
                     unknown.join(", ")
                 ),
@@ -373,12 +374,13 @@ impl DeviceRegistry {
                 .find(|(k, _)| k.eq_ignore_ascii_case("level"))
             {
                 if (level - 1.0).abs() > 1e-9 {
-                    eprintln!(
-                        "warning: MOSFET model '{}' asks for LEVEL={} — fairchild \
+                    warn_user!(
+                        "MOSFET model '{}' asks for LEVEL={} — fairchild \
                          implements Level 1 (Shichman-Hodges) only, and is simulating \
                          this card as Level 1. Currents and capacitances will differ \
                          from the intended model, not merely in the unset parameters.",
-                        card.name, level
+                        card.name,
+                        level
                     );
                 }
             }
@@ -389,8 +391,8 @@ impl DeviceRegistry {
                 .filter(|k| !k.eq_ignore_ascii_case("level"))
                 .collect();
             if !unknown.is_empty() {
-                eprintln!(
-                    "warning: MOSFET model '{}' params not yet implemented (using defaults): {}",
+                warn_user!(
+                    "MOSFET model '{}' params not yet implemented (using defaults): {}",
                     card.name,
                     unknown.join(", ")
                 );
@@ -411,8 +413,8 @@ impl DeviceRegistry {
             };
             let (_, unknown) = GummelPoonBjt::from_model_params(is_pnp, &card.params);
             if !unknown.is_empty() {
-                eprintln!(
-                    "warning: BJT model '{}' params not yet implemented (using defaults): {}",
+                warn_user!(
+                    "BJT model '{}' params not yet implemented (using defaults): {}",
                     card.name,
                     unknown.join(", ")
                 );
@@ -468,8 +470,8 @@ impl DeviceRegistry {
                             .and_then(|t| SpectrumTable::from_csv(&t, d.n_ports()))
                         {
                             Ok(table) => d.set_table(table),
-                            Err(e) => eprintln!(
-                                "warning: fc_awgr model '{name}' could not load sfile=\"{p}\" \
+                            Err(e) => warn_user!(
+                                "fc_awgr model '{name}' could not load sfile=\"{p}\" \
                                  ({e}); falling back to the analytic response"
                             ),
                         }
@@ -494,8 +496,8 @@ impl DeviceRegistry {
                         .and_then(|(_, src)| match Expr::parse(src) {
                             Ok(e) => Some(e),
                             Err(err) => {
-                                eprintln!(
-                                    "warning: photonic model '{}' {name} expression \
+                                warn_user!(
+                                    "photonic model '{}' {name} expression \
                                      failed to parse ({err:?}); treating as 0",
                                     card.name
                                 );
@@ -551,8 +553,8 @@ impl DeviceRegistry {
                 // Not a photonic family (or unknown LEVEL) — leave for others;
                 // warn on a recognised family with a bad LEVEL.
                 (k @ ("fc_pn_ps" | "fc_thermal_ps" | "fc_pn_th_ps"), bad) => {
-                    eprintln!(
-                        "warning: photonic model '{}' has unsupported {k} LEVEL={bad}; \
+                    warn_user!(
+                        "photonic model '{}' has unsupported {k} LEVEL={bad}; \
                          using LEVEL=1",
                         card.name
                     );

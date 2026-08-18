@@ -1,5 +1,6 @@
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
+use crate::warn_user;
 
 // ────────────────────────────────────────────────────────────────────────
 // Native 3-port circulator (bidir-only)
@@ -76,8 +77,8 @@ impl Device for NativeCirculator {
             // needs 3·5·N, so the caller's terminal-count error fires with true
             // numbers. It cannot know *why*, so say it here — the count is a
             // symptom of the missing option, not an independent mistake.
-            eprintln!(
-                "warning: fc_circulator requires bidirectional propagation; set \
+            warn_user!(
+                "fc_circulator requires bidirectional propagation; set \
                  `.options enable_bidirectional=1` (or via CLI / Python). Without it \
                  each optical port carries {} wires per channel instead of 5, which \
                  is the terminal-count error that follows.",

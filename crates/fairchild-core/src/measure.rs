@@ -4,6 +4,7 @@
 //! `TranResult`.  Each `Measurement` becomes a `(name, value)` scalar that the
 //! CLI prints and Python exposes via `SimResult.measurements()`.
 
+use crate::warn_user;
 use fairchild_parser::{EvalContext, Expr, MeasKind, MeasOp, Measurement};
 
 use crate::tran::TranResult;
@@ -28,8 +29,8 @@ pub fn evaluate_measurements(
         .iter()
         .filter(|m| {
             if !matches!(m.analysis, MeasAnalysis::Tran) {
-                eprintln!(
-                    "warning: .meas '{}' is not a transient measurement and will be skipped \
+                warn_user!(
+                    ".meas '{}' is not a transient measurement and will be skipped \
                      — only `.meas tran` is currently supported",
                     m.name
                 );
