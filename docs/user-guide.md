@@ -974,9 +974,10 @@ reached with `run("dc_sweep")`.
 
 Directives outside that list divide the same way. `.model`, `.param`, `.subckt`,
 `.include`, `.ic`, `.osdi` and friends define *what the circuit is* and are
-always honoured identically in both frontends. `.print`/`.plot`/`.probe` select
-*what to report*, which the frontend owns — use `--probe` from the CLI, or index
-the returned result. `.control` is imperative script; control flow belongs in
+always honoured identically in both frontends. `.print`, `.plot`, `.probe`, `.save` and
+`.width` select *what to report*, which the frontend owns — use `--probe` from
+the CLI, or index the returned result. They load and warn rather than narrowing
+anything: every signal is available either way. `.control` is imperative script; control flow belongs in
 this API, so it is declined rather than interpreted.
 
 ### Gradients — `dc_adjoint`, `ac_adjoint`, `tran_adjoint`
