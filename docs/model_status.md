@@ -1,6 +1,6 @@
 # Model status — what is parsed, what is stamped, what is validated
 
-*Audited against the source on 2026-08-07. If you find a disagreement between
+*Audited against the source on 2026-08-18. If you find a disagreement between
 this table and the simulator, the simulator is the bug.*
 
 This document exists because "supported" is not a binary. A parameter can be
@@ -17,6 +17,16 @@ Three columns, and they mean exactly this:
 | **Validated** | A test pins it — `ngspice` where the column says so, otherwise an analytic or equivalence test in-tree. |
 
 Legend: ✅ yes · ⚠️ partial (see the note) · ❌ no.
+
+**How a card value may be written.** Any value on a `.model` card may be a
+parse-time expression over `.param` values and `.func` calls, braced (`VTO={vt}`)
+or single-quoted (`VTO='vt*1.05'`); both are evaluated before the card is built,
+so the tables below apply unchanged. Until 2026-08-18 they were *not* evaluated on
+a top-level card: the value landed in the card's expression params, which only the
+`fc_phase_shifter_expr` and `fc_awgr` kinds read, and every other card defaulted
+the parameter in silence. Double quotes still mean a device constitutive map over
+the device's own bias (`dneff="5.0e-5*V"`) and are left symbolic — a card whose
+kind cannot read one now warns instead of dropping it.
 
 **The short version of what to watch out for:**
 

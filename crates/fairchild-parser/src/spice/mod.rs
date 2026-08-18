@@ -1968,7 +1968,7 @@ R1 a b 1k
         )
         .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("finite"), "{msg}");
+        assert!(msg.contains("undefined"), "{msg}");
         assert!(
             msg.contains("nope"),
             "the message must name the culprit: {msg}"
@@ -2213,6 +2213,143 @@ R1 a 0 1k
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 2);
+    }
+
+    // ─── .if / .elseif / .else / .endif ─────────────────────────────────────
+
+    #[test]
+    fn if_selects_one_branch() {
+        for (corner, want) in [(1.0, 1e3), (2.0, 2e3), (3.0, 5e3)] {
+            let deck = format!(
+                "* corners\n.param corner={corner}\n                 .if (corner==1)\nR1 in 0 1k\n                 .elseif (corner==2)\nR1 in 0 2k\n                 .else\nR1 in 0 5k\n.endif\n                 V1 in 0 DC 1\n.op\n.end\n"
+            );
+            let r = resistance_of(&deck, "r1");
+            assert!((r - want).abs() < 1e-9, "corner {corner}: got {r}");
+        }
+    }
+
+    #[test]
+    fn only_the_taken_branch_is_collected() {
+        // Every branch declares R1. If more than one were kept the deck would
+        // carry two elements of the same name, which is how a conditional that
+        // does not really conditionalise shows up.
+        let netlist = parse_spice(
+            "* one only\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n.else\nR1 in 0 2k\nR2 in 0 3k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        assert_eq!(netlist.elements.len(), 2, "{:?}", netlist.elements);
+    }
+
+    #[test]
+    fn dead_branches_declare_nothing() {
+        // A `.param`, a `.model` and a `.subckt` in an untaken branch must not
+        // exist afterwards — including for later conditions to read.
+        let netlist = parse_spice(
+            "* dead\n.param c=0\n             .if (c==1)\n.param extra=5\n.model dead_d D(IS=1e-14)\n             .subckt deadsub a b\nR9 a b 1\n.ends\n.endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        assert!(netlist.models.is_empty(), "{:?}", netlist.models);
+        assert_eq!(netlist.elements.len(), 2, "{:?}", netlist.elements);
+    }
+
+    #[test]
+    fn a_dead_branch_condition_is_not_evaluated() {
+        // `.elseif (undefined_thing==1)` cannot run once the first branch is
+        // taken, so it must not be evaluated — otherwise a deck that works in
+        // HSPICE fails here on a name that never mattered.
+        let netlist = parse_spice(
+            "* unevaluated\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n             .elseif (never_defined==1)\nR1 in 0 2k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        assert_eq!(netlist.elements.len(), 2);
+    }
+
+    #[test]
+    fn nested_ifs_gate_on_the_outer_branch() {
+        // The inner `.if` is true, but its parent is false: nothing inside runs.
+        let netlist = parse_spice(
+            "* nested\n.param outer=0\n.param inner=1\n             .if (outer==1)\n             .if (inner==1)\nR9 in 0 9k\n.endif\n             .endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        assert_eq!(netlist.elements.len(), 2, "{:?}", netlist.elements);
+        let r = resistance_of(
+            "* nested live\n.param outer=1\n.param inner=2\n             .if (outer==1)\n             .if (inner==1)\nR1 in 0 1k\n.else\nR1 in 0 7k\n.endif\n             .endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 7e3).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn condition_may_call_a_func() {
+        let r = resistance_of(
+            "* fcond\n.func big(x)=x>2\n.param w=3\n             .if (big(w))\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 1e3).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn params_defined_above_a_condition_are_visible_to_it() {
+        // Conditions read the deck in file order, so this is the one ordering rule
+        // `.if` has: define before you test.
+        let r = resistance_of(
+            "* order\n.param a=2\n.param b={a*2}\n             .if (b==4)\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 1e3).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn conditional_faults_are_refused() {
+        for (deck, want) in [
+            (
+                "* unterminated\n.param c=1\n.if (c==1)\nR1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+                "unterminated",
+            ),
+            (
+                "* stray else\nR1 in 0 1k\n.else\nV1 in 0 DC 1\n.op\n.end\n",
+                "without a matching .if",
+            ),
+            (
+                "* stray endif\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "without a matching .if",
+            ),
+            (
+                "* empty cond\n.if\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "no condition",
+            ),
+            (
+                // A comparison against an undefined name is the dangerous one: it
+                // evaluates to a valid `false` and would silently pick the other
+                // branch — the wrong corner, simulated without complaint.
+                "* undefined\n.if (nope==1)\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "undefined parameter",
+            ),
+            (
+                "* in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.else\nR1 a b 2k\n.endif\n.ends\n                 X1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "inside a .subckt",
+            ),
+        ] {
+            let err = parse_spice(deck).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains(want), "expected {want:?} in: {msg}");
+        }
+    }
+
+    #[test]
+    fn include_is_not_mistaken_for_a_conditional() {
+        // `.if` is matched as a whole word: a prefix test would have swallowed
+        // `.include`, and the failure would look like a missing file.
+        let dir = std::env::temp_dir();
+        let inc = dir.join(format!("fc_if_include_{}.sp", std::process::id()));
+        std::fs::write(&inc, "R1 in 0 4k\n").unwrap();
+        let deck = format!(
+            "* inc\n.include {}\nV1 in 0 DC 1\n.op\n.end\n",
+            inc.display()
+        );
+        let r = resistance_of(&deck, "r1");
+        std::fs::remove_file(&inc).ok();
+        assert!((r - 4e3).abs() < 1e-9, "got {r}");
     }
 
     // ─── .func and parse-time parameter expressions ─────────────────────────

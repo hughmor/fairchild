@@ -67,6 +67,9 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     let mut in_subckt = false;
     // `.control` state. The verbs are collected only to name them in the
     // warning — nothing reads them, and nothing should start to.
+    // `.if` / `.elseif` / `.else` / `.endif`. One frame per open `.if`; a line is
+    // kept only while every frame on the stack is emitting.
+    let mut cond_stack: Vec<CondFrame> = Vec::new();
     let mut in_control = false;
     let mut control_lineno = 0usize;
     let mut control_verbs: Vec<String> = Vec::new();
@@ -110,6 +113,71 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
                 line: lineno,
                 msg: ".endc without a matching .control".into(),
             });
+        }
+
+        // Conditionals resolve here, before any other arm sees the line: a false
+        // branch may hold `.model`, `.subckt`, `.param` or elements, and none of
+        // them may be collected. Conditions are evaluated against the parameters
+        // and functions defined *above* them, in file order — which is why this
+        // lives in the pass that accumulates those rather than in a pass of its
+        // own.
+        if let Some(kind) = conditional_directive(&lc) {
+            if in_subckt {
+                // Evaluating it here would use the subcircuit's *default*
+                // parameters, once, for every instance — a wrong answer per
+                // instance rather than a missing feature. Refuse instead.
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!(
+                        "{kind} inside a .subckt is not supported: its condition \
+                         would be evaluated once against the subcircuit's default \
+                         parameters, not per instance. Select with .if outside the \
+                         definition, or give the instances different models"
+                    ),
+                });
+            }
+            let parent_live = cond_stack.iter().all(|f| f.live);
+            match kind {
+                ".if" => {
+                    let live =
+                        parent_live && eval_condition(&lc, kind, &global_params, &funcs, lineno)?;
+                    cond_stack.push(CondFrame { live, taken: live });
+                }
+                ".elseif" | ".else" | ".endif" => {
+                    let Some(frame) = cond_stack.last().copied() else {
+                        return Err(ParseError::Syntax {
+                            line: lineno,
+                            msg: format!("{kind} without a matching .if"),
+                        });
+                    };
+                    if kind == ".endif" {
+                        cond_stack.pop();
+                    } else {
+                        // `parent_live` above included this frame; the enclosing
+                        // frames are what gate a sibling branch.
+                        let outer_live = cond_stack[..cond_stack.len() - 1].iter().all(|f| f.live);
+                        let cond = if kind == ".else" {
+                            true
+                        } else {
+                            // A condition in a branch that cannot run is not
+                            // evaluated at all, so a dead branch may reference
+                            // parameters that were never defined.
+                            outer_live
+                                && !frame.taken
+                                && eval_condition(&lc, kind, &global_params, &funcs, lineno)?
+                        };
+                        let live = outer_live && !frame.taken && cond;
+                        let last = cond_stack.last_mut().unwrap();
+                        last.live = live;
+                        last.taken = frame.taken || live;
+                    }
+                }
+                _ => unreachable!("conditional_directive returns only those four"),
+            }
+            continue;
+        }
+        if !cond_stack.iter().all(|f| f.live) {
+            continue;
         }
 
         if lc == ".end" {
@@ -173,6 +241,16 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         return Err(ParseError::Syntax {
             line: 0,
             msg: format!(".subckt '{current_name}' has no matching .ends"),
+        });
+    }
+    if !cond_stack.is_empty() {
+        return Err(ParseError::Syntax {
+            line: 0,
+            msg: format!(
+                "{} unterminated .if block(s): every .if needs an .endif, and \
+                 guessing where one ended would silently drop the rest of the deck",
+                cond_stack.len()
+            ),
         });
     }
     if in_control {
@@ -347,6 +425,56 @@ impl crate::expr::EvalContext for ParamCtx<'_> {
     }
 }
 
+/// One open `.if`: whether its current branch emits, and whether any branch has.
+#[derive(Clone, Copy)]
+struct CondFrame {
+    /// This branch is emitting lines.
+    live: bool,
+    /// Some branch of this `.if` has already been taken, so no later one may be.
+    taken: bool,
+}
+
+/// Which conditional directive a line is, if any.
+///
+/// Matched on the whole first word so `.iff` or `.elsewhere` are not conditionals
+/// — and `.if` must not swallow `.include`, which is why this is a word match and
+/// not a prefix test.
+fn conditional_directive(lc: &str) -> Option<&'static str> {
+    let word = lc.split_whitespace().next().unwrap_or(lc);
+    let word = word.split('(').next().unwrap_or(word);
+    match word {
+        ".if" => Some(".if"),
+        ".elseif" | ".elsif" => Some(".elseif"),
+        ".else" => Some(".else"),
+        ".endif" => Some(".endif"),
+        _ => None,
+    }
+}
+
+/// Evaluate a `.if` / `.elseif` condition: true when it is a non-zero number.
+///
+/// The condition is an ordinary parse-time expression, so it may use `.param`
+/// values, `.func` calls and the comparison operators the grammar already has.
+/// Surrounding parentheses are optional — both spellings are in the wild.
+fn eval_condition(
+    lc: &str,
+    kind: &str,
+    params: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+) -> Result<bool, ParseError> {
+    let rest = lc[kind.len()..].trim();
+    let rest = strip_span(rest).trim();
+    if rest.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!("{kind} has no condition"),
+        });
+    }
+    let val = eval_param_expr(rest, params, funcs, lineno, &format!("{kind} condition"))?;
+    Ok(val != 0.0)
+}
+
 /// Evaluate one parse-time expression over `params` and `funcs`.
 ///
 /// The single path for every `{…}`, `'…'`, `.param` value and `.model` value:
@@ -366,6 +494,31 @@ fn eval_param_expr(
         msg: format!("{what}: cannot parse '{src}': {e}"),
     })?;
     let expr = expand_and_check(parsed, funcs, lineno, what)?;
+    // Undefined names are caught by name, before evaluation: a comparison would
+    // otherwise launder one into a valid answer — `nope == 1` is NaN against 1,
+    // which is a perfectly finite `false`, and `.if (nope==1)` would quietly take
+    // the other branch.
+    let mut vars = Vec::new();
+    expr.collect_vars(&mut vars);
+    let undefined: Vec<String> = vars
+        .into_iter()
+        .filter(|v| v != "pi" && !params.contains_key(v))
+        .collect();
+    if !undefined.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "{what}: undefined parameter(s) {} — define them with .param above \
+                 this line, or (for a node voltage or the simulation time) note \
+                 that a parse-time expression cannot use the solution",
+                undefined
+                    .iter()
+                    .map(|v| format!("'{v}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
     let val = expr.eval(&ParamCtx(params));
     if !val.is_finite() {
         return Err(ParseError::Syntax {

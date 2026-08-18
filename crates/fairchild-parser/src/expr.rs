@@ -304,6 +304,39 @@ impl Expr {
         }
     }
 
+    /// Every bare variable name in this AST, deduplicated.
+    ///
+    /// A parse-time expression needs this because a comparison launders an
+    /// undefined name: `nope == 1` evaluates NaN against 1 and yields a perfectly
+    /// finite `false`, so `.if (nope==1)` would silently take the other branch.
+    /// Names are checked before evaluation instead.
+    pub fn collect_vars(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Num(_) | Expr::NodeV(_) | Expr::NodeDiffV(..) | Expr::BranchI(_) | Expr::Time => {
+            }
+            Expr::Var(n) => {
+                if !out.iter().any(|m| m == n) {
+                    out.push(n.clone());
+                }
+            }
+            Expr::Neg(e) | Expr::Not(e) => e.collect_vars(out),
+            Expr::Bin(_, a, b) => {
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            Expr::If(c, a, b) => {
+                c.collect_vars(out);
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            Expr::Call(_, args) => {
+                for a in args {
+                    a.collect_vars(out);
+                }
+            }
+        }
+    }
+
     /// Function names in this AST that nothing can evaluate — neither a built-in
     /// nor (after [`Expr::expand_funcs`]) a `.func`.
     ///
