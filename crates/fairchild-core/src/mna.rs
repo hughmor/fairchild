@@ -113,45 +113,6 @@ impl CircuitTopology {
         }
     }
 
-    /// Compressed-sparse-column arrays `(ap, ai, ax)` built straight from the
-    /// sparse rows, dropping values at or below `thr`.
-    ///
-    /// This is what a sparse LU backend actually wants, and building it from
-    /// the row structure is O(nnz). The dense equivalent
-    /// (`fairchild_klu::dense_to_csc`) scanned all n² cells in column-major
-    /// order over row-major storage — 41 ms per call at n = 3200.
-    pub fn to_csc(a: &[SparseRow], thr: f64) -> (Vec<i32>, Vec<i32>, Vec<f64>) {
-        let n = a.len();
-        let mut col_count = vec![0i32; n];
-        for row in a {
-            for (j, v) in row.iter() {
-                if v.abs() > thr {
-                    col_count[j] += 1;
-                }
-            }
-        }
-        let mut ap = vec![0i32; n + 1];
-        for j in 0..n {
-            ap[j + 1] = ap[j] + col_count[j];
-        }
-        let nnz = ap[n] as usize;
-        let mut ai = vec![0i32; nnz];
-        let mut ax = vec![0.0f64; nnz];
-        let mut fill = ap.clone();
-        // Row-major walk keeps row indices ascending within each column.
-        for (i, row) in a.iter().enumerate() {
-            for (j, v) in row.iter() {
-                if v.abs() > thr {
-                    let k = fill[j] as usize;
-                    ai[k] = i as i32;
-                    ax[k] = v;
-                    fill[j] += 1;
-                }
-            }
-        }
-        (ap, ai, ax)
-    }
-
     /// Wrap dense rows as sparse ones, dropping exact zeros.
     ///
     /// ponytail: exists only to bridge the still-dense `.ac`/`.noise` assembly

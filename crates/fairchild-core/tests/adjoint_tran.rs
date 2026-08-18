@@ -533,3 +533,88 @@ fn a_device_declared_capacitance_gradient_matches_a_full_resolve() {
     let fd = (solve(nominal + d) - solve(nominal - d)) / (2.0 * d);
     assert_close("dP(out0)/dc_j0", s.grad[0], fd, 1e-3);
 }
+
+// ---------------------------------------------------------------------------
+// The two Jacobian diagnostics
+//
+// Both were written to chase real defects — `jacobian_check_tran` measured the
+// missing `v·dC/dv` term at 22 % of the drive node's diagonal (see the note on
+// the interferometer test above), and `charge_lag` explains why a
+// bias-dependent capacitance is stamped one step stale. Both then had no
+// caller, so a regression in either would have gone unnoticed until the next
+// time someone needed them and found they no longer worked.
+//
+// A linear RC is the case where each has a known exact answer, which is what
+// makes them usable as tests rather than as agreement invariants.
+// ---------------------------------------------------------------------------
+
+const LINEAR_RC: &str = "* linear RC\n\
+                         V1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\n\
+                         R1 in out 1k\n\
+                         C1 out 0 1u\n\
+                         .tran 100u 2m\n.end\n";
+
+fn linear_rc() -> (fairchild_parser::Netlist, DeviceRegistry, SimOptions) {
+    let net = fairchild_parser::parse_spice(LINEAR_RC).unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    (net, reg, opts)
+}
+
+#[test]
+fn jacobian_check_reports_no_mismatch_on_a_linear_circuit() {
+    let (net, reg, opts) = linear_rc();
+    let bad = fairchild_core::adjoint_tran::jacobian_check_tran(
+        &net, &reg, &opts, 100e-6, 1e-3, 1e-6, 1e-12,
+    )
+    .unwrap();
+    // Every stamp in an R/C/V circuit is a constant, so the stamped Jacobian
+    // and the finite-difference one must agree to the tolerance given. A
+    // mismatch here is either a wrong stamp or a broken checker.
+    let undeclared: Vec<_> = bad.iter().filter(|m| !m.frozen).collect();
+    assert!(
+        undeclared.is_empty(),
+        "linear circuit should have no undeclared Jacobian mismatch, got {:?}",
+        undeclared
+            .iter()
+            .map(|m| (m.row, m.col, m.stamped, m.numeric))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn charge_lag_reports_a_device_charge_branch_and_finds_no_lag_at_a_static_bias() {
+    // A *netlist* capacitor declares no device branch, so `charge_lag` returns
+    // an empty list for an ordinary RC and any assertion over it is vacuous —
+    // which is how the first version of this test passed against a deliberately
+    // corrupted diagnostic. It needs a device that declares its own charge.
+    let src = "* pn phase shifter with Cj(V)\n\
+               .optical_port a\n.optical_port b\n\
+               Xl a fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+               Xps a b vm 0 fc_pn_ps_cap L_um=500 V_pi_L=2e-3 g_pn=1e-3\n\
+               Vm vm 0 PULSE(0 2 0 1n 1n 50n 100n)\n\
+               .tran 1n 20n\n.end\n";
+    let net = fairchild_parser::parse_spice(src).unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&net.models);
+    reg.register_native_photonics();
+    let opts = SimOptions::from_netlist(&net);
+
+    let lag = fairchild_core::adjoint_tran::charge_lag(&net, &reg, &opts, 1e-9, 1e-8).unwrap();
+    assert!(
+        !lag.is_empty(),
+        "fc_pn_ps_cap declares a charge branch; an empty result means the \
+         diagnostic stopped seeing device branches at all"
+    );
+    // t = 10 ns sits on the pulse plateau, so the bias is not moving between
+    // steps and the stale-C effect this measures has nothing to bite on. The
+    // two companions must therefore be the same number.
+    for (name, stamped, refreshed) in &lag {
+        assert!(
+            (stamped - refreshed).abs() <= 1e-12 * stamped.abs().max(1.0),
+            "static bias should show no lag on '{name}': \
+             stamped={stamped:.6e} refreshed={refreshed:.6e}"
+        );
+    }
+}

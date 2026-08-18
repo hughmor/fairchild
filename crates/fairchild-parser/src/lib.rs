@@ -306,21 +306,6 @@ pub enum Waveform {
 }
 
 impl Waveform {
-    /// Value used for DC operating-point (t = 0).
-    pub fn dc_value(&self) -> f64 {
-        match self {
-            Waveform::Dc(v) => *v,
-            Waveform::Pulse { v0, .. } => *v0,
-            Waveform::Pwl { points } => points.first().map(|(_, v)| *v).unwrap_or(0.0),
-            // All continuous shapes use their value at t=0 as the DC point.
-            // For SIN with td>0, this is just vo; for EXP, v1; etc.
-            Waveform::Sin { vo, .. } => *vo,
-            Waveform::Exp { v1, .. } => *v1,
-            Waveform::Sffm { vo, .. } => *vo, // sin(0)=0 → vo dominates
-            Waveform::Am { vo, .. } => *vo,
-        }
-    }
-
     /// Next time strictly after `t` at which this waveform has a slope discontinuity.
     ///
     /// Returns `None` for smooth (DC) waveforms or when all breakpoints are in the past.

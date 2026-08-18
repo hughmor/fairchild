@@ -43,10 +43,10 @@ pub use newton::{
 pub use noise::{noise_analysis, NoiseResult};
 pub use options::SimOptions;
 pub use sanity::check_netlist_sanity;
-pub use solver::{lu_solve, SolverKind};
+pub use solver::SolverKind;
 pub use tran::{
-    run_tran, run_tran_tr, tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry,
-    tran_nr_with_registry_opts, tran_nr_with_registry_tr, tran_nr_with_registry_var,
-    tran_nr_with_registry_var_opts, IntegratorMode, TranResult,
+    tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry, tran_nr_with_registry_opts,
+    tran_nr_with_registry_tr, tran_nr_with_registry_var, tran_nr_with_registry_var_opts,
+    IntegratorMode, TranResult,
 };
 pub use tran_step::TranStepper;
