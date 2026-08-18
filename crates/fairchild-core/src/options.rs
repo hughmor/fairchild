@@ -250,22 +250,31 @@ impl SimOptions {
                 );
             }
         }
-        // `.tran`'s tstart and tmax used to be parsed and dropped. Picking them
-        // up here rather than at each analysis entry point means the CLI and the
-        // Python bindings both get them from one place.
-        for a in &netlist.analyses {
-            if let fairchild_parser::Analysis::Tran { tstart, tmax, .. } = a {
-                if *tstart > 0.0 {
-                    opts.tstart = *tstart;
-                }
-                if let Some(tmax) = tmax {
-                    // Tightest constraint wins, so this can never loosen a step
-                    // ceiling the user set through `.options maxstep`.
-                    opts.max_step = opts.max_step.min(*tmax);
-                }
-            }
-        }
         opts
+    }
+
+    /// Apply one `.tran` card's option-bearing fields — `tstart`, `tmax` and
+    /// `UIC` — as a unit.
+    ///
+    /// Call this only from the code about to run *that* card. It used to live in
+    /// [`SimOptions::from_netlist`], which every frontend calls whether or not
+    /// it is running the deck's analyses: a caller supplying its own `step` and
+    /// `stop` still inherited the card's `tmax`, so half a card applied and
+    /// nobody chose that. A deck with two `.tran` cards was worse — both runs
+    /// got the tightest `tmax` of the two. Either the card is taken whole or it
+    /// is not taken.
+    pub fn apply_tran_card(&mut self, tstart: f64, tmax: Option<f64>, uic: bool) {
+        if tstart > 0.0 {
+            self.tstart = tstart;
+        }
+        if let Some(tmax) = tmax {
+            // Tightest constraint wins, so this can never loosen a step ceiling
+            // the user set through `.options maxstep` or a CLI flag.
+            self.max_step = self.max_step.min(tmax);
+        }
+        if uic {
+            self.uic = true;
+        }
     }
 
     /// Build a `SimContext` consistent with these options.  Threads temperature
@@ -599,5 +608,107 @@ mod tests {
             "expected last value, got {}",
             o.reltol
         );
+    }
+
+    // ── `.tran` cards are applied per run, not folded into every options set ──
+
+    #[test]
+    fn from_netlist_leaves_tran_card_alone() {
+        // A caller that supplies its own step and stop must get none of the
+        // card. `from_netlist` used to fold tstart and tmax in, so the deck's
+        // 0.1 ps ceiling silently clamped a run timed entirely from Python.
+        let net = fairchild_parser::parse_spice(
+            "* tran card
+V1 in 0 PULSE(0 1 0 1n 1n 1u 2u)
+R1 in out 1k
+             C1 out 0 1n
+.tran 1p 5n 2n 0.1p
+.end
+",
+        )
+        .unwrap();
+        let o = SimOptions::from_netlist(&net);
+        assert!(
+            o.max_step.is_infinite(),
+            "card tmax reached options that asked for no card: {}",
+            o.max_step
+        );
+        assert_eq!(o.tstart, 0.0, "card tstart reached options unasked");
+    }
+
+    #[test]
+    fn apply_tran_card_takes_the_whole_card() {
+        let net = fairchild_parser::parse_spice(
+            "* tran card
+V1 in 0 DC 1
+R1 in out 1k
+C1 out 0 1n
+             .tran 1p 5n 2n 0.1p UIC
+.end
+",
+        )
+        .unwrap();
+        let fairchild_parser::Analysis::Tran {
+            tstart, tmax, uic, ..
+        } = net.analyses[0]
+        else {
+            panic!("expected a .tran card, got {:?}", net.analyses);
+        };
+        let mut o = SimOptions::from_netlist(&net);
+        o.apply_tran_card(tstart, tmax, uic);
+        assert_eq!(o.tstart, 2e-9);
+        assert!((o.max_step - 1e-13).abs() < 1e-20);
+        assert!(o.uic, "UIC on the card must reach the run");
+    }
+
+    #[test]
+    fn each_tran_card_applies_only_to_its_own_run() {
+        // Two cards in one deck: the coarse run must not inherit the fine run's
+        // step ceiling. Folding both into one options set gave every run
+        // min(tmax) over the whole deck.
+        let net = fairchild_parser::parse_spice(
+            "* two trans
+V1 in 0 DC 1
+R1 in out 1k
+C1 out 0 1n
+             .tran 1n 100n 0 2n
+.tran 1p 5n 0 0.1p
+.end
+",
+        )
+        .unwrap();
+        let base = SimOptions::from_netlist(&net);
+        let mut per_card = Vec::new();
+        for a in &net.analyses {
+            if let fairchild_parser::Analysis::Tran {
+                tstart, tmax, uic, ..
+            } = *a
+            {
+                let mut o = base.clone();
+                o.apply_tran_card(tstart, tmax, uic);
+                per_card.push(o.max_step);
+            }
+        }
+        assert_eq!(per_card.len(), 2);
+        assert!((per_card[0] - 2e-9).abs() < 1e-18, "got {}", per_card[0]);
+        assert!((per_card[1] - 1e-13).abs() < 1e-20, "got {}", per_card[1]);
+    }
+
+    #[test]
+    fn options_maxstep_survives_a_looser_card() {
+        // Tightest constraint wins: a card may lower the ceiling, never raise it.
+        let net = fairchild_parser::parse_spice(
+            "* tighter option
+V1 in 0 DC 1
+R1 in out 1k
+             .options maxstep=1e-13
+.tran 1p 5n 0 1p
+.end
+",
+        )
+        .unwrap();
+        let mut o = SimOptions::from_netlist(&net);
+        o.apply_tran_card(0.0, Some(1e-12), false);
+        assert!((o.max_step - 1e-13).abs() < 1e-20, "got {}", o.max_step);
     }
 }

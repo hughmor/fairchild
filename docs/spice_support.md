@@ -101,11 +101,11 @@ expression source as a `B` element instead.
 | `.table` | lookup table | ❌ | error |
 | `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ❌ | error |
 | `.control` / `.endc` | interactive control block | ❌ | error |
-| `.op` | operating point | ✅ | — |
-| `.dc` | DC sweep | ✅ nested, parallel | — |
-| `.ac` | AC small-signal | ✅ magnitude and phase honoured | — |
-| `.tran` | transient | ✅ incl. `tstart`, `tmax`, `UIC` | — |
-| `.noise` | noise analysis | ✅ | — |
+| `.op` | operating point | ✅ | §4.4 |
+| `.dc` | DC sweep | ✅ nested, parallel | §4.4 |
+| `.ac` | AC small-signal | ✅ magnitude and phase honoured | §4.4 |
+| `.tran` | transient | ✅ incl. `tstart`, `tmax`, `UIC` | §4.4 |
+| `.noise` | noise analysis | ✅ | §4.4 |
 | `.disto` | small-signal distortion | ❌ | error |
 | `.pz` | pole-zero | ❌ | error |
 | `.sens` | sensitivity | ❌ | error |
@@ -224,28 +224,49 @@ expect to matter. `banana` shows there is no validation at all.
 **Fixed.** `SimOptions::set` already returned `false` for an unrecognised key —
 `from_netlist` was discarding it. It now warns. Known keys stay quiet.
 
-### 4.4 `.tran`'s third and fourth arguments were discarded — FIXED
+### 4.4 `.tran`'s third and fourth arguments were discarded, then half-applied — FIXED
 
 ```spice
 .tran 1n 20n 10n        tstart — ngspice suppresses output before 10 ns
 .tran 1n 20n 0 0.1n     tmax   — ngspice caps the step at 0.1 ns
 ```
 
-Measured: with `tstart=10n`, ngspice's first output row is at 1e-8; fairchild's
-is at 0 and the row count is unchanged. With `tmax=0.1n`, fairchild returns the
-same 21 rows as without it — the step cap is ignored, so a deck that asked for
-finer resolution silently does not get it.
+Measured originally: with `tstart=10n`, ngspice's first output row is at 1e-8;
+fairchild's was at 0 and the row count unchanged. With `tmax=0.1n`, fairchild
+returned the same 21 rows as without it — the step cap ignored, so a deck that
+asked for finer resolution silently did not get it.
 
 (`UIC` *is* honoured — verified, `.ic v(out)=0.9` survives to t=0 with `UIC` and
 is discarded without it.)
 
-**Fixed.** Both are parsed (skipping `UIC`, which may occupy any trailing slot)
-and picked up in `SimOptions::from_netlist`, so the CLI and the Python bindings
-get them from one place. `tstart` trims the finished result — SPICE's tstart
-selects what is *saved*, not where integration begins. `tmax` clamps
-`max_step` with `min`, so it can never loosen a ceiling set via
-`.options maxstep`. Verified: `tstart=10n` now starts at 1e-8 like ngspice, and
-`tmax=0.1n` turns 21 rows into 202.
+**Fixed, twice.** Both are parsed (skipping `UIC`, which may occupy any trailing
+slot). The first fix picked them up in `SimOptions::from_netlist`, which every
+frontend calls whether or not it is running the deck's analyses — so
+`Circuit.run("tran", step=…, stop=…)`, which takes its timing entirely from the
+caller, still inherited the card's `tmax`. Half the card applied and nobody chose
+that. A deck with two `.tran` lines was worse: both runs got the tightest `tmax`
+of the two.
+
+An analysis card is now honoured **as a unit**, by whoever is about to run it
+(`SimOptions::apply_tran_card`):
+
+- The CLI runs every card in deck order, each with its own `tstart`, `tmax` and
+  `UIC` — unchanged behaviour for a single-card deck, correct now for several.
+- `Circuit.run("tran")` with no timing kwargs adopts the deck's card whole:
+  `step`, `stop`, `tstart`, `tmax`, `UIC`. Pass any of `step`/`stop` and the card
+  is not consulted at all. The same rule covers `.ac`, `.dc` (through
+  `run("dc_sweep")`) and `.noise`; `Circuit.analyses` lists what a deck declares.
+- With neither a card nor kwargs, `run("tran")` is an error naming both fixes,
+  and a deck declaring two cards of one kind is an error rather than a silent
+  pick of the first.
+
+Verified: `tstart=10n` starts at 1e-8 like ngspice; `tmax=0.1n` turns 21 rows
+into 202 when the card is adopted, and leaves a caller-timed run at 21.
+
+**Behaviour change worth noting:** a deck's `tstart`/`tmax` no longer reach a
+Python or C-API run that supplied its own `step` and `stop`. A deck that was
+relying on the leak gets a coarser `max_step` than before — pass `maxstep=` (or
+no timing at all, and take the card) to get it back.
 
 ### 4.5 `LEVEL=` on a MOSFET card was only warned about generically — FIXED
 

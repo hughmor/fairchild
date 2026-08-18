@@ -7,7 +7,7 @@ same information in the form an agent needs it.
 
 ```bash
 cargo build --release
-cargo test --workspace                 # 521 tests; ngspice goldens skip if ngspice is absent
+cargo test --workspace                 # 573 tests; ngspice goldens skip if ngspice is absent
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

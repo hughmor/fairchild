@@ -787,15 +787,18 @@ fn run_corner_analyses_ctx(
             }
 
             Analysis::Tran {
-                step, stop, uic, ..
+                step,
+                stop,
+                tstart,
+                tmax,
+                uic,
             } => {
-                let local_opts;
-                let opts = if *uic && !opts.uic {
-                    local_opts = SimOptions { uic: true, ..*opts };
-                    &local_opts
-                } else {
-                    opts
-                };
+                // Each card's tstart/tmax/UIC belong to that card's run only.
+                // Folding them in `SimOptions::from_netlist` gave every run the
+                // tightest `tmax` of every `.tran` line in the deck.
+                let mut local_opts = opts.clone();
+                local_opts.apply_tran_card(*tstart, *tmax, *uic);
+                let opts = &local_opts;
                 if ctx.verbose {
                     let mode = if opts.variable_step {
                         "variable-step"
