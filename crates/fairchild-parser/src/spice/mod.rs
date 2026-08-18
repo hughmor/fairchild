@@ -83,7 +83,7 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
     };
 
     // Pass 1.
-    let (subckt_defs, global_params, main_lines) = collect_defs(&all_lines[body_start..])?;
+    let (subckt_defs, global_params, main_lines, funcs) = collect_defs(&all_lines[body_start..])?;
 
     // Pre-scan for `.options enable_bidirectional=…` so we know how to size
     // optical-port wires when we see `.optical_port` directives in pass 2.
@@ -210,7 +210,14 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
                 netlist.temps.push(c + 273.15);
             }
         } else if lc.starts_with(".model") {
-            if let Some(card) = parse_model(&lc, *lineno)? {
+            // A card's values go through parameter substitution like an element's.
+            // They did not: `.model nm NMOS (VTO={vt})` left `vto` in the card's
+            // expression params, where the MOSFET path never looks, so the
+            // threshold silently defaulted. Subcircuit-local cards were already
+            // substituted in `expand_instance`, which is what made the top-level
+            // omission look deliberate.
+            let substituted = substitute_params(&lc, &global_params, &funcs, *lineno)?;
+            if let Some(card) = parse_model(&substituted, *lineno)? {
                 if let Some(alter) = current_alter.as_mut() {
                     alter.model_overrides.push(card);
                 } else {
@@ -229,7 +236,9 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
         } else if lc.starts_with(".meas") {
             // .measure or .meas — both accepted.  Parse failure here is
             // surfaced as a Syntax error, not silently ignored.
-            netlist.measurements.push(parse_measure(trimmed, *lineno)?);
+            netlist
+                .measurements
+                .push(parse_measure(trimmed, *lineno, &funcs)?);
         } else if let Some(select) = select_directive(&lc) {
             if select_warned.insert(select) {
                 warn_user!(
@@ -249,8 +258,8 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
             }
         } else {
             // Element or instance line; substitute top-level params first.
-            let substituted = substitute_params(trimmed, &global_params, *lineno)?;
-            for base_el in parse_element_expanded(&substituted, *lineno)? {
+            let substituted = substitute_params(trimmed, &global_params, &funcs, *lineno)?;
+            for base_el in parse_element_expanded(&substituted, *lineno, &funcs)? {
                 // Bundle-port expansion (B2): any token in an XOsdi nets list
                 // that matches a declared `.optical_port` is replaced with its
                 // (re,im,λ) underlying wires.  When at least one referenced
@@ -291,6 +300,7 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
                                 def,
                                 &subckt_defs,
                                 &global_params,
+                                &funcs,
                                 &mut expanding,
                                 *lineno,
                             )?;
@@ -1958,7 +1968,11 @@ R1 a b 1k
         )
         .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("not finite"), "{msg}");
+        assert!(msg.contains("finite"), "{msg}");
+        assert!(
+            msg.contains("nope"),
+            "the message must name the culprit: {msg}"
+        );
     }
 
     /// A `.model` card inside a `.subckt` becomes a PRIVATE, per-instance card:
@@ -2041,10 +2055,10 @@ R1 a b 1k
 
     #[test]
     fn unsupported_directive_errors() {
-        let cases = [
-            "* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n.end\n",
-            "* test\nV1 a 0 DC 1\n.func myfn(x)=x*x\n.op\n.end\n",
-        ];
+        // `.func` used to live here; it is implemented now. `.lib` without a
+        // section argument stays an error because it names a file to include and
+        // the include machinery reports its own failure.
+        let cases = ["* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n.end\n"];
         for netlist_str in &cases {
             let result = parse_spice(netlist_str);
             assert!(
@@ -2199,6 +2213,171 @@ R1 a 0 1k
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 2);
+    }
+
+    // ─── .func and parse-time parameter expressions ─────────────────────────
+
+    fn resistance_of(deck: &str, want: &str) -> f64 {
+        let netlist = parse_spice(deck).unwrap_or_else(|e| panic!("{deck}\n{e}"));
+        netlist
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Resistor {
+                    name, resistance, ..
+                } if name == want => Some(*resistance),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no resistor '{want}' in {:?}", netlist.elements))
+    }
+
+    #[test]
+    fn func_is_callable_from_a_parameter_expression() {
+        let r = resistance_of(
+            "* f\n.func sq(x)=x*x\n.param a=3\nR1 in 0 {sq(a)*100}\nV1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 900.0).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn func_may_be_defined_after_its_use() {
+        // Definitions are collected in pass 1, before any expression is
+        // evaluated, so a deck that calls before defining still works. HSPICE
+        // requires definition first; being order-free is one less rule to know.
+        let r = resistance_of(
+            "* f\n.param a=2\nR1 in 0 {dbl(a)*100}\n.func dbl(x)=2*x\nV1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 400.0).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn param_values_may_be_expressions() {
+        // Each of the three spellings a real deck uses, and one that leans on a
+        // parameter defined earlier on the same line.
+        for deck in [
+            "* p\n.param a=3 b={a*100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
+            "* p\n.param a=3\n.param b='a*100'\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
+            "* p\n.param a=3\n.param b = {a * 100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
+        ] {
+            let r = resistance_of(deck, "r1");
+            assert!((r - 300.0).abs() < 1e-9, "got {r} for {deck}");
+        }
+    }
+
+    #[test]
+    fn param_suffix_is_a_value_not_an_expression() {
+        // `1k` must stay a number: read as an expression, `k` is an undefined
+        // parameter and the deck would fail to load.
+        let r = resistance_of(
+            "* p\n.param rr=1k\nR1 in 0 {rr}\nV1 in 0 DC 1\n.op\n.end\n",
+            "r1",
+        );
+        assert!((r - 1000.0).abs() < 1e-9, "got {r}");
+    }
+
+    #[test]
+    fn model_card_values_are_parameter_substituted() {
+        // The silent one: `VTO={vt}` used to land in the card's expression params,
+        // which the MOSFET path never reads, so the threshold quietly defaulted.
+        let netlist = parse_spice(
+            "* m\n.param vt=0.7\n.func bump(v)=v+0.1\n             .model nm NMOS (VTO={vt} KP={bump(1e-4)})\n             M1 d g s b nm W=1u L=1u\nV1 d 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        let card = &netlist.models[0];
+        assert!(
+            card.expr_params.is_empty(),
+            "nothing may be left unevaluated: {:?}",
+            card.expr_params
+        );
+        let vto = card
+            .params
+            .iter()
+            .find(|(k, _)| k == "vto")
+            .expect("vto must reach the card as a number");
+        assert!((vto.1 - 0.7).abs() < 1e-12, "got {vto:?}");
+        let kp = card.params.iter().find(|(k, _)| k == "kp").unwrap();
+        assert!((kp.1 - 0.1001).abs() < 1e-9, "got {kp:?}");
+    }
+
+    #[test]
+    fn double_quoted_model_value_stays_a_device_map() {
+        // A constitutive map is over the device's own bias, not over parameters,
+        // so it must survive substitution untouched.
+        let netlist = parse_spice(
+            "* m\n.optical_port ch0\n.optical_port out0\n             .model myps fc_phase_shifter_expr dneff=\"5.0e-5*V\" g_pn=1e-3\n             Xps ch0 out0 a 0 myps\nVb a 0 DC 1\n.op\n.end\n",
+        )
+        .unwrap();
+        let card = &netlist.models[0];
+        // The line reaches the card lowercased (it always has — the expression
+        // grammar lowercases identifiers, so `V` and `v` are the same variable).
+        assert_eq!(
+            card.expr_params
+                .iter()
+                .find(|(k, _)| k == "dneff")
+                .map(|(_, v)| v.as_str()),
+            Some("5.0e-5*v")
+        );
+    }
+
+    #[test]
+    fn func_in_a_b_source_expression_expands() {
+        // A B-source is evaluated by the solver, which knows nothing about .func;
+        // expansion at parse time is what makes this work at all.
+        let netlist = parse_spice(
+            "* b\n.func dbl(x)=2*x\nV1 in 0 DC 1.5\nB1 out 0 V=dbl(v(in))\nR1 out 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
+        let has_no_calls = netlist.elements.iter().any(|e| match e {
+            Element::Behavioral { expr, .. } => {
+                let mut unknown = Vec::new();
+                expr.unknown_calls(&mut unknown);
+                unknown.is_empty()
+            }
+            _ => false,
+        });
+        assert!(has_no_calls, "B-source kept an unexpanded call");
+    }
+
+    #[test]
+    fn unknown_function_in_a_parameter_is_an_error_naming_it() {
+        // Was a 0 Ω resistor.
+        let err =
+            parse_spice("* typo\n.param a=2\nR1 in 0 {frobnicate(a)}\nV1 in 0 DC 1\n.op\n.end\n")
+                .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("frobnicate"), "{msg}");
+    }
+
+    #[test]
+    fn func_definition_faults_are_refused() {
+        for (deck, want) in [
+            (
+                "* shadow\n.func sin(x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "shadow",
+            ),
+            (
+                "* dup\n.func f(x,x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "repeats",
+            ),
+            (
+                "* recurse\n.func f(x)=f(x)+1\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "recursive",
+            ),
+            (
+                "* arity\n.func f(x,y)=x+y\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "argument",
+            ),
+            (
+                "* nobody\n.func f(x)\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "empty body",
+            ),
+        ] {
+            let err = parse_spice(deck).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains(want), "expected {want:?} in: {msg}");
+        }
     }
 
     #[test]

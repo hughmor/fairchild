@@ -1,9 +1,13 @@
 use super::common::{canon_node, expand_bus_vectors, parse_value};
 use super::waveforms::{parse_waveform, split_ac_spec};
-use crate::expr::Expr;
+use crate::expr::{Expr, FuncTable};
 use crate::{BehavioralKind, Element, ModelCard, ParseError, Waveform};
 
-pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseError> {
+pub(super) fn parse_element(
+    line: &str,
+    lineno: usize,
+    funcs: &FuncTable,
+) -> Result<Element, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let name = tokens[0].to_lowercase();
     let letter = name.chars().next().unwrap();
@@ -239,6 +243,11 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
                 line: lineno,
                 msg: format!("B-element expression: {e}"),
             })?;
+            // `.func` calls expand here, where the AST is built — a B-source is
+            // evaluated by the solver, which knows nothing about `.func` and never
+            // needs to.
+            let expr =
+                super::directives::expand_and_check(expr, funcs, lineno, "B-element expression")?;
             Ok(Element::Behavioral {
                 name,
                 pos,
@@ -499,10 +508,11 @@ pub(super) fn parse_element(line: &str, lineno: usize) -> Result<Element, ParseE
 pub(super) fn parse_element_expanded(
     line: &str,
     lineno: usize,
+    funcs: &FuncTable,
 ) -> Result<Vec<Element>, ParseError> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.len() < 4 {
-        return parse_element(line, lineno).map(|e| vec![e]);
+        return parse_element(line, lineno, funcs).map(|e| vec![e]);
     }
 
     let name = tokens[0].to_lowercase();
@@ -510,7 +520,7 @@ pub(super) fn parse_element_expanded(
 
     match letter {
         'r' | 'l' | 'c' => {}
-        _ => return parse_element(line, lineno).map(|e| vec![e]),
+        _ => return parse_element(line, lineno, funcs).map(|e| vec![e]),
     }
 
     let mut rser: Option<f64> = None;
@@ -534,7 +544,7 @@ pub(super) fn parse_element_expanded(
     }
 
     if rser.is_none() && cpar.is_none() && esr.is_none() && esl.is_none() && rpar.is_none() {
-        return parse_element(line, lineno).map(|e| vec![e]);
+        return parse_element(line, lineno, funcs).map(|e| vec![e]);
     }
 
     let pos: String = canon_node(tokens[1]);
