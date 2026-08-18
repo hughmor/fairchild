@@ -89,19 +89,35 @@ jobs:
           python3 -m pip install --no-index --find-links dist fairchild
           python3 - <<'PY'
           import fairchild
-          c = fairchild.Circuit()
-          c.load_str("""* rc smoke
+          DECK = """* rc smoke
           V1 in 0 PULSE(0 1 0 1n 1n 1u 2u)
           R1 in out 1k
           C1 out 0 1n
-          """)
+          .tran 1e-8 2e-6 0 1e-9
+          """
+          c = fairchild.Circuit()
+          c.load_str(DECK)
           r = c.run("tran", stop=2e-6, step=1e-8)
           v = r["v(out)"]
           assert r.is_tran and len(v) > 10, (r.signals(), len(v))
           # RC = 1k * 1n = 1us and the pulse falls at 1us, so the peak is one
           # time constant of charging: 1 - 1/e = 0.6321.
           assert 0.60 < v.max() < 0.66, v.max()
-          print(f"ok: {len(v)} points, vmax={v.max():.4f}")
+          # A .tran card is honoured as a unit or not at all (issue #33). The run
+          # above supplied its own timing, so the card's 1 ns tmax must not clamp
+          # it; run("tran") with no timing takes the whole card, ceiling included,
+          # and that shows up as an order more rows.
+          assert c.analyses[0]["tmax"] == 1e-9, c.analyses
+          whole = c.run("tran")
+          assert len(whole.time()) > 5 * len(v), (len(whole.time()), len(v))
+          bare = fairchild.Circuit()
+          bare.load_str(DECK.replace(".tran 1e-8 2e-6 0 1e-9", ""))
+          try:
+              bare.run("tran")
+              raise AssertionError("no card and no kwargs must be an error")
+          except RuntimeError as e:
+              assert "step=" in str(e) and ".tran card" in str(e), e
+          print(f"ok: {len(v)} points, vmax={v.max():.4f}, card-adopted {len(whole.time())}")
           PY
 
       # The C header is hand-written, so nothing in the Rust tests catches it

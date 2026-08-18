@@ -394,6 +394,11 @@ slot.
 | `tstart` | trim the *saved* result to `t ≥ tstart`. Integration still begins at 0 — SPICE's `tstart` selects what is kept, not where the maths starts |
 | `tmax` | ceiling on the internal step. Clamps `max_step` with `min`, so it can never loosen a limit set by `.options maxstep` |
 
+The CLI runs every `.tran` card in the deck, each with its own `tstart`, `tmax`
+and `UIC`. From Python the card applies only to a `run("tran")` that asked for
+no timing of its own — see [Who owns the
+run](#who-owns-the-run--the-deck-or-the-caller).
+
 Integration method is selected by `.options method=be|tr|gear` (default TR
 with BE first-step bootstrap; GEAR/BDF-2 recommended for stiff circuits or
 where ringing on TR is unacceptable). Device-internal capacitances honour this
@@ -938,6 +943,41 @@ meas = tran.measurements        # dict of name → value from .measure
 
 `Circuit.set_source(name, WaveformSource.pulse(0, 1, 0, 1e-9, 1e-9, 10e-9, 20e-9))`
 replaces a source's waveform without re-parsing.
+
+#### Who owns the run — the deck, or the caller
+
+A deck *declares* what could be run; from Python it never runs anything by
+itself. `Circuit.analyses` is that declaration, and `run(kind)` chooses from it:
+
+```python
+c.analyses
+# [{'kind': 'op'},
+#  {'kind': 'tran', 'step': 1e-12, 'stop': 5e-09, 'tstart': 0.0,
+#   'tmax': 1e-13, 'uic': False}]
+
+c.run("tran")                          # the deck's .tran card, whole
+c.run("tran", step=1e-12, stop=5e-9)   # your numbers; the card is not read
+
+for a in c.analyses:                   # what the CLI does, in deck order
+    c.run("dc_sweep" if a["kind"] == "dc" else a["kind"])
+```
+
+A card is taken **as a unit or not at all**: `run("tran")` with no timing takes
+`step`, `stop`, `tstart`, `tmax` and `UIC` off the card; passing either `step` or
+`stop` means you own the timing and none of the card applies. Half a card is
+never applied, so every number in a run comes from one place. `.ac`, `.noise` and
+`.dc` (through `run("dc_sweep")`) work the same way.
+
+Two errors rather than a guess: no card *and* no kwargs, and a deck declaring two
+cards of the same kind. `"dc"` remains an alias for `"op"` — a `.dc` card is
+reached with `run("dc_sweep")`.
+
+Directives outside that list divide the same way. `.model`, `.param`, `.subckt`,
+`.include`, `.ic`, `.osdi` and friends define *what the circuit is* and are
+always honoured identically in both frontends. `.print`/`.plot`/`.probe` select
+*what to report*, which the frontend owns — use `--probe` from the CLI, or index
+the returned result. `.control` is imperative script; control flow belongs in
+this API, so it is declined rather than interpreted.
 
 ### Gradients — `dc_adjoint`, `ac_adjoint`, `tran_adjoint`
 

@@ -25,7 +25,7 @@ use fairchild_core::{
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::OsdiLibrary;
-use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Netlist};
+use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Analysis, Netlist};
 
 // ---------------------------------------------------------------------------
 // Error conversion
@@ -493,6 +493,100 @@ impl Circuit {
             .unwrap_or_default()
     }
 
+    /// The analyses the deck declares, in deck order, as a list of dicts.
+    ///
+    /// A deck *declares* what could be run; it never runs anything on its own
+    /// here. `run(kind)` with no analysis kwargs adopts the matching card whole;
+    /// this is how you see what that card says, and what to pass if you want to
+    /// override it.
+    ///
+    /// ```python
+    /// ckt.analyses
+    /// # [{'kind': 'op'},
+    /// #  {'kind': 'tran', 'step': 1e-12, 'stop': 5e-09, 'tstart': 0.0,
+    /// #   'tmax': 1e-13, 'uic': False}]
+    /// ```
+    #[getter]
+    pub fn analyses<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let Some(netlist) = self.netlist.as_ref() else {
+            return Ok(Vec::new());
+        };
+        netlist
+            .analyses
+            .iter()
+            .map(|a| {
+                let d = PyDict::new_bound(py);
+                match a {
+                    Analysis::Op => d.set_item("kind", "op")?,
+                    Analysis::Tran {
+                        step,
+                        stop,
+                        tstart,
+                        tmax,
+                        uic,
+                    } => {
+                        d.set_item("kind", "tran")?;
+                        d.set_item("step", step)?;
+                        d.set_item("stop", stop)?;
+                        d.set_item("tstart", tstart)?;
+                        d.set_item("tmax", tmax)?;
+                        d.set_item("uic", uic)?;
+                    }
+                    Analysis::Ac {
+                        variation,
+                        points,
+                        fstart,
+                        fstop,
+                    } => {
+                        d.set_item("kind", "ac")?;
+                        d.set_item("variation", variation_name(*variation))?;
+                        d.set_item("points", points)?;
+                        d.set_item("fstart", fstart)?;
+                        d.set_item("fstop", fstop)?;
+                    }
+                    Analysis::Dc {
+                        src,
+                        start,
+                        stop,
+                        step,
+                        nested,
+                    } => {
+                        d.set_item("kind", "dc")?;
+                        d.set_item("src", src)?;
+                        d.set_item("start", start)?;
+                        d.set_item("stop", stop)?;
+                        d.set_item("step", step)?;
+                        if let Some(n) = nested {
+                            d.set_item("src2", &n.src)?;
+                            d.set_item("start2", n.start)?;
+                            d.set_item("stop2", n.stop)?;
+                            d.set_item("step2", n.step)?;
+                        }
+                    }
+                    Analysis::Noise {
+                        out_pos,
+                        out_neg,
+                        input_src,
+                        variation,
+                        points,
+                        fstart,
+                        fstop,
+                    } => {
+                        d.set_item("kind", "noise")?;
+                        d.set_item("out_pos", out_pos)?;
+                        d.set_item("out_neg", out_neg)?;
+                        d.set_item("src", input_src)?;
+                        d.set_item("variation", variation_name(*variation))?;
+                        d.set_item("points", points)?;
+                        d.set_item("fstart", fstart)?;
+                        d.set_item("fstop", fstop)?;
+                    }
+                }
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// Inject a numpy waveform as the source for a voltage or current source.
     ///
     /// The source named `name` (e.g. `"Vin"`, `"V1"`) will have its waveform
@@ -506,13 +600,23 @@ impl Circuit {
     /// Run a simulation analysis.
     ///
     /// Parameters:
-    ///   analysis: `"op"` for DC, `"tran"` for transient, `"ac"` for AC sweep.
+    ///   analysis: `"op"` for DC, `"tran"` for transient, `"ac"` for AC sweep,
+    ///   `"noise"`, or `"dc_sweep"`.  (`"dc"` is an alias for `"op"` unless a
+    ///   `src` kwarg makes it a sweep; a deck's `.dc` card is reached through
+    ///   `"dc_sweep"`.)
     ///
-    ///   For `"tran"`: `stop` (s) and `step` (s) are required.
+    ///   Pass no analysis parameters and the deck's matching card is adopted
+    ///   **whole**: `run("tran")` takes `step`, `stop`, `tstart`, `tmax` and
+    ///   `UIC` off the `.tran` line.  Pass any one of them and the card is not
+    ///   used at all — a card is never half-applied, so the numbers in a run
+    ///   always come from one place.  See `analyses` for what a deck declares.
+    ///
+    ///   For `"tran"`: `stop` (s) and `step` (s), or a `.tran` card.
     ///
     ///   For `"ac"`: `fstart` (Hz), `fstop` (Hz), `points` (int, default 20),
-    ///   `variation` (`"dec"`, `"oct"`, `"lin"`, default `"dec"`),
-    ///   `src` (excitation source name, default `None` = first V source).
+    ///   `variation` (`"dec"`, `"oct"`, `"lin"`, default `"dec"`), or a `.ac`
+    ///   card; `src` (excitation source name, default `None` = first V source)
+    ///   is not on the card and stays yours either way.
     ///
     ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
     ///   `lambdatol`, `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
@@ -561,7 +665,7 @@ impl Circuit {
         }
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
-        let opts = build_sim_options(&nl, kwargs)?;
+        let mut opts = build_sim_options(&nl, kwargs)?;
 
         let analysis_lc = analysis.to_lowercase();
         // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
@@ -572,7 +676,7 @@ impl Circuit {
                     .is_some());
 
         if is_dc_sweep {
-            let p = parse_dc_kwargs(kwargs)?;
+            let p = parse_dc_kwargs(&nl, kwargs)?;
             let nested_arg = p
                 .nested
                 .as_ref()
@@ -605,7 +709,7 @@ impl Circuit {
                 })
             }
             "tran" | "transient" => {
-                let (stop, step) = parse_tran_kwargs(kwargs)?;
+                let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
                 let result = py
                     .allow_threads(|| {
                         if opts.variable_step {
@@ -625,7 +729,7 @@ impl Circuit {
                 })
             }
             "ac" => {
-                let (freqs, src) = parse_ac_kwargs(kwargs)?;
+                let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
                 let result = py
                     .allow_threads(|| {
                         ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
@@ -637,7 +741,7 @@ impl Circuit {
                 })
             }
             "noise" => {
-                let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(kwargs)?;
+                let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(&nl, kwargs)?;
                 let result = py
                     .allow_threads(|| {
                         fairchild_core::noise_analysis(
@@ -688,8 +792,6 @@ impl Circuit {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
-        let (stop, step) = parse_tran_kwargs(kwargs)?;
-
         let mut nl = netlist.clone();
         apply_overrides(&mut nl, &self.overrides);
         apply_source_overrides(&mut nl, &self.source_overrides);
@@ -705,7 +807,8 @@ impl Circuit {
         }
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
-        let opts = build_sim_options(&nl, kwargs)?;
+        let mut opts = build_sim_options(&nl, kwargs)?;
+        let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
 
         let declared: Vec<(String, Output)> = probes
             .iter()
@@ -857,8 +960,6 @@ impl Circuit {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
-        let (freqs, src) = parse_ac_kwargs(kwargs)?;
-
         let mut nl = netlist.clone();
         apply_overrides(&mut nl, &self.overrides);
         apply_source_overrides(&mut nl, &self.source_overrides);
@@ -875,6 +976,7 @@ impl Circuit {
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let opts = build_sim_options(&nl, kwargs)?;
+        let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
 
         let out = match quantity.unwrap_or("mag2") {
             "mag2" | "mag_squared" | "power" => AcOutput::MagSquared { node: node.into() },
@@ -927,7 +1029,7 @@ impl Circuit {
             apply_overrides(&mut nl, &sweep_override);
 
             let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
-            let opts = build_sim_options(&nl, kwargs)?;
+            let mut opts = build_sim_options(&nl, kwargs)?;
 
             let result = match analysis.to_lowercase().as_str() {
                 "op" | "dc" => {
@@ -938,7 +1040,7 @@ impl Circuit {
                     }
                 }
                 "tran" | "transient" => {
-                    let (stop, step) = parse_tran_kwargs(kwargs)?;
+                    let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
                     let r = if opts.variable_step {
                         tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
                     } else {
@@ -955,7 +1057,7 @@ impl Circuit {
                     }
                 }
                 "ac" => {
-                    let (freqs, src) = parse_ac_kwargs(kwargs)?;
+                    let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
                     let r = ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
                         .map_err(sim_err)?;
                     SimResult {
@@ -1034,7 +1136,53 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
 // Helper: parse tran kwargs
 // ---------------------------------------------------------------------------
 
-fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)> {
+/// True when the caller passed none of `keys`.
+///
+/// This is the all-or-nothing test behind every card adoption below: a deck
+/// card is taken whole or not at all, so one kwarg from the card's own set is
+/// enough to hand the whole decision to the caller.
+fn none_of(kwargs: Option<&Bound<'_, PyDict>>, keys: &[&str]) -> PyResult<bool> {
+    let Some(kw) = kwargs else { return Ok(true) };
+    for k in keys {
+        if kw.get_item(k)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The deck's one card of a given kind, or `None` if it declares none.
+///
+/// Two cards of the same kind is an error rather than a silent pick: which one
+/// the caller meant is unknowable, and guessing produces a run nobody asked for.
+fn sole_card<'a>(
+    netlist: &'a Netlist,
+    kind: &str,
+    is_kind: impl Fn(&Analysis) -> bool,
+) -> PyResult<Option<&'a Analysis>> {
+    let mut matching = netlist.analyses.iter().filter(|a| is_kind(a));
+    let first = matching.next();
+    if first.is_some() && matching.next().is_some() {
+        return Err(PyRuntimeError::new_err(format!(
+            "deck declares more than one .{kind} card, so run(\"{kind}\") cannot tell \
+             which you mean: pass the parameters as kwargs, or read ckt.analyses and \
+             pass the one you want"
+        )));
+    }
+    Ok(first)
+}
+
+/// Transient timing: the caller's kwargs, or else the deck's `.tran` card taken
+/// whole — `step`, `stop`, `tstart`, `tmax` and `UIC` together.
+///
+/// Never a mix of the two. `tstart` and `tmax` used to reach `opts` from
+/// `SimOptions::from_netlist` even when the caller supplied its own `step` and
+/// `stop`, which applied half a card to a run that had not asked for any of it.
+fn parse_tran_kwargs(
+    netlist: &Netlist,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    opts: &mut SimOptions,
+) -> PyResult<(f64, f64)> {
     let mut stop: Option<f64> = None;
     let mut step: Option<f64> = None;
 
@@ -1045,6 +1193,24 @@ fn parse_tran_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(f64, f64)>
         if let Some(v) = kw.get_item("step")? {
             step = Some(v.extract::<f64>()?);
         }
+    }
+
+    if stop.is_none() && step.is_none() {
+        if let Some(Analysis::Tran {
+            step,
+            stop,
+            tstart,
+            tmax,
+            uic,
+        }) = sole_card(netlist, "tran", |a| matches!(a, Analysis::Tran { .. }))?
+        {
+            opts.apply_tran_card(*tstart, *tmax, *uic);
+            return Ok((*stop, *step));
+        }
+        return Err(PyRuntimeError::new_err(
+            "tran needs timing: pass step= and stop= (seconds), or give the deck a \
+             .tran card — run(\"tran\") then takes the whole card",
+        ));
     }
 
     let stop =
@@ -1145,9 +1311,37 @@ struct DcKwargs {
     nested: Option<(String, f64, f64, f64)>,
 }
 
-fn parse_dc_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<DcKwargs> {
-    let kw = kwargs
-        .ok_or_else(|| PyRuntimeError::new_err("dc requires src, start, stop, step kwargs"))?;
+/// DC-sweep parameters: the caller's kwargs, or else the deck's `.dc` card
+/// taken whole (both sweeps of a nested card included).
+fn parse_dc_kwargs(netlist: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<DcKwargs> {
+    const CARD: &[&str] = &[
+        "src", "start", "stop", "step", "src2", "start2", "stop2", "step2",
+    ];
+    if none_of(kwargs, CARD)? {
+        if let Some(Analysis::Dc {
+            src,
+            start,
+            stop,
+            step,
+            nested,
+        }) = sole_card(netlist, "dc", |a| matches!(a, Analysis::Dc { .. }))?
+        {
+            return Ok(DcKwargs {
+                src: src.clone(),
+                start: *start,
+                stop: *stop,
+                step: *step,
+                nested: nested
+                    .as_ref()
+                    .map(|n| (n.src.clone(), n.start, n.stop, n.step)),
+            });
+        }
+    }
+    let kw = kwargs.ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "dc sweep needs src, start, stop, step kwargs, or a .dc card in the deck",
+        )
+    })?;
 
     let get = |k: &str| -> PyResult<_> {
         kw.get_item(k)?
@@ -1184,12 +1378,34 @@ fn parse_dc_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<DcKwargs> {
 // Helper: parse ac kwargs
 // ---------------------------------------------------------------------------
 
-fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Option<String>)> {
+/// AC sweep: the caller's frequency kwargs, or else the deck's `.ac` card taken
+/// whole.  `src` is not on the card — it names the excitation source and stays
+/// the caller's either way.
+fn parse_ac_kwargs(
+    netlist: &Netlist,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(Vec<f64>, Option<String>)> {
     let mut fstart: Option<f64> = None;
     let mut fstop: Option<f64> = None;
     let mut points: usize = 20;
     let mut variation = AcVariation::Dec;
     let mut src: Option<String> = None;
+
+    if none_of(kwargs, &["fstart", "fstop", "points", "variation"])? {
+        if let Some(Analysis::Ac {
+            variation,
+            points,
+            fstart,
+            fstop,
+        }) = sole_card(netlist, "ac", |a| matches!(a, Analysis::Ac { .. }))?
+        {
+            let src = match kwargs {
+                Some(kw) => kw.get_item("src")?.and_then(|v| v.extract().ok()),
+                None => None,
+            };
+            return Ok((ac_freqs(*variation, *fstart, *fstop, *points), src));
+        }
+    }
 
     if let Some(kw) = kwargs {
         if let Some(v) = kw.get_item("fstart")? {
@@ -1220,25 +1436,73 @@ fn parse_ac_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Vec<f64>, Op
         }
     }
 
-    let fstart =
-        fstart.ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstart' kwarg (Hz)"))?;
-    let fstop = fstop.ok_or_else(|| PyRuntimeError::new_err("ac requires 'fstop' kwarg (Hz)"))?;
+    let fstart = fstart.ok_or_else(|| {
+        PyRuntimeError::new_err("ac requires 'fstart' kwarg (Hz), or a .ac card in the deck")
+    })?;
+    let fstop = fstop.ok_or_else(|| {
+        PyRuntimeError::new_err("ac requires 'fstop' kwarg (Hz), or a .ac card in the deck")
+    })?;
 
-    let freqs = match variation {
+    Ok((ac_freqs(variation, fstart, fstop, points), src))
+}
+
+fn variation_name(v: AcVariation) -> &'static str {
+    match v {
+        AcVariation::Dec => "dec",
+        AcVariation::Oct => "oct",
+        AcVariation::Lin => "lin",
+    }
+}
+
+/// The frequency vector one `DEC|OCT|LIN points fstart fstop` sweep describes.
+/// Shared so a card and a kwarg set can never disagree about what a sweep means.
+fn ac_freqs(variation: AcVariation, fstart: f64, fstop: f64, points: usize) -> Vec<f64> {
+    match variation {
         AcVariation::Dec => freq_decade(fstart, fstop, points),
         AcVariation::Oct => freq_oct(fstart, fstop, points),
         AcVariation::Lin => freq_linear(fstart, fstop, points),
-    };
-
-    Ok((freqs, src))
+    }
 }
 
+/// Noise sweep: the caller's kwargs, or else the deck's `.noise` card taken
+/// whole — observation nodes, input source and frequency sweep together.
 fn parse_noise_kwargs(
+    netlist: &Netlist,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(Vec<f64>, String, String, String)> {
+    const CARD: &[&str] = &[
+        "out",
+        "out_pos",
+        "out_neg",
+        "src",
+        "fstart",
+        "fstop",
+        "points",
+        "variation",
+    ];
+    if none_of(kwargs, CARD)? {
+        if let Some(Analysis::Noise {
+            out_pos,
+            out_neg,
+            input_src,
+            variation,
+            points,
+            fstart,
+            fstop,
+        }) = sole_card(netlist, "noise", |a| matches!(a, Analysis::Noise { .. }))?
+        {
+            return Ok((
+                ac_freqs(*variation, *fstart, *fstop, *points),
+                out_pos.to_lowercase(),
+                out_neg.to_lowercase(),
+                input_src.to_lowercase(),
+            ));
+        }
+    }
     let kw = kwargs.ok_or_else(|| {
         PyRuntimeError::new_err(
-            "noise requires kwargs: out (or out_pos+out_neg), src, fstart, fstop",
+            "noise requires kwargs: out (or out_pos+out_neg), src, fstart, fstop \
+             — or a .noise card in the deck",
         )
     })?;
 
@@ -1293,14 +1557,8 @@ fn parse_noise_kwargs(
     let fstart = fstart.ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstart' kwarg"))?;
     let fstop = fstop.ok_or_else(|| PyRuntimeError::new_err("noise: missing 'fstop' kwarg"))?;
 
-    let freqs = match variation {
-        AcVariation::Dec => freq_decade(fstart, fstop, points),
-        AcVariation::Oct => freq_oct(fstart, fstop, points),
-        AcVariation::Lin => freq_linear(fstart, fstop, points),
-    };
-
     Ok((
-        freqs,
+        ac_freqs(variation, fstart, fstop, points),
         out_pos.to_lowercase(),
         out_neg.to_lowercase(),
         input_src.to_lowercase(),
