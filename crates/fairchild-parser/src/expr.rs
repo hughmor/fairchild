@@ -85,6 +85,14 @@ pub enum ExprError {
     UnexpectedEof,
     BadNumber(String),
     UnknownFunction(String),
+    /// A `.func` call with the wrong number of arguments.
+    Arity {
+        name: String,
+        expected: usize,
+        got: usize,
+    },
+    /// A `.func` whose expansion reaches itself.
+    Recursive(String),
 }
 
 impl fmt::Display for ExprError {
@@ -93,7 +101,23 @@ impl fmt::Display for ExprError {
             ExprError::UnexpectedToken(t, i) => write!(f, "unexpected token '{t}' at offset {i}"),
             ExprError::UnexpectedEof => write!(f, "unexpected end of expression"),
             ExprError::BadNumber(s) => write!(f, "invalid number '{s}'"),
-            ExprError::UnknownFunction(s) => write!(f, "unknown function '{s}'"),
+            ExprError::UnknownFunction(s) => write!(
+                f,
+                "unknown function '{s}' — not a built-in and not defined by any .func"
+            ),
+            ExprError::Arity {
+                name,
+                expected,
+                got,
+            } => write!(
+                f,
+                ".func '{name}' takes {expected} argument(s), called with {got}"
+            ),
+            ExprError::Recursive(s) => write!(
+                f,
+                ".func '{s}' is recursive; fairchild expands .func at parse time, \
+                 which a recursive definition never finishes"
+            ),
         }
     }
 }
@@ -171,7 +195,143 @@ impl Expr {
             }
             Expr::Call(name, args) => {
                 let vs: Vec<f64> = args.iter().map(|a| a.eval(ctx)).collect();
-                eval_fn(name, &vs).unwrap_or(0.0)
+                // NaN, not 0.0. An unknown name or a wrong argument count used to
+                // read as zero, so `R1 in 0 {frobnicate(a)}` was a 0 Ω resistor
+                // and nothing said so. NaN propagates to the caller's finiteness
+                // check, and the parser refuses the expression by name.
+                eval_fn(name, &vs).unwrap_or(f64::NAN)
+            }
+        }
+    }
+
+    /// Replace every call to a `.func` with that function's body, with the
+    /// arguments substituted in — recursively, so a `.func` may call another.
+    ///
+    /// Expansion happens at parse time and produces an ordinary AST, which is
+    /// what keeps `.func` from reaching the solver at all: a B-source, a
+    /// `.measure`, a `{…}` parameter and a `.model` value all get the same
+    /// treatment from one place, and none of them needs to know `.func` exists.
+    ///
+    /// A formal parameter shadows a `.param` of the same name inside the body —
+    /// the argument is substituted before anything resolves names, so
+    /// `.param x=5` and `.func f(x)=x*2` cannot disagree about what `x` means.
+    ///
+    /// Recursion is refused rather than depth-limited: expansion is textual in
+    /// effect, so a recursive `.func` has no finite expansion to produce.
+    pub fn expand_funcs(&self, funcs: &FuncTable) -> Result<Expr, ExprError> {
+        self.expand_inner(funcs, &mut Vec::new())
+    }
+
+    fn expand_inner(&self, funcs: &FuncTable, active: &mut Vec<String>) -> Result<Expr, ExprError> {
+        Ok(match self {
+            Expr::Num(_) | Expr::NodeV(_) | Expr::NodeDiffV(..) | Expr::BranchI(_) | Expr::Time => {
+                self.clone()
+            }
+            Expr::Var(n) => Expr::Var(n.clone()),
+            Expr::Neg(e) => Expr::Neg(Box::new(e.expand_inner(funcs, active)?)),
+            Expr::Not(e) => Expr::Not(Box::new(e.expand_inner(funcs, active)?)),
+            Expr::Bin(op, a, b) => Expr::Bin(
+                op.clone(),
+                Box::new(a.expand_inner(funcs, active)?),
+                Box::new(b.expand_inner(funcs, active)?),
+            ),
+            Expr::If(c, a, b) => Expr::If(
+                Box::new(c.expand_inner(funcs, active)?),
+                Box::new(a.expand_inner(funcs, active)?),
+                Box::new(b.expand_inner(funcs, active)?),
+            ),
+            Expr::Call(name, args) => {
+                // Arguments expand first, in the caller's scope, so a formal name
+                // reused as an argument cannot capture the callee's binding.
+                let args: Vec<Expr> = args
+                    .iter()
+                    .map(|a| a.expand_inner(funcs, active))
+                    .collect::<Result<_, _>>()?;
+                let Some(def) = funcs.get(name) else {
+                    // A built-in, or an error the caller reports by name.
+                    return Ok(Expr::Call(name.clone(), args));
+                };
+                if active.iter().any(|n| n == name) {
+                    return Err(ExprError::Recursive(name.clone()));
+                }
+                if def.params.len() != args.len() {
+                    return Err(ExprError::Arity {
+                        name: name.clone(),
+                        expected: def.params.len(),
+                        got: args.len(),
+                    });
+                }
+                let bind: std::collections::HashMap<&str, &Expr> = def
+                    .params
+                    .iter()
+                    .map(|p| p.as_str())
+                    .zip(args.iter())
+                    .collect();
+                active.push(name.clone());
+                let expanded = def.body.substitute(&bind).expand_inner(funcs, active)?;
+                active.pop();
+                expanded
+            }
+        })
+    }
+
+    /// Replace bare variables named in `bind` with the given sub-expressions.
+    fn substitute(&self, bind: &std::collections::HashMap<&str, &Expr>) -> Expr {
+        match self {
+            Expr::Var(n) => match bind.get(n.as_str()) {
+                Some(e) => (*e).clone(),
+                None => Expr::Var(n.clone()),
+            },
+            Expr::Num(_) | Expr::NodeV(_) | Expr::NodeDiffV(..) | Expr::BranchI(_) | Expr::Time => {
+                self.clone()
+            }
+            Expr::Neg(e) => Expr::Neg(Box::new(e.substitute(bind))),
+            Expr::Not(e) => Expr::Not(Box::new(e.substitute(bind))),
+            Expr::Bin(op, a, b) => Expr::Bin(
+                op.clone(),
+                Box::new(a.substitute(bind)),
+                Box::new(b.substitute(bind)),
+            ),
+            Expr::If(c, a, b) => Expr::If(
+                Box::new(c.substitute(bind)),
+                Box::new(a.substitute(bind)),
+                Box::new(b.substitute(bind)),
+            ),
+            Expr::Call(name, args) => Expr::Call(
+                name.clone(),
+                args.iter().map(|a| a.substitute(bind)).collect(),
+            ),
+        }
+    }
+
+    /// Function names in this AST that nothing can evaluate — neither a built-in
+    /// nor (after [`Expr::expand_funcs`]) a `.func`.
+    ///
+    /// Every caller that parses an expression checks this: without it a
+    /// misspelled function evaluates to NaN, which is loud but says only that
+    /// *something* was undefined, not which name was wrong.
+    pub fn unknown_calls(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Num(_) | Expr::NodeV(_) | Expr::NodeDiffV(..) | Expr::BranchI(_) | Expr::Time => {
+            }
+            Expr::Var(_) => {}
+            Expr::Neg(e) | Expr::Not(e) => e.unknown_calls(out),
+            Expr::Bin(_, a, b) => {
+                a.unknown_calls(out);
+                b.unknown_calls(out);
+            }
+            Expr::If(c, a, b) => {
+                c.unknown_calls(out);
+                a.unknown_calls(out);
+                b.unknown_calls(out);
+            }
+            Expr::Call(name, args) => {
+                if !is_builtin(name) && !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+                for a in args {
+                    a.unknown_calls(out);
+                }
             }
         }
     }
@@ -205,6 +365,34 @@ impl Expr {
         }
     }
 }
+
+/// Every function name [`eval_fn`] implements.
+///
+/// One list, checked against `eval_fn` by a test rather than by eye: a name here
+/// that `eval_fn` does not answer would be accepted at parse time and evaluate to
+/// NaN, and a name `eval_fn` answers but this omits would be refused as unknown.
+pub const BUILTINS: &[&str] = &[
+    "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "log", "ln",
+    "log10", "sqrt", "abs", "sgn", "ceil", "floor", "min", "max", "pow", "atan2", "if",
+];
+
+/// Is `name` a built-in function?  Case-insensitive, like the grammar.
+pub fn is_builtin(name: &str) -> bool {
+    let lc = name.to_lowercase();
+    BUILTINS.contains(&lc.as_str())
+}
+
+/// One `.func name(a, b) = <body>` definition.
+#[derive(Debug, Clone)]
+pub struct FuncDef {
+    /// Formal parameter names, in order, lowercased.
+    pub params: Vec<String>,
+    /// The body, parsed once. Formals appear in it as [`Expr::Var`].
+    pub body: Expr,
+}
+
+/// `.func` definitions in scope, by lowercased name.
+pub type FuncTable = std::collections::HashMap<String, FuncDef>;
 
 fn eval_fn(name: &str, args: &[f64]) -> Option<f64> {
     let one = |f: fn(f64) -> f64| args.first().copied().map(f);
@@ -778,5 +966,153 @@ mod tests {
             vec!["out".to_string(), "in".to_string(), "gnd".to_string()]
         );
         assert_eq!(is, vec!["vsrc1".to_string()]);
+    }
+
+    // ─── built-in list, user functions ──────────────────────────────────────
+
+    struct Nil;
+    impl EvalContext for Nil {
+        fn node_voltage(&self, _n: &str) -> f64 {
+            f64::NAN
+        }
+        fn branch_current(&self, _n: &str) -> f64 {
+            f64::NAN
+        }
+        fn time(&self) -> f64 {
+            f64::NAN
+        }
+        fn variable(&self, _n: &str) -> f64 {
+            2.0
+        }
+    }
+
+    #[test]
+    fn builtins_list_agrees_with_the_evaluator() {
+        // The anchor is `eval_fn` itself, not a second copy of the list: a name in
+        // BUILTINS that eval_fn cannot answer would parse and then evaluate to
+        // NaN, which is the failure this pairing exists to prevent.
+        for name in BUILTINS {
+            assert!(
+                eval_fn(name, &[0.5, 0.5, 0.5]).is_some(),
+                "BUILTINS lists '{name}' but eval_fn does not implement it"
+            );
+            assert!(
+                is_builtin(&name.to_uppercase()),
+                "{name} must match any case"
+            );
+        }
+        assert!(eval_fn("frobnicate", &[1.0]).is_none());
+        assert!(!is_builtin("frobnicate"));
+    }
+
+    #[test]
+    fn unknown_function_evaluates_to_nan_not_zero() {
+        // A 0.0 here is a 0 Ω resistor or a dead source that nothing warns about.
+        let e = Expr::parse("frobnicate(2)").unwrap();
+        assert!(e.eval(&Nil).is_nan(), "unknown call must poison");
+        // Wrong arity is the same failure with a correctly-spelled name.
+        assert!(Expr::parse("min(1)").unwrap().eval(&Nil).is_nan());
+        assert!(!Expr::parse("min(1,2)").unwrap().eval(&Nil).is_nan());
+    }
+
+    #[test]
+    fn unknown_calls_names_the_culprit() {
+        let mut names = Vec::new();
+        Expr::parse("2*frobnicate(sqrt(4)) + wibble(1)")
+            .unwrap()
+            .unknown_calls(&mut names);
+        assert_eq!(names, vec!["frobnicate".to_string(), "wibble".to_string()]);
+        let mut none = Vec::new();
+        Expr::parse("sqrt(4)+min(1,2)")
+            .unwrap()
+            .unknown_calls(&mut none);
+        assert!(none.is_empty(), "{none:?}");
+    }
+
+    fn table(defs: &[(&str, &[&str], &str)]) -> FuncTable {
+        defs.iter()
+            .map(|(name, params, body)| {
+                (
+                    name.to_string(),
+                    FuncDef {
+                        params: params.iter().map(|p| p.to_string()).collect(),
+                        body: Expr::parse(body).unwrap(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn func_expansion_keeps_argument_precedence() {
+        // The trap in textual macro expansion: `f(x)=x+1` called as `2*f(3)` must
+        // be 2*(3+1)=8, not 2*3+1=7. Substituting into the AST cannot get this
+        // wrong, which is why expansion is not done on the source text.
+        let t = table(&[("f", &["x"], "x+1")]);
+        let e = Expr::parse("2*f(3)").unwrap().expand_funcs(&t).unwrap();
+        assert_eq!(e.eval(&Nil), 8.0);
+        // And an argument that is itself a sum stays whole.
+        let e = Expr::parse("f(1+2)").unwrap().expand_funcs(&t).unwrap();
+        assert_eq!(e.eval(&Nil), 4.0);
+    }
+
+    #[test]
+    fn func_formal_shadows_a_same_named_variable() {
+        // `y` resolves to 2.0 through the context. Inside f, `y` is the argument,
+        // so f(10) must be 10*10 and the trailing `y` outside must still be 2.
+        let t = table(&[("f", &["y"], "y*y")]);
+        let e = Expr::parse("f(10)+y").unwrap().expand_funcs(&t).unwrap();
+        assert_eq!(e.eval(&Nil), 102.0);
+    }
+
+    #[test]
+    fn func_body_may_call_another_func() {
+        let t = table(&[("sq", &["x"], "x*x"), ("quad", &["x"], "sq(x)*sq(x)")]);
+        let e = Expr::parse("quad(2)").unwrap().expand_funcs(&t).unwrap();
+        assert_eq!(e.eval(&Nil), 16.0);
+    }
+
+    #[test]
+    fn func_recursion_is_refused() {
+        let t = table(&[("f", &["x"], "f(x)+1")]);
+        let err = Expr::parse("f(1)").unwrap().expand_funcs(&t).unwrap_err();
+        assert!(
+            matches!(&err, ExprError::Recursive(n) if n == "f"),
+            "{err:?}"
+        );
+        // Mutual recursion is the same fault one step further out.
+        let t = table(&[("a", &["x"], "b(x)"), ("b", &["x"], "a(x)")]);
+        let err = Expr::parse("a(1)").unwrap().expand_funcs(&t).unwrap_err();
+        assert!(matches!(err, ExprError::Recursive(_)), "{err:?}");
+    }
+
+    #[test]
+    fn func_arity_mismatch_is_refused() {
+        let t = table(&[("f", &["x", "y"], "x+y")]);
+        let err = Expr::parse("f(1)").unwrap().expand_funcs(&t).unwrap_err();
+        assert!(
+            matches!(&err, ExprError::Arity { name, expected: 2, got: 1 } if name == "f"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn expansion_leaves_builtins_and_node_refs_alone() {
+        let t = table(&[("f", &["x"], "x*2")]);
+        let e = Expr::parse("sqrt(f(8)) + v(out)")
+            .unwrap()
+            .expand_funcs(&t)
+            .unwrap();
+        let mut unknown = Vec::new();
+        e.unknown_calls(&mut unknown);
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let mut v = Vec::new();
+        let mut i = Vec::new();
+        e.collect_refs(&mut v, &mut i);
+        assert_eq!(
+            v,
+            vec!["out".to_string()],
+            "node refs must survive expansion"
+        );
     }
 }
