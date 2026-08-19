@@ -762,7 +762,31 @@ X<inst>  <net1> <net2> …  <name>  [param=value …]
 
 Two-pass parse-time flattening. Instances may nest (with cycle detection);
 nested *definitions* — a `.subckt` inside a `.subckt` — are rejected. Internal
-nets are namespaced `<inst>.<net>`; `0`/`gnd` stays global.
+nets are namespaced `<inst>.<net>`; `0`/`gnd` stays global. Node and branch
+references inside an expression are in the same scope as the element that holds
+them, so a `B`/`E`/`F`/`G`/`H` inside a subcircuit reads its own instance's nets
+and sources.
+
+```
+.global  <net1> <net2> …
+```
+
+A `.global` net is the same node in every scope, whether or not it appears in a
+port list — the supplies of a CDL or foundry deck, which no layout tool threads
+through every port list. Nesting is unlimited, and the declaration may come after
+the instance that needs it. A net that is **both a port and global is refused**:
+the port would take the caller's net while every reference inside took the global
+one, and picking either silently is wrong for the deck that meant the other.
+
+```spice
+.global vdd vss
+.subckt inv a y          ← no supply ports
+Rpull vdd y 1k
+Rdown y vss 1k
+.ends
+Vsup vdd 0 1.8
+Xi in out inv            ← Rpull connects to the top-level vdd
+```
 
 Parameters resolve global `.param` < subckt defaults < call-site overrides, and
 are referenced as `{…}`, which may hold **arithmetic** over parameters, numeric
