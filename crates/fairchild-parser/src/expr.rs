@@ -304,6 +304,43 @@ impl Expr {
         }
     }
 
+    /// Rewrite every node and branch-current reference through the given maps.
+    ///
+    /// Subcircuit flattening renames nodes and elements, and an expression holds
+    /// references to both: `B1 out 0 V=v(mid)*2` inside a subcircuit means *that
+    /// instance's* `mid`, and `F1 … Vsense …` means that instance's `Vsense`. The
+    /// element's own node fields were remapped and the ones inside its expression
+    /// were not, so every controlled source in a subcircuit read an unknown node
+    /// or branch — which the solver reads as zero.
+    pub fn rename_refs(
+        &self,
+        node: &dyn Fn(&str) -> String,
+        vsrc: &dyn Fn(&str) -> String,
+    ) -> Expr {
+        match self {
+            Expr::NodeV(n) => Expr::NodeV(node(n)),
+            Expr::NodeDiffV(a, b) => Expr::NodeDiffV(node(a), node(b)),
+            Expr::BranchI(n) => Expr::BranchI(vsrc(n)),
+            Expr::Num(_) | Expr::Time | Expr::Var(_) => self.clone(),
+            Expr::Neg(e) => Expr::Neg(Box::new(e.rename_refs(node, vsrc))),
+            Expr::Not(e) => Expr::Not(Box::new(e.rename_refs(node, vsrc))),
+            Expr::Bin(op, a, b) => Expr::Bin(
+                op.clone(),
+                Box::new(a.rename_refs(node, vsrc)),
+                Box::new(b.rename_refs(node, vsrc)),
+            ),
+            Expr::If(c, a, b) => Expr::If(
+                Box::new(c.rename_refs(node, vsrc)),
+                Box::new(a.rename_refs(node, vsrc)),
+                Box::new(b.rename_refs(node, vsrc)),
+            ),
+            Expr::Call(name, args) => Expr::Call(
+                name.clone(),
+                args.iter().map(|a| a.rename_refs(node, vsrc)).collect(),
+            ),
+        }
+    }
+
     /// Every bare variable name in this AST, deduplicated.
     ///
     /// A parse-time expression needs this because a comparison launders an

@@ -95,3 +95,60 @@ fn vcvs_gain_carries_into_ac() {
         "doubling the VCVS gain should double the AC response: {one} -> {two}"
     );
 }
+
+// ─── inside a subcircuit ────────────────────────────────────────────────────
+//
+// The desugaring puts every control reference inside an expression, and
+// subcircuit flattening renames nodes and elements. Until 2026-08-19 it renamed
+// the element's own terminals and not the references in its expression, so every
+// one of these four read an unknown node or branch — which the solver reads as
+// zero. The expected values here are analytic, not agreements with the parser:
+// a node voltage the deck can only produce if the reference resolved.
+
+/// `B` reading an internal node of its own instance: mid is a 1 k/1 k divider off
+/// a 1 V source, so V(y) = 2·0.5 = 1.0 V. Read as zero before the fix.
+#[test]
+fn b_source_reads_its_own_instances_internal_node() {
+    let nl = parse_spice(
+        "* b in subckt\n.subckt amp inp outp\nR1 inp mid 1k\nR2 mid 0 1k\n\
+         B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n.end\n",
+    )
+    .unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&nl.models);
+    let r = dc_op_nr_with_registry(&nl, &reg).expect("DC OP failed");
+    let y = r.node_voltage("y").expect("no node `y`");
+    assert!((y - 1.0).abs() < TOL, "expected 1.0 V, got {y}");
+}
+
+/// `F` reading a source in its own instance: I(Vsense) = 1 mA through 1 k, the
+/// mirror pushes 2 mA into a 1 k load, so V(y) = 2.0 V. Zero before the fix.
+#[test]
+fn f_source_reads_its_own_instances_branch_current() {
+    let nl = parse_spice(
+        "* f in subckt\n.subckt mirror inp outp\nVsense inp mid DC 0\nR1 mid 0 1k\n\
+         F1 0 outp Vsense 2\nR2 outp 0 1k\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n.end\n",
+    )
+    .unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&nl.models);
+    let r = dc_op_nr_with_registry(&nl, &reg).expect("DC OP failed");
+    let y = r.node_voltage("y").expect("no node `y`");
+    assert!((y - 2.0).abs() < TOL, "expected 2.0 V, got {y}");
+}
+
+/// `E` whose control node is a *port*: it must resolve to the caller's net, not
+/// to a prefixed local name nothing drives. V(y) = 1·V(a) = 1.5 V.
+#[test]
+fn e_source_control_port_resolves_to_the_call_site() {
+    let nl = parse_spice(
+        "* e in subckt\n.subckt buf inp outp\nE1 outp 0 inp 0 1.0\n.ends\n\
+         V1 a 0 DC 1.5\nX1 a y buf\nRl y 0 1k\n.op\n.end\n",
+    )
+    .unwrap();
+    let mut reg = DeviceRegistry::new();
+    reg.register_builtin_models(&nl.models);
+    let r = dc_op_nr_with_registry(&nl, &reg).expect("DC OP failed");
+    let y = r.node_voltage("y").expect("no node `y`");
+    assert!((y - 1.5).abs() < TOL, "expected 1.5 V, got {y}");
+}

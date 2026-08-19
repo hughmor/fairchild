@@ -2215,6 +2215,77 @@ R1 a 0 1k
         assert_eq!(netlist.elements.len(), 2);
     }
 
+    // ─── expression references follow subcircuit scope ──────────────────────
+
+    #[test]
+    fn b_source_expression_refs_are_scoped_to_the_instance() {
+        // `v(mid)` means *this instance's* mid. It used to stay unqualified while
+        // the element's own terminals were remapped, so the solver looked up a node
+        // that does not exist and read it as zero.
+        let netlist = parse_spice(
+            "* b in subckt\n.subckt amp inp outp\nR1 inp mid 1k\nR2 mid 0 1k\n             B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n.end\n",
+        )
+        .unwrap();
+        let expr = netlist
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Behavioral { expr, .. } => Some(expr),
+                _ => None,
+            })
+            .expect("the B-source survived flattening");
+        let mut nodes = Vec::new();
+        let mut srcs = Vec::new();
+        expr.collect_refs(&mut nodes, &mut srcs);
+        assert_eq!(nodes, vec!["x1.mid".to_string()], "{nodes:?}");
+    }
+
+    #[test]
+    fn controlled_source_control_refs_are_scoped_to_the_instance() {
+        // E/F/G/H desugar onto the B-element, so the same fault made all four read
+        // zero inside a subcircuit. F/H reference a source by name, which is
+        // renamed by the same prefix as any other element.
+        let netlist = parse_spice(
+            "* f in subckt\n.subckt mirror inp outp\nVsense inp mid DC 0\nR1 mid 0 1k\n             F1 0 outp Vsense 2\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n.end\n",
+        )
+        .unwrap();
+        let expr = netlist
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Behavioral { expr, .. } => Some(expr),
+                _ => None,
+            })
+            .expect("the F-element desugared to a B-element");
+        let mut nodes = Vec::new();
+        let mut srcs = Vec::new();
+        expr.collect_refs(&mut nodes, &mut srcs);
+        assert_eq!(srcs, vec!["x1.vsense".to_string()], "{srcs:?}");
+    }
+
+    #[test]
+    fn a_ports_control_ref_maps_to_the_call_site_net() {
+        // A control node that *is* a port must land on the caller's net, not on a
+        // prefixed local name that nothing drives.
+        let netlist = parse_spice(
+            "* e in subckt\n.subckt buf inp outp\nE1 outp 0 inp 0 1\n.ends\n             V1 a 0 DC 1\nX1 a y buf\nR1 y 0 1k\n.op\n.end\n",
+        )
+        .unwrap();
+        let expr = netlist
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Behavioral { expr, .. } => Some(expr),
+                _ => None,
+            })
+            .unwrap();
+        let mut nodes = Vec::new();
+        let mut srcs = Vec::new();
+        expr.collect_refs(&mut nodes, &mut srcs);
+        assert!(nodes.contains(&"a".to_string()), "{nodes:?}");
+        assert!(!nodes.iter().any(|n| n.contains("inp")), "{nodes:?}");
+    }
+
     // ─── .if / .elseif / .else / .endif ─────────────────────────────────────
 
     #[test]

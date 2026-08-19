@@ -745,7 +745,12 @@ pub(super) fn remap_element_nodes(
             pos: rn(&pos),
             neg: rn(&neg),
             kind,
-            expr,
+            // The references *inside* the expression are in the same scope as the
+            // element's own terminals, and were the one place that did not know it.
+            // A controlled source in a subcircuit read an unknown node, which the
+            // solver reads as zero: E/F/G/H desugar onto this element, so all four
+            // were silently dead inside any subcircuit.
+            expr: expr.rename_refs(&rn, &|n| format!("{prefix}.{n}")),
         },
         Element::CoupledInductors {
             name,
