@@ -13,7 +13,7 @@ type CollectDefsResult = (
     FuncTable,
     HashSet<String>,
 );
-type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
+type SubcktHeader = (String, Vec<String>, Vec<(String, String)>);
 
 /// What one `.subckt` instance flattens into: its elements, plus a private copy
 /// of every `.model` card declared in its body (name-mangled per instance).
@@ -25,10 +25,29 @@ pub(super) struct Expansion {
 
 // ─── internal types ──────────────────────────────────────────────────────────
 
+/// One parameter as it was written: name, the source text of its value, and the
+/// line it came from.
+///
+/// The text is kept rather than a number because a default may be an expression
+/// over another parameter — `.subckt r a b w=1u rsh='100/w'` — and the caller may
+/// override the one it reads. Evaluating at collection time freezes the default
+/// into every instance, which is a wrong answer with nothing to warn about.
+struct ParamSrc {
+    name: String,
+    src: String,
+    lineno: usize,
+}
+
 /// Internal representation of a `.subckt ... .ends` block collected in pass 1.
 pub(super) struct SubcktDef {
-    ports: Vec<String>,               // port names (lowercased), in declaration order
-    params: Vec<(String, f64)>,       // default parameter values (header + body .param)
+    ports: Vec<String>, // port names (lowercased), in declaration order
+    /// Header parameters: the subcircuit's interface. A call may override these.
+    header_params: Vec<ParamSrc>,
+    /// `.param` assignments in the body, in source order. These are *computed*
+    /// from the header parameters and the enclosing scope, so a call cannot
+    /// override one — overriding it and then recomputing it are different
+    /// answers, and neither is what the caller asked for.
+    body_params: Vec<ParamSrc>,
     body_lines: Vec<(usize, String)>, // (original_lineno, raw_line) for pass-2 expansion
 }
 
@@ -81,7 +100,8 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     let mut current_name = String::new();
     let mut current_def = SubcktDef {
         ports: vec![],
-        params: vec![],
+        header_params: vec![],
+        body_params: vec![],
         body_lines: vec![],
     };
 
@@ -197,7 +217,8 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             subckt_defs.insert(std::mem::take(&mut current_name), current_def);
             current_def = SubcktDef {
                 ports: vec![],
-                params: vec![],
+                header_params: vec![],
+                body_params: vec![],
                 body_lines: vec![],
             };
             in_subckt = false;
@@ -212,7 +233,11 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             current_name = name;
             current_def = SubcktDef {
                 ports,
-                params,
+                header_params: params
+                    .into_iter()
+                    .map(|(name, src)| ParamSrc { name, src, lineno })
+                    .collect(),
+                body_params: vec![],
                 body_lines: vec![],
             };
             in_subckt = true;
@@ -235,18 +260,20 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             let (name, def) = parse_func_directive(trimmed, lineno)?;
             funcs.insert(name, def);
         } else if lc.starts_with(".param") {
-            // Values may be expressions over the parameters already in scope, so
-            // the map in scope goes in: `.param a=2 b={a*3}` resolves left to
-            // right, and inside a subcircuit the body's own defaults stack on top
-            // of the globals.
-            let mut in_scope = global_params.clone();
             if in_subckt {
-                in_scope.extend(current_def.params.iter().cloned());
-            }
-            let pairs = parse_param_directive(trimmed, lineno, &in_scope, &funcs)?;
-            if in_subckt {
-                current_def.params.extend(pairs);
+                // Kept as text and resolved per instance: the value may read a
+                // header parameter the caller overrides, and a number computed
+                // here would be the default's answer in every instance.
+                current_def.body_params.extend(
+                    param_assignments(trimmed)
+                        .into_iter()
+                        .map(|(name, src)| ParamSrc { name, src, lineno }),
+                );
             } else {
+                // A global `.param` has one scope and one answer, so it resolves
+                // here. Values may be expressions over the parameters already in
+                // scope: `.param a=2 b={a*3}` resolves left to right.
+                let pairs = parse_param_directive(trimmed, lineno, &global_params, &funcs)?;
                 global_params.extend(pairs);
             }
         } else if in_subckt {
@@ -333,12 +360,27 @@ pub(super) fn parse_subckt_header(line: &str, lineno: usize) -> Result<SubcktHea
     let mut params = Vec::new();
     for tok in &tokens[2..] {
         if let Some((k, v)) = tok.split_once('=') {
-            params.push((k.to_lowercase(), parse_value(v, lineno)?));
+            params.push((k.to_lowercase(), v.to_string()));
         } else {
             ports.push(canon_node(tok));
         }
     }
     Ok((name, ports, params))
+}
+
+/// Split `.param name=value [name2=value2 ...]` into raw `(name, source)` pairs,
+/// evaluating nothing.
+///
+/// One place splits a `.param` line, so the global form and the per-instance form
+/// cannot disagree about what an assignment is.
+fn param_assignments(line: &str) -> Vec<(String, String)> {
+    split_assignments(line)[1..]
+        .iter()
+        .filter_map(|tok| {
+            let (k, v) = tok.split_once('=')?;
+            Some((k.trim().to_lowercase(), v.trim().to_string()))
+        })
+        .collect()
 }
 
 /// Parse `.param name=value [name2=value2 ...]`.
@@ -351,28 +393,36 @@ pub(super) fn parse_param_directive(
     let mut pairs: Vec<(String, f64)> = Vec::new();
     // Each value may use the ones before it, on this line or an earlier one.
     let mut scope = in_scope.clone();
-    for tok in &split_assignments(line)[1..] {
-        let Some((k, v)) = tok.split_once('=') else {
-            continue;
-        };
-        let key = k.trim().to_lowercase();
-        let raw = v.trim();
-        // A plain number with a SPICE suffix stays the fast path: `1k` is a value,
-        // not an expression (`k` would read as an undefined parameter).
-        let val = match parse_value(raw, lineno) {
-            Ok(n) => n,
-            Err(_) => eval_param_expr(
-                strip_span(raw),
-                &scope,
-                funcs,
-                lineno,
-                &format!(".param '{key}' = '{raw}'"),
-            )?,
-        };
+    for (key, raw) in param_assignments(line) {
+        let val = param_value(&key, &raw, &scope, funcs, lineno, ".param")?;
         scope.insert(key.clone(), val);
         pairs.push((key, val));
     }
     Ok(pairs)
+}
+
+/// Resolve one parameter's source text to a number in `scope`.
+///
+/// A plain number with a SPICE suffix stays the fast path: `1k` is a value, not an
+/// expression (`k` would read as an undefined parameter).
+fn param_value(
+    key: &str,
+    raw: &str,
+    scope: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+    what: &str,
+) -> Result<f64, ParseError> {
+    match parse_value(raw, lineno) {
+        Ok(n) => Ok(n),
+        Err(_) => eval_param_expr(
+            strip_span(raw),
+            scope,
+            funcs,
+            lineno,
+            &format!("{what} '{key}' = '{raw}'"),
+        ),
+    }
 }
 
 /// Split a directive into `key=value` tokens, keeping a braced or quoted value
@@ -863,6 +913,67 @@ pub(super) fn remap_element_nodes(
     }
 }
 
+/// Resolve this instance's parameters: enclosing scope, then header defaults with
+/// the call's overrides applied, then the body's `.param` assignments.
+///
+/// Order is the whole point. A header default may read another header parameter
+/// (`.subckt r a b w=1u rsh='100/w'`), and a body `.param` may read any of them,
+/// so each is evaluated against what is already resolved — with the caller's
+/// override in place *before* anything reads it. Resolving at collection time
+/// instead froze every expression at the default, so an instance that overrode
+/// `w` got the default's `rsh` and nothing said so.
+fn resolve_instance_params(
+    def_name: &str,
+    def: &SubcktDef,
+    call_params: &[(String, f64)],
+    outer: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    call_lineno: usize,
+) -> Result<HashMap<String, f64>, ParseError> {
+    // A parameter the subcircuit does not declare cannot be applied, and applying
+    // nothing silently is how a typo (`wdith=2u`) runs the default and reports a
+    // clean answer for a circuit nobody described.
+    for (k, _) in call_params {
+        if def.header_params.iter().any(|p| &p.name == k) {
+            continue;
+        }
+        let msg = if let Some(p) = def.body_params.iter().find(|p| &p.name == k) {
+            format!(
+                "'{k}' on this instance of .subckt '{def_name}' is computed by a                  .param on line {}, not an interface parameter: overriding it and                  recomputing it are different circuits. Move it to the .subckt                  header to make it overridable",
+                p.lineno
+            )
+        } else {
+            let declared: Vec<&str> = def.header_params.iter().map(|p| p.name.as_str()).collect();
+            let known = if declared.is_empty() {
+                "it declares none".to_string()
+            } else {
+                format!("it declares {}", declared.join(", "))
+            };
+            format!(
+                ".subckt '{def_name}' has no parameter '{k}' ({known}). An                  unrecognised instance parameter would leave the default in place                  and change the answer with nothing to read"
+            )
+        };
+        return Err(ParseError::Syntax {
+            line: call_lineno,
+            msg,
+        });
+    }
+
+    let mut scope = outer.clone();
+    for p in &def.header_params {
+        let val = match call_params.iter().find(|(k, _)| *k == p.name) {
+            Some((_, v)) => *v,
+            None => param_value(&p.name, &p.src, &scope, funcs, p.lineno, ".subckt default")?,
+        };
+        scope.insert(p.name.clone(), val);
+    }
+    for p in &def.body_params {
+        let val = param_value(&p.name, &p.src, &scope, funcs, p.lineno, ".param")?;
+        scope.insert(p.name.clone(), val);
+    }
+    Ok(scope)
+}
+
 /// Expand one `.subckt` instance into a flat `Vec<Element>`.
 ///
 /// `expanding` is the set of subckt names currently on the call stack (cycle
@@ -907,14 +1018,14 @@ pub(super) fn expand_instance(
         .map(|(p, n)| (p.clone(), n.clone()))
         .collect();
 
-    // inst_params: global < def defaults < call overrides.
-    let mut inst_params: HashMap<String, f64> = global_params.clone();
-    for (k, v) in &def.params {
-        inst_params.insert(k.clone(), *v);
-    }
-    for (k, v) in call_params {
-        inst_params.insert(k.clone(), *v);
-    }
+    let inst_params = resolve_instance_params(
+        def_name,
+        def,
+        call_params,
+        global_params,
+        funcs,
+        call_lineno,
+    )?;
 
     let mut out = Expansion::default();
     // Model cards declared in this body: local name → per-instance mangled name.

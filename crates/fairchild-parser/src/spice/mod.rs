@@ -1977,6 +1977,152 @@ R1 a b 1k
         );
     }
 
+    /// The one resistance in a netlist, for the parameter-resolution tests below.
+    fn sole_resistance(net: &crate::Netlist) -> f64 {
+        let mut found = net.elements.iter().filter_map(|el| match el {
+            Element::Resistor { resistance, .. } => Some(*resistance),
+            _ => None,
+        });
+        let r = found.next().expect("no resistor in the netlist");
+        assert!(found.next().is_none(), "expected exactly one resistor");
+        r
+    }
+
+    /// A body `.param` that reads a header parameter must be recomputed for each
+    /// instance. It used to be evaluated once, when the definition was collected,
+    /// so it froze at the *default* — an instance overriding `n` got the default's
+    /// `rtot` and the deck reported a clean answer for a circuit nobody described.
+    #[test]
+    fn subckt_body_param_follows_the_call_override() {
+        let net = parse_spice(
+            "* body param over a header param\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rdiv n=2\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let resistance = sole_resistance(&net);
+        assert!(
+            (resistance - 2000.0).abs() < 1e-9,
+            "body .param froze at the default: got {resistance}, want 2000"
+        );
+    }
+
+    /// A header default may be an expression over an earlier header parameter,
+    /// and the override must be in place before it is read.
+    #[test]
+    fn subckt_header_default_may_be_an_expression() {
+        let net = parse_spice(
+            "* header default over another header param\n\
+             .subckt rdiv a b n=1 rtot='1000*n'\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rdiv n=3\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let resistance = sole_resistance(&net);
+        assert!(
+            (resistance - 3000.0).abs() < 1e-9,
+            "got {resistance}, want 3000"
+        );
+    }
+
+    /// Two instances of the same definition must not share a resolved parameter.
+    #[test]
+    fn two_instances_resolve_their_own_parameters() {
+        let net = parse_spice(
+            "* same definition, different overrides\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             Xa in 0 rdiv n=2\n\
+             Xb in 0 rdiv n=5\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let mut got: Vec<f64> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!((got[0] - 2000.0).abs() < 1e-9, "{got:?}");
+        assert!((got[1] - 5000.0).abs() < 1e-9, "{got:?}");
+    }
+
+    /// An instance parameter the definition does not declare cannot be applied,
+    /// and applying nothing silently is how a typo runs the default.
+    #[test]
+    fn an_undeclared_instance_parameter_is_refused() {
+        let err = parse_spice(
+            "* typo in an instance parameter\n\
+             .subckt rdiv a b n=1\n\
+             R1 a b {1000*n}\n\
+             .ends\n\
+             X1 p q rdiv nn=2\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("nn"), "must name the parameter: {msg}");
+        assert!(msg.contains('n'), "must name what is declared: {msg}");
+    }
+
+    /// A body `.param` is computed, not an interface: overriding it and
+    /// recomputing it are different circuits, so the ambiguity is refused rather
+    /// than resolved in whichever order the code happens to run.
+    #[test]
+    fn overriding_a_computed_param_is_refused() {
+        let err = parse_spice(
+            "* override a body .param\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             X1 p q rdiv rtot=5k\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("rtot"), "{msg}");
+        assert!(
+            msg.contains(".param"),
+            "must say where it comes from: {msg}"
+        );
+    }
+
+    /// An instance parameter whose value cannot be read used to be dropped, which
+    /// left the callee's default in place.
+    #[test]
+    fn an_unreadable_instance_parameter_value_is_refused() {
+        let err = parse_spice(
+            "* unbraced expression on an instance line\n\
+             .subckt rdiv a b n=1\n\
+             R1 a b {1000*n}\n\
+             .ends\n\
+             X1 p q rdiv n=2*3\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("2*3"),
+            "must quote what it could not read: {msg}"
+        );
+    }
+
     #[test]
     fn subckt_param_expression_undefined_errors() {
         let err = parse_spice(

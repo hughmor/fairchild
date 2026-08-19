@@ -809,6 +809,32 @@ Xwg in out fc_waveguide l_m={2*pi*radius} n_g={n_g}
 An undefined name, or an expression that evaluates non-finite, is an error —
 never a silent zero.
 
+**A subcircuit's parameters resolve per instance**, in this order: the enclosing
+scope, then the header defaults with the call's overrides already in place, then
+the body's `.param` lines. So a default may be an expression over an earlier
+parameter, a body `.param` follows an override rather than the default, and two
+instances of one definition resolve independently:
+
+```spice
+.subckt rdiv a b n=1 rsh='1000/n'   ← a default over another parameter
+.param rtot={rsh*n}                 ← computed per instance, not per definition
+R1 a b {rtot}
+.ends
+X1 in 0 rdiv n=2                    ← rsh=500, rtot=1000
+```
+
+Two things are refused rather than guessed:
+
+- **A parameter the definition does not declare.** `X1 in 0 rdiv nn=2` is an error
+  naming `nn` and listing what `rdiv` declares — a typo that left the default in
+  place would report a clean answer for a different circuit.
+- **Overriding a body `.param`.** It is computed, not an interface: overriding it
+  and recomputing it are different circuits. Move it to the header to make it
+  overridable.
+
+An instance-parameter value must also be readable — a number, or `{…}` that
+resolves to one. `n=2*3` unbraced is an error, not a dropped assignment.
+
 **`.model` cards inside a `.subckt` are per-instance.** The card is name-mangled
 to `<inst>.<card>` and references from inside that instance are retargeted, so
 each instance carries its own model built from its own parameters. That is what

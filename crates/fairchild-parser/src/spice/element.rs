@@ -462,9 +462,12 @@ pub(super) fn parse_element(
             for tok in &tokens[1..] {
                 if tok.contains('=') {
                     if let Some((k, v)) = tok.split_once('=') {
-                        if let Ok(val) = parse_value(v, lineno) {
-                            params.push((k.to_lowercase(), val));
-                        }
+                        // A value we cannot read used to be dropped here, which
+                        // left the callee's default in place and produced a clean
+                        // answer for a different circuit. An expression must be
+                        // braced so parameter substitution has already resolved
+                        // it by now; anything still unreadable is a deck bug.
+                        params.push((k.to_lowercase(), parse_value(v, lineno)?));
                     }
                 } else {
                     positional.push(tok);

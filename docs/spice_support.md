@@ -20,10 +20,9 @@ Three failure modes, and only one of them is dangerous:
 | **SILENT** | Runs, says nothing, and the answer may be wrong. **These are bugs.** |
 
 The good news up front: every unimplemented element letter and every
-unimplemented dot-command is a hard **error**. The silent set was small, and §4
-records it — **all five silent items are now fixed**; the section is kept as the
-record of what they were, because each one is a shape of bug worth recognising
-again.
+unimplemented dot-command is a hard **error**. The silent set is recorded in §4 —
+**every item in it is now fixed** — and the section is kept as the record of what
+they were, because each one is a shape of bug worth recognising again.
 
 ---
 
@@ -479,6 +478,49 @@ caller's net while every reference inside took the global one, and picking eithe
 silently is wrong for the deck that meant the other. `.global 0` warns instead —
 ground is already global in every scope, so the declaration is redundant rather
 than wrong.
+
+---
+
+### 4.11 A subcircuit parameter was resolved once, for the default — FIXED
+
+```spice
+.subckt rdiv a b n=1
+.param rtot={1000*n}      ← evaluated when the DEFINITION was read, with n=1
+R1 a b {rtot}
+.ends
+X1 in 0 rdiv n=2          ← 1 kΩ, not 2 kΩ. No warning, no error, wrong current.
+```
+
+A `.subckt` is the only construct whose parameters have more than one answer: one
+per instance. Both were collected as **numbers** when the definition was read —
+header defaults through `parse_value`, body `.param` lines evaluated against the
+defaults then and there — so every expression froze at the default. An instance
+that overrode `n` got its own `n` and everybody else's `rtot`.
+
+The same freeze made the honest half of the seam impossible: a header default
+*written* as an expression (`.subckt r a b w=1u rsh='100/w'`) could not be a number
+at collection time, so it was a hard error — which is what a foundry wrapper looks
+like from the first line.
+
+**Fixed.** A definition now keeps its parameters as **source text**, and each
+instance resolves them in order: enclosing scope, then header defaults with the
+call's overrides in place *before* anything reads them, then the body's `.param`
+assignments. Two instances of one definition resolve independently.
+
+Two refusals came with it, both at the same seam:
+
+- **An undeclared instance parameter is an error.** `X1 p q rdiv nn=2` used to add
+  `nn` to the scope, leave `n` at its default, and report a clean answer for a
+  circuit nobody described. The error names the parameter and lists what the
+  definition declares.
+- **Overriding a body `.param` is an error**, not a silent choice between
+  overriding and recomputing. The message says which line computes it and that
+  moving it to the header makes it overridable.
+
+```spice
+X1 p q rdiv n=2*3         ← also now an error: an unreadable instance-parameter
+                            value used to be dropped, leaving the default in place
+```
 
 ---
 
