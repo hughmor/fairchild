@@ -223,9 +223,9 @@ fn lex(input: &str) -> Vec<Stmt> {
 /// Strip comments from one raw line; returns the body and whether a trailing
 /// `\` asks for the next line to be joined.
 ///
-/// `//` runs to end of line. A `*` in the first column is a comment too — the
-/// GF45 tree uses it freely (`***…`, `**pro`, `*+ commented-out continuation`),
-/// mixed with `//` in the same file. A `*` anywhere else is multiplication.
+/// `//` runs to end of line. A `*` in the first column is a comment too — foundry
+/// trees use it freely (`***…`, `*+ commented-out continuation`), mixed with `//`
+/// in the same file. A `*` anywhere else is multiplication.
 fn strip_comments(raw: &str) -> (String, bool) {
     let lead = raw.trim_start();
     if lead.starts_with('*') || lead.starts_with(';') {
@@ -375,7 +375,7 @@ fn instance_or_analysis(
     let name = first_word(text);
     let rest = text[name.len()..].trim();
 
-    // Nodes may be parenthesised — the modern form — or bare, which the GF45
+    // Nodes may be parenthesised — the modern form — or bare, which foundry
     // wrappers use for the primitive instance inside a subcircuit.
     let (nodes, after) = if let Some(close) = rest.find(')') {
         if rest.starts_with('(') {
