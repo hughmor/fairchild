@@ -291,6 +291,17 @@ fn statement(st: &Stmt, globals: &mut Vec<String>) -> Result<String, ParseError>
             }
             return Ok(format!("* {text}"));
         }
+        // Constructs a later commit will read. Named here so the error says which
+        // one, rather than letting the instance parser fail on `ends` and blame a
+        // line the user did not write wrong.
+        "subckt" | "inline" | "ends" | "endsubckt" | "model" | "if" | "else" | "function" => {
+            return Err(ParseError::Syntax {
+                line: st.lineno,
+                msg: format!(
+                    "Spectre '{head_lc}' is not read yet: fairchild currently reads                      flat Spectre — parameters, primitive instances, includes, globals                      and analyses. Flatten the deck, or translate this construct to                      the SPICE equivalent (.subckt/.model/.if)"
+                ),
+            });
+        }
         _ => {}
     }
 
@@ -832,5 +843,24 @@ tr1 tran stop=1u step=1n
                 ("d".into(), "2".into())
             ]
         );
+    }
+
+    /// A `subckt` block used to fail on its `ends` line with an instance-parse
+    /// error, which blamed a line the user wrote correctly. The refusal must name
+    /// the construct that is missing.
+    #[test]
+    fn an_unread_construct_names_itself() {
+        for (deck, want) in [
+            ("subckt div (in out)\nends div\n", "subckt"),
+            ("inline subckt nfet (d g s)\nends nfet\n", "inline"),
+            ("model nch bsim4 type=n\n", "model"),
+            ("if (corner == 1) {\n", "if"),
+        ] {
+            let src = format!("simulator lang=spectre\n{deck}");
+            let msg = format!("{}", parse_spectre(&src).unwrap_err());
+            assert!(msg.contains(want), "{msg}");
+            assert!(msg.contains("not read yet"), "{msg}");
+            assert!(msg.contains("line 2"), "{msg}");
+        }
     }
 }
