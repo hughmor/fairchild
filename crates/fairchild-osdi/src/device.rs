@@ -13,12 +13,13 @@
 //!   MUST only READ from `inst` memory. Correctly implemented OSDI v0.4 models
 //!   satisfy this.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
 use std::sync::Arc;
 
 use fairchild_core::device::{Device, EvalFlags, NodeId, SimContext};
 use fairchild_core::mna::MnaMatrix;
+use fairchild_core::warn_user;
 
 use fairchild_core::device::Discretisation;
 use fairchild_core::reactive::charge_current;
@@ -78,6 +79,10 @@ pub struct OsdiDevice {
     /// The integrator's discretisation, captured during `eval` because
     /// `load_*_tran` receives only `alpha`.
     disc: Option<Discretisation>,
+    /// The OSDI `handle`: a NUL-terminated instance name the model dereferences
+    /// while building a diagnostic. Passing null here segfaults any model that
+    /// emits one — which every foundry compact model does about its defaults.
+    handle: CString,
 }
 
 // SAFETY: descriptor is read-only after construction; Vec storage is thread-safe.
@@ -111,6 +116,10 @@ impl OsdiDevice {
             q_prev2: None,
             i_react_prev: vec![0.0; desc.num_nodes as usize],
             disc: None,
+            // Named after the module until the builder knows the instance name:
+            // the model dereferences this while formatting a diagnostic, so it
+            // must be a real string from the start.
+            handle: descriptor_name(descriptor),
         }
     }
 
@@ -140,6 +149,10 @@ impl OsdiDevice {
             q_prev2: None,
             i_react_prev: vec![0.0; desc.num_nodes as usize],
             disc: None,
+            // Named after the module until the builder knows the instance name:
+            // the model dereferences this while formatting a diagnostic, so it
+            // must be a real string from the start.
+            handle: descriptor_name(descriptor),
         })
     }
 
@@ -367,6 +380,71 @@ impl OsdiDevice {
     }
 }
 
+/// The module's own name, as a C string, for use as the OSDI handle.
+fn descriptor_name(descriptor: *const OsdiDescriptor) -> CString {
+    let raw = unsafe { (*descriptor).name };
+    let name = if raw.is_null() {
+        "osdi_model".to_string()
+    } else {
+        unsafe { CStr::from_ptr(raw).to_string_lossy().into_owned() }
+    };
+    CString::new(name).unwrap_or_else(|_| CString::new("osdi_model").unwrap())
+}
+
+/// `INIT_ERR_OUT_OF_BOUNDS` from `osdi_0_4.h`.
+const INIT_ERR_OUT_OF_BOUNDS: u32 = 1;
+
+impl OsdiDevice {
+    /// Name of the parameter an init error points at, when the descriptor has one.
+    fn param_name(&self, id: u32) -> String {
+        let desc = self.desc();
+        if id >= desc.num_params {
+            return format!("#{id}");
+        }
+        unsafe {
+            let entry = desc.param_opvar.add(id as usize);
+            if entry.is_null() || (*entry).name.is_null() {
+                return format!("#{id}");
+            }
+            let first = *(*entry).name;
+            if first.is_null() {
+                return format!("#{id}");
+            }
+            CStr::from_ptr(first).to_string_lossy().into_owned()
+        }
+    }
+
+    /// Surface whatever a model reported from `setup_model` / `setup_instance`.
+    ///
+    /// These used to be requested with a null array and never read, so a model
+    /// saying "this parameter is out of range" was discarded — the model knew,
+    /// and the run continued on a value it had rejected.
+    fn report_init(&self, res: &OsdiInitInfo, phase: &str) {
+        if res.num_errors == 0 || res.errors.is_null() {
+            return;
+        }
+        let errors = unsafe { std::slice::from_raw_parts(res.errors, res.num_errors as usize) };
+        for e in errors {
+            match e.code {
+                INIT_ERR_OUT_OF_BOUNDS => {
+                    let id = unsafe { e.payload.parameter_id };
+                    warn_user!(
+                        "model '{}' rejected parameter '{}' during {phase}: value out of \
+                         the range the model declares, and the model's own default is \
+                         being used instead",
+                        self.handle.to_string_lossy(),
+                        self.param_name(id)
+                    );
+                }
+                other => warn_user!(
+                    "model '{}' reported init error code {other} during {phase}",
+                    self.handle.to_string_lossy()
+                ),
+            }
+        }
+    }
+}
+
 impl Device for OsdiDevice {
     fn num_terminals(&self) -> usize {
         self.desc().num_terminals as usize
@@ -384,12 +462,13 @@ impl Device for OsdiDevice {
             };
             unsafe {
                 f(
-                    std::ptr::null_mut(), // handle (unused by most models)
+                    self.handle.as_ptr() as *mut c_void,
                     self.model_ptr(),
                     &mut paras,
                     &mut res,
                 );
             }
+            self.report_init(&res, "model setup");
         }
         let _ = ctx; // temperature injection deferred — will go into OsdiSimParas
     }
@@ -439,7 +518,7 @@ impl Device for OsdiDevice {
             };
             unsafe {
                 f(
-                    std::ptr::null_mut(),
+                    self.handle.as_ptr() as *mut c_void,
                     self.inst_ptr(),
                     self.model_ptr(),
                     ctx.temperature,
@@ -448,6 +527,7 @@ impl Device for OsdiDevice {
                     &mut res,
                 );
             }
+            self.report_init(&res, "instance setup");
         }
     }
 
@@ -846,7 +926,7 @@ impl OsdiDevice {
             };
             unsafe {
                 f(
-                    std::ptr::null_mut(),
+                    self.handle.as_ptr() as *mut c_void,
                     self.inst_ptr(),
                     self.model_ptr(),
                     temperature,
@@ -855,6 +935,7 @@ impl OsdiDevice {
                     &mut res,
                 );
             }
+            self.report_init(&res, "instance setup");
         }
     }
 }
@@ -885,11 +966,64 @@ fn osdi_param_name_matches(param: &OsdiParamOpvar, target: &str) -> bool {
     false
 }
 
+/// An empty simulator-parameter table.
+///
+/// `names` and `names_str` are **NUL-terminated lists**, so "no parameters" is a
+/// pointer to a single null entry — not a null pointer. A null list is what a
+/// model walks off the end of while looking up `$simparam`, and it crashes inside
+/// the message it was trying to format about the lookup failing. OpenVAF's own
+/// runtime spells this `names: &mut ptr::null_mut()`.
+fn empty_name_list() -> *mut *mut std::os::raw::c_char {
+    // One permanently-leaked null entry, shared by every call. Stored as a usize
+    // because a raw pointer is not `Sync` and this genuinely is: it is read-only
+    // and lives for the process.
+    static LIST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let addr = *LIST.get_or_init(|| {
+        let slot: &'static mut *mut std::os::raw::c_char =
+            Box::leak(Box::new(std::ptr::null_mut()));
+        slot as *mut *mut std::os::raw::c_char as usize
+    });
+    addr as *mut *mut std::os::raw::c_char
+}
+
 fn null_sim_paras() -> OsdiSimParas {
     OsdiSimParas {
-        names: std::ptr::null_mut(),
+        names: empty_name_list(),
         vals: std::ptr::null_mut(),
-        names_str: std::ptr::null_mut(),
+        names_str: empty_name_list(),
         vals_str: std::ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "No simulator parameters" is a pointer to a null entry, not a null pointer.
+    ///
+    /// `names` and `names_str` are NUL-terminated lists, and a model walks them
+    /// looking up `$simparam`. Handing it a null list is what it walks off, and it
+    /// crashes inside the diagnostic it was trying to format about the failure.
+    /// OpenVAF's own runtime spells the empty case `&mut ptr::null_mut()`.
+    #[test]
+    fn an_empty_sim_para_list_is_terminated_not_null() {
+        let paras = null_sim_paras();
+        assert!(!paras.names.is_null(), "the list itself must exist");
+        assert!(!paras.names_str.is_null());
+        unsafe {
+            assert!(
+                (*paras.names).is_null(),
+                "its first entry must terminate it"
+            );
+            assert!((*paras.names_str).is_null());
+        }
+        // Values may be null: a model reads a value only after finding its name.
+        assert!(paras.vals.is_null());
+    }
+
+    /// The list is shared and stable, so a device built later sees the same one.
+    #[test]
+    fn the_empty_list_is_stable_across_calls() {
+        assert_eq!(empty_name_list(), empty_name_list());
     }
 }
