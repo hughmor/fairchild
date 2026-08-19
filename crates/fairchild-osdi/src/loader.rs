@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fairchild_core::device_registry::{DeviceRegistry, ParamSet};
+use fairchild_core::warn_user;
 use fairchild_core::Device;
 
 use crate::device::OsdiDevice;
@@ -84,6 +85,7 @@ impl OsdiLibrary {
         let descriptors_base = dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
 
         install_lim_table(handle);
+        install_log_hook(handle);
 
         Ok(Self {
             handle,
@@ -213,6 +215,68 @@ type LimiterFn = unsafe extern "C" fn(bool, *mut bool, f64, f64, f64, f64) -> f6
 /// Hence [`osdi_no_limit`] for anything unrecognised: an unimplemented limiter
 /// degrades to *no limiting*, which costs convergence robustness but keeps the
 /// model numerically valid, instead of killing the process.
+/// OSDI log levels (`osdi_0_4.h`).
+const LOG_LVL_MASK: u32 = 7;
+const LOG_LVL_DEBUG: u32 = 0;
+const LOG_LVL_DISPLAY: u32 = 1;
+const LOG_LVL_INFO: u32 = 2;
+const LOG_LVL_WARN: u32 = 3;
+const LOG_LVL_ERR: u32 = 4;
+const LOG_LVL_FATAL: u32 = 5;
+/// Set when the model could not format its own message.
+const LOG_FMT_ERR: u32 = 16;
+
+/// Receive a diagnostic from a compiled model.
+///
+/// `handle` is whatever the simulator passed to `setup_model` / `setup_instance` /
+/// `eval` — by OSDI convention a NUL-terminated instance name, which is why it
+/// must never be null: the model dereferences it while building the message.
+unsafe extern "C" fn osdi_log_cb(handle: *mut libc::c_void, msg: *const libc::c_char, lvl: u32) {
+    let who = if handle.is_null() {
+        "<unknown instance>".to_string()
+    } else {
+        CStr::from_ptr(handle as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let text = if msg.is_null() {
+        "<null message>".to_string()
+    } else {
+        CStr::from_ptr(msg).to_string_lossy().trim_end().to_string()
+    };
+    let text = if lvl & LOG_FMT_ERR != 0 {
+        format!("(model could not format its own message) {text}")
+    } else {
+        text
+    };
+    match lvl & LOG_LVL_MASK {
+        // A model's `$debug`/`$display` is the author talking to themselves;
+        // routing it through the warning switch keeps `--quiet` meaningful.
+        LOG_LVL_DEBUG | LOG_LVL_DISPLAY | LOG_LVL_INFO => {
+            warn_user!("model '{who}': {text}")
+        }
+        LOG_LVL_WARN => warn_user!("model '{who}': {text}"),
+        LOG_LVL_ERR => warn_user!("model '{who}' reports an error: {text}"),
+        LOG_LVL_FATAL => warn_user!("model '{who}' reports a FATAL condition: {text}"),
+        other => warn_user!("model '{who}' (log level {other}): {text}"),
+    }
+}
+
+/// Install [`osdi_log_cb`] into the library's `osdi_log` slot.
+///
+/// The symbol is a *function pointer variable* the simulator is expected to fill
+/// in; OpenVAF's own runtime does exactly this. Leaving it unset is not benign:
+/// a model that emits any diagnostic during setup — which every foundry compact
+/// model does, about its default parameters — takes the process down with it.
+unsafe fn install_log_hook(handle: *mut libc::c_void) {
+    type LogFn = unsafe extern "C" fn(*mut libc::c_void, *const libc::c_char, u32);
+    let slot = libc::dlsym(handle, c"osdi_log".as_ptr()) as *mut Option<LogFn>;
+    if slot.is_null() {
+        return; // no model in this library logs anything
+    }
+    slot.write(Some(osdi_log_cb));
+}
+
 unsafe fn install_lim_table(handle: *mut libc::c_void) {
     let table = libc::dlsym(handle, c"OSDI_LIM_TABLE".as_ptr()) as *mut OsdiLimFunction;
     let len_ptr = libc::dlsym(handle, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32;

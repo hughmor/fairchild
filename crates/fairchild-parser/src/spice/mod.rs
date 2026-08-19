@@ -376,10 +376,7 @@ fn resolve_includes(
                 Some(dir) => dir.join(fname),
                 None => PathBuf::from(fname),
             };
-            let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
-                line: lineno,
-                msg: format!(".include '{}': {e}", path.display()),
-            })?;
+            let content = read_included(&path, lineno, ".include")?;
             let inlined = resolve_includes(&content, path.parent(), depth + 1)?;
             out.push_str(&inlined);
             out.push('\n');
@@ -399,10 +396,7 @@ fn resolve_includes(
                     Some(dir) => dir.join(fname),
                     None => PathBuf::from(fname),
                 };
-                let content = std::fs::read_to_string(&path).map_err(|e| ParseError::Syntax {
-                    line: lineno,
-                    msg: format!(".lib '{}': {e}", path.display()),
-                })?;
+                let content = read_included(&path, lineno, ".lib")?;
                 let section_text =
                     extract_lib_section(&content, section).ok_or_else(|| ParseError::Syntax {
                         line: lineno,
@@ -502,11 +496,36 @@ pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
         line: 0,
         msg: format!("cannot read '{}': {e}", path.display()),
     })?;
+    // A `.scs` deck is as loadable as a `.sp` one: the dialect is detected from
+    // the content, so one entry point serves both and a caller does not choose.
+    let src = if crate::spectre::looks_like_spectre(&src) {
+        crate::spectre::to_spice(&src)?
+    } else {
+        src
+    };
     let resolved = resolve_includes(&src, path.parent(), 0)?;
     parse_resolved(&resolved)
 }
 
 // ─── analysis directive parsers ───────────────────────────────────────────────
+
+/// Read an included file, transliterating it when it turns out to be Spectre.
+///
+/// A foundry model library is Spectre and a deck that pulls one in is often SPICE,
+/// so the dialect is decided per file rather than per run. Detection is by content
+/// (`simulator lang=`, or a `//` comment before anything else) — an extension is a
+/// convention, and a library that arrives under another name is still Spectre.
+fn read_included(path: &Path, lineno: usize, what: &str) -> Result<String, ParseError> {
+    let content = std::fs::read_to_string(path).map_err(|e| ParseError::Syntax {
+        line: lineno,
+        msg: format!("{what} '{}': {e}", path.display()),
+    })?;
+    if crate::spectre::looks_like_spectre(&content) {
+        crate::spectre::to_spice(&content)
+    } else {
+        Ok(content)
+    }
+}
 
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();

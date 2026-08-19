@@ -656,6 +656,14 @@ Python as `result.measurements`.
 `.include` substitutes a file inline (depth ≤ 16; relative to the referencing
 file).
 
+An included file may be written in the **Spectre** dialect (`.scs`) rather than
+SPICE, and so may the top-level deck — the dialect is detected from the content of
+each file, so you never choose a mode and a SPICE deck may pull in a Spectre model
+library. Spectre statements are transliterated to their SPICE equivalents, which is
+why everything else in this guide still applies unchanged; the surface currently
+read, and what it refuses, is tabulated in
+[`spice_support.md` §5](spice_support.md).
+
 ### Parametrisation
 
 ```

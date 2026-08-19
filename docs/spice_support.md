@@ -7,8 +7,9 @@ disagree, the simulator is the bug.*
 `docs/model_status.md` covers the **device** dimension: which model-card and
 instance parameters are parsed, stamped and validated. This document covers the
 **syntax** dimension: which element letters, dot-commands and source functions a
-netlist may use at all, and — the part that matters — **how fairchild fails when
-it cannot honour something.**
+netlist may use at all — in either the SPICE spelling or the Spectre one (§5) —
+and, the part that matters, **how fairchild fails when it cannot honour
+something.**
 
 Three failure modes, and only one of them is dangerous:
 
@@ -481,17 +482,60 @@ than wrong.
 
 ---
 
-## 5. What is left
+## 5. The Spectre dialect
+
+Foundry model libraries are written in Spectre (`.scs`), so fairchild reads that
+spelling too. It is a **front end, not a second parser**: every statement is
+transliterated into the equivalent SPICE statement and the existing passes do the
+rest, so exactly one place still decides what a resistor is and how a subcircuit
+flattens. Transliteration is line-aligned, so an error still names the line you
+wrote.
+
+The dialect is detected **per file, from the content** — `simulator lang=` or a
+leading `//` comment — not from the extension. A SPICE deck may therefore
+`.include` a Spectre library and vice versa, and neither caller chooses a mode.
+
+| Spectre | becomes |
+|---|---|
+| `parameters a=1 b=2*a` | `.param a=1 b={2*a}` |
+| `R1 (in out) resistor r=1k` | `R1 in out 1k` |
+| `C1 (out 0) capacitor c=1n`, `L… inductor l=` | `C1 out 0 1n`, `L… …` |
+| `V1 (in 0) vsource dc=1.8`, `isource` | `V1 in 0 DC 1.8`, `I…` |
+| `X1 (a b) mycell w=1u` | `X1 a b mycell w=1u` |
+| `X1 a b mycell` (bare nodes) | same — both spellings are read |
+| `dc1 dc`, `tr1 tran stop=1n`, `ac1 ac`, `n1 noise` | `.op`, `.tran … 1n`, `.ac …`, `.noise …` |
+| `include "f"` / `include "f" section=s` | `.include "f"` / `.lib "f" s` |
+| `vdd!`, `global vdd!` | a net, plus `.global vdd!` |
+| `opt1 options temp=85` | `.temp 85` |
+| a trailing `\\` or leading `+` continuation, `//` and column-1 `*` comments | joined / stripped |
+
+Failure modes, same three as above:
+
+| construct | mode |
+|---|---|
+| `subckt` / `inline subckt` / `ends`, `model`, `if`/`else`, `function` | **error** naming the construct — not read yet, so a flat deck is the current surface |
+| Any other unreadable statement | **error** with the line and the two forms it accepts |
+| `ahdl_include "m.va"` | **warn**, skipped — Verilog-A needs an out-of-band OpenVAF compile and a `.osdi` line, so the devices it defines would otherwise be unknown models |
+| `save`, `assert`, `statistics`, `montecarlo`, `sweep`, `alter`, `altergroup`, `check`, `info`, `shell` | **warn**, skipped — they do not change a single solve |
+| `options` keys other than `temp` | **warn** (as `.options` above) |
+
+Nothing here is SILENT: a statement is either transliterated, reported as
+skipped, or refused.
+
+## 6. What is left
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+1. **Spectre `subckt` / `model` / `if`** — a foundry library is nothing but these,
+   so the flat surface in §5 does not yet read one. Each has an exact SPICE
+   equivalent (`.subckt`, `.model`, `.if`), which is what the front end will emit.
+2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-2. **Model binning and `level=` routing** — what actually stands between this and
+3. **Model binning and `level=` routing** — what actually stands between this and
    a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
    silent wrong answer, so geometry outside every bin must be a hard error.
-3. Everything else in §1–§2 is a clean error and can wait for a use case.
+4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document
 

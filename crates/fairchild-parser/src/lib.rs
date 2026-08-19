@@ -1,10 +1,12 @@
 mod error;
 pub mod expr;
+pub mod spectre;
 mod spice;
 pub mod warn;
 
 pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
+pub use spectre::parse_spectre;
 pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, parse_spice_value, BundleArity};
 
 /// The `AC <mag> [phase]` small-signal excitation on a source line.
