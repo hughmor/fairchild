@@ -83,7 +83,8 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
     };
 
     // Pass 1.
-    let (subckt_defs, global_params, main_lines, funcs) = collect_defs(&all_lines[body_start..])?;
+    let (subckt_defs, global_params, main_lines, funcs, globals) =
+        collect_defs(&all_lines[body_start..])?;
 
     // Pre-scan for `.options enable_bidirectional=…` so we know how to size
     // optical-port wires when we see `.optical_port` directives in pass 2.
@@ -301,6 +302,7 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
                                 &subckt_defs,
                                 &global_params,
                                 &funcs,
+                                &globals,
                                 &mut expanding,
                                 *lineno,
                             )?;
@@ -2213,6 +2215,129 @@ R1 a 0 1k
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 2);
+    }
+
+    // ─── .global ────────────────────────────────────────────────────────────
+
+    fn node_names(deck: &str) -> Vec<String> {
+        let netlist = parse_spice(deck).unwrap_or_else(|e| panic!("{deck}\n{e}"));
+        let mut names: Vec<String> = netlist
+            .elements
+            .iter()
+            .flat_map(|e| match e {
+                Element::Resistor { pos, neg, .. } => vec![pos.clone(), neg.clone()],
+                Element::VoltageSource { pos, neg, .. } => vec![pos.clone(), neg.clone()],
+                _ => vec![],
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    const GLOBAL_DECK: &str = "\
+* global supplies
+.global vdd vss
+.subckt inv a y
+Rpull vdd y 1k
+Rdown y vss 1k
+.ends
+Vsup vdd 0 1.8
+Xi in out inv
+.op
+.end
+";
+
+    #[test]
+    fn global_nets_keep_one_name_in_every_scope() {
+        let names = node_names(GLOBAL_DECK);
+        assert!(names.contains(&"vdd".to_string()), "{names:?}");
+        assert!(names.contains(&"vss".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("xi.vdd")),
+            "a global net must not be namespaced: {names:?}"
+        );
+    }
+
+    #[test]
+    fn without_the_declaration_the_same_net_is_namespaced() {
+        // The anchor for the test above: it is the declaration doing the work, not
+        // some accident of how these particular names are resolved.
+        let names = node_names(&GLOBAL_DECK.replace(".global vdd vss\n", ""));
+        assert!(
+            names.contains(&"xi.vdd".to_string()),
+            "expected a namespaced vdd without .global: {names:?}"
+        );
+    }
+
+    #[test]
+    fn global_may_be_declared_after_the_instance_that_needs_it() {
+        // Definitions are collected before any instance is expanded, so a deck
+        // that declares its supplies at the bottom still works.
+        let deck = "\
+* late global
+.subckt inv a y
+Rpull vdd y 1k
+Rdown y vss 1k
+.ends
+Xi in out inv
+Vsup vdd 0 1.8
+.global vdd vss
+.op
+.end
+";
+        let names = node_names(deck);
+        assert!(names.contains(&"vdd".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn global_nets_survive_nesting() {
+        let deck = "\
+* nested global
+.global vdd vss
+.subckt inv a y
+Rpull vdd y 1k
+Rdown y vss 1k
+.ends
+.subckt chain i o
+X1 i m inv
+X2 m o inv
+.ends
+Vsup vdd 0 1.8
+Xtop in out chain
+.op
+.end
+";
+        let names = node_names(deck);
+        assert!(names.contains(&"vdd".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("vdd") && n.contains('.')),
+            "two levels of nesting must not namespace a global: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_port_that_is_also_global_is_refused() {
+        // Two answers for what it connects to — the caller's net for the port, the
+        // global net for every reference inside. Picking one silently is wrong for
+        // the deck that meant the other.
+        let err = parse_spice(
+            "* clash\n.global vdd\n.subckt inv a y vdd\nRpull vdd y 1k\n.ends\n             Vsup vdd 0 1.8\nXi in out vdd inv\n.op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("vdd"), "{msg}");
+        assert!(msg.contains("port"), "{msg}");
+    }
+
+    #[test]
+    fn global_ground_is_accepted_and_changes_nothing() {
+        // Warns rather than errors: ground already is global, so the declaration is
+        // redundant, not wrong.
+        let names = node_names(
+            "* global gnd\n.global 0\n.subckt r1s a\nRx a 0 1k\n.ends\n             Vs n1 0 DC 1\nXi n1 r1s\n.op\n.end\n",
+        );
+        assert!(names.contains(&"0".to_string()), "{names:?}");
     }
 
     // ─── expression references follow subcircuit scope ──────────────────────

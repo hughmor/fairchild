@@ -96,7 +96,7 @@ expression source as a `B` element instead.
 | `.model` | model card | ✅ | — |
 | `.param` | parameter definition | ✅ values may be expressions: `{…}`, `'…'`, or bare | §4.8 |
 | `.func` | user function | ✅ expanded at parse time | §4.8 |
-| `.global` | global nets | ❌ | error |
+| `.global` | global nets | ✅ (a port of the same name is refused) | §4.10 |
 | `.csparam` | constant → control variable | ❌ | error |
 | `.table` | lookup table | ❌ | error |
 | `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time (not inside `.subckt`) | §4.8 |
@@ -438,6 +438,47 @@ were the hole.
 expression by name (`unknown function 'frobnicate'`) rather than reporting that
 something in it was not finite.
 
+### 4.10 A controlled source inside a subcircuit read zero — FIXED
+
+```spice
+.subckt amp inp outp
+R1 inp mid 1k
+R2 mid 0 1k
+B1 outp 0 V=v(mid)*2
+.ends
+X1 a y amp        ← V(y) was 0.0 V; it is 2 × 0.5 = 1.0 V
+```
+
+Subcircuit flattening renames nodes and elements. It renamed the element's own
+terminals and left the references *inside* its expression alone, so `v(mid)` still
+named a top-level `mid` that does not exist — and an unknown node reads as zero.
+`E`, `F`, `G` and `H` desugar onto the B-element, so all four were silently dead
+inside any subcircuit, in DC, AC and transient alike. A current-controlled pair
+missed twice over: `F1 … Vsense …` references a source name that flattening had
+prefixed.
+
+**Fixed.** `Expr::rename_refs` applies the same two maps flattening already uses —
+the node map (port → call-site net, ground stays ground, `.global` passes through,
+everything else namespaced) and the element prefix for a branch reference — at the
+point that was already remapping the terminals.
+
+**`.global` lands here**, being the other half of the same resolver:
+
+```spice
+.global vdd vss        ← the same node in every scope, port list or not
+```
+
+Declarations are collected before any instance is expanded, so a `.global` may
+follow the instance that needs it. Nesting is unlimited: a supply reaches a
+subcircuit two levels down without appearing in either port list, which is what
+CDL and foundry decks written by a layout tool expect.
+
+A net that is **both a port and global is refused**. The port would take the
+caller's net while every reference inside took the global one, and picking either
+silently is wrong for the deck that meant the other. `.global 0` warns instead —
+ground is already global in every scope, so the declaration is redundant rather
+than wrong.
+
 ---
 
 ## 5. What is left
@@ -447,12 +488,10 @@ something in it was not finite.
 1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-2. **`.global`** — a net resolving to the same node in every subcircuit scope.
-   Needed by CDL and foundry decks fed to us directly.
-3. **Model binning and `level=` routing** — what actually stands between this and
+2. **Model binning and `level=` routing** — what actually stands between this and
    a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
    silent wrong answer, so geometry outside every bin must be a hard error.
-4. Everything else in §1–§2 is a clean error and can wait for a use case.
+3. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document
 

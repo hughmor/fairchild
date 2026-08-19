@@ -11,6 +11,7 @@ type CollectDefsResult = (
     HashMap<String, f64>,
     Vec<(usize, String)>,
     FuncTable,
+    HashSet<String>,
 );
 type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
 
@@ -63,6 +64,9 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     // here: scoping `.func` per subcircuit would need its own name resolution and
     // nothing has asked for it.
     let mut funcs: FuncTable = FuncTable::new();
+    // `.global` names, collected across the whole deck before any instance is
+    // expanded, so a `.global` may follow the X-line that relies on it.
+    let mut globals: HashSet<String> = HashSet::new();
 
     let mut in_subckt = false;
     // `.control` state. The verbs are collected only to name them in the
@@ -212,6 +216,21 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
                 body_lines: vec![],
             };
             in_subckt = true;
+        } else if lc.starts_with(".global") {
+            for tok in trimmed.split_whitespace().skip(1) {
+                let net = canon_node(tok);
+                if net == "0" {
+                    // Ground is already global everywhere. Declaring it is
+                    // harmless but says the author expected something else to
+                    // happen, so say that it did not.
+                    warn_user!(
+                        ".global on line {lineno} lists ground, which is already \
+                         global in every scope — the declaration has no effect"
+                    );
+                    continue;
+                }
+                globals.insert(net);
+            }
         } else if lc.starts_with(".func") {
             let (name, def) = parse_func_directive(trimmed, lineno)?;
             funcs.insert(name, def);
@@ -278,7 +297,25 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         );
     }
 
-    Ok((subckt_defs, global_params, main_lines, funcs))
+    // A port that is also global has two answers for what it connects to, and
+    // picking either silently would be wrong for the deck that meant the other.
+    for (name, def) in &subckt_defs {
+        for port in &def.ports {
+            if globals.contains(port) {
+                return Err(ParseError::Syntax {
+                    line: 0,
+                    msg: format!(
+                        ".subckt '{name}' declares '{port}' as a port and .global \
+                         declares it global: the port would take the caller's net \
+                         while every reference inside took the global one. Remove it \
+                         from the port list, or rename the port"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok((subckt_defs, global_params, main_lines, funcs, globals))
 }
 
 /// Parse `.subckt <name> <port1> ... [param=default ...]`.
@@ -597,11 +634,19 @@ pub(super) fn substitute_params(
     Ok(result)
 }
 
-/// Map a single node: port names → call-site nets; ground stays "0"; all
-/// others get the `{prefix}.` namespace.
-pub(super) fn remap_node(node: &str, port_map: &HashMap<String, String>, prefix: &str) -> String {
-    if node == "0" {
-        return "0".to_string();
+/// Map a single node: `.global` names and ground pass through untouched, port
+/// names become the call-site net, everything else gets the `{prefix}.` namespace.
+///
+/// A `.global` net is checked before the port map, which costs nothing because a
+/// name that is both is refused when the definitions are collected.
+pub(super) fn remap_node(
+    node: &str,
+    port_map: &HashMap<String, String>,
+    prefix: &str,
+    globals: &HashSet<String>,
+) -> String {
+    if node == "0" || globals.contains(node) {
+        return node.to_string();
     }
     if let Some(mapped) = port_map.get(node) {
         return mapped.clone();
@@ -614,8 +659,9 @@ pub(super) fn remap_element_nodes(
     el: Element,
     port_map: &HashMap<String, String>,
     prefix: &str,
+    globals: &HashSet<String>,
 ) -> Element {
-    let rn = |n: &str| remap_node(n, port_map, prefix);
+    let rn = |n: &str| remap_node(n, port_map, prefix, globals);
     match el {
         Element::Resistor {
             name,
@@ -831,6 +877,7 @@ pub(super) fn expand_instance(
     subckt_defs: &HashMap<String, SubcktDef>,
     global_params: &HashMap<String, f64>,
     funcs: &FuncTable,
+    globals: &HashSet<String>,
     expanding: &mut HashSet<String>,
     call_lineno: usize,
 ) -> Result<Expansion, ParseError> {
@@ -928,7 +975,7 @@ pub(super) fn expand_instance(
 
         let substituted = substitute_params(trimmed, &inst_params, funcs, lineno)?;
         for el in parse_element_expanded(&substituted, lineno, funcs)? {
-            let mut el = remap_element_nodes(el, &port_map, inst_name);
+            let mut el = remap_element_nodes(el, &port_map, inst_name, globals);
 
             // Point references at this instance's own copy of a local card.
             // Checked before the subckt lookup so a local model always wins.
@@ -966,6 +1013,7 @@ pub(super) fn expand_instance(
                         subckt_defs,
                         &inst_params,
                         funcs,
+                        globals,
                         expanding,
                         lineno,
                     )?;
