@@ -660,10 +660,74 @@ file).
 
 ```
 .param  <name>=<value>  [<name2>=<value2> ...]
+.func   <name>(<arg> [, <arg> ...]) = <expression>
 ```
 
-Parameters substitute into element values, model-card values, and B-element
-expressions as `{name}`.
+Parameters substitute into element values, model-card values and B-element
+expressions as `{name}`, and a value may be any expression rather than only a
+number:
+
+```spice
+.param w=2u l=0.18u
+.param area={w*l}          ← braces
+.param perim='2*(w+l)'     ← single quotes: the HSPICE spelling, same meaning
+.func  ratio(a,b) = a/b
+.param aspect={ratio(w,l)}
+M1 d g s b nm W={w} L={l}
+.model nm NMOS (VTO={0.7*1.05} KP=100u)
+```
+
+Values resolve in file order over the parameters already defined, including
+earlier on the same line, so define before you use. A value may contain spaces
+only inside braces or quotes — `.param a = 1 + 2 b = 3` has no unambiguous
+reading. A SPICE suffix stays a number: `1k` is 1000, not an expression over an
+undefined `k`.
+
+`.func` is expanded where it is called, at parse time, so it works anywhere an
+expression does — a `{…}` value, another `.param`, a `.model` value, a B-source,
+a `.measure`. A definition may come after its first use. An argument shadows a
+`.param` of the same name inside the body. Recursion, a repeated argument name, a
+name that shadows a built-in function such as `sin`, and a call with the wrong
+number of arguments are all errors.
+
+Double quotes mean something different and are not substituted: on a `.model`
+line `"…"` is a device constitutive map over the device's own bias
+(`dneff="5.0e-5*V"`), which is not a parse-time value. See
+[Photonic devices](#12-photonic-devices).
+
+### Conditional netlists
+
+```
+.if (<condition>)  …  .elseif (<condition>)  …  .else  …  .endif
+```
+
+The condition is a parse-time expression over `.param` values and `.func` calls,
+with the comparison and logical operators of the expression grammar. Only the
+taken branch is collected: a `.model`, `.subckt`, `.param` or element in a branch
+that was not taken does not exist afterwards. Blocks nest, and a condition in a
+branch that cannot run is not evaluated, so a dead branch may reference names that
+were never defined.
+
+```spice
+.param corner=2
+.if (corner==1)
+.include models_tt.lib
+.elseif (corner==2)
+.include models_ff.lib
+.else
+.include models_ss.lib
+.endif
+```
+
+Two things are refused rather than guessed:
+
+- **`.if` inside a `.subckt`.** The condition would be evaluated once against the
+  subcircuit's *default* parameters and then apply to every instance. Select
+  outside the definition, or give the instances different models.
+- **A condition over an undefined name.** `nope==1` would compare NaN against 1
+  and yield a perfectly ordinary `false`, so a misspelled corner variable would
+  quietly select the other branch. Names are checked before the condition is
+  evaluated.
 
 ### Corner and temperature sweeps
 

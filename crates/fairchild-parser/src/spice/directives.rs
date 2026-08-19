@@ -1,5 +1,5 @@
 use super::common::{canon_node, parse_value};
-use crate::expr::Expr;
+use crate::expr::{Expr, FuncDef, FuncTable};
 use crate::{
     AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, ParseError,
 };
@@ -26,6 +26,121 @@ pub(super) fn select_directive(lc: &str) -> Option<&'static str> {
     SELECT.iter().copied().find(|d| lc.starts_with(d))
 }
 
+/// Expand `.func` calls in `expr`, then refuse any call nothing can evaluate.
+///
+/// Every place the parser builds an expression goes through here, so `.func` has
+/// exactly one meaning across `{…}` parameters, `.param` values, `.model` values,
+/// B-sources and `.measure` — and no unexpanded call can reach the solver, where
+/// it would evaluate to NaN and say only that something was undefined.
+pub(super) fn expand_and_check(
+    expr: Expr,
+    funcs: &FuncTable,
+    lineno: usize,
+    what: &str,
+) -> Result<Expr, ParseError> {
+    let expanded = expr.expand_funcs(funcs).map_err(|e| ParseError::Syntax {
+        line: lineno,
+        msg: format!("{what}: {e}"),
+    })?;
+    let mut unknown = Vec::new();
+    expanded.unknown_calls(&mut unknown);
+    if !unknown.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "{what}: unknown function(s) {} — not built in and not defined by a .func",
+                unknown
+                    .iter()
+                    .map(|n| format!("'{n}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    Ok(expanded)
+}
+
+/// Parse `.func name(a, b) = <body>` into one entry for the function table.
+///
+/// Accepts every spelling in the wild: `=` optional, body bare, braced `{…}`, or
+/// quoted `'…'` / `"…"`. The body is parsed once here so a broken definition
+/// fails at its own line rather than at the first call site.
+///
+/// Refused, both because guessing would be silent:
+/// - a name that is already a built-in — `.func sin(x)` would make which `sin`
+///   you get depend on expansion order;
+/// - a repeated formal parameter, where the second binding would win invisibly.
+pub(super) fn parse_func_directive(
+    line: &str,
+    lineno: usize,
+) -> Result<(String, FuncDef), ParseError> {
+    let syntax = |msg: String| ParseError::Syntax { line: lineno, msg };
+
+    let rest = line
+        .get(".func".len()..)
+        .ok_or_else(|| syntax(".func needs a definition: .func name(args) = expr".into()))?
+        .trim();
+    let (Some(open), Some(close)) = (rest.find('('), rest.find(')')) else {
+        return Err(syntax(format!(
+            ".func needs a parameter list in parentheses: .func name(args) = expr (got '{rest}')"
+        )));
+    };
+    if close < open {
+        return Err(syntax(format!(".func has ')' before '(': '{rest}'")));
+    }
+    let name = rest[..open].trim().to_lowercase();
+    if name.is_empty() {
+        return Err(syntax(".func has no name".into()));
+    }
+    if crate::expr::is_builtin(&name) {
+        return Err(syntax(format!(
+            ".func '{name}' would shadow the built-in function of the same name; \
+             rename it — which one a call meant would otherwise depend on \
+             expansion order"
+        )));
+    }
+    let mut params: Vec<String> = Vec::new();
+    for tok in rest[open + 1..close].split(',') {
+        let p = tok.trim().to_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        if params.contains(&p) {
+            return Err(syntax(format!(
+                ".func '{name}' repeats the parameter '{p}'"
+            )));
+        }
+        params.push(p);
+    }
+
+    let body_src = rest[close + 1..].trim();
+    let body_src = body_src.strip_prefix('=').unwrap_or(body_src).trim();
+    let body_src = strip_span(body_src).trim();
+    if body_src.is_empty() {
+        return Err(syntax(format!(".func '{name}' has an empty body")));
+    }
+    let body = Expr::parse(body_src).map_err(|e| {
+        syntax(format!(
+            ".func '{name}': cannot parse body '{body_src}': {e}"
+        ))
+    })?;
+    Ok((name, FuncDef { params, body }))
+}
+
+/// Strip one layer of `{…}`, `'…'` or `"…"` from `s`, if it is wrapped in one.
+pub(super) fn strip_span(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() >= 2 {
+        let wrapped = (b[0] == b'{' && b[b.len() - 1] == b'}')
+            || (b[0] == b'\'' && b[b.len() - 1] == b'\'')
+            || (b[0] == b'"' && b[b.len() - 1] == b'"');
+        if wrapped {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
 /// Parse a `.measure` / `.meas` directive into a `Measurement`.
 ///
 /// Supported forms (case-insensitive keywords):
@@ -39,7 +154,11 @@ pub(super) fn select_directive(lc: &str) -> Option<&'static str> {
 /// any expression accepted by `Expr::parse`.  Comparisons in WHEN/TRIG/TARG
 /// either come from the expression itself (`V(out) > 0.5`) or use the
 /// `VAL=<v>` keyword which adds an implicit `expr - val` zero-cross.
-pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, ParseError> {
+pub(super) fn parse_measure(
+    line: &str,
+    lineno: usize,
+    funcs: &FuncTable,
+) -> Result<Measurement, ParseError> {
     let toks: Vec<&str> = line.split_whitespace().collect();
     if toks.len() < 4 {
         return Err(ParseError::FieldCount {
@@ -67,10 +186,11 @@ pub(super) fn parse_measure(line: &str, lineno: usize) -> Result<Measurement, Pa
     // `<lhs> <relop> <rhs>` where `<relop>` is a separate token (`>`, `<`,
     // `=`, etc.).
     let parse_expr = |s: &str| -> Result<Expr, ParseError> {
-        Expr::parse(s).map_err(|e| ParseError::Syntax {
+        let e = Expr::parse(s).map_err(|e| ParseError::Syntax {
             line: lineno,
             msg: format!(".meas expr '{s}': {e}"),
-        })
+        })?;
+        expand_and_check(e, funcs, lineno, &format!(".meas expr '{s}'"))
     };
 
     // Helper: split tokens[start..] into (expr_tokens, keyword_pairs).

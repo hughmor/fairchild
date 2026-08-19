@@ -94,12 +94,12 @@ expression source as a `B` element instead.
 | `.include` | include a file | ✅ 16-deep | — |
 | `.lib` / `.endl` | library section | ✅ | — |
 | `.model` | model card | ✅ | — |
-| `.param` | parameter definition | ✅ (`{expr}` references) | — |
-| `.func` | user function | ❌ | error |
+| `.param` | parameter definition | ✅ values may be expressions: `{…}`, `'…'`, or bare | §4.8 |
+| `.func` | user function | ✅ expanded at parse time | §4.8 |
 | `.global` | global nets | ❌ | error |
 | `.csparam` | constant → control variable | ❌ | error |
 | `.table` | lookup table | ❌ | error |
-| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ❌ | error |
+| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time (not inside `.subckt`) | §4.8 |
 | `.control` / `.endc` | interactive control block | ⚠️ skipped, **warns once** | §4.7 |
 | `.op` | operating point | ✅ | §4.4 |
 | `.dc` | DC sweep | ✅ nested, parallel | §4.4 |
@@ -152,12 +152,14 @@ list rather than as a `TRNOISE` source function.
 
 ---
 
-## 4. The silent set — all five now fixed
+## 4. The silent set
 
 Kept as the record. Each was found by running a deck, not by reading code.
-§4.6 and §4.7 were never in the silent set — `.save` and `.control` were loud
-errors — but they are recorded here because the same audit turned them up and one
-rule decided all three: who owns the decision, the deck or the caller.
+§4.1–§4.5 were the original five; §4.9 and the first half of §4.8 are two more
+found later, in the same way. §4.6 and §4.7 were never silent — `.save` and
+`.control` were loud errors — but they are recorded here because the same audit
+turned them up and one rule decided them: who owns the decision, the deck or the
+caller.
 
 ### 4.1 `AC <mag> [phase]` on a source line was discarded — FIXED
 
@@ -364,6 +366,78 @@ feature it duplicates. This is the Script class of the directive rule — the on
 class fairchild declines rather than honours; see
 [who owns the run](user-guide.md#who-owns-the-run--the-deck-or-the-caller).
 
+### 4.8 A `.model` value written as a parameter was silently dropped — FIXED
+
+```spice
+.param vt=0.7
+.model nm NMOS (VTO={vt} KP=100u)     ← VTO defaulted; nothing said so
+```
+
+`.model` lines were the one place parameter substitution did not run. `{vt}` was
+not evaluated, so `vto` landed in the card's *expression* params, which the
+MOSFET path never reads — the card was simulated with the default threshold. A
+different transistor than the deck asked for, with no warning. Subcircuit-local
+cards were already substituted at instantiation, which is what made the top-level
+omission look deliberate.
+
+**Fixed**, together with the two gaps that made it hard to hit and easy to
+mis-diagnose:
+
+- **`.model` values are substituted** like any element value. `{…}` and `'…'` are
+  parse-time expressions everywhere in a deck now, including on a card.
+  `"…"` on a card still means a device constitutive map over the device's own bias
+  (`dneff="5.0e-5*V"`) and is left untouched — that is now the only spelling for
+  one.
+- **`.param` values may be expressions.** `.param b={a*3}` was `invalid number
+  '{a*3}'`. Values may be braced, single-quoted (the HSPICE spelling), or bare,
+  and resolve in file order over the parameters already defined — including
+  earlier on the same line. A value may contain spaces only inside braces or
+  quotes, which is HSPICE's rule for HSPICE's reason: `.param a = 1 + 2 b = 3` has
+  no unambiguous reading. `1k` stays a number.
+- **`.func name(args) = body`** is expanded at parse time, over the syntax tree
+  rather than the source text — `f(x)=x+1` called as `2*f(3)` is 8, and textual
+  expansion gets that wrong without parenthesising every substitution. It works
+  anywhere an expression does: `{…}`, `.param`, a `.model` value, a B-source,
+  `.measure`. Definitions may follow their first use. Refused: a name that shadows
+  a built-in, a repeated formal, recursion (there is no finite expansion),
+  and the wrong argument count.
+
+Also fixed in passing: an **undefined parameter is now named**. `{2*nope}` said
+only that the result was not finite.
+
+**`.if` / `.elseif` / `.else` / `.endif`** land here too, as netlist
+preprocessing: the condition is an ordinary parse-time expression over `.param`
+values and `.func` calls, and only the taken branch is collected — a `.model`,
+`.subckt` or `.param` in a dead branch does not exist afterwards. A condition in a
+branch that cannot run is not evaluated, so a dead branch may reference names that
+were never defined.
+
+Two refusals worth stating:
+
+- **`.if` inside a `.subckt` is an error.** Its condition would be evaluated once,
+  against the subcircuit's *default* parameters, and then apply to every instance
+  — a wrong answer per instance rather than a missing feature.
+- **A condition over an undefined name is an error**, not `false`. `nope == 1`
+  compares NaN against 1 and yields a perfectly finite `false`, so a misspelled
+  corner variable would have silently selected the other branch. Names are checked
+  before the expression is evaluated.
+
+### 4.9 An unknown function read as zero — FIXED
+
+```spice
+.param a=2
+R1 in 0 {frobnicate(a)}     ← a 0 Ω resistor, silently
+```
+
+The expression evaluator resolved an unknown function name — or a known one with
+the wrong argument count — to `0.0`. Every other undefined thing in that grammar
+resolves to NaN precisely so the caller's finiteness check can refuse it; calls
+were the hole.
+
+**Fixed.** Unresolvable calls evaluate to NaN, and the parser refuses the
+expression by name (`unknown function 'frobnicate'`) rather than reporting that
+something in it was not finite.
+
 ---
 
 ## 5. What is left
@@ -373,10 +447,11 @@ class fairchild declines rather than honours; see
 1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-2. **`.func`** — used pervasively by HSPICE-format PDK model libraries, so it
-   gates foundry decks more tightly than anything else left here.
-3. **`.global`** — a net resolving to the same node in every subcircuit scope.
+2. **`.global`** — a net resolving to the same node in every subcircuit scope.
    Needed by CDL and foundry decks fed to us directly.
+3. **Model binning and `level=` routing** — what actually stands between this and
+   a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
+   silent wrong answer, so geometry outside every bin must be a hard error.
 4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document

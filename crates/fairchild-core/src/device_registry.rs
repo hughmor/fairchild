@@ -147,6 +147,42 @@ pub struct DeviceRegistry {
     pub(crate) switch_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
 }
 
+/// Kinds that read a card's expression params as device constitutive maps.
+///
+/// Every other kind reads numbers only, so an expression that reached it would be
+/// dropped without a word: `.model nm NMOS (VTO={vt})` used to arrive here as an
+/// expression param and the MOSFET path never looks at those, so the threshold
+/// silently defaulted. The parser now evaluates `{…}` and `'…'` before the card
+/// gets here, which leaves this as the backstop for whatever it could not.
+const EXPR_PARAM_KINDS: &[&str] = &["fc_phase_shifter_expr", "fc_awgr"];
+
+/// Warn about card values that nothing downstream can read.
+fn warn_unusable_expr_params(cards: &[ModelCard]) {
+    for card in cards {
+        if card.expr_params.is_empty() {
+            continue;
+        }
+        let kind = card.kind.to_lowercase();
+        if EXPR_PARAM_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let keys: Vec<&str> = card.expr_params.iter().map(|(k, _)| k.as_str()).collect();
+        warn_user!(
+            ".model '{}' ({kind}): parameter(s) {} are expressions, and a {kind} card \
+             takes numbers — they are being ignored, not evaluated. A value that \
+             depends on a .param must be written {{…}} or '…' so it is evaluated at \
+             parse time; \"…\" is reserved for a device constitutive map over the \
+             device's own bias, which only {} accept",
+            card.name,
+            keys.iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            EXPR_PARAM_KINDS.join(" / ")
+        );
+    }
+}
+
 impl DeviceRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
@@ -592,6 +628,7 @@ impl DeviceRegistry {
     /// models. The single entry point every analysis uses, so a model card is
     /// honoured uniformly regardless of which analysis builds the registry.
     pub fn register_builtin_models(&mut self, cards: &[ModelCard]) {
+        warn_unusable_expr_params(cards);
         self.register_builtin_diodes(cards);
         self.register_builtin_mosfets(cards);
         self.register_builtin_bjts(cards);

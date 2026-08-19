@@ -1,6 +1,7 @@
 use super::common::{canon_node, parse_value};
-use super::directives::is_silent_directive;
+use super::directives::{expand_and_check, is_silent_directive, parse_func_directive, strip_span};
 use super::element::{parse_element_expanded, parse_model};
+use crate::expr::FuncTable;
 use crate::warn_user;
 use crate::{Element, ModelCard, ParseError};
 use std::collections::{HashMap, HashSet};
@@ -9,6 +10,7 @@ type CollectDefsResult = (
     HashMap<String, SubcktDef>,
     HashMap<String, f64>,
     Vec<(usize, String)>,
+    FuncTable,
 );
 type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
 
@@ -55,10 +57,19 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     let mut subckt_defs: HashMap<String, SubcktDef> = HashMap::new();
     let mut global_params: HashMap<String, f64> = HashMap::new();
     let mut main_lines: Vec<(usize, String)> = Vec::new();
+    // `.func` definitions are collected across the whole deck before pass 2 runs,
+    // so a call may precede its definition — more permissive than HSPICE, and one
+    // less ordering rule to explain. A definition inside a `.subckt` still lands
+    // here: scoping `.func` per subcircuit would need its own name resolution and
+    // nothing has asked for it.
+    let mut funcs: FuncTable = FuncTable::new();
 
     let mut in_subckt = false;
     // `.control` state. The verbs are collected only to name them in the
     // warning — nothing reads them, and nothing should start to.
+    // `.if` / `.elseif` / `.else` / `.endif`. One frame per open `.if`; a line is
+    // kept only while every frame on the stack is emitting.
+    let mut cond_stack: Vec<CondFrame> = Vec::new();
     let mut in_control = false;
     let mut control_lineno = 0usize;
     let mut control_verbs: Vec<String> = Vec::new();
@@ -104,6 +115,71 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             });
         }
 
+        // Conditionals resolve here, before any other arm sees the line: a false
+        // branch may hold `.model`, `.subckt`, `.param` or elements, and none of
+        // them may be collected. Conditions are evaluated against the parameters
+        // and functions defined *above* them, in file order — which is why this
+        // lives in the pass that accumulates those rather than in a pass of its
+        // own.
+        if let Some(kind) = conditional_directive(&lc) {
+            if in_subckt {
+                // Evaluating it here would use the subcircuit's *default*
+                // parameters, once, for every instance — a wrong answer per
+                // instance rather than a missing feature. Refuse instead.
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!(
+                        "{kind} inside a .subckt is not supported: its condition \
+                         would be evaluated once against the subcircuit's default \
+                         parameters, not per instance. Select with .if outside the \
+                         definition, or give the instances different models"
+                    ),
+                });
+            }
+            let parent_live = cond_stack.iter().all(|f| f.live);
+            match kind {
+                ".if" => {
+                    let live =
+                        parent_live && eval_condition(&lc, kind, &global_params, &funcs, lineno)?;
+                    cond_stack.push(CondFrame { live, taken: live });
+                }
+                ".elseif" | ".else" | ".endif" => {
+                    let Some(frame) = cond_stack.last().copied() else {
+                        return Err(ParseError::Syntax {
+                            line: lineno,
+                            msg: format!("{kind} without a matching .if"),
+                        });
+                    };
+                    if kind == ".endif" {
+                        cond_stack.pop();
+                    } else {
+                        // `parent_live` above included this frame; the enclosing
+                        // frames are what gate a sibling branch.
+                        let outer_live = cond_stack[..cond_stack.len() - 1].iter().all(|f| f.live);
+                        let cond = if kind == ".else" {
+                            true
+                        } else {
+                            // A condition in a branch that cannot run is not
+                            // evaluated at all, so a dead branch may reference
+                            // parameters that were never defined.
+                            outer_live
+                                && !frame.taken
+                                && eval_condition(&lc, kind, &global_params, &funcs, lineno)?
+                        };
+                        let live = outer_live && !frame.taken && cond;
+                        let last = cond_stack.last_mut().unwrap();
+                        last.live = live;
+                        last.taken = frame.taken || live;
+                    }
+                }
+                _ => unreachable!("conditional_directive returns only those four"),
+            }
+            continue;
+        }
+        if !cond_stack.iter().all(|f| f.live) {
+            continue;
+        }
+
         if lc == ".end" {
             // End-of-file marker: stop collecting.
             break;
@@ -136,8 +212,19 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
                 body_lines: vec![],
             };
             in_subckt = true;
+        } else if lc.starts_with(".func") {
+            let (name, def) = parse_func_directive(trimmed, lineno)?;
+            funcs.insert(name, def);
         } else if lc.starts_with(".param") {
-            let pairs = parse_param_directive(trimmed, lineno)?;
+            // Values may be expressions over the parameters already in scope, so
+            // the map in scope goes in: `.param a=2 b={a*3}` resolves left to
+            // right, and inside a subcircuit the body's own defaults stack on top
+            // of the globals.
+            let mut in_scope = global_params.clone();
+            if in_subckt {
+                in_scope.extend(current_def.params.iter().cloned());
+            }
+            let pairs = parse_param_directive(trimmed, lineno, &in_scope, &funcs)?;
             if in_subckt {
                 current_def.params.extend(pairs);
             } else {
@@ -154,6 +241,16 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         return Err(ParseError::Syntax {
             line: 0,
             msg: format!(".subckt '{current_name}' has no matching .ends"),
+        });
+    }
+    if !cond_stack.is_empty() {
+        return Err(ParseError::Syntax {
+            line: 0,
+            msg: format!(
+                "{} unterminated .if block(s): every .if needs an .endif, and \
+                 guessing where one ended would silently drop the rest of the deck",
+                cond_stack.len()
+            ),
         });
     }
     if in_control {
@@ -181,7 +278,7 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         );
     }
 
-    Ok((subckt_defs, global_params, main_lines))
+    Ok((subckt_defs, global_params, main_lines, funcs))
 }
 
 /// Parse `.subckt <name> <port1> ... [param=default ...]`.
@@ -211,15 +308,95 @@ pub(super) fn parse_subckt_header(line: &str, lineno: usize) -> Result<SubcktHea
 pub(super) fn parse_param_directive(
     line: &str,
     lineno: usize,
+    in_scope: &HashMap<String, f64>,
+    funcs: &FuncTable,
 ) -> Result<Vec<(String, f64)>, ParseError> {
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    let mut pairs = Vec::new();
-    for tok in &tokens[1..] {
-        if let Some((k, v)) = tok.split_once('=') {
-            pairs.push((k.to_lowercase(), parse_value(v, lineno)?));
-        }
+    let mut pairs: Vec<(String, f64)> = Vec::new();
+    // Each value may use the ones before it, on this line or an earlier one.
+    let mut scope = in_scope.clone();
+    for tok in &split_assignments(line)[1..] {
+        let Some((k, v)) = tok.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().to_lowercase();
+        let raw = v.trim();
+        // A plain number with a SPICE suffix stays the fast path: `1k` is a value,
+        // not an expression (`k` would read as an undefined parameter).
+        let val = match parse_value(raw, lineno) {
+            Ok(n) => n,
+            Err(_) => eval_param_expr(
+                strip_span(raw),
+                &scope,
+                funcs,
+                lineno,
+                &format!(".param '{key}' = '{raw}'"),
+            )?,
+        };
+        scope.insert(key.clone(), val);
+        pairs.push((key, val));
     }
     Ok(pairs)
+}
+
+/// Split a directive into `key=value` tokens, keeping a braced or quoted value
+/// whole and gluing an assignment back together when it was written with spaces
+/// around the `=`.
+///
+/// A value may contain spaces only inside `{…}`, `'…'` or `"…"` — the same rule
+/// HSPICE has, and the reason it has it: `.param a = 1 + 2 b = 3` cannot be split
+/// unambiguously, so the braces are what make the intent readable.
+fn split_assignments(line: &str) -> Vec<String> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut span: Option<char> = None;
+    for c in line.chars() {
+        match span {
+            Some(open) => {
+                cur.push(c);
+                let closes = match open {
+                    '{' => c == '}',
+                    q => c == q,
+                };
+                if closes {
+                    span = None;
+                }
+            }
+            None => match c {
+                '{' | '\'' | '"' => {
+                    span = Some(c);
+                    cur.push(c);
+                }
+                ' ' | '\t' => {
+                    if !cur.is_empty() {
+                        toks.push(std::mem::take(&mut cur));
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    // Re-glue `name = value` and `name= value` / `name =value`.
+    let mut glued: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let mut t = toks[i].clone();
+        if t == "=" {
+            // Orphan `=`: attach to the previous token and pull in the next.
+            if let Some(prev) = glued.pop() {
+                t = format!("{prev}=");
+            }
+        }
+        while t.ends_with('=') && i + 1 < toks.len() {
+            i += 1;
+            t.push_str(&toks[i]);
+        }
+        glued.push(t);
+        i += 1;
+    }
+    glued
 }
 
 // ─── expansion helpers ────────────────────────────────────────────────────────
@@ -248,6 +425,114 @@ impl crate::expr::EvalContext for ParamCtx<'_> {
     }
 }
 
+/// One open `.if`: whether its current branch emits, and whether any branch has.
+#[derive(Clone, Copy)]
+struct CondFrame {
+    /// This branch is emitting lines.
+    live: bool,
+    /// Some branch of this `.if` has already been taken, so no later one may be.
+    taken: bool,
+}
+
+/// Which conditional directive a line is, if any.
+///
+/// Matched on the whole first word so `.iff` or `.elsewhere` are not conditionals
+/// — and `.if` must not swallow `.include`, which is why this is a word match and
+/// not a prefix test.
+fn conditional_directive(lc: &str) -> Option<&'static str> {
+    let word = lc.split_whitespace().next().unwrap_or(lc);
+    let word = word.split('(').next().unwrap_or(word);
+    match word {
+        ".if" => Some(".if"),
+        ".elseif" | ".elsif" => Some(".elseif"),
+        ".else" => Some(".else"),
+        ".endif" => Some(".endif"),
+        _ => None,
+    }
+}
+
+/// Evaluate a `.if` / `.elseif` condition: true when it is a non-zero number.
+///
+/// The condition is an ordinary parse-time expression, so it may use `.param`
+/// values, `.func` calls and the comparison operators the grammar already has.
+/// Surrounding parentheses are optional — both spellings are in the wild.
+fn eval_condition(
+    lc: &str,
+    kind: &str,
+    params: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+) -> Result<bool, ParseError> {
+    let rest = lc[kind.len()..].trim();
+    let rest = strip_span(rest).trim();
+    if rest.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!("{kind} has no condition"),
+        });
+    }
+    let val = eval_param_expr(rest, params, funcs, lineno, &format!("{kind} condition"))?;
+    Ok(val != 0.0)
+}
+
+/// Evaluate one parse-time expression over `params` and `funcs`.
+///
+/// The single path for every `{…}`, `'…'`, `.param` value and `.model` value:
+/// parse, expand `.func` calls, refuse a call nothing can evaluate, then require
+/// a finite result. An undefined name resolves to NaN inside the grammar, so the
+/// finiteness check is what turns "you referred to something that does not exist"
+/// into an error instead of a plausible number.
+fn eval_param_expr(
+    src: &str,
+    params: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+    what: &str,
+) -> Result<f64, ParseError> {
+    let parsed = crate::expr::Expr::parse(src).map_err(|e| ParseError::Syntax {
+        line: lineno,
+        msg: format!("{what}: cannot parse '{src}': {e}"),
+    })?;
+    let expr = expand_and_check(parsed, funcs, lineno, what)?;
+    // Undefined names are caught by name, before evaluation: a comparison would
+    // otherwise launder one into a valid answer — `nope == 1` is NaN against 1,
+    // which is a perfectly finite `false`, and `.if (nope==1)` would quietly take
+    // the other branch.
+    let mut vars = Vec::new();
+    expr.collect_vars(&mut vars);
+    let undefined: Vec<String> = vars
+        .into_iter()
+        .filter(|v| v != "pi" && !params.contains_key(v))
+        .collect();
+    if !undefined.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "{what}: undefined parameter(s) {} — define them with .param above \
+                 this line, or (for a node voltage or the simulation time) note \
+                 that a parse-time expression cannot use the solution",
+                undefined
+                    .iter()
+                    .map(|v| format!("'{v}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    let val = expr.eval(&ParamCtx(params));
+    if !val.is_finite() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "{what}: '{src}' did not evaluate to a finite number — an \
+                 undefined parameter, or a reference to a node voltage or time, \
+                 which a parse-time expression cannot use"
+            ),
+        });
+    }
+    Ok(val)
+}
+
 /// Replace `{…}` placeholders using `params`.
 ///
 /// The contents may be a bare parameter name (`{radius}`) or any arithmetic
@@ -258,55 +543,55 @@ impl crate::expr::EvalContext for ParamCtx<'_> {
 pub(super) fn substitute_params(
     line: &str,
     params: &HashMap<String, f64>,
+    funcs: &FuncTable,
     lineno: usize,
 ) -> Result<String, ParseError> {
-    if !line.contains('{') {
+    if !line.contains('{') && !line.contains('\'') {
         return Ok(line.to_string());
     }
     let mut result = String::with_capacity(line.len() + 16);
     let mut chars = line.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch != '{' {
-            result.push(ch);
-            continue;
-        }
-        let mut name = String::new();
+        let close = match ch {
+            '{' => '}',
+            // HSPICE spells a parse-time expression `'…'`, and PDK model libraries
+            // are written that way throughout. Double quotes stay untouched: on a
+            // `.model` line those are a device constitutive map over the device's
+            // own bias, which is not a parse-time value.
+            '\'' => '\'',
+            _ => {
+                result.push(ch);
+                continue;
+            }
+        };
+        let mut body = String::new();
         let mut closed = false;
         for c in chars.by_ref() {
-            if c == '}' {
+            if c == close {
                 closed = true;
                 break;
             }
-            name.push(c);
+            body.push(c);
         }
         if !closed {
             return Err(ParseError::Syntax {
                 line: lineno,
-                msg: "unclosed '{' in parameter reference".into(),
+                msg: format!("unclosed '{ch}' in parameter reference"),
             });
         }
-        let key = name.trim().to_lowercase();
+        let key = body.trim().to_lowercase();
         // Fast path: a bare parameter name.
         if let Some(val) = params.get(&key) {
             result.push_str(&format!("{val:e}"));
             continue;
         }
-        // Otherwise evaluate it as an expression over the parameter map.
-        let expr = crate::expr::Expr::parse(&key).map_err(|e| ParseError::Syntax {
-            line: lineno,
-            msg: format!("cannot evaluate parameter expression '{name}': {e}"),
-        })?;
-        let val = expr.eval(&ParamCtx(params));
-        if !val.is_finite() {
-            return Err(ParseError::Syntax {
-                line: lineno,
-                msg: format!(
-                    "parameter expression '{name}' is not finite — undefined \
-                     parameter, or a reference to a node voltage / time, which \
-                     parameters cannot use"
-                ),
-            });
-        }
+        let val = eval_param_expr(
+            &key,
+            params,
+            funcs,
+            lineno,
+            &format!("parameter expression '{body}'"),
+        )?;
         result.push_str(&format!("{val:e}"));
     }
     Ok(result)
@@ -540,6 +825,7 @@ pub(super) fn expand_instance(
     def: &SubcktDef,
     subckt_defs: &HashMap<String, SubcktDef>,
     global_params: &HashMap<String, f64>,
+    funcs: &FuncTable,
     expanding: &mut HashSet<String>,
     call_lineno: usize,
 ) -> Result<Expansion, ParseError> {
@@ -592,7 +878,7 @@ pub(super) fn expand_instance(
         if !trimmed.to_lowercase().starts_with(".model") {
             continue;
         }
-        let substituted = substitute_params(trimmed, &inst_params, *lineno)?;
+        let substituted = substitute_params(trimmed, &inst_params, funcs, *lineno)?;
         if let Some(mut card) = parse_model(&substituted, *lineno)? {
             let local = card.name.to_lowercase();
             let mangled = format!("{inst_name}.{local}");
@@ -635,8 +921,8 @@ pub(super) fn expand_instance(
             continue;
         }
 
-        let substituted = substitute_params(trimmed, &inst_params, lineno)?;
-        for el in parse_element_expanded(&substituted, lineno)? {
+        let substituted = substitute_params(trimmed, &inst_params, funcs, lineno)?;
+        for el in parse_element_expanded(&substituted, lineno, funcs)? {
             let mut el = remap_element_nodes(el, &port_map, inst_name);
 
             // Point references at this instance's own copy of a local card.
@@ -674,6 +960,7 @@ pub(super) fn expand_instance(
                         nested_def,
                         subckt_defs,
                         &inst_params,
+                        funcs,
                         expanding,
                         lineno,
                     )?;
