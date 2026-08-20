@@ -38,6 +38,14 @@ pub struct OsdiDevice {
     /// Stable pointer into the OsdiLibrary descriptor array.
     descriptor: *const OsdiDescriptor,
     /// Per-model state: descriptor.model_size bytes, 8-byte aligned.
+    ///
+    /// 8 is enough, and the reference host's `max_align_t` (16) is not needed: an
+    /// OpenVAF-generated struct holds doubles, 32-bit integers and pointers,
+    /// none of which want more. This was worth checking once — a crash that
+    /// looked like misalignment turned out to be [#42]'s log handle — so it is
+    /// written down rather than re-tried: widening the element type without
+    /// changing `div_ceil(8)` allocates half the bytes and corrupts state
+    /// silently, which is what an experiment here looks like when it "works".
     model: Vec<u64>,
     /// Per-instance state: descriptor.instance_size bytes, 8-byte aligned.
     instance: Vec<u64>,
