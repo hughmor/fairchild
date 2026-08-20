@@ -228,6 +228,10 @@ pub fn build_devices_with_footprints(
 ) -> Result<DevicesWithFootprints, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
     let mut foot: Vec<Footprint> = Vec::new();
+    // Every auxiliary row allocated below lands at or after this index, in
+    // device order — `check_exclusive_potential_drivers` walks the same order
+    // to attribute a row back to the device that owns it.
+    let extras_base = topo.size;
     let topo_arc = Arc::new(topo.clone());
     for el in &netlist.elements {
         match el {
@@ -417,7 +421,83 @@ pub fn build_devices_with_footprints(
             _ => {}
         }
     }
+    check_exclusive_potential_drivers(&devices, netlist, topo, extras_base)?;
     Ok((devices, foot))
+}
+
+/// Refuse a netlist in which two devices pin the same node's potential.
+///
+/// A device that drives a node through an auxiliary branch row is asserting
+/// exclusive ownership of it. When a second device asserts the same node, the
+/// two columns differ only by the `gmin` on their own diagonals, so the block
+/// is rank-deficient in a way LU never reports: the factorisation succeeds and
+/// returns a `gmin`-weighted average of the two assertions, with no error and
+/// no warning. That has shipped twice — a laser driving its backward wire to
+/// zero while the waveguide drove the returning field onto it (4x low), and
+/// `fc_mux`/`fc_demux` stamping the backward path in the forward direction.
+///
+/// The ownership is not declared anywhere, so this reads it off the stamp
+/// rather than off a second list that could disagree with it: every driven
+/// potential goes through `models::photonic::stamp_potential_eq` (and the OSDI
+/// runtime's equivalent), which writes exactly `a[row][node] = a[node][row] = 1`
+/// for its own auxiliary `row`. Only the owning device writes its own rows and
+/// columns, so that cell pair identifies both the node and the owner.
+///
+/// One device pinning a node twice is a bug in that device, not in the netlist,
+/// and is left to the device's own tests.
+fn check_exclusive_potential_drivers(
+    devices: &[Box<dyn Device>],
+    netlist: &Netlist,
+    topo: &CircuitTopology,
+    extras_base: usize,
+) -> Result<(), SimError> {
+    if topo.size == extras_base {
+        return Ok(());
+    }
+    // Stamped before any `eval`, so the coefficients are whatever the devices
+    // were constructed with. That does not matter: the `1` marking the driven
+    // node is written unconditionally, independent of every coefficient.
+    let mut scratch = crate::mna::MnaMatrix::zeros(topo.size);
+    for dev in devices {
+        dev.load_jacobian(&mut scratch);
+    }
+    let mut owner: Vec<usize> = vec![usize::MAX; topo.size - extras_base];
+    let mut next = extras_base;
+    for (i, dev) in devices.iter().enumerate() {
+        let extras = dev.num_extra_nodes();
+        owner[next - extras_base..next + extras - extras_base].fill(i);
+        next += extras;
+    }
+    let n_nodes = topo.n_nodes();
+    let mut pinned: IndexMap<usize, usize> = IndexMap::new();
+    let mut names: Option<Vec<String>> = None;
+    for row in extras_base..topo.size {
+        for (node, v) in scratch.a[row].iter() {
+            if node >= n_nodes || v != 1.0 || scratch.a[node][row] != 1.0 {
+                continue;
+            }
+            let dev = owner[row - extras_base];
+            let Some(&first) = pinned.get(&node) else {
+                pinned.insert(node, dev);
+                continue;
+            };
+            if first == dev {
+                continue;
+            }
+            let names = names.get_or_insert_with(|| build_device_names(netlist));
+            let name = |i: usize| names.get(i).cloned().unwrap_or_else(|| "?".into());
+            return Err(SimError::OverdrivenNode {
+                node: topo
+                    .node_index
+                    .get_index(node)
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_else(|| format!("row {node}")),
+                first: name(first),
+                second: name(dev),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Report MNA matrix size, NNZ, sparsity, and diagonal magnitude spread.

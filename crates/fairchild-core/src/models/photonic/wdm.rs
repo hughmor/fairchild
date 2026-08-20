@@ -158,6 +158,48 @@ impl ChannelFilter {
 // with every bundle flattened to its underlying wires.  See
 // `expand_bundle_ports` in fairchild-parser.
 
+/// Stamp one channel's route between the bus block and the per-channel block,
+/// shared by `fc_mux` (`bus_out = true`) and `fc_demux` (`bus_out = false`).
+///
+/// The forward field and the λ tag travel from the input side to the output
+/// side; the backward pair travels the other way, so the **input** side owns
+/// those two wires. Both devices used to stamp all five in the forward
+/// direction, which put a mux's driver on the bus's backward wires — the wires
+/// the next device down the bus already drives, because a device's `in` port
+/// drives its own backward pair. Two drivers on one node leaves the block
+/// rank-deficient, and the solve reports nothing: it returns a `gmin`-weighted
+/// average of the two answers. Meanwhile the backward light never reached the
+/// channel ports at all, so a reflection anywhere past a mux went missing.
+/// `newton::check_exclusive_potential_drivers` now refuses that shape by name.
+fn stamp_route(
+    mat: &mut MnaMatrix,
+    branches: &[Option<usize>],
+    nodes: &[NodeId],
+    n: usize,
+    wpc: usize,
+    k: usize,
+    amp: f64,
+    bus_out: bool,
+) {
+    for w in 0..wpc {
+        let bus_w = nodes[wpc * k + w];
+        let ch_w = nodes[wpc * (n + k) + w];
+        // Wires 2 and 3 of a 5-wire bundle are the backward pair. Under
+        // unidirectional propagation there is no such pair and every wire runs
+        // forward.
+        let backward = wpc == 5 && (w == 2 || w == 3);
+        let (dst, src) = if bus_out != backward {
+            (bus_w, ch_w)
+        } else {
+            (ch_w, bus_w)
+        };
+        // The λ label is a name for the channel, not a field: never attenuated,
+        // and it rides the forward direction whichever way the field goes.
+        let g = if w == wpc - 1 { 1.0 } else { amp };
+        stamp_potential_eq(mat, branches, wpc * k + w, dst, &[(src, -g)]);
+    }
+}
+
 /// Identity-routing combiner: N single-channel optical bundles → 1 N-channel
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
 pub struct NativeMux {
@@ -255,17 +297,17 @@ impl Device for NativeMux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        let wpc = self.wpc;
-        for k in 0..n {
-            for w in 0..wpc {
-                let bus_w = self.nodes[wpc * k + w];
-                let ch_w = self.nodes[wpc * (n + k) + w];
-                // Route every wire from channel to bus. Field wires carry the
-                // channel's transmission; the λ label is never attenuated.
-                let g = if w == wpc - 1 { 1.0 } else { self.amp[k] };
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, bus_w, &[(ch_w, -g)]);
-            }
+        for k in 0..self.n_channels {
+            stamp_route(
+                mat,
+                &self.branches,
+                &self.nodes,
+                self.n_channels,
+                self.wpc,
+                k,
+                self.amp[k],
+                true,
+            );
         }
     }
 
@@ -373,16 +415,17 @@ impl Device for NativeDemux {
     fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let n = self.n_channels;
-        let wpc = self.wpc;
-        for k in 0..n {
-            for w in 0..wpc {
-                let bus_w = self.nodes[wpc * k + w];
-                let ch_w = self.nodes[wpc * (n + k) + w];
-                // Channels drive FROM bus, through the channel's passband.
-                let g = if w == wpc - 1 { 1.0 } else { self.amp[k] };
-                stamp_potential_eq(mat, &self.branches, wpc * k + w, ch_w, &[(bus_w, -g)]);
-            }
+        for k in 0..self.n_channels {
+            stamp_route(
+                mat,
+                &self.branches,
+                &self.nodes,
+                self.n_channels,
+                self.wpc,
+                k,
+                self.amp[k],
+                false,
+            );
         }
     }
 
