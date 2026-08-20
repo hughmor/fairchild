@@ -67,7 +67,31 @@ fn stub_compiler(dir: &Path, mock: &Path, counter: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    settle(&path);
     path
+}
+
+/// Wait until the OS will run a file we just wrote.
+///
+/// Four tests here each write an executable and each spawn one, in parallel
+/// threads. On Linux exec returns `ETXTBSY` while any process holds a write
+/// descriptor to that inode, and a sibling thread that forks mid-write hands its
+/// child exactly such a descriptor. One successful exec settles it for good.
+/// `compile.rs`'s own `write_stub` carries the long version of this note.
+fn settle(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::process::Command::new(path).arg("--version").output() {
+            Ok(_) => return,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => panic!("stub '{}' will not run: {e}", path.display()),
+        }
+    }
 }
 
 fn compiles(counter: &Path) -> usize {

@@ -118,21 +118,37 @@ impl VaCompiler {
     /// circuit, not a degraded one.
     pub fn find(opts: &VaOptions) -> Result<Self, OsdiError> {
         if let Some(path) = &opts.compiler {
-            // Named explicitly, so a miss is that name's fault and nothing else's.
+            // Named explicitly, so a miss is that name's fault and nothing
+            // else's — and *why* it missed is the whole message. A binary that
+            // is there but will not run (not executable, not a binary, being
+            // rewritten) reported "not found", which names the wrong problem
+            // and sends the reader looking for a file that is already there.
             return match version_of(path) {
-                Some(version) => Ok(Self {
+                Ok(version) => Ok(Self {
                     path: path.clone(),
                     version,
                 }),
-                None => Err(OsdiError::CompilerNotFound {
+                Err(VersionError::NotFound) => Err(OsdiError::CompilerNotFound {
                     tried: vec![path.display().to_string()],
+                }),
+                Err(VersionError::WouldNotRun(detail)) => Err(OsdiError::CompilerFailed {
+                    path: path.clone(),
+                    detail,
                 }),
             };
         }
         for name in CANDIDATES {
             let path = PathBuf::from(name);
-            if let Some(version) = version_of(&path) {
-                return Ok(Self { path, version });
+            match version_of(&path) {
+                Ok(version) => return Ok(Self { path, version }),
+                // Searching a list of names: one that is not installed is the
+                // normal case and the search goes on. One that *is* installed
+                // and will not run is not — stopping there beats reporting that
+                // none of four names exists when the first one does.
+                Err(VersionError::NotFound) => continue,
+                Err(VersionError::WouldNotRun(detail)) => {
+                    return Err(OsdiError::CompilerFailed { path, detail })
+                }
             }
         }
         Err(OsdiError::CompilerNotFound {
@@ -156,13 +172,34 @@ impl VaCompiler {
     }
 }
 
-/// Ask the compiler its version. `None` means it did not run at all.
-fn version_of(path: &Path) -> Option<String> {
-    let out = Command::new(path).arg("--version").output().ok()?;
+/// Why asking a candidate for its version did not produce one.
+enum VersionError {
+    /// Nothing of that name to run — the ordinary miss while searching.
+    NotFound,
+    /// It is there and it did not run, or ran and failed. The detail is the
+    /// operating system's own words, which are the only ones that name the
+    /// actual obstacle: a directory, a missing execute bit, a script with no
+    /// interpreter, a file another process is still writing.
+    WouldNotRun(String),
+}
+
+/// Ask the compiler its version.
+fn version_of(path: &Path) -> Result<String, VersionError> {
+    let out = match Command::new(path).arg("--version").output() {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(VersionError::NotFound),
+        Err(e) => return Err(VersionError::WouldNotRun(e.to_string())),
+    };
     if !out.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("`--version` exited with {}", out.status)
+        } else {
+            format!("`--version` exited with {}: {stderr}", out.status)
+        };
+        return Err(VersionError::WouldNotRun(detail));
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Compile `src` to an `.osdi` in the cache, or return the cached artefact.
@@ -365,6 +402,42 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// Write an executable stub, and wait until the OS will actually run it.
+    ///
+    /// Writing an executable and exec'ing it from a multithreaded process is a
+    /// race on Linux: exec returns `ETXTBSY` while any process holds a write
+    /// descriptor to that inode, and a sibling test that forks while this thread
+    /// is still writing hands its child exactly such a descriptor — briefly,
+    /// even though Rust opens files close-on-exec. It cost a CI job: the same
+    /// commit passed ubuntu in one run and failed it in the other, inside
+    /// `VaCompiler::find`, on a stub that had just been chmod'ed. The old error
+    /// path then reported it as "compiler not found", which is why that is fixed
+    /// too.
+    ///
+    /// One successful exec closes the question — afterwards no descriptor to
+    /// this file is open anywhere, so every later run of it is safe. So the wait
+    /// lives here, once, rather than as a retry inside `version_of`: production
+    /// code that silently re-runs a compiler is a worse thing to own than a test
+    /// that waits for its own fixture.
+    fn write_stub(path: &Path, script: &str) {
+        write(path, script);
+        set_exec(path);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match Command::new(path).arg("--version").output() {
+                // Only that it *ran* matters here, not what it said.
+                Ok(_) => return,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("stub '{}' will not run: {e}", path.display()),
+            }
+        }
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         // Per-process, so parallel `cargo test` runs cannot delete each other's.
         let dir = std::env::temp_dir().join(format!("fc_va_{tag}_{}", std::process::id()));
@@ -387,7 +460,7 @@ mod tests {
         // A stub that does what `--print-expansion` does: concatenate the
         // closure. Real OpenVAF is not needed to prove the key tracks it.
         let stub = dir.join("stub-openvaf");
-        write(
+        write_stub(
             &stub,
             "#!/bin/sh\n\
              for a in \"$@\"; do case \"$a\" in --version) echo 'stub 1'; exit 0;; esac; done\n\
@@ -395,7 +468,6 @@ mod tests {
              for a in \"$@\"; do case \"$a\" in *.va) d=$(dirname \"$a\");; esac; done\n\
              cat \"$d\"/inc.va\n",
         );
-        set_exec(&stub);
 
         let opts = VaOptions {
             compiler: Some(stub.clone()),
@@ -421,8 +493,7 @@ mod tests {
         let top = dir.join("top.va");
         write(&top, "module m(a); end\n");
         let stub = dir.join("stub-openvaf");
-        write(&stub, "#!/bin/sh\ncat \"$2\" 2>/dev/null; exit 0\n");
-        set_exec(&stub);
+        write_stub(&stub, "#!/bin/sh\ncat \"$2\" 2>/dev/null; exit 0\n");
 
         let opts = VaOptions {
             compiler: Some(stub),
@@ -449,6 +520,44 @@ mod tests {
         assert!(msg.contains("FAIRCHILD_OPENVAF"), "{msg}");
     }
 
+    /// A compiler that is *there* and will not run must not be reported as
+    /// missing. "Not found" sends the reader looking for a file that is already
+    /// on disk; what they need is the operating system's reason — no execute
+    /// bit, not a binary, a directory, or another process still writing it.
+    #[test]
+    fn a_compiler_that_will_not_run_is_not_reported_as_missing() {
+        let dir = scratch("wontrun");
+
+        // There, but not executable.
+        let unrunnable = dir.join("openvaf-r");
+        write(&unrunnable, "not a program\n");
+        let msg = VaCompiler::find(&VaOptions {
+            compiler: Some(unrunnable.clone()),
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("could not be run"), "{msg}");
+        assert!(msg.contains("openvaf-r"), "{msg}");
+        assert!(
+            !msg.contains("not found") && !msg.contains("No Verilog-A compiler"),
+            "a file that exists must not be reported as missing: {msg}"
+        );
+
+        // There, runs, and fails — the version is part of every cache key, so a
+        // compiler that will not say what it is cannot be used silently either.
+        let angry = dir.join("angry-openvaf");
+        write_stub(&angry, "#!/bin/sh\necho 'boom' >&2\nexit 3\n");
+        let msg = VaCompiler::find(&VaOptions {
+            compiler: Some(angry),
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("could not be run"), "{msg}");
+        assert!(msg.contains("boom"), "the compiler's own words: {msg}");
+    }
+
     /// `--no-va-compile` refuses; it does not quietly load nothing.
     #[test]
     fn no_compile_refuses_rather_than_skips() {
@@ -456,8 +565,7 @@ mod tests {
         let top = dir.join("top.va");
         write(&top, "module m(a); end\n");
         let stub = dir.join("stub-openvaf");
-        write(&stub, "#!/bin/sh\ncat \"$2\" 2>/dev/null; exit 0\n");
-        set_exec(&stub);
+        write_stub(&stub, "#!/bin/sh\ncat \"$2\" 2>/dev/null; exit 0\n");
 
         let opts = VaOptions {
             compiler: Some(stub),
