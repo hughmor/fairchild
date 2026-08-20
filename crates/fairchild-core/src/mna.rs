@@ -99,17 +99,23 @@ impl CircuitTopology {
     /// Generic over the row type so one implementation serves both the sparse
     /// [`SparseRow`] matrix the Newton loop stamps and the dense `Vec<f64>`
     /// rows `.ac`/`.noise` build for their complex assembly.
-    pub fn stamp_gmin<R>(&self, a: &mut [R], g: f64)
+    ///
+    /// `floor` decides what an **empty** row gets — see [`RowFloor`]. The rest
+    /// of the matrix takes `g` either way.
+    pub fn stamp_gmin<R>(&self, a: &mut [R], g: f64, floor: RowFloor)
     where
-        R: std::ops::IndexMut<usize, Output = f64>,
+        R: GminRow,
     {
         let n_nodes = self.n_nodes();
-        for (i, row) in a.iter_mut().enumerate().take(n_nodes) {
-            row[i] += g;
-        }
         let vsrc_end = n_nodes + self.vsrc_index.len();
-        for (i, row) in a.iter_mut().enumerate().skip(vsrc_end) {
-            row[i] += g;
+        for (i, row) in a.iter_mut().enumerate() {
+            if i >= n_nodes && i < vsrc_end {
+                continue; // vsource branch rows carry their own equation
+            }
+            row[i] += match floor {
+                RowFloor::PinEmptyRows if row.is_all_zero() => 1.0,
+                _ => g,
+            };
         }
     }
 
@@ -347,6 +353,63 @@ pub struct SparseRow {
 
 /// Returned for reads of cells that are structurally absent.
 static ZERO: f64 = 0.0;
+
+/// What [`CircuitTopology::stamp_gmin`] puts on a row nothing stamped into.
+///
+/// The distinction is not cosmetic: it depends on whether the matrix being
+/// stamped is the whole system or only part of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RowFloor {
+    /// The matrix is the complete system, so an empty row means a node **no
+    /// element reaches** — pin it at `V = 0` outright.
+    ///
+    /// The equation is `g·V = 0` either way; the pin is the same equation with
+    /// a pivot the factorisation can use. A direct-potential device that
+    /// *reads* a node without conducting to it writes ±1 into that node's
+    /// **column** and nothing into its row, which is exactly what an
+    /// unconnected optical input port looks like. `g` is then twelve orders
+    /// below the entries it competes with, so partial pivoting rejects the
+    /// diagonal, eliminates the row against a coupling row, and the variable
+    /// comes back off a `g`-sized pivot carrying roundoff amplified by `1/g` —
+    /// measured at 1e-4 on a bundle wire whose true value is 0. While that wire
+    /// is lit the noise is far inside `tolerance`'s bound and invisible.
+    /// Extinguish the channel and it becomes the whole signal, the bound
+    /// collapses onto it, and Newton cannot converge however small the timestep
+    /// (issue #47).
+    ///
+    /// The pin reads differently from `g·V = 0` only for a row with a non-zero
+    /// RHS, which means a current source on a node with no conductance
+    /// anywhere — a floating node [`check_connectivity`](crate::connectivity)
+    /// refuses before any of this runs.
+    PinEmptyRows,
+    /// The matrix is one *block* of a larger system, so an empty row proves
+    /// nothing about the node. `.ac` and `.noise` build a real conductance
+    /// matrix and add `jωC` and `1/jωL` themselves: an inductor-only node has
+    /// an empty conductance row and is not floating at all. Pinning it would
+    /// hang 1 S across the reactance and flatten every resonance.
+    GminOnly,
+}
+
+/// A matrix row [`CircuitTopology::stamp_gmin`] can index and test for
+/// emptiness. Implemented for the sparse rows the Newton loop stamps and the
+/// dense rows `.ac` / `.noise` build.
+pub trait GminRow: std::ops::IndexMut<usize, Output = f64> {
+    /// True when every stored value is exactly zero — nothing was stamped into
+    /// this row, whatever the structural pattern reserved for it.
+    fn is_all_zero(&self) -> bool;
+}
+
+impl GminRow for SparseRow {
+    fn is_all_zero(&self) -> bool {
+        self.vals.iter().all(|v| *v == 0.0)
+    }
+}
+
+impl GminRow for Vec<f64> {
+    fn is_all_zero(&self) -> bool {
+        self.iter().all(|v| *v == 0.0)
+    }
+}
 
 impl SparseRow {
     /// A row with every column of `cols` pre-allocated at zero.
@@ -1386,16 +1449,57 @@ mod tests {
         assert_eq!(internal, 3);
         assert_eq!(topo.size, 4);
 
+        // Rows 0, 1 and 3 carry a stamp already; row 2 is the vsource branch.
         let mut a = vec![vec![0.0; 4]; 4];
-        topo.stamp_gmin(&mut a, 1e-12);
+        a[0][0] = 1e-3;
+        a[1][1] = 2e-3;
+        a[3][3] = 1.0;
+        topo.stamp_gmin(&mut a, 1e-12, RowFloor::PinEmptyRows);
 
         // Node rows 0,1 get the floor; the vsource aux row 2 is skipped (clean
         // KCL diagonal); the device-internal row 3 gets the floor.
-        assert_eq!(a[0][0], 1e-12);
-        assert_eq!(a[1][1], 1e-12);
+        assert_eq!(a[0][0], 1e-3 + 1e-12);
+        assert_eq!(a[1][1], 2e-3 + 1e-12);
         assert_eq!(a[2][2], 0.0, "vsource branch row must NOT receive gmin");
-        assert_eq!(a[3][3], 1e-12, "device-internal row must receive gmin");
+        assert_eq!(
+            a[3][3],
+            1.0 + 1e-12,
+            "device-internal row must receive gmin"
+        );
         // Off-diagonals untouched.
         assert_eq!(a[0][1], 0.0);
+    }
+
+    /// A row nothing stamped into is pinned at 1, not at `gmin`.
+    ///
+    /// Both say `V = 0`, but `gmin` says it twelve orders below the ±1 a
+    /// direct-potential device writes into that node's *column* when it reads
+    /// the node without conducting to it. Partial pivoting then rejects the
+    /// diagonal and the variable comes back off a `gmin`-sized pivot, carrying
+    /// roundoff amplified by 1/gmin — invisible while the wire is lit, and the
+    /// whole signal once it is dark. See `stamp_gmin` and issue #47.
+    #[test]
+    fn a_row_nothing_stamped_into_is_pinned_not_floored() {
+        let net =
+            parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n").unwrap();
+        let mut topo = CircuitTopology::build(&net);
+        let internal = topo.allocate_extra_rows(1);
+        assert_eq!(internal, 3);
+
+        // Row 1 is untouched by any stamp; row 0 carries one.
+        let mut a = vec![vec![0.0; 4]; 4];
+        a[0][0] = 1e-3;
+        topo.stamp_gmin(&mut a, 1e-12, RowFloor::PinEmptyRows);
+        assert_eq!(a[0][0], 1e-3 + 1e-12, "a stamped row still gets gmin");
+        assert_eq!(a[1][1], 1.0, "an empty node row is pinned at 1");
+        assert_eq!(a[3][3], 1.0, "an empty internal row is pinned at 1");
+        assert_eq!(a[2][2], 0.0, "the vsource branch row is still skipped");
+
+        // A row whose only entry is off-diagonal still counts as stamped: the
+        // node has an equation, it just is not a self-conductance.
+        let mut b = vec![vec![0.0; 4]; 4];
+        b[1][0] = -1e-3;
+        topo.stamp_gmin(&mut b, 1e-12, RowFloor::PinEmptyRows);
+        assert_eq!(b[1][1], 1e-12);
     }
 }

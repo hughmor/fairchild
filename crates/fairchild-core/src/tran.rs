@@ -15,7 +15,7 @@ use fairchild_parser::{Element, Netlist};
 use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::CircuitTopology;
+use crate::mna::{CircuitTopology, RowFloor};
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::tran_step::TranStepper;
@@ -612,7 +612,7 @@ pub fn tran_nr_with_registry_var_opts(
                 gear2,
             );
 
-            topo.stamp_gmin(&mut mat.a, opts.gmin);
+            topo.stamp_gmin(&mut mat.a, opts.gmin, RowFloor::PinEmptyRows);
 
             let x_new = if let Some(f) = fact.as_mut() {
                 f.refactor_and_solve_mat(&mat)?
