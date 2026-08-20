@@ -1,0 +1,16 @@
+// A current source of `k * $abstime` amps.
+//
+// The point is that the simulation clock shows up in the *answer*: driving this
+// into a resistor gives V = k·R·t, so a test reads what the model was handed
+// instead of inspecting a struct field. `$abstime` was hardcoded to 0.0 once,
+// which every time-parametrised model would have seen as a dead clock.
+`include "disciplines.vams"
+
+module abstime_ramp(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real k = 1.0;
+    analog begin
+        I(p, n) <+ -k * $abstime;
+    end
+endmodule

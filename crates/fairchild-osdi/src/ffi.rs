@@ -46,6 +46,12 @@ pub const PARA_KIND_OPVAR: u32 = 2 << 30;
 // Access flags for the `access` function pointer
 pub const ACCESS_FLAG_READ: u32 = 0;
 pub const ACCESS_FLAG_SET: u32 = 1;
+/// Take the pointer out of the *instance* struct rather than the model's.
+///
+/// An instance parameter lives in instance memory, and `access()` returns null
+/// for one unless this flag says where to look. Without it every instance
+/// parameter — a MOSFET's `W` and `L`, a `$mfactor` — silently fails to apply.
+pub const ACCESS_FLAG_INSTANCE: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Simple structs

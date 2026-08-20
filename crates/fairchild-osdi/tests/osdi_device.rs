@@ -1,109 +1,109 @@
-//! Integration test: OsdiDevice adapter for the test_conductance mock model.
+//! The `OsdiDevice` adapter, against a compiled model.
 //!
-//! Loads osdi-mock, wraps its descriptor in OsdiDevice, and verifies that:
-//!   - setup_model initialises gd = 1e-3 S in model memory
-//!   - setup_instance writes node_mapping into instance memory
-//!   - eval is a no-op for a linear element
-//!   - load_residual contributes nothing to b (Jeq = 0)
-//!   - load_jacobian stamps the conductance correctly into MnaMatrix
-
-use std::path::PathBuf;
+//! Wraps a real descriptor and checks the three things the adapter owes the
+//! solver: the conductance reaches the matrix, a grounded terminal drops out of
+//! it, and a parameter written from the deck actually changes the stamp.
 
 use fairchild_core::device::{Device, EvalFlags, SimContext};
 use fairchild_core::mna::MnaMatrix;
 use fairchild_osdi::{OsdiDevice, OsdiLibrary};
 
-fn mock_path() -> PathBuf {
-    let mut p = std::env::current_exe().expect("current_exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    p.push(format!("libosdi_mock.{ext}"));
-    p
-}
+mod common;
 
-// MnaMatrix::new is private; this helper mirrors its layout for tests.
-fn make_mat(size: usize) -> MnaMatrix {
-    MnaMatrix::zeros(size)
+/// The model's own defaults: `rc_shunt.va` declares 1 mS ∥ 1 nF.
+const GD: f64 = 1e-3;
+const TOL: f64 = 1e-12;
+
+fn device(path: &std::path::Path) -> (std::sync::Arc<OsdiLibrary>, OsdiDevice) {
+    let lib = std::sync::Arc::new(unsafe { OsdiLibrary::open(path) }.expect("open"));
+    let desc = lib.descriptors().next().expect("one descriptor") as *const _;
+    // SAFETY: the descriptor lives as long as `lib`, which the caller keeps.
+    let dev = unsafe { OsdiDevice::new(desc) };
+    (lib, dev)
 }
 
 #[test]
-fn osdi_device_conductance_stamp() {
-    let path = mock_path();
-    if !path.exists() {
-        eprintln!("osdi-mock not found — skipping OsdiDevice test");
+fn the_conductance_reaches_the_matrix() {
+    let Some(path) = common::compiled("rc_shunt") else {
         return;
-    }
-
-    let lib = unsafe { OsdiLibrary::open(&path) }.expect("open mock");
-    let desc_ptr = lib.descriptors().next().expect("one descriptor") as *const _;
-
+    };
+    let (_lib, mut dev) = device(&path);
     let ctx = SimContext::default();
 
-    // --- setup_model ---
-    let mut dev = unsafe { OsdiDevice::new(desc_ptr) };
     dev.setup_model(&ctx);
-
-    // --- setup_instance: anode = MNA node 0, cathode = MNA node 1 ---
     dev.setup_instance(&[Some(0), Some(1)], &ctx);
+    dev.eval(&[1.0, 0.0], EvalFlags::dc(), &ctx);
 
-    // --- eval with x = [1.0, 0.0] (1 V across the conductance) ---
-    let x = vec![1.0f64, 0.0f64];
-    dev.eval(&x, EvalFlags::dc(), &ctx);
-
-    // --- load_residual: Jeq = 0 for linear element, b unchanged ---
-    let mut mat = make_mat(2);
+    let mut mat = MnaMatrix::zeros(2);
     dev.load_residual(&mut mat.b);
     assert_eq!(
         mat.b,
         vec![0.0, 0.0],
-        "load_residual should be no-op for linear conductance"
+        "a linear element linearised about its own operating point has no residual"
     );
 
-    // --- load_jacobian: stamps gd = 1e-3 S as standard conductance ---
     dev.load_jacobian(&mut mat);
-
-    let gd = 1e-3_f64;
-    let tol = 1e-12;
-    assert!((mat.a[0][0] - gd).abs() < tol, "a[0][0] = {}", mat.a[0][0]);
-    assert!((mat.a[0][1] + gd).abs() < tol, "a[0][1] = {}", mat.a[0][1]);
-    assert!((mat.a[1][0] + gd).abs() < tol, "a[1][0] = {}", mat.a[1][0]);
-    assert!((mat.a[1][1] - gd).abs() < tol, "a[1][1] = {}", mat.a[1][1]);
+    assert!((mat.a[0][0] - GD).abs() < TOL, "a[0][0] = {}", mat.a[0][0]);
+    assert!((mat.a[0][1] + GD).abs() < TOL, "a[0][1] = {}", mat.a[0][1]);
+    assert!((mat.a[1][0] + GD).abs() < TOL, "a[1][0] = {}", mat.a[1][0]);
+    assert!((mat.a[1][1] - GD).abs() < TOL, "a[1][1] = {}", mat.a[1][1]);
 }
 
 #[test]
-fn osdi_device_ground_terminal() {
-    // Cathode connected to ground (NodeId = None): only the anode row/col is stamped.
-    let path = mock_path();
-    if !path.exists() {
+fn a_grounded_terminal_leaves_one_row() {
+    let Some(path) = common::compiled("rc_shunt") else {
         return;
-    }
-
-    let lib = unsafe { OsdiLibrary::open(&path) }.expect("open mock");
-    let desc_ptr = lib.descriptors().next().unwrap() as *const _;
-
+    };
+    let (_lib, mut dev) = device(&path);
     let ctx = SimContext::default();
-    let mut dev = unsafe { OsdiDevice::new(desc_ptr) };
+
     dev.setup_model(&ctx);
-    dev.setup_instance(&[Some(0), None], &ctx); // cathode = ground
+    dev.setup_instance(&[Some(0), None], &ctx); // second terminal to ground
     dev.eval(&[1.0], EvalFlags::dc(), &ctx);
 
-    let mut mat = make_mat(1);
+    let mut mat = MnaMatrix::zeros(1);
     dev.load_residual(&mut mat.b);
     dev.load_jacobian(&mut mat);
 
-    // Only a[0][0] should be stamped; off-diagonal entries don't exist.
-    let gd = 1e-3_f64;
-    assert!(
-        (mat.a[0][0] - gd).abs() < 1e-12,
-        "a[0][0] = {}",
-        mat.a[0][0]
-    );
+    assert!((mat.a[0][0] - GD).abs() < TOL, "a[0][0] = {}", mat.a[0][0]);
     assert_eq!(mat.b, vec![0.0]);
+}
+
+/// A parameter the deck sets has to change the stamp — the check the old
+/// fixture could not make, because it declared no parameters.
+///
+/// `gd` is a model parameter and `$mfactor` an instance one, and the two live in
+/// different halves of the descriptor's table with different access rules. An
+/// instance parameter used to be dropped (the id carried a `PARA_KIND` bit that
+/// matched no case, and the access flag that says "look in the instance" was
+/// missing), so `W`/`L` on a compiled MOSFET silently ran at their defaults.
+#[test]
+fn a_parameter_written_from_the_deck_changes_the_stamp() {
+    let Some(path) = common::compiled("rc_shunt") else {
+        return;
+    };
+    let ctx = SimContext::default();
+
+    for (name, value, want) in [
+        ("gd", 4e-3, 4e-3),          // model parameter
+        ("$mfactor", 4.0, 4.0 * GD), // instance parameter, by its Verilog-A name
+        ("m", 3.0, 3.0 * GD),        // and by the spelling a SPICE deck uses
+    ] {
+        let (_lib, mut dev) = device(&path);
+        dev.setup_model(&ctx);
+        dev.setup_instance(&[Some(0), None], &ctx);
+        assert!(
+            dev.set_real_param(name, value),
+            "'{name}' was not applied at all"
+        );
+        dev.eval(&[1.0], EvalFlags::dc(), &ctx);
+
+        let mut mat = MnaMatrix::zeros(1);
+        dev.load_jacobian(&mut mat);
+        assert!(
+            (mat.a[0][0] - want).abs() < TOL,
+            "{name}={value}: stamped {} S, want {want} S",
+            mat.a[0][0]
+        );
+    }
 }

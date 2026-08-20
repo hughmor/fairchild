@@ -1466,7 +1466,7 @@ OSDI (`.osdi` shared objects compiled by OpenVAF) is the **supported path for
 electrical device models distributed as Verilog-A** — foundry transistor models
 (BSIM, PSP, HiCUM, …). fairchild does not hand-write BSIM in Rust; load it via
 `.osdi <path>` and instantiate with an `X` element. The loader is verified in CI
-by the `osdi-mock` fixture.
+against models compiled from Verilog-A by the installed compiler.
 
 **Photonics can be written in Verilog-A too** — the complex-envelope
 representation is three ordinary real unknowns per channel, so a custom

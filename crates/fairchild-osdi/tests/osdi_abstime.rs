@@ -2,64 +2,63 @@
 //!
 //! `OsdiSimInfo.abstime` was hardcoded to 0.0, so any Verilog-A model reading
 //! `$abstime` — an arbitrary-waveform source, a drift or ageing term, anything
-//! time-parametrised — silently saw t = 0 for the whole run. `SimContext`
-//! already carried `time_s` (the waveguide group delay uses it); `eval` just
-//! never passed it on.
+//! time-parametrised — silently saw t = 0 for the whole run.
 //!
-//! Runs against `osdi-mock`, whose `eval` records the `abstime` it was handed
-//! into model memory, so this needs no OpenVAF and runs in CI.
+//! The old fixture recorded the value it was handed into a spare field of its
+//! model struct, and the test read it back. That proved the number crossed the
+//! ABI and nothing more. `abstime_ramp.va` puts it in the *answer* instead: it
+//! drives `k · $abstime` amps into a resistor, so V(out) must be k·R·t at every
+//! timepoint, and a dead clock is a flat line.
 
-use std::path::PathBuf;
+use fairchild_core::{tran_nr_with_registry, DeviceRegistry};
+use fairchild_parser::parse_spice;
 
-use fairchild_core::device::{Device, EvalFlags, SimContext};
-use fairchild_osdi::{OsdiDevice, OsdiLibrary};
-use osdi_mock::ABSTIME_OFFSET;
-
-fn mock_path() -> PathBuf {
-    let mut p = std::env::current_exe().expect("current_exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    p.push(format!("libosdi_mock.{ext}"));
-    p
-}
+mod common;
 
 #[test]
-fn eval_forwards_the_simulation_clock_as_abstime() {
-    let path = mock_path();
-    if !path.exists() {
-        eprintln!("osdi-mock not found at {path:?}; run `cargo build -p osdi-mock`.");
+fn the_simulation_clock_reaches_the_model() {
+    let Some(path) = common::compiled("abstime_ramp") else {
         return;
-    }
+    };
 
-    let lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
-    let desc = lib.descriptors().next().unwrap() as *const _;
-    let mut dev = unsafe { OsdiDevice::new(desc) };
+    // k = 1 A/s into 1 kΩ: V(out) = 1000·t, which is 5 mV at the 5 µs stop.
+    let deck = format!(
+        "* $abstime through a resistor\n\
+         .osdi {}\n\
+         Xs out 0 abstime_ramp\n\
+         Rl out 0 1k\n\
+         .tran 1u 5u\n\
+         .end\n",
+        path.display()
+    );
+    let netlist = parse_spice(&deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&netlist.models);
+    fairchild_osdi::load_libraries(
+        &netlist.osdi_paths,
+        &netlist.va_sources,
+        None,
+        &Default::default(),
+        &mut registry,
+    )
+    .expect("load");
 
-    let model_ptr = dev.model_ptr_raw();
-    let recorded = || unsafe { *((model_ptr as *const u8).add(ABSTIME_OFFSET) as *const f64) };
+    let r = tran_nr_with_registry(&netlist, 1e-6, 5e-6, &registry).expect("transient failed");
 
-    let mut ctx = SimContext::default();
-    dev.setup_model(&ctx);
-    dev.setup_instance(&[None, None], &ctx);
-
-    // DC: the clock is 0 and Verilog-A expects to see 0 there.
-    dev.eval(&[0.0, 0.0], EvalFlags::dc(), &ctx);
-    assert_eq!(recorded(), 0.0, "DC eval should report t = 0");
-
-    for t in [1e-9, 3.25e-6, 0.5] {
-        ctx.time_s = t;
-        dev.eval(&[0.0, 0.0], EvalFlags::tran(), &ctx);
-        assert_eq!(
-            recorded(),
-            t,
-            "eval did not forward SimContext::time_s ({t}) as OSDI abstime"
+    let times = &r.time;
+    let out = r.node_voltages.get("out").expect("node out");
+    assert!(times.len() >= 5, "too few timepoints: {}", times.len());
+    for (t, v) in times.iter().zip(out) {
+        let want = 1000.0 * t;
+        assert!(
+            (v - want).abs() < 1e-9,
+            "t = {t}: V(out) = {v}, want {want} — the model did not see the clock"
         );
     }
+    // And it has to have gone somewhere: a clock stuck at zero would satisfy
+    // the loop above only if every timepoint were zero too.
+    assert!(
+        out.last().copied().unwrap_or(0.0) > 1e-3,
+        "no ramp at all: {out:?}"
+    );
 }

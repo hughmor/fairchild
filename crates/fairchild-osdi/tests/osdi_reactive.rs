@@ -10,11 +10,11 @@
 //! branches: a Verilog-A charge is a general matrix, and ∂q_i/∂v_j ≠ ∂q_j/∂v_i
 //! (transcapacitance) is exactly what a BSIM-class model is made of.
 //!
-//! Runs against `osdi-mock` — 1 mS in parallel with 1 nF — so it needs no
-//! OpenVAF and runs in CI.
+//! `rc_shunt.va` is 1 mS in parallel with 1 nF, which is *exactly* a discrete
+//! `Rg = 1k` plus `Cg = 1n`. Comparing a compiled model against a circuit built
+//! from primitives is an absolute anchor: the two share no code.
 
 use std::f64::consts::PI;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use fairchild_core::tran::IntegratorMode;
@@ -24,39 +24,27 @@ use fairchild_core::{
 };
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::parse_spice;
-use osdi_mock::{MOCK_C, MOCK_GD};
 
-fn mock_path() -> PathBuf {
-    let mut p = std::env::current_exe().expect("current_exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    p.push(format!("libosdi_mock.{ext}"));
-    p
-}
+mod common;
 
-/// `Vin —[R]— out —[mock]— gnd`, so V(out)/Vin = Y_mock⁻¹ / (R + Y_mock⁻¹)
-/// with Y_mock = gd + jωC. Solving: V(out) = 1 / (1 + R·(gd + jωC)).
+/// `rc_shunt.va`'s defaults.
+const MODEL_GD: f64 = 1e-3;
+const MODEL_C: f64 = 1e-9;
+
+/// `Vin —[R]— out —[model]— gnd`, so V(out)/Vin = Y⁻¹ / (R + Y⁻¹) with
+/// Y = gd + jωC. Solving: V(out) = 1 / (1 + R·(gd + jωC)).
 #[test]
 fn reactive_jacobian_reaches_ac() {
-    let path = mock_path();
-    if !path.exists() {
-        eprintln!("osdi-mock not found at {path:?}; run `cargo build -p osdi-mock`.");
+    let Some(path) = common::compiled("rc_shunt") else {
         return;
-    }
+    };
 
     const R: f64 = 1e3;
     let netlist = parse_spice(
-        "* mock RC divider\n\
+        "* compiled RC divider\n\
          Vin in 0 DC 0 AC 1\n\
          R1 in out 1k\n\
-         Xm out 0 test_conductance\n\
+         Xm out 0 rc_shunt\n\
          .ac dec 2 1k 10meg\n\
          .end\n",
     )
@@ -74,7 +62,7 @@ fn reactive_jacobian_reaches_ac() {
     for (i, &f) in freqs.iter().enumerate() {
         let omega = 2.0 * PI * f;
         // 1 / (1 + R·gd + jωRC)
-        let (dr, di) = (1.0 + R * MOCK_GD, omega * R * MOCK_C);
+        let (dr, di) = (1.0 + R * MODEL_GD, omega * R * MODEL_C);
         let denom = dr * dr + di * di;
         let (want_re, want_im) = (dr / denom, -di / denom);
         let (got_re, got_im) = out[i];
@@ -101,24 +89,22 @@ fn reactive_jacobian_reaches_ac() {
 /// element from a discrete `C` of the same value under the default method
 /// (Trapezoidal), by about 0.6 % on a 0.45 τ step.
 ///
-/// osdi-mock is 1 mS in parallel with 1 nF, which is *exactly* a discrete
-/// `Rg = 1k` plus `Cg = 1n`. Comparing the two under every method is the
-/// strongest available statement, and needs no OpenVAF.
+/// The compiled model is 1 mS ∥ 1 nF, which is exactly a discrete `Rg = 1k`
+/// plus `Cg = 1n`. Comparing the two under every method is the strongest
+/// available statement.
 #[test]
 fn ddt_honours_the_integration_method() {
-    let path = mock_path();
-    if !path.exists() {
-        eprintln!("osdi-mock not found at {path:?}; run `cargo build -p osdi-mock`.");
+    let Some(path) = common::compiled("rc_shunt") else {
         return;
-    }
+    };
 
     // 1k into the device, and the identical 1k into its discrete equivalent.
     // tau = 1k‖1k · 1n = 500 ns, stepped at 100 ns so the method is visible.
     let netlist = parse_spice(
-        "* mock reactance vs the discrete equivalent\n\
+        "* compiled reactance vs the discrete equivalent\n\
          Vin in 0 PULSE(0 1 0 1n 1n 10u 20u)\n\
          R1 in a 1k\n\
-         Xm a 0 test_conductance\n\
+         Xm a 0 rc_shunt\n\
          R2 in b 1k\n\
          Rg b 0 1k\n\
          Cg b 0 1n\n\

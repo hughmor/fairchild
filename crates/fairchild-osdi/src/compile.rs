@@ -255,7 +255,18 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
     // Compile to a private name and rename into place. Two fairchild runs
     // sharing a cache would otherwise be able to hand each other a half-written
     // library, which dlopen reports as a corrupt file at best.
-    let tmp = dir.join(format!(".{stem}-{key:016x}.{}.tmp", std::process::id()));
+    // Unique per *call*, not just per process. Two threads compiling the same
+    // source — two devices from one deck, two tests in one binary — otherwise
+    // pick the same temp name, both run the compiler into it, and the second
+    // rename fails with ENOENT because the first already moved the file away.
+    // The final path is shared on purpose: same key, same bytes, last writer
+    // wins.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(
+        ".{stem}-{key:016x}.{}.{seq}.tmp",
+        std::process::id()
+    ));
     // OpenVAF's `--output` parser requires the parent to exist but not the
     // file; it also refuses to overwrite anything that is not a plain file.
     let status = compiler

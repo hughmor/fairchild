@@ -7,7 +7,9 @@ same information in the form an agent needs it.
 
 ```bash
 cargo build --release
-cargo test --workspace                 # 663 tests; ngspice goldens skip if ngspice is absent
+cargo test --workspace                 # ngspice goldens skip without ngspice; OSDI
+                                       # suites skip without openvaf-r on PATH
+                                       # (FAIRCHILD_OPENVAF=<path> also works)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```

@@ -23,15 +23,29 @@ The Rust toolchain is pinned by `rust-toolchain.toml` and rustup installs it on
 the first `cargo` call. Don't pin a version anywhere else; two sources of truth
 is how they drift apart.
 
-**ngspice** is needed for the comparison suites. Without it those tests *skip*
-rather than fail, so you can develop without it — but CI installs it and asserts
-it is on `PATH`, because nine suites silently comparing nothing is worse than a
+**ngspice** is needed for the comparison suites, and **openvaf-r** for the OSDI
+suites — those compile Verilog-A from `crates/fairchild-osdi/tests/models` and
+run the result, because the only honest fixture for a compiled model is a
+compiled model. Without either, the tests that need it *skip* rather than fail,
+so you can develop without them — but CI installs both and asserts they are on
+`PATH`, because a dozen suites silently comparing nothing is worse than a
 missing dependency.
 
 ```bash
 brew install ngspice suite-sparse        # macOS
 sudo apt-get install ngspice libsuitesparse-dev
 ```
+
+openvaf-r ships prebuilt, and needs no LLVM of its own:
+
+```bash
+# https://github.com/OpenVAF/OpenVAF-Reloaded/releases — bin/openvaf-r onto PATH.
+# On macOS the release's Mach-O files must be re-signed before they will run at
+# all (they were modified after signing, so the kernel kills them on exec):
+#   for f in lib/*.dylib bin/openvaf-r; do codesign --force --sign - "$f"; done
+```
+
+`FAIRCHILD_OPENVAF=<path>` points at one that is not on `PATH`.
 
 **Python bindings**: `maturin develop --release` (maturin ≥ 1.8 — 1.7 cannot
 parse PEP 639 metadata and fails outright).

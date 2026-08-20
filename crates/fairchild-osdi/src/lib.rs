@@ -6,10 +6,19 @@
 //! most importantly the foundry transistor models (BSIM, PSP, HiCUM, …) that
 //! the industry ships as compiled `.osdi` shared objects via OpenVAF.
 //! fairchild will not hand-write BSIM in Rust; this loader is how those models
-//! are consumed. It is exercised in CI by the `osdi-mock` fixture (1 mS in
-//! parallel with 1 nF) — keep it: it is the only proof the `dlopen`/FFI/stamp
-//! path works end-to-end, for both the resistive and the reactive Jacobian,
-//! and removing it would leave this crate with zero coverage.
+//! are consumed. It is exercised in CI against **models compiled from the
+//! Verilog-A in `tests/models`** by the installed compiler — the whole
+//! `dlopen`/FFI/stamp path, resistive and reactive, plus parameters, `$abstime`
+//! and `$limit`. Those tests skip when no compiler is installed, the way the
+//! ngspice goldens do, and CI asserts one is on PATH so the skip cannot go
+//! quiet.
+//!
+//! A hand-written cdylib (`osdi-mock`) used to stand in for the compiler here.
+//! It was retired: an imitation reports whatever its author wrote, so agreeing
+//! with it proved only that two files matched — and it hid two real defects
+//! that the first compiled model surfaced immediately (an instance parameter
+//! could not be set at all, and a `.osdi` whose descriptor is larger than ours
+//! is normal rather than an error).
 //!
 //! **Optical models work too.** fairchild carries a complex envelope on three
 //! ordinary real MNA unknowns per channel (`re`, `im`, `wl`), so a custom

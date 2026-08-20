@@ -1,0 +1,21 @@
+// A conductance in parallel with a capacitance, as a Verilog-A model.
+//
+// Deliberately the exact analytic equivalent of a discrete `R` and `C` of the
+// same values: that is what lets a test compare a compiled model's answer
+// against a circuit built from primitives, which is an absolute anchor rather
+// than two subsystems agreeing with each other.
+//
+// The parameters exist so a `.model` card can move them — the default pair is
+// 1 mS ∥ 1 nF, giving tau = 1 µs into an open circuit.
+`include "disciplines.vams"
+
+module rc_shunt(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter real gd = 1e-3 from (0:inf);
+    parameter real c = 1e-9 from [0:inf);
+    analog begin
+        I(a, b) <+ gd * V(a, b);
+        I(a, b) <+ ddt(c * V(a, b));
+    end
+endmodule
