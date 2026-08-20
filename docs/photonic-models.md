@@ -167,6 +167,15 @@ trip loss, round trip phase, and return loss at the launch port, and gives you
 those exactly; distributed backscatter and intra-device forward↔backward
 coupling are not represented.
 
+**A wire nobody drives reads exactly zero.** Not "nearly zero" — a node no
+element stamps into is pinned at `V = 0` outright rather than floated on `gmin`,
+so an unconnected optical port stays at a hard zero through a whole transient.
+That matters more than it sounds: `gmin` is twelve orders below the couplings a
+device writes into such a node's column when it *reads* the node without
+conducting to it, so the factorisation used to hand back roundoff amplified by
+`1/gmin`. Invisible while the wire is lit; the entire signal once it is dark,
+and enough to stop Newton converging at any timestep.
+
 **Who is allowed to drive a backward wire.** Exactly one device may, and the
 simulator now enforces it: two devices pinning the same wire is a hard error
 naming both elements and the wire. That check exists because the failure was

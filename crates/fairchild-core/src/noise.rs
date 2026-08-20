@@ -23,7 +23,9 @@ use fairchild_parser::{Element, Netlist};
 use crate::device::{Device, EvalFlags, NodeId, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology};
+use crate::mna::{
+    stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, RowFloor,
+};
 use crate::newton::build_devices;
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
@@ -445,7 +447,7 @@ pub fn noise_analysis(
             }
         }
     }
-    topo.stamp_gmin(&mut g_mat, opts.gmin);
+    topo.stamp_gmin(&mut g_mat, opts.gmin, RowFloor::GminOnly);
     // ponytail: dense G/C/L and a dense 2n×2n adjoint system, same trade-off
     // and same upgrade path as `ac.rs`. Tracked as task #12.
     let mut c_mat = vec![vec![0.0f64; size]; size];
@@ -640,7 +642,7 @@ fn run_dc_op(
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
-        topo.stamp_gmin(&mut mat.a, opts.gmin);
+        topo.stamp_gmin(&mut mat.a, opts.gmin, RowFloor::PinEmptyRows);
         let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new
             .iter()
