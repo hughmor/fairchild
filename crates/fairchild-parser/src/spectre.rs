@@ -606,9 +606,10 @@ fn parameters(text: &str) -> String {
 
 /// `include "f"` → `.include "f"`; `include "f" section=s` → `.lib "f" s`.
 ///
-/// `ahdl_include` names Verilog-A source, which needs an out-of-band OpenVAF
-/// compile to become loadable — saying so beats a parse error, and beats
-/// pretending the devices exist.
+/// `ahdl_include` names Verilog-A source, which becomes `.va "f"` — the same
+/// request in SPICE spelling, compiled on demand by the consumer. It used to
+/// warn and drop the line, which made a foundry PDK a pile of manual compiles
+/// before the deck would load at all.
 fn include(text: &str, head: &str) -> String {
     let toks: Vec<&str> = text.split_whitespace().collect();
     let path = toks
@@ -616,12 +617,7 @@ fn include(text: &str, head: &str) -> String {
         .map(|t| t.trim_matches('"').trim_matches('\''))
         .unwrap_or("");
     if head == "ahdl_include" {
-        warn_user!(
-            "ahdl_include \"{path}\" is Verilog-A source, which fairchild loads only \
-             as a compiled OSDI library: compile it with OpenVAF and name the result \
-             with .osdi, or the devices it defines will be unknown models"
-        );
-        return format!("* {text}");
+        return format!(".va \"{path}\"");
     }
     let section = assignments(text)
         .into_iter()
@@ -1087,6 +1083,23 @@ tr1 tran stop=1u step=1n
         .unwrap();
         assert!(spice.contains(".include \"models.scs\""), "{spice}");
         assert!(spice.contains(".lib \"corners.scs\" tt"), "{spice}");
+    }
+
+    /// `ahdl_include` is the whole reason a foundry PDK loads at all: it used
+    /// to warn and drop the line, so every model it named became an unknown
+    /// model unless the user compiled it by hand first.
+    #[test]
+    fn ahdl_include_becomes_a_va_directive() {
+        let spice = to_spice(
+            "simulator lang=spectre\nahdl_include \"bsim.va\"\nahdl_include \"rdiff.va\"\n",
+        )
+        .unwrap();
+        assert!(spice.contains(".va \"bsim.va\""), "{spice}");
+        // Order survives: a PDK compiles its sources in the order it lists them.
+        assert!(
+            spice.find(".va \"bsim.va\"") < spice.find(".va \"rdiff.va\""),
+            "{spice}"
+        );
     }
 
     #[test]

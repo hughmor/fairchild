@@ -1618,12 +1618,33 @@ simpler and produces faster code.
 
 ## 14. Verilog-A models (OSDI)
 
-fairchild does not parse Verilog-A. You compile it with
-[OpenVAF-Reloaded][openvaf] into an OSDI v0.4 shared library (`.osdi`), and
-`crates/fairchild-osdi` `dlopen`s it and drives it through the OSDI ABI. This
-is the supported route to foundry compact models — BSIM, PSP, HiCUM — which
-fairchild will never hand-write in Rust, and it is equally the route to your
-own models, electrical or optical.
+fairchild does not parse Verilog-A. It is compiled by
+[OpenVAF-Reloaded][openvaf] into an OSDI v0.4 shared library (`.osdi`), which
+`crates/fairchild-osdi` `dlopen`s and drives through the OSDI ABI. This is the
+supported route to foundry compact models — BSIM, PSP, HiCUM — which fairchild
+will never hand-write in Rust, and it is equally the route to your own models,
+electrical or optical.
+
+**You do not have to run the compiler yourself.** Name the source and fairchild
+compiles it, caching the result:
+
+```spice
+.va models/va_diode.va          ; Verilog-A source — compiled on demand
+.model nch va_diode (Is=1e-14)
+M1 d g s b nch
+```
+
+Spectre's `ahdl_include "va_diode.va"` does the same thing, so a foundry PDK
+loads as written. The explicit two-step route also still works, and is what
+belongs in CI:
+
+```spice
+.osdi build/va_diode.osdi       ; a compiled artefact — no toolchain needed
+```
+
+Which keyword you use does not matter: a path ending `.va` or `.vams` is
+treated as source and a path ending `.osdi` as an artefact, whichever of `.va`
+/ `.osdi` named it.
 
 Worked examples and nine ready models live in `examples/verilog_a/`.
 
@@ -1688,6 +1709,32 @@ checked to a 500 V drive — but limiting is what scales to stiffer circuits.
 
 ### 14.2 Compiling
 
+Either fairchild drives the compile or you do. Both need `openvaf-r` installed;
+neither links it in, which is why fairchild stays Apache-2.0 while
+OpenVAF-Reloaded is GPL-3.0.
+
+**Fairchild drives it.** Put `.va` (or Spectre `ahdl_include`) in the deck and
+run normally. Relevant flags:
+
+| flag | effect |
+|---|---|
+| `--openvaf <path>` | the compiler to use. Default: `openvaf-r`, then `openvaf`, from `PATH` |
+| `--va-include <dir>` | an OpenVAF `-I` search directory. Repeatable, order preserved. Each source's own directory is always searched last |
+| `--no-va-compile` | never compile: any `.va` in the deck becomes an error |
+
+`FAIRCHILD_OPENVAF` and `FAIRCHILD_VA_CACHE` set the compiler and the cache
+directory for a caller with no command line — the Python binding, mainly.
+The cache defaults to `$XDG_CACHE_HOME/fairchild/va`, else `~/.cache/fairchild/va`.
+
+A cached model is reused only when the compiler would produce the same thing:
+the key is a hash of OpenVAF's own fully preprocessed source (its
+`--print-expansion`) plus the compiler version, so editing any file in the
+`` `include `` closure — not just the top one — recompiles. A missing compiler
+is an error naming what was looked for, never a skipped device.
+
+**You drive it.** The explicit route, for CI and for anyone without a
+toolchain on the machine that runs the simulation:
+
 ```bash
 openvaf-r -I models models/va_diode.va -o build/va_diode.osdi
 ```
@@ -1748,14 +1795,19 @@ cannot reach; see [Photonic models](photonic-models.md).
 ### 14.4 Instantiating
 
 ```spice
-.osdi build/va_diode.osdi                  ; relative to the netlist file
+.va   models/va_diode.va                   ; relative to the file that names it
 Xd1  a out  va_diode  Is=1e-14 Rs=0.5      ; model name == module name
 ```
 
-`.osdi` registers every descriptor in the library under its module name. From
-there it resolves like any other model: `X` takes an arbitrary terminal list,
-and `D`, `M`, `Q` work for two-, four- and three-terminal models respectively.
-All four carry instance parameters.
+Either directive registers every descriptor in the library under its module
+name. From there it resolves like any other model: `X` takes an arbitrary
+terminal list, and `D`, `M`, `Q` work for two-, four- and three-terminal models
+respectively. All four carry instance parameters.
+
+A relative path resolves against the file the directive is *written in*, not
+the top-level deck — so a PDK library in a subdirectory can name its own
+sources as siblings, and `.include`-ing it works from anywhere. `.va` sources
+load before `.osdi` artefacts, both in deck order.
 
 The foundry idiom puts process parameters on a card and geometry per instance:
 

@@ -44,7 +44,7 @@ Xarm1 a1 b1 p 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
 Xarm2 a2 b2 n 0        fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f
 Xc2   b1 b2 out unused fc_dcoupler kappa_L=0.785           ; recombine
 
-.osdi build/va_tia.osdi                                    ; Verilog-A, via OpenVAF
+.va   models/va_tia.va                                     ; Verilog-A, compiled for you
 Xlas  lin fc_cw_laser power_mW=0.05 rin_db_hz=-145         ; laser RIN
 Xpd   out det 0 fc_photodetector responsivity=0.9          ; shot noise
 Cpd   det 0 15f
@@ -125,9 +125,9 @@ builds the SuiteSparse KLU backend, which is the fastest on large circuits.
 | **Analyses** | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | **Integration** | Backward Euler, trapezoidal, GEAR (BDF-2); fixed or LTE-controlled step |
 | **Solvers** | dense LU, sparse LU (faer), KLU; Armijo-damped Newton with `pnjlim`/`fetlim`, source and gmin homotopy |
-| **Directives** | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`, `.include`, `.param`, `.subckt`, `.temp`, `.alter`, `.model`, `.osdi` |
+| **Directives** | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`, `.include`, `.param`, `.subckt`, `.temp`, `.alter`, `.model`, `.va`, `.osdi` |
 | **Output** | CSV, and ngspice-compatible Nutmeg rawfiles |
-| **Verilog-A** | via OSDI v0.4 (OpenVAF-Reloaded) — foundry electrical models, and optical models too |
+| **Verilog-A** | `.va` source compiled on demand (OpenVAF-Reloaded) or pre-built `.osdi` v0.4 — foundry electrical models, and optical models too |
 
 Not supported: lossy transmission lines, `.disto`, `.pz`, native `.mc`, PSF/FSDB.
 

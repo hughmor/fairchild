@@ -225,10 +225,26 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
                     netlist.models.push(card);
                 }
             }
-        } else if lc.starts_with(".osdi") {
+        } else if matches!(first_token(&lc), ".osdi" | ".va") {
+            // Two spellings, one concept: a model file the deck needs loaded.
+            // Which of `.osdi` / `.va` was typed decides nothing — the
+            // *extension* does, because that is what says whether the file is
+            // source or an artefact. Refusing `.osdi foo.va` would only teach
+            // the user which of two words this parser happens to prefer.
             let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            if tokens.len() >= 2 {
-                netlist.osdi_paths.push(tokens[1].to_string());
+            let raw = tokens.get(1).ok_or_else(|| ParseError::Syntax {
+                line: *lineno,
+                msg: format!(
+                    "{} requires a path argument (a .va/.vams source, or a \
+                     compiled .osdi library)",
+                    first_token(&lc)
+                ),
+            })?;
+            let path = raw.trim_matches('"').trim_matches('\'').to_string();
+            if is_va_source(&path) {
+                netlist.va_sources.push(path);
+            } else {
+                netlist.osdi_paths.push(path);
             }
         } else if lc.starts_with(".ic") {
             netlist.ic.extend(parse_node_assignments(trimmed)?);
@@ -331,6 +347,57 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
     }
 
     Ok(netlist)
+}
+
+/// The directive word on a line, or `""`. Used where `starts_with` would be
+/// wrong: `.va` must not also claim a future `.vary`.
+fn first_token(line: &str) -> &str {
+    line.split_whitespace().next().unwrap_or("")
+}
+
+/// Does this path name Verilog-A *source* rather than a compiled artefact?
+///
+/// `.vams` is Verilog-AMS, which OpenVAF reads the same way — the repo's own
+/// optical discipline example carries that extension.
+fn is_va_source(path: &str) -> bool {
+    let lc = path.to_lowercase();
+    lc.ends_with(".va") || lc.ends_with(".vams")
+}
+
+/// Rebase a relative `.osdi` / `.va` path onto the directory of the file that
+/// named it, as includes are spliced.
+///
+/// `.include` inlines its target's text, which loses the one thing a relative
+/// model path needs: which file it was relative to. A PDK is a tree of
+/// includes whose `ahdl_include` lines point at siblings, so without this the
+/// deck's own directory is the only one that ever works. Absolute is what the
+/// consumers already special-case, so that is what comes out.
+fn rebase_model_path(trimmed: &str, base_dir: Option<&Path>) -> Option<String> {
+    let mut toks = trimmed.split_whitespace();
+    let head = toks.next()?;
+    if !matches!(head.to_lowercase().as_str(), ".osdi" | ".va") {
+        return None;
+    }
+    let raw = toks.next()?;
+    let quote = raw.starts_with('"') || raw.starts_with('\'');
+    let path = Path::new(raw.trim_matches('"').trim_matches('\''));
+    if path.is_absolute() {
+        return None;
+    }
+    let joined = base_dir?.join(path);
+    let abs = if joined.is_absolute() {
+        joined
+    } else {
+        // `.include` from a string deck resolves against the CWD (see
+        // `parse_spice`); a model path must agree with it.
+        std::env::current_dir().ok()?.join(joined)
+    };
+    let abs = abs.display().to_string();
+    Some(if quote {
+        format!("{head} \"{abs}\"")
+    } else {
+        format!("{head} {abs}")
+    })
 }
 
 /// Recursively expand `.include "file"` and `.lib 'file' section` lines.
@@ -439,7 +506,10 @@ fn resolve_includes(
             // syntax error by the main parser pass.
         }
 
-        out.push_str(raw);
+        match rebase_model_path(trimmed, base_dir) {
+            Some(rebased) => out.push_str(&rebased),
+            None => out.push_str(raw),
+        }
         out.push('\n');
         i += 1;
     }

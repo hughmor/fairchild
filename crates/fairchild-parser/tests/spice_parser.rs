@@ -622,3 +622,95 @@ fn transmission_line_delay_from_freq_and_nl() {
         panic!("expected TransmissionLine");
     }
 }
+
+// ── Verilog-A / OSDI model files ──────────────────────────────────────────
+
+/// `.va` and `.osdi` are two spellings of "load this model file"; the
+/// extension, not the keyword, decides whether it needs compiling. Getting
+/// that backwards would send source to `dlopen` or a library to a compiler,
+/// and both fail confusingly rather than usefully.
+#[test]
+fn a_model_file_is_sorted_by_extension_not_keyword() {
+    let nl = parse_ok(
+        ".va models/diode.va\n\
+         .va build/prebuilt.osdi\n\
+         .osdi other/thermal.vams\n\
+         .osdi build/bsim.osdi\n\
+         .op\n.end\n",
+    );
+    assert_eq!(
+        nl.va_sources,
+        vec!["models/diode.va", "other/thermal.vams"],
+        "source is whatever ends .va/.vams, whichever keyword named it"
+    );
+    assert_eq!(
+        nl.osdi_paths,
+        vec!["build/prebuilt.osdi", "build/bsim.osdi"]
+    );
+}
+
+/// Deck order is preserved: a PDK relies on it, so the parser must not sort
+/// or deduplicate.
+#[test]
+fn va_source_order_follows_the_deck() {
+    let nl = parse_ok(".va c.va\n.va a.va\n.va b.va\n.va a.va\n.op\n.end\n");
+    assert_eq!(nl.va_sources, vec!["c.va", "a.va", "b.va", "a.va"]);
+}
+
+#[test]
+fn a_quoted_model_path_keeps_no_quotes() {
+    let nl = parse_ok(".osdi \"build/prebuilt.osdi\"\n.va 'm.va'\n.op\n.end\n");
+    assert_eq!(nl.osdi_paths, vec!["build/prebuilt.osdi"]);
+    assert_eq!(nl.va_sources, vec!["m.va"]);
+}
+
+/// An argument-less `.osdi` / `.va` used to be dropped in silence, which
+/// turned a typo into an "unknown model" page later — or a missing device.
+#[test]
+fn a_model_directive_with_no_path_is_an_error() {
+    let err = parse_spice(".va\n.op\n.end\n").expect_err("no path is not loadable");
+    assert!(err.to_string().contains(".va"), "{err}");
+    assert!(parse_spice(".osdi\n.op\n.end\n").is_err());
+}
+
+/// `.va` must not swallow a directive that merely starts with those letters.
+#[test]
+fn va_does_not_claim_a_longer_directive() {
+    assert!(parse_spice(".vary r1 dev=1\n.op\n.end\n").is_err());
+}
+
+/// The PDK case: a library in a subdirectory names its Verilog-A sources
+/// relative to *itself*, and `.include` splices its text away from that
+/// directory. Without rebasing, only a model sitting next to the top deck
+/// would ever be found — so a real PDK tree could not load.
+#[test]
+fn a_model_path_inside_an_include_resolves_against_that_file() {
+    // Per-process so parallel `cargo test` runs cannot delete each other's.
+    let root = std::env::temp_dir().join(format!("fc_va_rebase_{}", std::process::id()));
+    let pdk = root.join("pdk").join("models");
+    std::fs::create_dir_all(&pdk).unwrap();
+    std::fs::write(pdk.join("diode.va"), "// stand-in\n").unwrap();
+    // A Spectre library, so the transliteration and the rebase are both in play.
+    std::fs::write(
+        pdk.join("lib.scs"),
+        "simulator lang=spectre\nahdl_include \"diode.va\"\n",
+    )
+    .unwrap();
+    let deck = root.join("top.sp");
+    std::fs::write(
+        &deck,
+        format!(
+            "* deck\n.include {}\nR1 a 0 1k\n.op\n.end\n",
+            pdk.join("lib.scs").display()
+        ),
+    )
+    .unwrap();
+
+    let nl = fairchild_parser::parse_spice_file(&deck).expect("deck parses");
+    assert_eq!(nl.va_sources.len(), 1, "{:?}", nl.va_sources);
+    let got = std::path::Path::new(&nl.va_sources[0]);
+    assert!(got.is_absolute(), "{got:?} must not need a second base dir");
+    assert!(got.is_file(), "{got:?} must name the file that exists");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

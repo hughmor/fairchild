@@ -129,7 +129,7 @@ whole run in `.control … .endc`. The block is now skipped with a warning rathe
 than refusing the file — see §4.7 for what that does and does not buy you. It is
 **not** interpreted, and will not be.
 
-**fairchild extensions** (not ngspice): `.osdi`, `.optical`, `.optical_port`,
+**fairchild extensions** (not ngspice): `.va`, `.osdi`, `.optical`, `.optical_port`,
 `.optical_bus`, `.electrical_port`, and `.alter` (which is HSPICE's).
 
 ## 3. Independent-source functions
@@ -607,6 +607,7 @@ leading `//` comment — not from the extension. A SPICE deck may therefore
 | `include "f"` / `include "f" section=s` | `.include "f"` / `.lib "f" s` |
 | `vdd!`, `global vdd!` | a net, plus `.global vdd!` |
 | `opt1 options temp=85` | `.temp 85` |
+| `ahdl_include "m.va"` | `.va "m.va"` — the Verilog-A source is compiled and cached on the way in (user-guide §14.2) |
 | `R1 (a b) resistor`, `rload (a b) resistor` | `R1 …`, `rload …` — a name is never given a second letter |
 | a trailing `\\` or leading `+` continuation, `//` and column-1 `*` comments | joined / stripped |
 
@@ -617,7 +618,6 @@ Failure modes, same three as above:
 | A **binned** `model` (a braced body of numbered sections) | **error** — bin selection by geometry is not implemented, and guessing a bin is a wrong answer with nothing to read |
 | A function body that is not a single `return <expr>;` | **error** — local variables and control flow have no `.func` equivalent, and translating half of one would drop the rest in silence |
 | Any other unreadable statement | **error** with the line and the two forms it accepts |
-| `ahdl_include "m.va"` | **warn**, skipped — Verilog-A needs an out-of-band OpenVAF compile and a `.osdi` line, so the devices it defines would otherwise be unknown models |
 | `save`, `assert`, `statistics`, `montecarlo`, `sweep`, `alter`, `altergroup`, `check`, `info`, `shell` | **warn**, skipped — they do not change a single solve |
 | `options` keys other than `temp` | **warn** (as `.options` above) |
 

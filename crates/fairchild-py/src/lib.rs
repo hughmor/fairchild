@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
@@ -23,8 +22,6 @@ use fairchild_core::{
     tran_nr_with_registry_var_opts, AcResult, DcSweepResult, DeviceRegistry, NrResult, Output,
     ParamRef, SimError, SimOptions, TranAdjoint, TranResult,
 };
-#[cfg(feature = "osdi")]
-use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Analysis, Netlist};
 
 // ---------------------------------------------------------------------------
@@ -1093,40 +1090,37 @@ fn apply_source_overrides(netlist: &mut Netlist, overrides: &HashMap<String, Vec
 // Helper: build a DeviceRegistry
 // ---------------------------------------------------------------------------
 
+/// Load built-in models, then every model file the netlist named — `.va`
+/// sources compiled on the way in, `.osdi` artefacts as-is.
+///
+/// The resolving and loading is `fairchild_osdi::load_libraries`, shared with
+/// the CLI. There is no command line here to carry `--openvaf`, so the compiler
+/// and cache come from `FAIRCHILD_OPENVAF` / `FAIRCHILD_VA_CACHE`.
 fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<DeviceRegistry> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_models(&netlist.models);
 
     #[cfg(feature = "osdi")]
-    for osdi_path in &netlist.osdi_paths {
-        let path = if std::path::Path::new(osdi_path).is_absolute() {
-            PathBuf::from(osdi_path)
-        } else if let Some(dir) = netlist_dir {
-            dir.join(osdi_path)
-        } else {
-            PathBuf::from(osdi_path)
-        };
-
-        let lib = unsafe { OsdiLibrary::open(&path) }.map_err(|e| {
-            PyRuntimeError::new_err(format!(
-                "failed to load OSDI library '{}': {e}",
-                path.display()
-            ))
-        })?;
-        let lib = Arc::new(lib);
-        lib.register_into(&mut registry);
+    {
+        fairchild_osdi::load_libraries(
+            &netlist.osdi_paths,
+            &netlist.va_sources,
+            netlist_dir.map(|p| p.as_path()),
+            &fairchild_osdi::VaOptions::from_env(),
+            &mut registry,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // `.model <card> <module> (...)` cards naming a descriptor we just
+        // loaded. After the libraries, so the descriptors exist to alias.
+        registry.register_loaded_model_cards(&netlist.models);
     }
-    // `.model <card> <module> (...)` cards naming a descriptor we just loaded.
-    // After the libraries, so the descriptors exist to alias.
-    #[cfg(feature = "osdi")]
-    registry.register_loaded_model_cards(&netlist.models);
 
     #[cfg(not(feature = "osdi"))]
-    if !netlist.osdi_paths.is_empty() {
-        return Err(PyRuntimeError::new_err(format!(
-            "netlist references .osdi files but this build was compiled without OSDI support; \
-             rebuild with --features osdi or remove the .osdi references"
-        )));
+    if !netlist.osdi_paths.is_empty() || !netlist.va_sources.is_empty() {
+        return Err(PyRuntimeError::new_err(
+            "netlist references .osdi/.va model files but this build was compiled without OSDI \
+             support; rebuild with --features osdi or remove those references",
+        ));
     }
 
     Ok(registry)
