@@ -1,91 +1,88 @@
-//! Regression tests for fc_circulator.
+//! Regression tests for fc_circulator: the three routes, one at a time.
 //!
-//! Three-port circulator: 1→2, 2→3, 3→1.  Bidir-only — instantiating
-//! without `.options enable_bidirectional=1` panics at setup_instance.
+//! Bidir-only — instantiating without `.options enable_bidirectional=1` is an
+//! error naming the element.
 //!
-//! Wire convention: at every port, `re_fw`/`im_fw` flow INWARD (toward
-//! the device); `re_bw`/`im_bw` flow OUTWARD.  Hence external drivers
-//! place their incoming signal on a port's `_re_fw_` net and read the
-//! circulator's outgoing signal from the next port's `_re_bw_` net.
+//! Wire convention is the along-chain one every other device uses: `fw` runs
+//! from port 1 toward port 3, the same direction at all three ports. Port 1
+//! therefore behaves like a waveguide's `in` port (it reads `fw`, drives `bw`)
+//! and ports 2 and 3 like `out` ports (they drive `fw`, read `bw`). Each case
+//! below drives only wires the circulator does not, and reads only wires it
+//! does.
+//!
+//! Whether the routes compose into a circuit — and conserve power once they do
+//! — is `tests/bidirectional_composition.rs`; these three pin the routing table
+//! itself, one entry per test.
 
 use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
-/// Inject light at port 0 (port_0.re_fw = 1.0).  Verify it appears at
-/// port 1's outward wires (port_1.re_bw) and NOT at port 2's outward.
-#[test]
-fn circulator_routes_port0_to_port1() {
-    let netlist = "\
-.options enable_bidirectional=1
-.optical_port p0
-.optical_port p1
-.optical_port p2
-* Drive port 0's fw (light entering port 0)
-Vp0_re p0_re_fw_0 0 DC 1.0
-Vp0_im p0_im_fw_0 0 DC 0.0
-Vp0_wl p0_wl_0    0 DC 1.55e-6
-* The bw side of port 0 is the circulator's output back toward whatever's
-* upstream — pin to 0 with a probe so the matrix has a driver on it.
-* (Note: in a real schematic this is the wire that returning light from
-*  port 2 → port 0 routes through.)
-* Other ports: nothing driving fw on port 1 / port 2 — circulator routes
-* port_0.fw into port_1.bw via internal stamps.  No external loads on
-* port_1.bw / port_2.bw means those wires are pure outputs we can probe.
-Xcirc p0 p1 p2 fc_circulator
-.op
-.end
-";
-    let net = parse_spice(netlist).unwrap();
-    let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
-    let p1_re_bw = r.node_voltage("p1_re_bw_0").unwrap();
-    let p1_im_bw = r.node_voltage("p1_im_bw_0").unwrap();
-    let p2_re_bw = r.node_voltage("p2_re_bw_0").unwrap();
-    let p2_im_bw = r.node_voltage("p2_im_bw_0").unwrap();
-    assert!(
-        (p1_re_bw - 1.0).abs() < 1e-9,
-        "port_1.re_bw should be 1.0 (light from port 0); got {p1_re_bw}"
+fn run(drives: &str) -> fairchild_core::newton::NrResult {
+    let src = format!(
+        ".options enable_bidirectional=1\n\
+         .optical_port p1\n.optical_port p2\n.optical_port p3\n\
+         Xcirc p1 p2 p3 fc_circulator\n\
+         Vwl p1_wl_0 0 DC 1.55e-6\n\
+         {drives}.op\n.end\n"
     );
-    assert!(
-        p1_im_bw.abs() < 1e-9,
-        "port_1.im_bw should be 0; got {p1_im_bw}"
-    );
-    assert!(
-        p2_re_bw.abs() < 1e-9,
-        "port_2.re_bw should be 0 (no light entering port 1); got {p2_re_bw}"
-    );
-    assert!(p2_im_bw.abs() < 1e-9);
+    let net = parse_spice(&src).expect("netlist should parse");
+    dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP should converge")
 }
 
-/// Reflection round-trip: inject at port 0, "reflect" at port 1 via an
-/// external wire that ties port_1.re_fw back to port_1.re_bw.  The
-/// reflected wave should appear at port_2.re_bw.
+fn v(r: &fairchild_core::newton::NrResult, wire: &str) -> f64 {
+    r.node_voltage(wire)
+        .unwrap_or_else(|e| panic!("{wire}: {e}"))
+}
+
+/// Light entering port 1 leaves at port 2, and nowhere else.
 #[test]
-fn circulator_round_trip_to_port2() {
-    let netlist = "\
-.options enable_bidirectional=1
-.optical_port p0
-.optical_port p1
-.optical_port p2
-Vp0_re p0_re_fw_0 0 DC 1.0
-Vp0_im p0_im_fw_0 0 DC 0.0
-Vp0_wl p0_wl_0    0 DC 1.55e-6
-* External feedback: tie port_1.fw to port_1.bw (perfect reflection).
-* Use a 0 V source as a wire-equality stamp.
-Vrefl_re p1_re_fw_0 p1_re_bw_0 DC 0.0
-Vrefl_im p1_im_fw_0 p1_im_bw_0 DC 0.0
-Xcirc p0 p1 p2 fc_circulator
-.op
-.end
-";
-    let net = parse_spice(netlist).unwrap();
-    let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
-    // Light path: port_0.fw → port_1.bw (= 1.0) → external short → port_1.fw
-    // → port_2.bw (= port_1.fw = 1.0).
-    let p2_re_bw = r.node_voltage("p2_re_bw_0").unwrap();
+fn light_in_at_port_one_leaves_at_port_two() {
+    let r = run("Vre p1_re_fw_0 0 DC 1.0\nVim p1_im_fw_0 0 DC 0.0\n");
     assert!(
-        (p2_re_bw - 1.0).abs() < 1e-6,
-        "after perfect reflection at port 1, port_2.re_bw should be 1.0; got {p2_re_bw}"
+        (v(&r, "p2_re_fw_0") - 1.0).abs() < 1e-9,
+        "port 2 should carry it forward; got {}",
+        v(&r, "p2_re_fw_0")
     );
+    assert!(v(&r, "p2_im_fw_0").abs() < 1e-9);
+    assert!(
+        v(&r, "p3_re_fw_0").abs() < 1e-9,
+        "port 3 gets nothing until something comes back into port 2; got {}",
+        v(&r, "p3_re_fw_0")
+    );
+    // λ is a label on the channel: both `out`-role ports take port 1's.
+    assert!((v(&r, "p2_wl_0") - 1.55e-6).abs() < 1e-18);
+    assert!((v(&r, "p3_wl_0") - 1.55e-6).abs() < 1e-18);
+}
+
+/// Light coming back into port 2 leaves at port 3 — the measurement path.
+/// Port 2 is an `out`-role port, so a returning wave arrives on its `bw` wires.
+#[test]
+fn light_back_in_at_port_two_leaves_at_port_three() {
+    let r = run("Vre p2_re_bw_0 0 DC 1.0\nVim p2_im_bw_0 0 DC 0.0\n");
+    assert!(
+        (v(&r, "p3_re_fw_0") - 1.0).abs() < 1e-9,
+        "port 3 should carry the return; got {}",
+        v(&r, "p3_re_fw_0")
+    );
+    assert!(v(&r, "p3_im_fw_0").abs() < 1e-9);
+    assert!(
+        v(&r, "p2_re_fw_0").abs() < 1e-9,
+        "nothing entered port 1, so port 2's forward wire stays dark; got {}",
+        v(&r, "p2_re_fw_0")
+    );
+}
+
+/// Light coming back into port 3 leaves at port 1 — the third leg, and the one
+/// that decides whether the cycle closes or stops at port 3.
+#[test]
+fn light_back_in_at_port_three_leaves_at_port_one() {
+    let r = run("Vre p3_re_bw_0 0 DC 1.0\nVim p3_im_bw_0 0 DC 0.0\n");
+    assert!(
+        (v(&r, "p1_re_bw_0") - 1.0).abs() < 1e-9,
+        "port 1 should carry it back out; got {}",
+        v(&r, "p1_re_bw_0")
+    );
+    assert!(v(&r, "p1_im_bw_0").abs() < 1e-9);
 }
 
 /// Circulator must refuse to instantiate without bidir mode — as an error the

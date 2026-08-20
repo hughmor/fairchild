@@ -254,12 +254,12 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 | `fc_dcoupler` | `kappa_per_m`, `l_um`, `l_m`, `kappa_l` | ⚠️ analytic |
 | `fc_splitter` | `alpha`, `alpha_db`/`il_db`, `r`/`split_ratio` | ⚠️ analytic (`native_splitter_asymmetric`) |
 | `fc_grating_coupler` | `alpha_db`/`il_db`, `alpha` | ⚠️ analytic |
-| `fc_circulator` | (topology only) | ⚠️ in-tree, bidirectional |
-| `fc_mux` / `fc_demux` | `il_db`, `lambda0_nm`, `df_ghz`, `fwhm_ghz`, `shape_p`, `dlambda_dt_pm_per_k`, `t_nom_k` | ⚠️ analytic; the filter is opt-in and the default is bit-for-bit identity |
+| `fc_circulator` | (topology only) | ⚠️ analytic (`native_circulator`): each of the three routes, plus a power-conserving loop in `bidirectional_composition` |
+| `fc_mux` / `fc_demux` | `il_db`, `lambda0_nm`, `df_ghz`, `fwhm_ghz`, `shape_p`, `dlambda_dt_pm_per_k`, `t_nom_k` | ⚠️ analytic; the filter is opt-in and the default is bit-for-bit identity. The backward route is pinned by a mirror-terminated power budget (`bidirectional_composition`) |
 | `fc_awgr` | `lambda0_nm`/`lambda0_m`, `df_ghz`, `fsr_ghz`, `fwhm_ghz`, `shape_p`, `il_db`, `il_tilt_db`, `xt_adj_db`, `xt_bg_db`, `dlambda_dt_pm_per_k`, `t_nom_k`, `sfile` | ⚠️ analytic + a permutation-equivalence test vs demux/mux |
 | `fc_mzm` | `v_pi`, `alpha`, `alpha_db`/`il_db`, `e_r`, `e_r_db`, `f_c` | ⚠️ analytic |
 | `fc_optical_2x2` | `s11`, `s12`, `s21`, `s22`, `il_db`, `tau_s`, `allow_gain`, per-channel `w`/`dw_dv_<k>` | ⚠️ analytic + power conservation |
-| `fc_photodetector` | `responsivity`, `i_dark`, `r_shunt`, `r_series`, `c_par`/`c_j0` | ⚠️ analytic (`native_pd_r_series`) |
+| `fc_photodetector` | `responsivity`, `i_dark`, `r_shunt`, `r_series`, `c_par`/`c_j0` | ⚠️ analytic (`native_pd_r_series`); owns no optical wire, and sums both propagation directions into one photocurrent |
 | Phase shifters (`fc_pn_ps`, `fc_thermal_ps`, `fc_pn_th_ps`, … + `LEVEL`) | `dn_dv`, `da_dv`, `g_pn`, `v_pi_l`, `c_j0`, `v_bi`, `m_j`, `i_sat`, `n_diode`, `tau_carrier`, `dn_dv_inj`, `da_dv_inj`, `dn_di`, `da_di`, `beta_tpa`, `a_eff_m2`, `r_th`, `dn_dt`, `r_series`, `r_heater`, `p_pi`, `tau_th`, plus the `fc_waveguide` geometry set | ⚠️ characterisation pins + an equivalence test vs a discrete `C`; fitted against measured chip data in `experiments/giona` but that comparison is not a committed regression |
 | `fc_phase_shifter_expr` | `dneff`, `dalpha` (expression strings over `V`, `T`, `lambda`) | ⚠️ in-tree |
 

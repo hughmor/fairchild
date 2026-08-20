@@ -8,21 +8,42 @@ use crate::warn_user;
 
 /// 3-port circulator.  Routes light cyclically: light entering port 1
 /// exits port 2; entering port 2 exits port 3; entering port 3 exits
-/// port 1.  Requires `enable_bidirectional=1` because the routing
-/// fundamentally needs each port to support both an incoming wave (fw,
-/// inward to the circulator) and an outgoing wave (bw, outward from the
-/// circulator).  Errors at setup_instance if bidir is off.
+/// port 1.  Requires `enable_bidirectional=1` because two of the three
+/// routes are carried on backward wires that a unidirectional bundle does
+/// not have.  Errors at setup_instance if bidir is off.
 ///
-/// Wire convention (consistent across the circulator): at every port,
-/// `re_fw`/`im_fw` represent the wave flowing INWARD (toward the device)
-/// and `re_bw`/`im_bw` represent the wave flowing OUTWARD.  Internal
-/// routing:
-///   port_p.bw = port_((p+2) mod 3).fw   — for re and im, every channel
-/// (light entering port (p-1) leaves at port p, mod 3).
+/// # Which wire is which
 ///
-/// λ is tied across all three ports: `port_1.λ = port_0.λ`, `port_2.λ =
-/// port_0.λ`.  This works whether the laser drives port 0, 1, or 2 —
-/// SPICE branch equations resolve the cycle consistently.
+/// The convention is the **along-chain** one every other device uses, not a
+/// port-relative one: `fw` means "away from port 1, toward port 3", the same
+/// direction at all three ports.  So each port plays one of the two ordinary
+/// port roles, and the circulator drops into a chain like anything else:
+///
+/// | Port | Role | Drives | Reads |
+/// |---|---|---|---|
+/// | 1 | like a waveguide's `in` | `re_bw`, `im_bw` | `re_fw`, `im_fw`, λ |
+/// | 2 | like a waveguide's `out` | `re_fw`, `im_fw`, λ | `re_bw`, `im_bw` |
+/// | 3 | like a waveguide's `out` | `re_fw`, `im_fw`, λ | `re_bw`, `im_bw` |
+///
+/// The three routes then read straight off that table:
+///
+/// ```text
+///   port_2.fw = port_1.fw      light in at 1 leaves at 2
+///   port_3.fw = port_2.bw      light in at 2 leaves at 3
+///   port_1.bw = port_3.bw      light in at 3 leaves at 1
+/// ```
+///
+/// This used to be port-relative — `fw` meant "into me" at all three ports —
+/// which made every port behave like an `in` port.  Wiring port 2 or 3 onward
+/// into anything then put two drivers on that bundle's backward wires and none
+/// on its forward ones: the block went rank-deficient (silently averaged) and
+/// the routed light never left the circulator.  The old convention was
+/// documented rather than fixed, on the grounds that a user would drive the
+/// wires by name; a circulator exists to be put where light comes back, so it
+/// has to compose.  `newton::check_exclusive_potential_drivers` refuses the
+/// collision now, and this convention no longer causes one.
+///
+/// λ is tied from port 1 onto ports 2 and 3, matching their `out` role.
 ///
 /// Bundle-aware: 3·wpc·N terminals for N WDM channels.  Per channel
 /// branch count: 6 re/im routing + 2 λ ties = 8.
@@ -137,17 +158,19 @@ impl Device for NativeCirculator {
             let (p1_re_fw, p1_im_fw, p1_re_bw, p1_im_bw, p1_lam) = port_wires(1);
             let (p2_re_fw, p2_im_fw, p2_re_bw, p2_im_bw, p2_lam) = port_wires(2);
             let b = 8 * k;
-            // port_p.bw = port_((p+2) mod 3).fw
-            // port_0.bw = port_2.fw
-            stamp_potential_eq(mat, &self.branches, b, p0_re_bw, &[(p2_re_fw, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, b + 1, p0_im_bw, &[(p2_im_fw, -1.0)]);
-            // port_1.bw = port_0.fw
-            stamp_potential_eq(mat, &self.branches, b + 2, p1_re_bw, &[(p0_re_fw, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, b + 3, p1_im_bw, &[(p0_im_fw, -1.0)]);
-            // port_2.bw = port_1.fw
-            stamp_potential_eq(mat, &self.branches, b + 4, p2_re_bw, &[(p1_re_fw, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, b + 5, p2_im_bw, &[(p1_im_fw, -1.0)]);
-            // λ ties: port_1.λ = port_0.λ, port_2.λ = port_0.λ.
+            // In at port 1, out at port 2 — both on the forward wires, because
+            // that is the direction along the chain from 1 to 2.
+            stamp_potential_eq(mat, &self.branches, b, p1_re_fw, &[(p0_re_fw, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, b + 1, p1_im_fw, &[(p0_im_fw, -1.0)]);
+            // In at port 2, out at port 3. Port 2 is an `out`-role port, so
+            // light arriving there comes back on its backward wires.
+            stamp_potential_eq(mat, &self.branches, b + 2, p2_re_fw, &[(p1_re_bw, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, b + 3, p2_im_fw, &[(p1_im_bw, -1.0)]);
+            // In at port 3, out at port 1 — the whole return path, arriving on
+            // port 3's backward wires and leaving on port 1's.
+            stamp_potential_eq(mat, &self.branches, b + 4, p0_re_bw, &[(p2_re_bw, -1.0)]);
+            stamp_potential_eq(mat, &self.branches, b + 5, p0_im_bw, &[(p2_im_bw, -1.0)]);
+            // λ ties: the two `out`-role ports take port 1's tag.
             stamp_potential_eq(mat, &self.branches, b + 6, p1_lam, &[(p0_lam, -1.0)]);
             stamp_potential_eq(mat, &self.branches, b + 7, p2_lam, &[(p0_lam, -1.0)]);
         }
