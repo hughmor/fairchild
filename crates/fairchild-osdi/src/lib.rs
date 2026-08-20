@@ -28,18 +28,27 @@
 //! `fairchild_core::models::photonic`; anything else can go either way. The
 //! two paths coexist, which is what a real EPDA tool needs.
 //!
-//! Clear-text third-party Verilog-A the user has already compiled loads fine;
-//! IEEE-1735 / Cadence-encrypted PDKs do not, and cannot — that is upstream of
-//! OpenVAF, not a fairchild limitation.
+//! **The compile is ours to drive.** A deck naming `.va` source — via `.va`,
+//! or Spectre's `ahdl_include` — gets it compiled and cached on the way in, so
+//! a PDK full of `ahdl_include` lines is not a pile of manual compiles first.
+//! `crate::compile` is that path, and explains why it invokes a compiler
+//! rather than linking one. The explicit `.osdi` route stays: it is the
+//! offline, no-toolchain, reproducible one, and it belongs in CI.
+//!
+//! Clear-text third-party Verilog-A loads fine; IEEE-1735 / Cadence-encrypted
+//! PDKs do not, and cannot — that is upstream of OpenVAF, not a fairchild
+//! limitation.
 //!
 //! Authoring guide and worked examples: `docs/user-guide.md` §14 and
 //! `examples/verilog_a/`.
 
+pub mod compile;
 pub mod device;
 pub mod error;
 pub mod ffi;
 mod loader;
 
+pub use compile::{load_libraries, VaCompiler, VaOptions};
 pub use device::OsdiDevice;
 pub use error::OsdiError;
 pub use loader::OsdiLibrary;

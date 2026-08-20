@@ -34,6 +34,11 @@ pub struct Netlist {
     pub models: Vec<ModelCard>,
     /// Paths from `.osdi <path>` directives — OSDI shared libraries to load.
     pub osdi_paths: Vec<String>,
+    /// Verilog-A *source* paths, from `.va <path>` (or Spectre's
+    /// `ahdl_include`), in deck order. The consumer compiles each one to OSDI
+    /// and loads the result; a PDK relies on that order, so it is preserved
+    /// rather than deduplicated here.
+    pub va_sources: Vec<String>,
     /// Net names declared as optical via `.optical <net> ...` directive.
     pub optical_nets: Vec<String>,
     /// Raw `KEY=VALUE` pairs from every `.options` directive in source order.

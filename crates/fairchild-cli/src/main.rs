@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -14,8 +13,14 @@ use fairchild_core::{
     tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
-use fairchild_osdi::OsdiLibrary;
+use fairchild_osdi::VaOptions;
 use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Netlist};
+
+/// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
+/// its four call sites when the OSDI feature is off.
+#[cfg(not(feature = "osdi"))]
+#[derive(Default)]
+struct VaOptions;
 
 #[derive(Parser)]
 #[command(
@@ -127,6 +132,26 @@ struct Cli {
     /// stride.  Equivalent to `.options variable_step=1`.
     #[arg(long)]
     variable_step: bool,
+
+    // ── Verilog-A ────────────────────────────────────────────────────────
+    /// Path to the Verilog-A compiler used for `.va` / `ahdl_include` sources.
+    /// Default: `openvaf-r`, then `openvaf`, from PATH.  `FAIRCHILD_OPENVAF`
+    /// does the same thing for a caller with no command line.
+    #[arg(long = "openvaf", value_name = "PATH")]
+    openvaf: Option<PathBuf>,
+
+    /// Search directory for Verilog-A `include` files (OpenVAF `-I`).  Order
+    /// is preserved and matters: a PDK relies on it.  Can be repeated.  The
+    /// directory of each source is always searched last.
+    #[arg(long = "va-include", value_name = "DIR")]
+    va_include: Vec<PathBuf>,
+
+    /// Never invoke a Verilog-A compiler.  Any `.va` source in the deck becomes
+    /// an error — including one already in the cache, so the result does not
+    /// depend on a directory you cannot see.  This is the reproducible, offline
+    /// route for CI, where models arrive as pre-built `.osdi` artefacts.
+    #[arg(long = "no-va-compile")]
+    no_va_compile: bool,
 
     /// Bundle all `.alter` × `.temp` corner outputs into the single
     /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
@@ -286,9 +311,38 @@ fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
 
 // ── OSDI registry builder ─────────────────────────────────────────────────
 
-/// Load built-in models + any OSDI shared libraries listed in the netlist.
-/// Relative `.osdi` paths are resolved against `netlist_dir`.
-fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool) -> DeviceRegistry {
+/// The Verilog-A compile knobs, as flags plus environment fallback.
+///
+/// `--openvaf` / `--va-include` / `--no-va-compile` beat `FAIRCHILD_OPENVAF`
+/// and `FAIRCHILD_VA_CACHE`; the environment fills only what no flag set.
+#[cfg(feature = "osdi")]
+fn va_options(cli: &Cli) -> VaOptions {
+    VaOptions {
+        compiler: cli.openvaf.clone(),
+        include_dirs: cli.va_include.clone(),
+        cache_dir: None,
+        no_compile: cli.no_va_compile,
+    }
+    .or_env()
+}
+
+#[cfg(not(feature = "osdi"))]
+fn va_options(_cli: &Cli) -> VaOptions {
+    VaOptions
+}
+
+/// Load built-in models, then every model file the netlist named — `.va`
+/// sources compiled on the way in, `.osdi` artefacts as-is.
+///
+/// The resolving and loading itself is `fairchild_osdi::load_libraries`, shared
+/// with the Python binding: two copies of it were two chances to disagree about
+/// which paths a deck meant.
+fn build_registry(
+    netlist: &Netlist,
+    netlist_dir: Option<&PathBuf>,
+    quiet: bool,
+    #[allow(unused_variables)] va: &VaOptions,
+) -> DeviceRegistry {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_models(&netlist.models);
 
@@ -299,10 +353,11 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
         // `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`) are the recommended
         // path.  Surface a one-shot info note so users with `.osdi` photonic
         // models know there's a faster, cleaner alternative.
-        if !quiet && !netlist.osdi_paths.is_empty() {
+        if !quiet {
             let photonic_count = netlist
                 .osdi_paths
                 .iter()
+                .chain(&netlist.va_sources)
                 .filter(|p| {
                     p.contains("photonic")
                         || p.contains("waveguide")
@@ -321,33 +376,28 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>, quiet: bool)
             }
         }
 
-        for osdi_path in &netlist.osdi_paths {
-            let path = if std::path::Path::new(osdi_path).is_absolute() {
-                PathBuf::from(osdi_path)
-            } else if let Some(dir) = netlist_dir {
-                dir.join(osdi_path)
-            } else {
-                PathBuf::from(osdi_path)
-            };
-
-            let lib = unsafe { OsdiLibrary::open(&path) }.unwrap_or_else(|e| {
-                eprintln!("error: cannot load OSDI library '{}': {e}", path.display());
-                std::process::exit(1);
-            });
-            let lib = Arc::new(lib);
-            lib.register_into(&mut registry);
-        }
+        fairchild_osdi::load_libraries(
+            &netlist.osdi_paths,
+            &netlist.va_sources,
+            netlist_dir.map(|p| p.as_path()),
+            va,
+            &mut registry,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
         // `.model <card> <module> (...)` cards naming a descriptor we just
         // loaded.  After the libraries, so the descriptors exist to alias.
         registry.register_loaded_model_cards(&netlist.models);
     }
 
     #[cfg(not(feature = "osdi"))]
-    if !netlist.osdi_paths.is_empty() {
+    if !netlist.osdi_paths.is_empty() || !netlist.va_sources.is_empty() {
         fairchild_core::warn_user!(
-            "netlist references {} .osdi file(s) but this build was compiled without \
-             OSDI support (--features osdi). Those libraries will be ignored.",
-            netlist.osdi_paths.len()
+            "netlist references {} model file(s) but this build was compiled without \
+             OSDI support (--features osdi). Those models will be ignored.",
+            netlist.osdi_paths.len() + netlist.va_sources.len()
         );
     }
 
@@ -399,7 +449,12 @@ fn main() {
     if cli.list_nodes {
         // Build a registry for the netlist_dir (needed to load OSDI libs for topology)
         let netlist_dir_tmp = cli.file.parent().map(|p| p.to_path_buf());
-        let reg_tmp = build_registry(&netlist, netlist_dir_tmp.as_ref(), cli.quiet);
+        let reg_tmp = build_registry(
+            &netlist,
+            netlist_dir_tmp.as_ref(),
+            cli.quiet,
+            &va_options(&cli),
+        );
         let opts_tmp = build_options(&netlist, &cli);
         let result =
             dc_op_nr_with_registry_opts(&netlist, &reg_tmp, &opts_tmp).unwrap_or_else(|e| {
@@ -425,6 +480,11 @@ fn main() {
         for m in &netlist.models {
             let params: Vec<String> = m.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
             println!(".model {} {} {}", m.name, m.kind, params.join(" "));
+        }
+        // Both routes, so `--list-models` shows every model file the deck
+        // names rather than only the pre-compiled half.
+        for path in &netlist.va_sources {
+            println!(".va {path}");
         }
         for path in &netlist.osdi_paths {
             println!(".osdi {path}");
@@ -612,6 +672,7 @@ fn run_corners_serial(
         Some(path) => open_writer(path),
         None => Box::new(BufWriter::new(io::stdout())),
     };
+    let va = va_options(cli);
     let mut ran_something = false;
     let mut last_alter: Option<usize> = None;
     let mut registry: Option<DeviceRegistry> = None;
@@ -619,7 +680,7 @@ fn run_corners_serial(
         // Rebuild registry on every new alter block (model overrides may
         // differ); reuse across temperature sweep points within a block.
         if last_alter != Some(corner.alter_idx) {
-            registry = Some(build_registry(&corner.netlist, netlist_dir, cli.quiet));
+            registry = Some(build_registry(&corner.netlist, netlist_dir, cli.quiet, &va));
             last_alter = Some(corner.alter_idx);
         }
         if n_alters > 1 {
@@ -696,13 +757,14 @@ fn run_corners_parallel(
     let cli_quiet = cli.quiet;
     let cli_verbose = cli.verbose;
     let cli_format = cli.format.clone();
+    let va = va_options(cli);
 
     let ran: Vec<bool> = corners
         .par_iter()
         .map(|corner| {
             let out_path = corner_path(base, &corner.alter_label, n_alters, corner.temp_k, n_temps);
             let mut w: Box<dyn Write> = open_writer(&out_path);
-            let registry = build_registry(&corner.netlist, netlist_dir.as_ref(), cli_quiet);
+            let registry = build_registry(&corner.netlist, netlist_dir.as_ref(), cli_quiet, &va);
             // Build a synthetic Cli reference for run_corner_analyses; we
             // only need a few fields, so pass them explicitly via a
             // miniature struct rather than threading the whole Cli through.

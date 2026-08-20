@@ -172,29 +172,33 @@ fn build_registry(netlist: &Netlist, dir: Option<&PathBuf>) -> Result<DeviceRegi
     registry.register_builtin_models(&netlist.models);
 
     #[cfg(feature = "osdi")]
-    for osdi_path in &netlist.osdi_paths {
-        let path = if std::path::Path::new(osdi_path).is_absolute() {
-            PathBuf::from(osdi_path)
-        } else if let Some(d) = dir {
-            d.join(osdi_path)
-        } else {
-            PathBuf::from(osdi_path)
-        };
-        let lib = unsafe { fairchild_osdi::OsdiLibrary::open(&path) }.map_err(|e| ApiError {
+    {
+        fairchild_osdi::load_libraries(
+            &netlist.osdi_paths,
+            &netlist.va_sources,
+            dir.map(|p| p.as_path()),
+            &fairchild_osdi::VaOptions::from_env(),
+            &mut registry,
+        )
+        .map_err(|e| ApiError {
             code: FC_ERR_PARSE,
-            msg: format!("failed to load OSDI library '{}': {e}", path.display()),
+            msg: e.to_string(),
         })?;
-        std::sync::Arc::new(lib).register_into(&mut registry);
+        // This binding never aliased `.model <card> <module> (...)` cards onto a
+        // loaded descriptor, so a card naming a Verilog-A module was silently an
+        // unknown model here while it worked from the CLI and Python. Sharing
+        // one loader is what made the omission visible.
+        registry.register_loaded_model_cards(&netlist.models);
     }
 
     #[cfg(not(feature = "osdi"))]
     {
         let _ = dir;
-        if !netlist.osdi_paths.is_empty() {
+        if !netlist.osdi_paths.is_empty() || !netlist.va_sources.is_empty() {
             return Err(ApiError {
                 code: FC_ERR_PARSE,
-                msg: "netlist references .osdi files but this build has no OSDI support; \
-                      rebuild with --features osdi"
+                msg: "netlist references .osdi/.va model files but this build has no OSDI \
+                      support; rebuild with --features osdi"
                     .into(),
             });
         }
