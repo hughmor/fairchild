@@ -28,4 +28,18 @@ pub enum SimError {
          e.g. `V1 in 0 DC 0 AC 1`. Without one there is nothing to excite the circuit."
     )]
     NoAcSource,
+    #[error(
+        "'{first}' and '{second}' both drive node '{node}'. Two devices pinning one \
+         potential leave the block rank-deficient, which the solve does not report — it \
+         returns a weighted average of the two answers. On an optical bundle this is \
+         almost always a port facing the wrong way: a device's `in` port drives the \
+         backward wires and reads the forward ones, and its `out` port does the \
+         opposite, so two `in` ports (or two `out` ports) wired together collide. \
+         Check the port order on both elements."
+    )]
+    OverdrivenNode {
+        node: String,
+        first: String,
+        second: String,
+    },
 }
