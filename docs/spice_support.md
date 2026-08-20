@@ -99,7 +99,7 @@ expression source as a `B` element instead.
 | `.global` | global nets | ✅ (a port of the same name is refused) | §4.10 |
 | `.csparam` | constant → control variable | ❌ | error |
 | `.table` | lookup table | ❌ | error |
-| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time (not inside `.subckt`) | §4.8 |
+| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time; per instance inside a `.subckt` | §4.8, §4.11 |
 | `.control` / `.endc` | interactive control block | ⚠️ skipped, **warns once** | §4.7 |
 | `.op` | operating point | ✅ | §4.4 |
 | `.dc` | DC sweep | ✅ nested, parallel | §4.4 |
@@ -412,11 +412,14 @@ values and `.func` calls, and only the taken branch is collected — a `.model`,
 branch that cannot run is not evaluated, so a dead branch may reference names that
 were never defined.
 
-Two refusals worth stating:
+Inside a `.subckt` the condition is evaluated **per instance**, at expansion, so a
+wrapper's `.if (self_heating==1)` switch selects for each instance from its own
+parameters (§4.11 is what made that possible — before it, the condition could only
+have been read once, against the definition's defaults, which is why it used to be
+refused).
 
-- **`.if` inside a `.subckt` is an error.** Its condition would be evaluated once,
-  against the subcircuit's *default* parameters, and then apply to every instance
-  — a wrong answer per instance rather than a missing feature.
+One refusal worth stating:
+
 - **A condition over an undefined name is an error**, not `false`. `nope == 1`
   compares NaN against 1 and yields a perfectly finite `false`, so a misspelled
   corner variable would have silently selected the other branch. Names are checked
@@ -507,6 +510,13 @@ instance resolves them in order: enclosing scope, then header defaults with the
 call's overrides in place *before* anything reads them, then the body's `.param`
 assignments. Two instances of one definition resolve independently.
 
+Once the parameters resolve per instance, so can a **`.if` in the body** — the
+condition sees that instance's values, which is how a wrapper's switches — a
+self-heating flag, a parasitics flag — select per instance. It used to be an error
+for exactly the reason this section removes. A dead branch is dropped whole for that instance: its elements
+and its `.model` cards never reach the netlist, and it may name parameters that do
+not exist.
+
 Two refusals came with it, both at the same seam:
 
 - **An undeclared instance parameter is an error.** `X1 p q rdiv nn=2` used to add
@@ -546,20 +556,39 @@ leading `//` comment — not from the extension. A SPICE deck may therefore
 | `X1 (a b) mycell w=1u` | `X1 a b mycell w=1u` |
 | `X1 a b mycell` (bare nodes) | same — both spellings are read |
 | `dc1 dc`, `tr1 tran stop=1n`, `ac1 ac`, `n1 noise` | `.op`, `.tran … 1n`, `.ac …`, `.noise …` |
+| `subckt s (a b)` … `ends s`, and `inline subckt` | `.subckt s a b` … `.ends s` |
+| `parameters w=1u` **inside** a subcircuit | hoisted onto the `.subckt` header, where a call can override it |
+| `if (c) { … } else if (d) { … } else { … }` | `.if (c)` … `.elseif (d)` … `.else` … `.endif` |
+| `model nch diode is=1e-16` | `.model nch diode (is=1e-16)` |
+| `real f(real x) { return x/2; }` | `.func f(x) = {x/2}` |
 | `include "f"` / `include "f" section=s` | `.include "f"` / `.lib "f" s` |
 | `vdd!`, `global vdd!` | a net, plus `.global vdd!` |
 | `opt1 options temp=85` | `.temp 85` |
+| `R1 (a b) resistor`, `rload (a b) resistor` | `R1 …`, `rload …` — a name is never given a second letter |
 | a trailing `\\` or leading `+` continuation, `//` and column-1 `*` comments | joined / stripped |
 
 Failure modes, same three as above:
 
 | construct | mode |
 |---|---|
-| `subckt` / `inline subckt` / `ends`, `model`, `if`/`else`, `function` | **error** naming the construct — not read yet, so a flat deck is the current surface |
+| A **binned** `model` (a braced body of numbered sections) | **error** — bin selection by geometry is not implemented, and guessing a bin is a wrong answer with nothing to read |
+| A function body that is not a single `return <expr>;` | **error** — local variables and control flow have no `.func` equivalent, and translating half of one would drop the rest in silence |
 | Any other unreadable statement | **error** with the line and the two forms it accepts |
 | `ahdl_include "m.va"` | **warn**, skipped — Verilog-A needs an out-of-band OpenVAF compile and a `.osdi` line, so the devices it defines would otherwise be unknown models |
 | `save`, `assert`, `statistics`, `montecarlo`, `sweep`, `alter`, `altergroup`, `check`, `info`, `shell` | **warn**, skipped — they do not change a single solve |
 | `options` keys other than `temp` | **warn** (as `.options` above) |
+
+Two of those rows are worth a sentence:
+
+- **Hoisting.** Spectre declares a subcircuit's interface parameters in the body;
+  SPICE declares them on the header. They mean the same thing — overridable
+  defaults, resolved per instance (§4.11) — so the parameters of a block are moved
+  to its `.subckt` line and the line they came from becomes a comment. Order is
+  kept, because a later one may be an expression over an earlier one.
+- **Conditionals keep their lines.** A control-flow line is its own statement, so
+  the statements inside a block still land on the lines they were written on. That
+  is also why `statistics { … }` — a *data* block — is joined into one statement
+  and skipped whole, rather than leaking its contents.
 
 Nothing here is SILENT: a statement is either transliterated, reported as
 skipped, or refused.
@@ -568,9 +597,9 @@ skipped, or refused.
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **Spectre `subckt` / `model` / `if`** — a foundry library is nothing but these,
-   so the flat surface in §5 does not yet read one. Each has an exact SPICE
-   equivalent (`.subckt`, `.model`, `.if`), which is what the front end will emit.
+1. **`m=` instance multiplier**, on a subcircuit instance and on a device. A
+   wrapper passes it through and we refuse it, which is safe but stops a deck that
+   uses it at all.
 2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.

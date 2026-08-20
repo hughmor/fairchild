@@ -659,7 +659,9 @@ file).
 An included file may be written in the **Spectre** dialect (`.scs`) rather than
 SPICE, and so may the top-level deck — the dialect is detected from the content of
 each file, so you never choose a mode and a SPICE deck may pull in a Spectre model
-library. Spectre statements are transliterated to their SPICE equivalents, which is
+library. Subcircuits (`subckt`/`inline subckt`, with their `parameters` hoisted to
+the header), `model` cards, `if`/`else` blocks and `real f(){return …;}` functions
+all read across. Spectre statements are transliterated to their SPICE equivalents, which is
 why everything else in this guide still applies unchanged; the surface currently
 read, and what it refuses, is tabulated in
 [`spice_support.md` §5](spice_support.md).
@@ -727,11 +729,25 @@ were never defined.
 .endif
 ```
 
-Two things are refused rather than guessed:
+Inside a `.subckt` the condition is evaluated **per instance**, against that
+instance's parameters — so a switch on a subcircuit parameter selects for each
+instance, and a dead branch is dropped whole for that instance:
 
-- **`.if` inside a `.subckt`.** The condition would be evaluated once against the
-  subcircuit's *default* parameters and then apply to every instance. Select
-  outside the definition, or give the instances different models.
+```spice
+.subckt rsel a b mode=0
+.if (mode == 1)
+.param r=2k
+.else
+.param r=1k
+.endif
+R1 a b {r}
+.ends
+Xa in 0 rsel mode=1     ← 2 kΩ
+Xb in 0 rsel            ← 1 kΩ
+```
+
+One thing is refused rather than guessed:
+
 - **A condition over an undefined name.** `nope==1` would compare NaN against 1
   and yield a perfectly ordinary `false`, so a misspelled corner variable would
   quietly select the other branch. Names are checked before the condition is
