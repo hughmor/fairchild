@@ -191,8 +191,10 @@ fn a_laser_does_not_fight_the_wave_reflected_back_into_it() {
 }
 
 /// With nothing sending light back, an unbound backward wire still reads
-/// exactly zero — `stamp_gmin` leaves the row at `gmin·V = 0`. That is what
-/// makes leaving it alone safe rather than merely correct in the hard case.
+/// exactly zero: nothing stamps into that node's row, and `stamp_gmin` pins
+/// such a row at `V = 0`. That is what makes leaving it alone safe rather than
+/// merely correct in the hard case — and it is exactly zero rather than
+/// gmin-sized noise only because the pin is a unit one; see issue #47.
 #[test]
 fn an_undriven_backward_wire_is_still_zero() {
     let r = run("\

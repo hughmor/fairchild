@@ -14,8 +14,9 @@ use crate::mna::MnaMatrix;
 /// deck: the returned power came out 4x low, with no diagnostic.
 ///
 /// Leaving the wire alone is both correct and simpler.  When nothing else
-/// drives it — a laser straight into a photodetector — `stamp_gmin` leaves the
-/// row at `gmin·V = 0`, so it still reads exactly zero.
+/// drives it — a laser straight into a photodetector — nothing stamps into that
+/// node's row at all, and `stamp_gmin` pins such a row at `V = 0`, so it still
+/// reads exactly zero.
 fn emitted_wires(wpc: usize) -> usize {
     if wpc == 5 {
         3

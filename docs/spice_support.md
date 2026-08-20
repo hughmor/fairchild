@@ -20,10 +20,9 @@ Three failure modes, and only one of them is dangerous:
 | **SILENT** | Runs, says nothing, and the answer may be wrong. **These are bugs.** |
 
 The good news up front: every unimplemented element letter and every
-unimplemented dot-command is a hard **error**. The silent set was small, and §4
-records it — **all five silent items are now fixed**; the section is kept as the
-record of what they were, because each one is a shape of bug worth recognising
-again.
+unimplemented dot-command is a hard **error**. The silent set is recorded in §4 —
+**every item in it is now fixed** — and the section is kept as the record of what
+they were, because each one is a shape of bug worth recognising again.
 
 ---
 
@@ -36,7 +35,7 @@ fairchild does with a syntactically plausible line using that letter.
 |---|---|---|---|
 | `A` | XSPICE code model | ❌ | error |
 | `B` | behavioural (arbitrary) source | ✅ `V=`/`I=` expression (unbraced only) | — |
-| `C` | capacitor | ✅ + ESR/ESL parasitics | — |
+| `C` | capacitor | ✅ + ESR/ESL parasitics, `m=` | — |
 | `D` | diode | ✅ | — |
 | `E` | VCVS — linear voltage-controlled voltage source | ✅ | — |
 | `F` | CCCS — current-controlled current source | ✅ | — |
@@ -45,13 +44,13 @@ fairchild does with a syntactically plausible line using that letter.
 | `I` | independent current source | ✅ | — |
 | `J` | JFET | ❌ | error |
 | `K` | mutual inductance | ✅ | — |
-| `L` | inductor | ✅ + ESR parasitic | — |
+| `L` | inductor | ✅ + ESR parasitic, `m=` | — |
 | `M` | MOSFET | ✅ Level 1 only — `LEVEL≠1` warns loudly | — |
 | `N` | numerical device (NUMD, NBJT) | ❌ | error |
 | `O` | lossy transmission line (LTRA) | ❌ | error |
 | `P` | coupled multiconductor line | ❌ | error |
 | `Q` | BJT | ✅ Gummel-Poon L1 | — |
-| `R` | resistor | ✅ + ESR/ESL parasitics | — |
+| `R` | resistor | ✅ + parallel-C parasitic, `m=` | — |
 | `S` | voltage-controlled switch | ✅ | — |
 | `T` | lossless transmission line | ✅ | — |
 | `U` | uniform RC line (URC) | ❌ | error |
@@ -100,7 +99,7 @@ expression source as a `B` element instead.
 | `.global` | global nets | ✅ (a port of the same name is refused) | §4.10 |
 | `.csparam` | constant → control variable | ❌ | error |
 | `.table` | lookup table | ❌ | error |
-| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time (not inside `.subckt`) | §4.8 |
+| `.if` / `.elseif` / `.else` / `.endif` | netlist conditionals | ✅ resolved at parse time; per instance inside a `.subckt` | §4.8, §4.11 |
 | `.control` / `.endc` | interactive control block | ⚠️ skipped, **warns once** | §4.7 |
 | `.op` | operating point | ✅ | §4.4 |
 | `.dc` | DC sweep | ✅ nested, parallel | §4.4 |
@@ -413,11 +412,14 @@ values and `.func` calls, and only the taken branch is collected — a `.model`,
 branch that cannot run is not evaluated, so a dead branch may reference names that
 were never defined.
 
-Two refusals worth stating:
+Inside a `.subckt` the condition is evaluated **per instance**, at expansion, so a
+wrapper's `.if (self_heating==1)` switch selects for each instance from its own
+parameters (§4.11 is what made that possible — before it, the condition could only
+have been read once, against the definition's defaults, which is why it used to be
+refused).
 
-- **`.if` inside a `.subckt` is an error.** Its condition would be evaluated once,
-  against the subcircuit's *default* parameters, and then apply to every instance
-  — a wrong answer per instance rather than a missing feature.
+One refusal worth stating:
+
 - **A condition over an undefined name is an error**, not `false`. `nope == 1`
   compares NaN against 1 and yields a perfectly finite `false`, so a misspelled
   corner variable would have silently selected the other branch. Names are checked
@@ -482,6 +484,99 @@ than wrong.
 
 ---
 
+### 4.11 A subcircuit parameter was resolved once, for the default — FIXED
+
+```spice
+.subckt rdiv a b n=1
+.param rtot={1000*n}      ← evaluated when the DEFINITION was read, with n=1
+R1 a b {rtot}
+.ends
+X1 in 0 rdiv n=2          ← 1 kΩ, not 2 kΩ. No warning, no error, wrong current.
+```
+
+A `.subckt` is the only construct whose parameters have more than one answer: one
+per instance. Both were collected as **numbers** when the definition was read —
+header defaults through `parse_value`, body `.param` lines evaluated against the
+defaults then and there — so every expression froze at the default. An instance
+that overrode `n` got its own `n` and everybody else's `rtot`.
+
+The same freeze made the honest half of the seam impossible: a header default
+*written* as an expression (`.subckt r a b w=1u rsh='100/w'`) could not be a number
+at collection time, so it was a hard error — which is what a foundry wrapper looks
+like from the first line.
+
+**Fixed.** A definition now keeps its parameters as **source text**, and each
+instance resolves them in order: enclosing scope, then header defaults with the
+call's overrides in place *before* anything reads them, then the body's `.param`
+assignments. Two instances of one definition resolve independently.
+
+Once the parameters resolve per instance, so can a **`.if` in the body** — the
+condition sees that instance's values, which is how a wrapper's switches — a
+self-heating flag, a parasitics flag — select per instance. It used to be an error
+for exactly the reason this section removes. A dead branch is dropped whole for that instance: its elements
+and its `.model` cards never reach the netlist, and it may name parameters that do
+not exist.
+
+Two refusals came with it, both at the same seam:
+
+- **An undeclared instance parameter is an error.** `X1 p q rdiv nn=2` used to add
+  `nn` to the scope, leave `n` at its default, and report a clean answer for a
+  circuit nobody described. The error names the parameter and lists what the
+  definition declares.
+- **Overriding a body `.param` is an error**, not a silent choice between
+  overriding and recomputing. The message says which line computes it and that
+  moving it to the header makes it overridable.
+
+```spice
+X1 p q rdiv n=2*3         ← also now an error: an unreadable instance-parameter
+                            value used to be dropped, leaving the default in place
+```
+
+---
+
+### 4.12 An unrecognised parameter on a passive line was dropped — FIXED
+
+```spice
+R1 in 0 1k tc1=0.001      ← the tempco vanished; the resistor was 1 kΩ at every T
+C1 in 0 1n m=3            ← the multiplier vanished; the capacitor was 1 nF
+R2 in 0 1k esr=notanumber ← the value did not parse, so the key vanished too
+```
+
+`R`, `L` and `C` lines accept `key=value` parasitics, and the loop that read them
+matched five keys with `_ => {}` under an `if let Ok(val)`. So an unknown key was
+dropped, and so was a key whose value did not parse. The element stayed at its bare
+value and the run reported a clean answer for a different component — and the error
+is exactly the size of the factor that went missing.
+
+**Fixed.** An unrecognised key and an unreadable value are both errors, naming the
+key and listing what is accepted there. `m` is now one of the accepted ones.
+
+**`m=` — the instance multiplier — lands here**, being the parameter that made the
+drop worth finding. `m` means *m of this in parallel*, and it is applied exactly
+rather than by replication:
+
+| | with `m` |
+|---|---|
+| resistor, inductor | value ÷ m |
+| capacitor | value × m |
+| DC current source, current-mode `B` | value × m |
+| voltage source | unchanged — m in parallel hold the same voltage |
+| a compiled (OSDI) device | `m` passed down as its own instance parameter |
+
+On a **subcircuit instance** the same rule applies to everything the body
+flattened to. Two refusals rather than a guess:
+
+- **An element with no exact scaling** — a diode or BJT (which scale by *area*, a
+  model parameter here), a MOSFET (which scales by *width*, and m fingers in
+  parallel is not the same circuit as m×W), a switch, a transmission line, a
+  non-DC source waveform. The message names the element and why.
+- **A definition that declares `m` itself** keeps it: a wrapper that takes `m` and
+  forwards it to the device inside is doing the scaling itself, and doing it here
+  as well would double the factor. So a declared `m` is an ordinary parameter and
+  nothing is scaled.
+
+---
+
 ## 5. The Spectre dialect
 
 Foundry model libraries are written in Spectre (`.scs`), so fairchild reads that
@@ -504,20 +599,39 @@ leading `//` comment — not from the extension. A SPICE deck may therefore
 | `X1 (a b) mycell w=1u` | `X1 a b mycell w=1u` |
 | `X1 a b mycell` (bare nodes) | same — both spellings are read |
 | `dc1 dc`, `tr1 tran stop=1n`, `ac1 ac`, `n1 noise` | `.op`, `.tran … 1n`, `.ac …`, `.noise …` |
+| `subckt s (a b)` … `ends s`, and `inline subckt` | `.subckt s a b` … `.ends s` |
+| `parameters w=1u` **inside** a subcircuit | hoisted onto the `.subckt` header, where a call can override it |
+| `if (c) { … } else if (d) { … } else { … }` | `.if (c)` … `.elseif (d)` … `.else` … `.endif` |
+| `model nch diode is=1e-16` | `.model nch diode (is=1e-16)` |
+| `real f(real x) { return x/2; }` | `.func f(x) = {x/2}` |
 | `include "f"` / `include "f" section=s` | `.include "f"` / `.lib "f" s` |
 | `vdd!`, `global vdd!` | a net, plus `.global vdd!` |
 | `opt1 options temp=85` | `.temp 85` |
 | `ahdl_include "m.va"` | `.va "m.va"` — the Verilog-A source is compiled and cached on the way in (user-guide §14.2) |
+| `R1 (a b) resistor`, `rload (a b) resistor` | `R1 …`, `rload …` — a name is never given a second letter |
 | a trailing `\\` or leading `+` continuation, `//` and column-1 `*` comments | joined / stripped |
 
 Failure modes, same three as above:
 
 | construct | mode |
 |---|---|
-| `subckt` / `inline subckt` / `ends`, `model`, `if`/`else`, `function` | **error** naming the construct — not read yet, so a flat deck is the current surface |
+| A **binned** `model` (a braced body of numbered sections) | **error** — bin selection by geometry is not implemented, and guessing a bin is a wrong answer with nothing to read |
+| A function body that is not a single `return <expr>;` | **error** — local variables and control flow have no `.func` equivalent, and translating half of one would drop the rest in silence |
 | Any other unreadable statement | **error** with the line and the two forms it accepts |
 | `save`, `assert`, `statistics`, `montecarlo`, `sweep`, `alter`, `altergroup`, `check`, `info`, `shell` | **warn**, skipped — they do not change a single solve |
 | `options` keys other than `temp` | **warn** (as `.options` above) |
+
+Two of those rows are worth a sentence:
+
+- **Hoisting.** Spectre declares a subcircuit's interface parameters in the body;
+  SPICE declares them on the header. They mean the same thing — overridable
+  defaults, resolved per instance (§4.11) — so the parameters of a block are moved
+  to its `.subckt` line and the line they came from becomes a comment. Order is
+  kept, because a later one may be an expression over an earlier one.
+- **Conditionals keep their lines.** A control-flow line is its own statement, so
+  the statements inside a block still land on the lines they were written on. That
+  is also why `statistics { … }` — a *data* block — is joined into one statement
+  and skipped whole, rather than leaking its contents.
 
 Nothing here is SILENT: a statement is either transliterated, reported as
 skipped, or refused.
@@ -526,15 +640,15 @@ skipped, or refused.
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **Spectre `subckt` / `model` / `if`** — a foundry library is nothing but these,
-   so the flat surface in §5 does not yet read one. Each has an exact SPICE
-   equivalent (`.subckt`, `.model`, `.if`), which is what the front end will emit.
-2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-3. **Model binning and `level=` routing** — what actually stands between this and
+2. **Model binning and `level=` routing** — what actually stands between this and
    a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
    silent wrong answer, so geometry outside every bin must be a hard error.
+3. **`m=` on the elements that refuse it** — a MOSFET wants `nf`-style finger
+   semantics and a junction device wants area, so each needs a decision rather
+   than a factor.
 4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document

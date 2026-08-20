@@ -2047,6 +2047,348 @@ R1 a b 1k
         );
     }
 
+    /// The one resistance in a netlist, for the parameter-resolution tests below.
+    fn sole_resistance(net: &crate::Netlist) -> f64 {
+        let mut found = net.elements.iter().filter_map(|el| match el {
+            Element::Resistor { resistance, .. } => Some(*resistance),
+            _ => None,
+        });
+        let r = found.next().expect("no resistor in the netlist");
+        assert!(found.next().is_none(), "expected exactly one resistor");
+        r
+    }
+
+    /// A body `.param` that reads a header parameter must be recomputed for each
+    /// instance. It used to be evaluated once, when the definition was collected,
+    /// so it froze at the *default* — an instance overriding `n` got the default's
+    /// `rtot` and the deck reported a clean answer for a circuit nobody described.
+    #[test]
+    fn subckt_body_param_follows_the_call_override() {
+        let net = parse_spice(
+            "* body param over a header param\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rdiv n=2\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let resistance = sole_resistance(&net);
+        assert!(
+            (resistance - 2000.0).abs() < 1e-9,
+            "body .param froze at the default: got {resistance}, want 2000"
+        );
+    }
+
+    /// A header default may be an expression over an earlier header parameter,
+    /// and the override must be in place before it is read.
+    #[test]
+    fn subckt_header_default_may_be_an_expression() {
+        let net = parse_spice(
+            "* header default over another header param\n\
+             .subckt rdiv a b n=1 rtot='1000*n'\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rdiv n=3\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let resistance = sole_resistance(&net);
+        assert!(
+            (resistance - 3000.0).abs() < 1e-9,
+            "got {resistance}, want 3000"
+        );
+    }
+
+    /// Two instances of the same definition must not share a resolved parameter.
+    #[test]
+    fn two_instances_resolve_their_own_parameters() {
+        let net = parse_spice(
+            "* same definition, different overrides\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             Xa in 0 rdiv n=2\n\
+             Xb in 0 rdiv n=5\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let mut got: Vec<f64> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!((got[0] - 2000.0).abs() < 1e-9, "{got:?}");
+        assert!((got[1] - 5000.0).abs() < 1e-9, "{got:?}");
+    }
+
+    /// `m=` on a subcircuit instance means m of it in parallel. Scaled exactly
+    /// rather than by replication: conductance and capacitance add, inductance
+    /// divides.
+    #[test]
+    fn m_on_a_subcircuit_instance_scales_its_elements() {
+        let net = parse_spice(
+            "* multiplier\n\
+             .subckt rc a b\n\
+             R1 a b 1k\n\
+             C1 a b 1n\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rc m=4\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        let c = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Capacitor { capacitance, .. } => Some(*capacitance),
+                _ => None,
+            })
+            .unwrap();
+        assert!((r - 250.0).abs() < 1e-9, "r={r}");
+        assert!((c - 4e-9).abs() < 1e-18, "c={c}");
+    }
+
+    /// A definition that declares `m` owns it: a wrapper taking `m` and forwarding
+    /// it to the device inside is doing the scaling itself, and doing it here as
+    /// well would double the factor.
+    #[test]
+    fn a_declared_m_is_the_decks_own_parameter() {
+        let net = parse_spice(
+            "* the deck scales it itself\n\
+             .subckt rr a b m=1\n\
+             R1 a b {1000/m}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rr m=2\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            (r - 500.0).abs() < 1e-9,
+            "the multiplier was applied twice: r={r}, want 500"
+        );
+    }
+
+    /// A factor quietly ignored is a wrong answer exactly the size of the factor,
+    /// so an element with no exact scaling is named instead.
+    #[test]
+    fn m_over_an_element_that_cannot_scale_is_refused() {
+        let err = parse_spice(
+            "* m over a diode\n\
+             .subckt d1 a b\n\
+             D1 a b dmod\n\
+             .ends\n\
+             .model dmod D IS=1e-14\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 d1 m=2\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("d1"), "must name the element: {msg}");
+        assert!(msg.contains("area"), "must say why: {msg}");
+    }
+
+    /// `m=` on a passive line is the same multiplier, and exact there too.
+    #[test]
+    fn m_on_a_passive_line_scales_it() {
+        let net = parse_spice(
+            "* device multiplier\n\
+             V1 in 0 DC 1\n\
+             R1 in 0 1k m=4\n\
+             C1 in 0 1n m=3\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        let c = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Capacitor { capacitance, .. } => Some(*capacitance),
+                _ => None,
+            })
+            .unwrap();
+        assert!((r - 250.0).abs() < 1e-9, "r={r}");
+        assert!((c - 3e-9).abs() < 1e-18, "c={c}");
+    }
+
+    /// An unrecognised `k=v` on a passive line was dropped in silence, which left
+    /// the element at its bare value — a tempco or a multiplier that goes missing
+    /// is exactly the size of the error it causes.
+    #[test]
+    fn an_unknown_parameter_on_a_passive_line_is_refused() {
+        for deck in [
+            "* tempco\nV1 in 0 DC 1\nR1 in 0 1k tc1=0.001\n.op\n.end\n",
+            "* unreadable value\nV1 in 0 DC 1\nC1 in 0 1n esr=notanumber\n.op\n.end\n",
+        ] {
+            let err = parse_spice(deck).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("line 3"), "{msg}");
+        }
+    }
+
+    /// A `.if` in a subcircuit body is evaluated per instance, against that
+    /// instance's parameters. It used to be refused outright, because collecting
+    /// it would have evaluated the condition once against the definition's
+    /// defaults — which is what a wrapper's `shmod=0` switch cannot survive.
+    #[test]
+    fn a_conditional_in_a_subckt_body_selects_per_instance() {
+        let net = parse_spice(
+            "* per-instance switch\n\
+             .subckt rsel a b mode=0\n\
+             .if (mode == 1)\n\
+             .param r=2k\n\
+             .else\n\
+             .param r=1k\n\
+             .endif\n\
+             R1 a b {r}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             Xa in 0 rsel mode=1\n\
+             Xb in 0 rsel mode=0\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let mut got: Vec<f64> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!((got[0] - 1000.0).abs() < 1e-9, "{got:?}");
+        assert!((got[1] - 2000.0).abs() < 1e-9, "{got:?}");
+    }
+
+    /// A dead branch is dropped whole: its elements and its `.model` cards never
+    /// reach the netlist, and it may name parameters that do not exist.
+    #[test]
+    fn a_dead_branch_in_a_subckt_body_is_dropped_whole() {
+        let net = parse_spice(
+            "* dead branch\n\
+             .subckt rsel a b mode=0\n\
+             .if (mode == 1)\n\
+             R1 a b {nonexistent_parameter}\n\
+             .else\n\
+             R2 a b 1k\n\
+             .endif\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rsel\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["x1.r2"], "{names:?}");
+    }
+
+    /// An instance parameter the definition does not declare cannot be applied,
+    /// and applying nothing silently is how a typo runs the default.
+    #[test]
+    fn an_undeclared_instance_parameter_is_refused() {
+        let err = parse_spice(
+            "* typo in an instance parameter\n\
+             .subckt rdiv a b n=1\n\
+             R1 a b {1000*n}\n\
+             .ends\n\
+             X1 p q rdiv nn=2\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("nn"), "must name the parameter: {msg}");
+        assert!(msg.contains('n'), "must name what is declared: {msg}");
+    }
+
+    /// A body `.param` is computed, not an interface: overriding it and
+    /// recomputing it are different circuits, so the ambiguity is refused rather
+    /// than resolved in whichever order the code happens to run.
+    #[test]
+    fn overriding_a_computed_param_is_refused() {
+        let err = parse_spice(
+            "* override a body .param\n\
+             .subckt rdiv a b n=1\n\
+             .param rtot={1000*n}\n\
+             R1 a b {rtot}\n\
+             .ends\n\
+             X1 p q rdiv rtot=5k\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("rtot"), "{msg}");
+        assert!(
+            msg.contains(".param"),
+            "must say where it comes from: {msg}"
+        );
+    }
+
+    /// An instance parameter whose value cannot be read used to be dropped, which
+    /// left the callee's default in place.
+    #[test]
+    fn an_unreadable_instance_parameter_value_is_refused() {
+        let err = parse_spice(
+            "* unbraced expression on an instance line\n\
+             .subckt rdiv a b n=1\n\
+             R1 a b {1000*n}\n\
+             .ends\n\
+             X1 p q rdiv n=2*3\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("2*3"),
+            "must quote what it could not read: {msg}"
+        );
+    }
+
     #[test]
     fn subckt_param_expression_undefined_errors() {
         let err = parse_spice(
@@ -2611,8 +2953,15 @@ Xtop in out chain
                 "undefined parameter",
             ),
             (
-                "* in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.else\nR1 a b 2k\n.endif\n.ends\n                 X1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
-                "inside a .subckt",
+                // Inside a `.subckt` the same faults are caught at expansion,
+                // where the condition is evaluated. An unterminated one would
+                // otherwise drop the rest of the definition.
+                "* unterminated in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "unterminated",
+            ),
+            (
+                "* stray endif in subckt\n.subckt s a b\nR1 a b 1k\n.endif\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "without a matching .if",
             ),
         ] {
             let err = parse_spice(deck).unwrap_err();

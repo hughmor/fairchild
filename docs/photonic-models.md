@@ -167,14 +167,55 @@ trip loss, round trip phase, and return loss at the launch port, and gives you
 those exactly; distributed backscatter and intra-device forward↔backward
 coupling are not represented.
 
-**Who is allowed to drive a backward wire.** Only one device may. This matters
-more than it sounds, because the failure is silent: if two devices both drive
-the same wire, the block is rank-deficient and the solve returns a weighted
-average of the two answers with no error. A `fc_cw_laser` *drives* its port's
-backward wires to zero — a perfect absorber, which is a reasonable model of a
-laser but is still an opinion. Put a laser at the far end of a reflecting chain
-and it fights the waveguide for that node. Either launch with plain `V` sources
-on the forward wires, or terminate the return path somewhere the laser is not.
+**A wire nobody drives reads exactly zero.** Not "nearly zero" — a node no
+element stamps into is pinned at `V = 0` outright rather than floated on `gmin`,
+so an unconnected optical port stays at a hard zero through a whole transient.
+That matters more than it sounds: `gmin` is twelve orders below the couplings a
+device writes into such a node's column when it *reads* the node without
+conducting to it, so the factorisation used to hand back roundoff amplified by
+`1/gmin`. Invisible while the wire is lit; the entire signal once it is dark,
+and enough to stop Newton converging at any timestep.
+
+**Who is allowed to drive a backward wire.** Exactly one device may, and the
+simulator now enforces it: two devices pinning the same wire is a hard error
+naming both elements and the wire. That check exists because the failure was
+otherwise silent — a rank-deficient optical block does not make LU fail, it
+makes it return a `gmin`-weighted average of the two assertions. The error also
+fires on forward wires and on non-optical potentials; it is a property of the
+matrix, not of the discipline.
+
+**Which wire each device owns.** Every optical port plays one of two roles, and
+the role fixes who drives what:
+
+| Role | Drives | Reads |
+|---|---|---|
+| `in` (light enters here) | `re_bw`, `im_bw` | `re_fw`, `im_fw`, `wl` |
+| `out` (light leaves here) | `re_fw`, `im_fw`, `wl` | `re_bw`, `im_bw` |
+
+Wiring an `in` port onto another `in` port — or an `out` onto an `out` — is the
+mistake this catches. The full accounting, which is an audit rather than a
+design statement, because each of these was checked one device at a time:
+
+| Device | Ports | Notes |
+|---|---|---|
+| `fc_waveguide`, `fc_pn_ps`, `fc_thermal_ps`, `fc_pn_th_ps`, `fc_mzm`, `fc_grating_coupler` | `in`, `out` | The shared `OpticalSegment`; both directions pay the same loss and phase. |
+| `fc_splitter` | `in`, `out`×2 | Backward fields from both outputs recombine into the input. |
+| `fc_dcoupler` | `in`×2, `out`×2 | Same coupling matrix each way; only the outputs carry a λ tag. |
+| `fc_mux` | bus `out`, channels `in` | Backward light on the bus leaves through the channel port of its own slot. |
+| `fc_demux` | bus `in`, channels `out` | Backward light at a channel port returns into that slot of the bus. |
+| `fc_circulator` | port 1 `in`, ports 2–3 `out` | See [`fc_circulator`](#fc_circulator--3-port-bidirectional-circulator). |
+| `fc_facet` | one `in` | The only device that turns forward light into backward light. |
+| `fc_cw_laser`, `fc_driven_laser` | `out` (fields and λ only) | Absorbs what comes back; does **not** assert the wire is dark. |
+| `fc_photodetector` | `in`, reads only | Owns no optical wire at all. Both directions land in one photocurrent. |
+| `fc_awgr`, `fc_optical_2x2` | — | Refuse `enable_bidirectional=1` outright; the backward fields would need their own routing. |
+
+Two of these were wrong until the audit and are worth naming, because the
+symptom in both cases was missing power rather than a diagnostic. `fc_mux` and
+`fc_demux` stamped their backward pair in the forward direction, so a
+reflection anywhere past one read as zero at every channel port. And
+`fc_circulator` used a port-relative convention in which every port behaved
+like an `in` port, so it could not be wired into a chain at all — which is the
+one thing a circulator is for.
 
 ### One physical device, all the modes
 
@@ -541,27 +582,45 @@ X<name>  p1  p2  p3  fc_circulator
 Routes light cyclically: incoming at port 1 exits port 2, incoming at
 port 2 exits port 3, incoming at port 3 exits port 1. **Requires
 `enable_bidirectional=1`** — without it the device errors out on
-instantiation (a circulator is meaningless in unidirectional mode).
+instantiation (two of the three routes ride backward wires a unidirectional
+bundle does not have).
 
-Wire convention at every port: `re_fw` / `im_fw` flow INWARD (incoming
-to the device); `re_bw` / `im_bw` flow OUTWARD (leaving toward whatever
-is connected). λ is tied across all three ports.
+Wire convention is the along-chain one, so the circulator composes like any
+other device: port 1 plays an `in` role and ports 2 and 3 play `out` roles, per
+the table in [Bidirectional propagation](#bidirectional-propagation). λ is tied
+from port 1 onto the other two.
 
-Typical use — round-trip monitoring of a device-under-test (DUT):
+Typical use — round-trip monitoring of a device-under-test (DUT). Wire it as a
+chain and the directions follow:
 
+```spice
+.options enable_bidirectional=1
+.optical_port src
+.optical_port p1
+.optical_port p2
+.optical_port p3
+.optical_port out
+
+Xl  src fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xin src p1 fc_waveguide L_um=250
+Xc  p1 p2 p3 fc_circulator
+Xdw p2 dut fc_waveguide L_um=500     $ out to the DUT and back
+Xm  dut fc_facet reflectance=0.3
+Xow p3 out fc_waveguide L_um=750     $ the return, on `out`'s forward wires
+Xpd out pd_a 0 fc_photodetector responsivity=0.8
 ```
-[laser] → port 1 (drive p1_re_fw_*)
-port 2 ↔ [DUT]   (forward stimulus + reflected return)
-port 3 → [PD]    (PD reads p3_re_bw_*: only the reflection back from p2)
-```
 
-> **This convention is port-relative, and the waveguide's is not.** A
-> `fc_waveguide` calls `fw` the direction along the chain, the same at both of
-> its ports; the circulator calls `fw` "into me" at all three of its own. Wiring
-> one straight onto the other therefore connects an inward wire to an
-> along-chain wire, which is a different physical field. Drive and read the
-> circulator's wires by name, as in the sketch above, rather than assuming a
-> chain composes through it.
+The reflection reaches the detector on `out`'s **forward** wires, because from
+port 3 onward it is simply travelling along the chain again.
+
+Until the audit in #32 this convention was port-relative — `fw` meant "into me"
+at all three ports, which made every port behave like an `in` port. Wiring port
+2 or 3 onward into anything then put two drivers on that bundle's backward
+wires and none on its forward ones: rank-deficient, silently averaged, and the
+routed light never left the circulator. Decks that drove the old wires by name
+need the ports they read swapped: what used to arrive on `p2_re_bw_*` and
+`p3_re_bw_*` now arrives on `p2_re_fw_*` and `p3_re_fw_*`, and what used to be
+launched on `p1_re_fw_*` still is.
 
 No insertion loss or isolation parameters at this tier — the model is
 an ideal 3-port circulator.
