@@ -2062,6 +2062,71 @@ R1 a b 1k
         assert!((got[1] - 5000.0).abs() < 1e-9, "{got:?}");
     }
 
+    /// A `.if` in a subcircuit body is evaluated per instance, against that
+    /// instance's parameters. It used to be refused outright, because collecting
+    /// it would have evaluated the condition once against the definition's
+    /// defaults — which is what a wrapper's `shmod=0` switch cannot survive.
+    #[test]
+    fn a_conditional_in_a_subckt_body_selects_per_instance() {
+        let net = parse_spice(
+            "* per-instance switch\n\
+             .subckt rsel a b mode=0\n\
+             .if (mode == 1)\n\
+             .param r=2k\n\
+             .else\n\
+             .param r=1k\n\
+             .endif\n\
+             R1 a b {r}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             Xa in 0 rsel mode=1\n\
+             Xb in 0 rsel mode=0\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let mut got: Vec<f64> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!((got[0] - 1000.0).abs() < 1e-9, "{got:?}");
+        assert!((got[1] - 2000.0).abs() < 1e-9, "{got:?}");
+    }
+
+    /// A dead branch is dropped whole: its elements and its `.model` cards never
+    /// reach the netlist, and it may name parameters that do not exist.
+    #[test]
+    fn a_dead_branch_in_a_subckt_body_is_dropped_whole() {
+        let net = parse_spice(
+            "* dead branch\n\
+             .subckt rsel a b mode=0\n\
+             .if (mode == 1)\n\
+             R1 a b {nonexistent_parameter}\n\
+             .else\n\
+             R2 a b 1k\n\
+             .endif\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rsel\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = net
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Resistor { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["x1.r2"], "{names:?}");
+    }
+
     /// An instance parameter the definition does not declare cannot be applied,
     /// and applying nothing silently is how a typo runs the default.
     #[test]
@@ -2687,8 +2752,15 @@ Xtop in out chain
                 "undefined parameter",
             ),
             (
-                "* in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.else\nR1 a b 2k\n.endif\n.ends\n                 X1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
-                "inside a .subckt",
+                // Inside a `.subckt` the same faults are caught at expansion,
+                // where the condition is evaluated. An unterminated one would
+                // otherwise drop the rest of the definition.
+                "* unterminated in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "unterminated",
+            ),
+            (
+                "* stray endif in subckt\n.subckt s a b\nR1 a b 1k\n.endif\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "without a matching .if",
             ),
         ] {
             let err = parse_spice(deck).unwrap_err();

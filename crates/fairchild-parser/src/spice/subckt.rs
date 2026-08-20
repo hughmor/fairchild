@@ -14,6 +14,9 @@ type CollectDefsResult = (
     HashSet<String>,
 );
 type SubcktHeader = (String, Vec<String>, Vec<(String, String)>);
+/// What one instance's body walk produced: the lines that survived its
+/// conditionals, and the parameter scope they resolve against.
+type WalkedBody = (Vec<(usize, String)>, HashMap<String, f64>);
 
 /// What one `.subckt` instance flattens into: its elements, plus a private copy
 /// of every `.model` card declared in its body (name-mangled per instance).
@@ -43,11 +46,13 @@ pub(super) struct SubcktDef {
     ports: Vec<String>, // port names (lowercased), in declaration order
     /// Header parameters: the subcircuit's interface. A call may override these.
     header_params: Vec<ParamSrc>,
-    /// `.param` assignments in the body, in source order. These are *computed*
-    /// from the header parameters and the enclosing scope, so a call cannot
-    /// override one — overriding it and then recomputing it are different
-    /// answers, and neither is what the caller asked for.
-    body_params: Vec<ParamSrc>,
+    /// Names of the body's `.param` assignments, with the line each is on. The
+    /// assignments themselves stay in `body_lines` and resolve during the walk,
+    /// because a `.if` in the body may choose between two of them. These names
+    /// exist only to refuse a call that tries to override one: overriding it and
+    /// recomputing it are different answers, and neither is what the caller asked
+    /// for.
+    body_param_names: Vec<(String, usize)>,
     body_lines: Vec<(usize, String)>, // (original_lineno, raw_line) for pass-2 expansion
 }
 
@@ -101,7 +106,7 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     let mut current_def = SubcktDef {
         ports: vec![],
         header_params: vec![],
-        body_params: vec![],
+        body_param_names: vec![],
         body_lines: vec![],
     };
 
@@ -147,57 +152,13 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         // own.
         if let Some(kind) = conditional_directive(&lc) {
             if in_subckt {
-                // Evaluating it here would use the subcircuit's *default*
-                // parameters, once, for every instance — a wrong answer per
-                // instance rather than a missing feature. Refuse instead.
-                return Err(ParseError::Syntax {
-                    line: lineno,
-                    msg: format!(
-                        "{kind} inside a .subckt is not supported: its condition \
-                         would be evaluated once against the subcircuit's default \
-                         parameters, not per instance. Select with .if outside the \
-                         definition, or give the instances different models"
-                    ),
-                });
+                // Deferred to expansion, where the condition is evaluated against
+                // *this instance's* parameters. Evaluating it here would use the
+                // definition's defaults, once, for every instance.
+                current_def.body_lines.push((lineno, line.clone()));
+                continue;
             }
-            let parent_live = cond_stack.iter().all(|f| f.live);
-            match kind {
-                ".if" => {
-                    let live =
-                        parent_live && eval_condition(&lc, kind, &global_params, &funcs, lineno)?;
-                    cond_stack.push(CondFrame { live, taken: live });
-                }
-                ".elseif" | ".else" | ".endif" => {
-                    let Some(frame) = cond_stack.last().copied() else {
-                        return Err(ParseError::Syntax {
-                            line: lineno,
-                            msg: format!("{kind} without a matching .if"),
-                        });
-                    };
-                    if kind == ".endif" {
-                        cond_stack.pop();
-                    } else {
-                        // `parent_live` above included this frame; the enclosing
-                        // frames are what gate a sibling branch.
-                        let outer_live = cond_stack[..cond_stack.len() - 1].iter().all(|f| f.live);
-                        let cond = if kind == ".else" {
-                            true
-                        } else {
-                            // A condition in a branch that cannot run is not
-                            // evaluated at all, so a dead branch may reference
-                            // parameters that were never defined.
-                            outer_live
-                                && !frame.taken
-                                && eval_condition(&lc, kind, &global_params, &funcs, lineno)?
-                        };
-                        let live = outer_live && !frame.taken && cond;
-                        let last = cond_stack.last_mut().unwrap();
-                        last.live = live;
-                        last.taken = frame.taken || live;
-                    }
-                }
-                _ => unreachable!("conditional_directive returns only those four"),
-            }
+            apply_conditional(&mut cond_stack, kind, &lc, &global_params, &funcs, lineno)?;
             continue;
         }
         if !cond_stack.iter().all(|f| f.live) {
@@ -218,7 +179,7 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             current_def = SubcktDef {
                 ports: vec![],
                 header_params: vec![],
-                body_params: vec![],
+                body_param_names: vec![],
                 body_lines: vec![],
             };
             in_subckt = false;
@@ -237,7 +198,7 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
                     .into_iter()
                     .map(|(name, src)| ParamSrc { name, src, lineno })
                     .collect(),
-                body_params: vec![],
+                body_param_names: vec![],
                 body_lines: vec![],
             };
             in_subckt = true;
@@ -261,14 +222,15 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             funcs.insert(name, def);
         } else if lc.starts_with(".param") {
             if in_subckt {
-                // Kept as text and resolved per instance: the value may read a
-                // header parameter the caller overrides, and a number computed
-                // here would be the default's answer in every instance.
-                current_def.body_params.extend(
+                // Deferred for two reasons: the value may read a header parameter
+                // the caller overrides, and a `.if` in the body may choose between
+                // two assignments to the same name. Only the names are kept here.
+                current_def.body_param_names.extend(
                     param_assignments(trimmed)
                         .into_iter()
-                        .map(|(name, src)| ParamSrc { name, src, lineno }),
+                        .map(|(k, _)| (k, lineno)),
                 );
+                current_def.body_lines.push((lineno, line.clone()));
             } else {
                 // A global `.param` has one scope and one answer, so it resolves
                 // here. Values may be expressions over the parameters already in
@@ -536,6 +498,58 @@ fn conditional_directive(lc: &str) -> Option<&'static str> {
         ".endif" => Some(".endif"),
         _ => None,
     }
+}
+
+/// Apply one conditional directive to the frame stack.
+///
+/// One place runs this state machine, because there are two callers — the
+/// collection pass, for the top level, and the expansion pass, for a subcircuit
+/// body where the condition must see the instance's parameters. Two copies would
+/// be two chances to disagree about which branch a deck takes.
+fn apply_conditional(
+    stack: &mut Vec<CondFrame>,
+    kind: &str,
+    lc: &str,
+    scope: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+) -> Result<(), ParseError> {
+    let parent_live = stack.iter().all(|f| f.live);
+    match kind {
+        ".if" => {
+            let live = parent_live && eval_condition(lc, kind, scope, funcs, lineno)?;
+            stack.push(CondFrame { live, taken: live });
+        }
+        ".elseif" | ".else" | ".endif" => {
+            let Some(frame) = stack.last().copied() else {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!("{kind} without a matching .if"),
+                });
+            };
+            if kind == ".endif" {
+                stack.pop();
+            } else {
+                // `parent_live` above included this frame; the enclosing frames
+                // are what gate a sibling branch.
+                let outer_live = stack[..stack.len() - 1].iter().all(|f| f.live);
+                let cond = if kind == ".else" {
+                    true
+                } else {
+                    // A condition in a branch that cannot run is not evaluated at
+                    // all, so a dead branch may reference parameters that were
+                    // never defined.
+                    outer_live && !frame.taken && eval_condition(lc, kind, scope, funcs, lineno)?
+                };
+                let live = outer_live && !frame.taken && cond;
+                let last = stack.last_mut().unwrap();
+                last.live = live;
+                last.taken = frame.taken || live;
+            }
+        }
+        _ => unreachable!("conditional_directive returns only those four"),
+    }
+    Ok(())
 }
 
 /// Evaluate a `.if` / `.elseif` condition: true when it is a non-zero number.
@@ -937,10 +951,12 @@ fn resolve_instance_params(
         if def.header_params.iter().any(|p| &p.name == k) {
             continue;
         }
-        let msg = if let Some(p) = def.body_params.iter().find(|p| &p.name == k) {
+        let msg = if let Some((_, line)) = def.body_param_names.iter().find(|(n, _)| n == k) {
             format!(
-                "'{k}' on this instance of .subckt '{def_name}' is computed by a                  .param on line {}, not an interface parameter: overriding it and                  recomputing it are different circuits. Move it to the .subckt                  header to make it overridable",
-                p.lineno
+                "'{k}' on this instance of .subckt '{def_name}' is computed by a \
+                 .param on line {line}, not an interface parameter: overriding it \
+                 and recomputing it are different circuits. Move it to the .subckt \
+                 header to make it overridable"
             )
         } else {
             let declared: Vec<&str> = def.header_params.iter().map(|p| p.name.as_str()).collect();
@@ -950,7 +966,9 @@ fn resolve_instance_params(
                 format!("it declares {}", declared.join(", "))
             };
             format!(
-                ".subckt '{def_name}' has no parameter '{k}' ({known}). An                  unrecognised instance parameter would leave the default in place                  and change the answer with nothing to read"
+                ".subckt '{def_name}' has no parameter '{k}' ({known}). An \
+                 unrecognised instance parameter would leave the default in place \
+                 and change the answer with nothing to read"
             )
         };
         return Err(ParseError::Syntax {
@@ -967,11 +985,60 @@ fn resolve_instance_params(
         };
         scope.insert(p.name.clone(), val);
     }
-    for p in &def.body_params {
-        let val = param_value(&p.name, &p.src, &scope, funcs, p.lineno, ".param")?;
-        scope.insert(p.name.clone(), val);
-    }
     Ok(scope)
+}
+
+/// Walk a definition's body for one instance: resolve its `.param` lines and drop
+/// the lines a `.if` rules out. Returns the lines that survive, and the scope.
+///
+/// Both happen here, in one pass, because they depend on each other in source
+/// order: a condition may read a `.param` above it, and a `.param` may sit inside
+/// a branch. Doing it per instance is the point — the condition sees *this*
+/// instance's parameters, so a wrapper's `if (shmod==1)` switch selects per
+/// instance rather than once for the definition.
+fn walk_body(
+    def_name: &str,
+    def: &SubcktDef,
+    mut scope: HashMap<String, f64>,
+    funcs: &FuncTable,
+) -> Result<WalkedBody, ParseError> {
+    let mut live_lines: Vec<(usize, String)> = Vec::new();
+    let mut cond_stack: Vec<CondFrame> = Vec::new();
+
+    for (lineno, line) in &def.body_lines {
+        let lineno = *lineno;
+        let trimmed = line.trim();
+        let lc = trimmed.to_lowercase();
+
+        if let Some(kind) = conditional_directive(&lc) {
+            apply_conditional(&mut cond_stack, kind, &lc, &scope, funcs, lineno)?;
+            continue;
+        }
+        if !cond_stack.iter().all(|f| f.live) {
+            continue;
+        }
+        if lc.starts_with(".param") {
+            for (key, raw) in param_assignments(trimmed) {
+                let val = param_value(&key, &raw, &scope, funcs, lineno, ".param")?;
+                scope.insert(key, val);
+            }
+            continue;
+        }
+        live_lines.push((lineno, line.clone()));
+    }
+
+    if !cond_stack.is_empty() {
+        return Err(ParseError::Syntax {
+            line: 0,
+            msg: format!(
+                "{} unterminated .if block(s) in .subckt '{def_name}': every .if \
+                 needs an .endif, and guessing where one ended would silently drop \
+                 the rest of the definition",
+                cond_stack.len()
+            ),
+        });
+    }
+    Ok((live_lines, scope))
 }
 
 /// Expand one `.subckt` instance into a flat `Vec<Element>`.
@@ -1018,7 +1085,7 @@ pub(super) fn expand_instance(
         .map(|(p, n)| (p.clone(), n.clone()))
         .collect();
 
-    let inst_params = resolve_instance_params(
+    let header_scope = resolve_instance_params(
         def_name,
         def,
         call_params,
@@ -1026,6 +1093,9 @@ pub(super) fn expand_instance(
         funcs,
         call_lineno,
     )?;
+    // Conditionals and body `.param` lines resolve together, in source order, for
+    // this instance: `body` is what survived, `inst_params` is what it resolved to.
+    let (body, inst_params) = walk_body(def_name, def, header_scope, funcs)?;
 
     let mut out = Expansion::default();
     // Model cards declared in this body: local name → per-instance mangled name.
@@ -1036,7 +1106,7 @@ pub(super) fn expand_instance(
 
     // Two passes over the body: cards first, so an element line may reference a
     // model declared below it (SPICE decks are order-independent for `.model`).
-    for (lineno, body_line) in &def.body_lines {
+    for (lineno, body_line) in &body {
         let trimmed = body_line.trim();
         if !trimmed.to_lowercase().starts_with(".model") {
             continue;
@@ -1051,7 +1121,7 @@ pub(super) fn expand_instance(
         }
     }
 
-    for (lineno, body_line) in &def.body_lines {
+    for (lineno, body_line) in &body {
         let lineno = *lineno;
         let trimmed = body_line.trim();
         if trimmed.is_empty() || trimmed.starts_with('*') {
