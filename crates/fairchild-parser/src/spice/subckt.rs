@@ -13,7 +13,10 @@ type CollectDefsResult = (
     FuncTable,
     HashSet<String>,
 );
-type SubcktHeader = (String, Vec<String>, Vec<(String, f64)>);
+type SubcktHeader = (String, Vec<String>, Vec<(String, String)>);
+/// What one instance's body walk produced: the lines that survived its
+/// conditionals, and the parameter scope they resolve against.
+type WalkedBody = (Vec<(usize, String)>, HashMap<String, f64>);
 
 /// What one `.subckt` instance flattens into: its elements, plus a private copy
 /// of every `.model` card declared in its body (name-mangled per instance).
@@ -25,10 +28,31 @@ pub(super) struct Expansion {
 
 // ─── internal types ──────────────────────────────────────────────────────────
 
+/// One parameter as it was written: name, the source text of its value, and the
+/// line it came from.
+///
+/// The text is kept rather than a number because a default may be an expression
+/// over another parameter — `.subckt r a b w=1u rsh='100/w'` — and the caller may
+/// override the one it reads. Evaluating at collection time freezes the default
+/// into every instance, which is a wrong answer with nothing to warn about.
+struct ParamSrc {
+    name: String,
+    src: String,
+    lineno: usize,
+}
+
 /// Internal representation of a `.subckt ... .ends` block collected in pass 1.
 pub(super) struct SubcktDef {
-    ports: Vec<String>,               // port names (lowercased), in declaration order
-    params: Vec<(String, f64)>,       // default parameter values (header + body .param)
+    ports: Vec<String>, // port names (lowercased), in declaration order
+    /// Header parameters: the subcircuit's interface. A call may override these.
+    header_params: Vec<ParamSrc>,
+    /// Names of the body's `.param` assignments, with the line each is on. The
+    /// assignments themselves stay in `body_lines` and resolve during the walk,
+    /// because a `.if` in the body may choose between two of them. These names
+    /// exist only to refuse a call that tries to override one: overriding it and
+    /// recomputing it are different answers, and neither is what the caller asked
+    /// for.
+    body_param_names: Vec<(String, usize)>,
     body_lines: Vec<(usize, String)>, // (original_lineno, raw_line) for pass-2 expansion
 }
 
@@ -81,7 +105,8 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
     let mut current_name = String::new();
     let mut current_def = SubcktDef {
         ports: vec![],
-        params: vec![],
+        header_params: vec![],
+        body_param_names: vec![],
         body_lines: vec![],
     };
 
@@ -127,57 +152,13 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
         // own.
         if let Some(kind) = conditional_directive(&lc) {
             if in_subckt {
-                // Evaluating it here would use the subcircuit's *default*
-                // parameters, once, for every instance — a wrong answer per
-                // instance rather than a missing feature. Refuse instead.
-                return Err(ParseError::Syntax {
-                    line: lineno,
-                    msg: format!(
-                        "{kind} inside a .subckt is not supported: its condition \
-                         would be evaluated once against the subcircuit's default \
-                         parameters, not per instance. Select with .if outside the \
-                         definition, or give the instances different models"
-                    ),
-                });
+                // Deferred to expansion, where the condition is evaluated against
+                // *this instance's* parameters. Evaluating it here would use the
+                // definition's defaults, once, for every instance.
+                current_def.body_lines.push((lineno, line.clone()));
+                continue;
             }
-            let parent_live = cond_stack.iter().all(|f| f.live);
-            match kind {
-                ".if" => {
-                    let live =
-                        parent_live && eval_condition(&lc, kind, &global_params, &funcs, lineno)?;
-                    cond_stack.push(CondFrame { live, taken: live });
-                }
-                ".elseif" | ".else" | ".endif" => {
-                    let Some(frame) = cond_stack.last().copied() else {
-                        return Err(ParseError::Syntax {
-                            line: lineno,
-                            msg: format!("{kind} without a matching .if"),
-                        });
-                    };
-                    if kind == ".endif" {
-                        cond_stack.pop();
-                    } else {
-                        // `parent_live` above included this frame; the enclosing
-                        // frames are what gate a sibling branch.
-                        let outer_live = cond_stack[..cond_stack.len() - 1].iter().all(|f| f.live);
-                        let cond = if kind == ".else" {
-                            true
-                        } else {
-                            // A condition in a branch that cannot run is not
-                            // evaluated at all, so a dead branch may reference
-                            // parameters that were never defined.
-                            outer_live
-                                && !frame.taken
-                                && eval_condition(&lc, kind, &global_params, &funcs, lineno)?
-                        };
-                        let live = outer_live && !frame.taken && cond;
-                        let last = cond_stack.last_mut().unwrap();
-                        last.live = live;
-                        last.taken = frame.taken || live;
-                    }
-                }
-                _ => unreachable!("conditional_directive returns only those four"),
-            }
+            apply_conditional(&mut cond_stack, kind, &lc, &global_params, &funcs, lineno)?;
             continue;
         }
         if !cond_stack.iter().all(|f| f.live) {
@@ -197,7 +178,8 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             subckt_defs.insert(std::mem::take(&mut current_name), current_def);
             current_def = SubcktDef {
                 ports: vec![],
-                params: vec![],
+                header_params: vec![],
+                body_param_names: vec![],
                 body_lines: vec![],
             };
             in_subckt = false;
@@ -212,7 +194,11 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             current_name = name;
             current_def = SubcktDef {
                 ports,
-                params,
+                header_params: params
+                    .into_iter()
+                    .map(|(name, src)| ParamSrc { name, src, lineno })
+                    .collect(),
+                body_param_names: vec![],
                 body_lines: vec![],
             };
             in_subckt = true;
@@ -235,18 +221,21 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
             let (name, def) = parse_func_directive(trimmed, lineno)?;
             funcs.insert(name, def);
         } else if lc.starts_with(".param") {
-            // Values may be expressions over the parameters already in scope, so
-            // the map in scope goes in: `.param a=2 b={a*3}` resolves left to
-            // right, and inside a subcircuit the body's own defaults stack on top
-            // of the globals.
-            let mut in_scope = global_params.clone();
             if in_subckt {
-                in_scope.extend(current_def.params.iter().cloned());
-            }
-            let pairs = parse_param_directive(trimmed, lineno, &in_scope, &funcs)?;
-            if in_subckt {
-                current_def.params.extend(pairs);
+                // Deferred for two reasons: the value may read a header parameter
+                // the caller overrides, and a `.if` in the body may choose between
+                // two assignments to the same name. Only the names are kept here.
+                current_def.body_param_names.extend(
+                    param_assignments(trimmed)
+                        .into_iter()
+                        .map(|(k, _)| (k, lineno)),
+                );
+                current_def.body_lines.push((lineno, line.clone()));
             } else {
+                // A global `.param` has one scope and one answer, so it resolves
+                // here. Values may be expressions over the parameters already in
+                // scope: `.param a=2 b={a*3}` resolves left to right.
+                let pairs = parse_param_directive(trimmed, lineno, &global_params, &funcs)?;
                 global_params.extend(pairs);
             }
         } else if in_subckt {
@@ -333,12 +322,27 @@ pub(super) fn parse_subckt_header(line: &str, lineno: usize) -> Result<SubcktHea
     let mut params = Vec::new();
     for tok in &tokens[2..] {
         if let Some((k, v)) = tok.split_once('=') {
-            params.push((k.to_lowercase(), parse_value(v, lineno)?));
+            params.push((k.to_lowercase(), v.to_string()));
         } else {
             ports.push(canon_node(tok));
         }
     }
     Ok((name, ports, params))
+}
+
+/// Split `.param name=value [name2=value2 ...]` into raw `(name, source)` pairs,
+/// evaluating nothing.
+///
+/// One place splits a `.param` line, so the global form and the per-instance form
+/// cannot disagree about what an assignment is.
+fn param_assignments(line: &str) -> Vec<(String, String)> {
+    split_assignments(line)[1..]
+        .iter()
+        .filter_map(|tok| {
+            let (k, v) = tok.split_once('=')?;
+            Some((k.trim().to_lowercase(), v.trim().to_string()))
+        })
+        .collect()
 }
 
 /// Parse `.param name=value [name2=value2 ...]`.
@@ -351,28 +355,36 @@ pub(super) fn parse_param_directive(
     let mut pairs: Vec<(String, f64)> = Vec::new();
     // Each value may use the ones before it, on this line or an earlier one.
     let mut scope = in_scope.clone();
-    for tok in &split_assignments(line)[1..] {
-        let Some((k, v)) = tok.split_once('=') else {
-            continue;
-        };
-        let key = k.trim().to_lowercase();
-        let raw = v.trim();
-        // A plain number with a SPICE suffix stays the fast path: `1k` is a value,
-        // not an expression (`k` would read as an undefined parameter).
-        let val = match parse_value(raw, lineno) {
-            Ok(n) => n,
-            Err(_) => eval_param_expr(
-                strip_span(raw),
-                &scope,
-                funcs,
-                lineno,
-                &format!(".param '{key}' = '{raw}'"),
-            )?,
-        };
+    for (key, raw) in param_assignments(line) {
+        let val = param_value(&key, &raw, &scope, funcs, lineno, ".param")?;
         scope.insert(key.clone(), val);
         pairs.push((key, val));
     }
     Ok(pairs)
+}
+
+/// Resolve one parameter's source text to a number in `scope`.
+///
+/// A plain number with a SPICE suffix stays the fast path: `1k` is a value, not an
+/// expression (`k` would read as an undefined parameter).
+fn param_value(
+    key: &str,
+    raw: &str,
+    scope: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+    what: &str,
+) -> Result<f64, ParseError> {
+    match parse_value(raw, lineno) {
+        Ok(n) => Ok(n),
+        Err(_) => eval_param_expr(
+            strip_span(raw),
+            scope,
+            funcs,
+            lineno,
+            &format!("{what} '{key}' = '{raw}'"),
+        ),
+    }
 }
 
 /// Split a directive into `key=value` tokens, keeping a braced or quoted value
@@ -486,6 +498,58 @@ fn conditional_directive(lc: &str) -> Option<&'static str> {
         ".endif" => Some(".endif"),
         _ => None,
     }
+}
+
+/// Apply one conditional directive to the frame stack.
+///
+/// One place runs this state machine, because there are two callers — the
+/// collection pass, for the top level, and the expansion pass, for a subcircuit
+/// body where the condition must see the instance's parameters. Two copies would
+/// be two chances to disagree about which branch a deck takes.
+fn apply_conditional(
+    stack: &mut Vec<CondFrame>,
+    kind: &str,
+    lc: &str,
+    scope: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    lineno: usize,
+) -> Result<(), ParseError> {
+    let parent_live = stack.iter().all(|f| f.live);
+    match kind {
+        ".if" => {
+            let live = parent_live && eval_condition(lc, kind, scope, funcs, lineno)?;
+            stack.push(CondFrame { live, taken: live });
+        }
+        ".elseif" | ".else" | ".endif" => {
+            let Some(frame) = stack.last().copied() else {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!("{kind} without a matching .if"),
+                });
+            };
+            if kind == ".endif" {
+                stack.pop();
+            } else {
+                // `parent_live` above included this frame; the enclosing frames
+                // are what gate a sibling branch.
+                let outer_live = stack[..stack.len() - 1].iter().all(|f| f.live);
+                let cond = if kind == ".else" {
+                    true
+                } else {
+                    // A condition in a branch that cannot run is not evaluated at
+                    // all, so a dead branch may reference parameters that were
+                    // never defined.
+                    outer_live && !frame.taken && eval_condition(lc, kind, scope, funcs, lineno)?
+                };
+                let live = outer_live && !frame.taken && cond;
+                let last = stack.last_mut().unwrap();
+                last.live = live;
+                last.taken = frame.taken || live;
+            }
+        }
+        _ => unreachable!("conditional_directive returns only those four"),
+    }
+    Ok(())
 }
 
 /// Evaluate a `.if` / `.elseif` condition: true when it is a non-zero number.
@@ -863,6 +927,324 @@ pub(super) fn remap_element_nodes(
     }
 }
 
+/// Resolve this instance's parameters: enclosing scope, then header defaults with
+/// the call's overrides applied, then the body's `.param` assignments.
+///
+/// Order is the whole point. A header default may read another header parameter
+/// (`.subckt r a b w=1u rsh='100/w'`), and a body `.param` may read any of them,
+/// so each is evaluated against what is already resolved — with the caller's
+/// override in place *before* anything reads it. Resolving at collection time
+/// instead froze every expression at the default, so an instance that overrode
+/// `w` got the default's `rsh` and nothing said so.
+fn resolve_instance_params(
+    def_name: &str,
+    def: &SubcktDef,
+    call_params: &[(String, f64)],
+    outer: &HashMap<String, f64>,
+    funcs: &FuncTable,
+    call_lineno: usize,
+) -> Result<HashMap<String, f64>, ParseError> {
+    // A parameter the subcircuit does not declare cannot be applied, and applying
+    // nothing silently is how a typo (`wdith=2u`) runs the default and reports a
+    // clean answer for a circuit nobody described.
+    for (k, _) in call_params {
+        if def.header_params.iter().any(|p| &p.name == k) {
+            continue;
+        }
+        // `m` is the instance multiplier, which every subcircuit accepts whether
+        // or not it declares anything — see `instance_multiplier`.
+        if k == "m" {
+            continue;
+        }
+        let msg = if let Some((_, line)) = def.body_param_names.iter().find(|(n, _)| n == k) {
+            format!(
+                "'{k}' on this instance of .subckt '{def_name}' is computed by a \
+                 .param on line {line}, not an interface parameter: overriding it \
+                 and recomputing it are different circuits. Move it to the .subckt \
+                 header to make it overridable"
+            )
+        } else {
+            let declared: Vec<&str> = def.header_params.iter().map(|p| p.name.as_str()).collect();
+            let known = if declared.is_empty() {
+                "it declares none".to_string()
+            } else {
+                format!("it declares {}", declared.join(", "))
+            };
+            format!(
+                ".subckt '{def_name}' has no parameter '{k}' ({known}). An \
+                 unrecognised instance parameter would leave the default in place \
+                 and change the answer with nothing to read"
+            )
+        };
+        return Err(ParseError::Syntax {
+            line: call_lineno,
+            msg,
+        });
+    }
+
+    let mut scope = outer.clone();
+    for p in &def.header_params {
+        let val = match call_params.iter().find(|(k, _)| *k == p.name) {
+            Some((_, v)) => *v,
+            None => param_value(&p.name, &p.src, &scope, funcs, p.lineno, ".subckt default")?,
+        };
+        scope.insert(p.name.clone(), val);
+    }
+    Ok(scope)
+}
+
+/// Walk a definition's body for one instance: resolve its `.param` lines and drop
+/// the lines a `.if` rules out. Returns the lines that survive, and the scope.
+///
+/// Both happen here, in one pass, because they depend on each other in source
+/// order: a condition may read a `.param` above it, and a `.param` may sit inside
+/// a branch. Doing it per instance is the point — the condition sees *this*
+/// instance's parameters, so a wrapper's `if (shmod==1)` switch selects per
+/// instance rather than once for the definition.
+fn walk_body(
+    def_name: &str,
+    def: &SubcktDef,
+    mut scope: HashMap<String, f64>,
+    funcs: &FuncTable,
+) -> Result<WalkedBody, ParseError> {
+    let mut live_lines: Vec<(usize, String)> = Vec::new();
+    let mut cond_stack: Vec<CondFrame> = Vec::new();
+
+    for (lineno, line) in &def.body_lines {
+        let lineno = *lineno;
+        let trimmed = line.trim();
+        let lc = trimmed.to_lowercase();
+
+        if let Some(kind) = conditional_directive(&lc) {
+            apply_conditional(&mut cond_stack, kind, &lc, &scope, funcs, lineno)?;
+            continue;
+        }
+        if !cond_stack.iter().all(|f| f.live) {
+            continue;
+        }
+        if lc.starts_with(".param") {
+            for (key, raw) in param_assignments(trimmed) {
+                let val = param_value(&key, &raw, &scope, funcs, lineno, ".param")?;
+                scope.insert(key, val);
+            }
+            continue;
+        }
+        live_lines.push((lineno, line.clone()));
+    }
+
+    if !cond_stack.is_empty() {
+        return Err(ParseError::Syntax {
+            line: 0,
+            msg: format!(
+                "{} unterminated .if block(s) in .subckt '{def_name}': every .if \
+                 needs an .endif, and guessing where one ended would silently drop \
+                 the rest of the definition",
+                cond_stack.len()
+            ),
+        });
+    }
+    Ok((live_lines, scope))
+}
+
+/// The instance multiplier, `m=`: this instance stands for `m` of itself in
+/// parallel.
+///
+/// `m` is a *simulator* parameter, not one of the subcircuit's, so a call may
+/// carry it whether or not the definition declares anything. But when the
+/// definition *does* declare `m`, the deck owns it — a wrapper that takes `m` and
+/// forwards it to the device inside is doing the scaling itself, and doing it here
+/// as well would double it. So a declared `m` is an ordinary parameter and nothing
+/// is scaled here.
+fn instance_multiplier(
+    def: &SubcktDef,
+    call_params: &[(String, f64)],
+    call_lineno: usize,
+) -> Result<f64, ParseError> {
+    if def.header_params.iter().any(|p| p.name == "m") {
+        return Ok(1.0);
+    }
+    let Some((_, m)) = call_params.iter().find(|(k, _)| k == "m") else {
+        return Ok(1.0);
+    };
+    if !m.is_finite() || *m <= 0.0 {
+        return Err(ParseError::Syntax {
+            line: call_lineno,
+            msg: format!("m={m} on this instance: the multiplier must be finite and positive"),
+        });
+    }
+    Ok(*m)
+}
+
+/// Scale one flattened element by the instance multiplier `m`.
+///
+/// `m` copies in parallel, done exactly rather than by replication: the elements
+/// that have a closed form get it, and everything else is refused by name. A
+/// factor quietly ignored is a wrong answer of exactly the size of the factor,
+/// and this is the seam where a foundry wrapper's `m=2` arrives.
+fn scale_by_multiplier(el: Element, m: f64, lineno: usize) -> Result<Element, ParseError> {
+    let refuse = |what: &str, why: &str| {
+        Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "m= on this instance would have to scale {what}, and {why}. Remove \
+                 the multiplier and instantiate the copies, or give the subcircuit \
+                 its own `m` parameter and scale inside it"
+            ),
+        })
+    };
+    Ok(match el {
+        // Parallel copies: conductance adds, capacitance adds, inductance divides.
+        Element::Resistor {
+            name,
+            pos,
+            neg,
+            resistance,
+        } => Element::Resistor {
+            name,
+            pos,
+            neg,
+            resistance: resistance / m,
+        },
+        Element::Capacitor {
+            name,
+            pos,
+            neg,
+            capacitance,
+        } => Element::Capacitor {
+            name,
+            pos,
+            neg,
+            capacitance: capacitance * m,
+        },
+        Element::Inductor {
+            name,
+            pos,
+            neg,
+            inductance,
+        } => Element::Inductor {
+            name,
+            pos,
+            neg,
+            inductance: inductance / m,
+        },
+        // m current sources in parallel drive m times the current. Only a DC
+        // value is scaled: every waveform shape has amplitude terms mixed with
+        // times, and scaling the wrong field is a wrong answer that looks like a
+        // feature. m voltage sources in parallel hold the same voltage, so a
+        // voltage source needs nothing.
+        Element::CurrentSource {
+            name,
+            pos,
+            neg,
+            waveform: crate::Waveform::Dc(v),
+            ac,
+        } => Element::CurrentSource {
+            name,
+            pos,
+            neg,
+            waveform: crate::Waveform::Dc(v * m),
+            ac: ac.map(|a| crate::AcSpec {
+                mag: a.mag * m,
+                ..a
+            }),
+        },
+        Element::CurrentSource { ref name, .. } => {
+            return refuse(
+                &format!("the waveform of current source '{name}'"),
+                "only a DC value has one amplitude to scale",
+            )
+        }
+        el @ Element::VoltageSource { .. } => el,
+        Element::Behavioral {
+            name,
+            pos,
+            neg,
+            kind,
+            expr,
+        } => match kind {
+            crate::BehavioralKind::Current => Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr: crate::expr::Expr::Bin(
+                    crate::expr::BinOp::Mul,
+                    Box::new(expr),
+                    Box::new(crate::expr::Expr::Num(m)),
+                ),
+            },
+            crate::BehavioralKind::Voltage => Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr,
+            },
+        },
+        // A compiled model owns its own multiplier: OSDI defines `m` as an
+        // instance parameter, so pass it down rather than guessing which of the
+        // model's contributions scale. If the model does not declare it, applying
+        // the parameter fails by name, which is the right failure.
+        Element::XOsdi {
+            name,
+            nets,
+            model_name,
+            mut params,
+        } => {
+            match params.iter_mut().find(|(k, _)| k == "m") {
+                Some((_, v)) => *v *= m,
+                None => params.push(("m".to_string(), m)),
+            }
+            Element::XOsdi {
+                name,
+                nets,
+                model_name,
+                params,
+            }
+        }
+        Element::Diode { ref name, .. } | Element::Bjt { ref name, .. } => {
+            return refuse(
+                &format!("'{name}'"),
+                "a junction device scales by area, which is a model parameter here \
+                 rather than a factor on its current",
+            )
+        }
+        Element::Mosfet { ref name, .. } => {
+            return refuse(
+                &format!("'{name}'"),
+                "a MOSFET scales by width, and multiplying W is not the same circuit \
+                 as m fingers in parallel",
+            )
+        }
+        el => {
+            return refuse(
+                &format!("a {}", element_kind(&el)),
+                "there is no exact scaling for it",
+            )
+        }
+    })
+}
+
+/// A human name for an element kind, for a message that has to say what it could
+/// not scale.
+fn element_kind(el: &Element) -> &'static str {
+    match el {
+        Element::Resistor { .. } => "resistor",
+        Element::Capacitor { .. } => "capacitor",
+        Element::Inductor { .. } => "inductor",
+        Element::CoupledInductors { .. } => "coupled-inductor pair",
+        Element::VoltageSwitch { .. } | Element::CurrentSwitch { .. } => "switch",
+        Element::TransmissionLine { .. } => "transmission line",
+        Element::VoltageSource { .. } => "voltage source",
+        Element::CurrentSource { .. } => "current source",
+        Element::Diode { .. } => "diode",
+        Element::Mosfet { .. } => "MOSFET",
+        Element::Bjt { .. } => "BJT",
+        Element::XOsdi { .. } => "device instance",
+        Element::Behavioral { .. } => "behavioural source",
+    }
+}
+
 /// Expand one `.subckt` instance into a flat `Vec<Element>`.
 ///
 /// `expanding` is the set of subckt names currently on the call stack (cycle
@@ -907,14 +1289,17 @@ pub(super) fn expand_instance(
         .map(|(p, n)| (p.clone(), n.clone()))
         .collect();
 
-    // inst_params: global < def defaults < call overrides.
-    let mut inst_params: HashMap<String, f64> = global_params.clone();
-    for (k, v) in &def.params {
-        inst_params.insert(k.clone(), *v);
-    }
-    for (k, v) in call_params {
-        inst_params.insert(k.clone(), *v);
-    }
+    let header_scope = resolve_instance_params(
+        def_name,
+        def,
+        call_params,
+        global_params,
+        funcs,
+        call_lineno,
+    )?;
+    // Conditionals and body `.param` lines resolve together, in source order, for
+    // this instance: `body` is what survived, `inst_params` is what it resolved to.
+    let (body, inst_params) = walk_body(def_name, def, header_scope, funcs)?;
 
     let mut out = Expansion::default();
     // Model cards declared in this body: local name → per-instance mangled name.
@@ -925,7 +1310,7 @@ pub(super) fn expand_instance(
 
     // Two passes over the body: cards first, so an element line may reference a
     // model declared below it (SPICE decks are order-independent for `.model`).
-    for (lineno, body_line) in &def.body_lines {
+    for (lineno, body_line) in &body {
         let trimmed = body_line.trim();
         if !trimmed.to_lowercase().starts_with(".model") {
             continue;
@@ -940,7 +1325,7 @@ pub(super) fn expand_instance(
         }
     }
 
-    for (lineno, body_line) in &def.body_lines {
+    for (lineno, body_line) in &body {
         let lineno = *lineno;
         let trimmed = body_line.trim();
         if trimmed.is_empty() || trimmed.starts_with('*') {
@@ -1024,6 +1409,15 @@ pub(super) fn expand_instance(
                 out.elements.push(el);
             }
         }
+    }
+
+    let m = instance_multiplier(def, call_params, call_lineno)?;
+    if m != 1.0 {
+        out.elements = out
+            .elements
+            .into_iter()
+            .map(|el| scale_by_multiplier(el, m, call_lineno))
+            .collect::<Result<Vec<_>, _>>()?;
     }
 
     expanding.remove(def_name);

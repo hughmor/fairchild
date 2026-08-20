@@ -462,9 +462,12 @@ pub(super) fn parse_element(
             for tok in &tokens[1..] {
                 if tok.contains('=') {
                     if let Some((k, v)) = tok.split_once('=') {
-                        if let Ok(val) = parse_value(v, lineno) {
-                            params.push((k.to_lowercase(), val));
-                        }
+                        // A value we cannot read used to be dropped here, which
+                        // left the callee's default in place and produced a clean
+                        // answer for a different circuit. An expression must be
+                        // braced so parameter substitution has already resolved
+                        // it by now; anything still unreadable is a deck bug.
+                        params.push((k.to_lowercase(), parse_value(v, lineno)?));
                     }
                 } else {
                     positional.push(tok);
@@ -528,28 +531,69 @@ pub(super) fn parse_element_expanded(
     let mut esr: Option<f64> = None;
     let mut esl: Option<f64> = None;
     let mut rpar: Option<f64> = None;
+    // `m=` is the instance multiplier: m of this element in parallel. Exact for a
+    // passive, so it is applied here rather than refused.
+    let mut mult = 1.0f64;
     for tok in &tokens[4..] {
-        if let Some((k, v)) = tok.split_once('=') {
-            if let Ok(val) = parse_value(v, lineno) {
-                match k.to_lowercase().as_str() {
-                    "rser" => rser = Some(val),
-                    "cpar" => cpar = Some(val),
-                    "esr" => esr = Some(val),
-                    "esl" => esl = Some(val),
-                    "rpar" => rpar = Some(val),
-                    _ => {}
+        let Some((k, v)) = tok.split_once('=') else {
+            continue;
+        };
+        // An unreadable value and an unrecognised key were both dropped here in
+        // silence, which left the element at its bare value and reported a clean
+        // answer for a different component. A tempco or a multiplier that goes
+        // missing is exactly the size of the error it causes.
+        let val = parse_value(v, lineno)?;
+        match k.to_lowercase().as_str() {
+            "rser" => rser = Some(val),
+            "cpar" => cpar = Some(val),
+            "esr" => esr = Some(val),
+            "esl" => esl = Some(val),
+            "rpar" => rpar = Some(val),
+            "m" => {
+                if !val.is_finite() || val <= 0.0 {
+                    return Err(ParseError::Syntax {
+                        line: lineno,
+                        msg: format!(
+                            "{name}: m={val} — the multiplier must be finite and positive"
+                        ),
+                    });
                 }
+                mult = val;
+            }
+            other => {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!(
+                        "{name}: '{other}' is not a parameter of an R, L or C line. \
+                         Accepted here: m, and the parasitics rser, cpar, esr, esl, \
+                         rpar. Ignoring it would leave the element at its bare value \
+                         and give a clean answer for a different component"
+                    ),
+                })
             }
         }
     }
 
-    if rser.is_none() && cpar.is_none() && esr.is_none() && esl.is_none() && rpar.is_none() {
+    let no_parasitics =
+        rser.is_none() && cpar.is_none() && esr.is_none() && esl.is_none() && rpar.is_none();
+    if no_parasitics && mult == 1.0 {
         return parse_element(line, lineno, funcs).map(|e| vec![e]);
     }
 
     let pos: String = canon_node(tokens[1]);
     let neg: String = canon_node(tokens[2]);
-    let val: f64 = parse_value(tokens[3], lineno)?;
+    let raw: f64 = parse_value(tokens[3], lineno)?;
+    // m in parallel: conductance and capacitance add, inductance divides. The
+    // parasitics scale with the copies they belong to.
+    let val: f64 = match letter {
+        'c' => raw * mult,
+        _ => raw / mult,
+    };
+    let rser = rser.map(|v| v / mult);
+    let esr = esr.map(|v| v / mult);
+    let esl = esl.map(|v| v / mult);
+    let rpar = rpar.map(|v| v / mult);
+    let cpar = cpar.map(|v| v * mult);
 
     let mut elements: Vec<Element> = Vec::new();
 

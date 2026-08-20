@@ -83,10 +83,16 @@ C1  out 0  1u
 ### Passive elements
 
 ```
-R<name>  <pos> <neg>  <resistance>
-C<name>  <pos> <neg>  <capacitance>     [IC=<v0>]
-L<name>  <pos> <neg>  <inductance>      [IC=<i0>]
+R<name>  <pos> <neg>  <resistance>      [m=<n>] [cpar=<F>]
+C<name>  <pos> <neg>  <capacitance>     [IC=<v0>] [m=<n>] [esr=<Ω>] [esl=<H>] [rpar=<Ω>]
+L<name>  <pos> <neg>  <inductance>      [IC=<i0>] [m=<n>] [rser=<Ω>] [cpar=<F>]
 ```
+
+`m=<n>` is the instance multiplier — *n of this element in parallel* — applied
+exactly: a resistance or inductance divides, a capacitance multiplies, and the
+parasitics scale with the copies they belong to. Any other `key=value` on these
+lines is an **error** naming the key: ignoring one would leave the element at its
+bare value and give a clean answer for a different component.
 
 ### Independent sources
 
@@ -659,7 +665,9 @@ file).
 An included file may be written in the **Spectre** dialect (`.scs`) rather than
 SPICE, and so may the top-level deck — the dialect is detected from the content of
 each file, so you never choose a mode and a SPICE deck may pull in a Spectre model
-library. Spectre statements are transliterated to their SPICE equivalents, which is
+library. Subcircuits (`subckt`/`inline subckt`, with their `parameters` hoisted to
+the header), `model` cards, `if`/`else` blocks and `real f(){return …;}` functions
+all read across. Spectre statements are transliterated to their SPICE equivalents, which is
 why everything else in this guide still applies unchanged; the surface currently
 read, and what it refuses, is tabulated in
 [`spice_support.md` §5](spice_support.md).
@@ -727,11 +735,25 @@ were never defined.
 .endif
 ```
 
-Two things are refused rather than guessed:
+Inside a `.subckt` the condition is evaluated **per instance**, against that
+instance's parameters — so a switch on a subcircuit parameter selects for each
+instance, and a dead branch is dropped whole for that instance:
 
-- **`.if` inside a `.subckt`.** The condition would be evaluated once against the
-  subcircuit's *default* parameters and then apply to every instance. Select
-  outside the definition, or give the instances different models.
+```spice
+.subckt rsel a b mode=0
+.if (mode == 1)
+.param r=2k
+.else
+.param r=1k
+.endif
+R1 a b {r}
+.ends
+Xa in 0 rsel mode=1     ← 2 kΩ
+Xb in 0 rsel            ← 1 kΩ
+```
+
+One thing is refused rather than guessed:
+
 - **A condition over an undefined name.** `nope==1` would compare NaN against 1
   and yield a perfectly ordinary `false`, so a misspelled corner variable would
   quietly select the other branch. Names are checked before the condition is
@@ -808,6 +830,40 @@ Xwg in out fc_waveguide l_m={2*pi*radius} n_g={n_g}
 
 An undefined name, or an expression that evaluates non-finite, is an error —
 never a silent zero.
+
+**A subcircuit's parameters resolve per instance**, in this order: the enclosing
+scope, then the header defaults with the call's overrides already in place, then
+the body's `.param` lines. So a default may be an expression over an earlier
+parameter, a body `.param` follows an override rather than the default, and two
+instances of one definition resolve independently:
+
+```spice
+.subckt rdiv a b n=1 rsh='1000/n'   ← a default over another parameter
+.param rtot={rsh*n}                 ← computed per instance, not per definition
+R1 a b {rtot}
+.ends
+X1 in 0 rdiv n=2                    ← rsh=500, rtot=1000
+```
+
+**`m=` on the instance** means m of the whole subcircuit in parallel, and scales
+everything the body flattened to (see [Passive elements](#passive-elements)).
+`m` is the simulator's parameter, so it needs no declaration — but a definition
+that *declares* `m` owns it, and nothing is scaled here, because a wrapper that
+forwards `m` to the device inside is already doing the scaling. An element with no
+exact scaling — a diode, a MOSFET, a switch — is an error naming it, since a factor
+quietly ignored is a wrong answer exactly the size of the factor.
+
+Two more things are refused rather than guessed:
+
+- **A parameter the definition does not declare.** `X1 in 0 rdiv nn=2` is an error
+  naming `nn` and listing what `rdiv` declares — a typo that left the default in
+  place would report a clean answer for a different circuit.
+- **Overriding a body `.param`.** It is computed, not an interface: overriding it
+  and recomputing it are different circuits. Move it to the header to make it
+  overridable.
+
+An instance-parameter value must also be readable — a number, or `{…}` that
+resolves to one. `n=2*3` unbraced is an error, not a dropped assignment.
 
 **`.model` cards inside a `.subckt` are per-instance.** The card is name-mangled
 to `<inst>.<card>` and references from inside that instance are retargeted, so
