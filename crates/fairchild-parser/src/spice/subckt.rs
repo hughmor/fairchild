@@ -951,6 +951,11 @@ fn resolve_instance_params(
         if def.header_params.iter().any(|p| &p.name == k) {
             continue;
         }
+        // `m` is the instance multiplier, which every subcircuit accepts whether
+        // or not it declares anything — see `instance_multiplier`.
+        if k == "m" {
+            continue;
+        }
         let msg = if let Some((_, line)) = def.body_param_names.iter().find(|(n, _)| n == k) {
             format!(
                 "'{k}' on this instance of .subckt '{def_name}' is computed by a \
@@ -1039,6 +1044,205 @@ fn walk_body(
         });
     }
     Ok((live_lines, scope))
+}
+
+/// The instance multiplier, `m=`: this instance stands for `m` of itself in
+/// parallel.
+///
+/// `m` is a *simulator* parameter, not one of the subcircuit's, so a call may
+/// carry it whether or not the definition declares anything. But when the
+/// definition *does* declare `m`, the deck owns it — a wrapper that takes `m` and
+/// forwards it to the device inside is doing the scaling itself, and doing it here
+/// as well would double it. So a declared `m` is an ordinary parameter and nothing
+/// is scaled here.
+fn instance_multiplier(
+    def: &SubcktDef,
+    call_params: &[(String, f64)],
+    call_lineno: usize,
+) -> Result<f64, ParseError> {
+    if def.header_params.iter().any(|p| p.name == "m") {
+        return Ok(1.0);
+    }
+    let Some((_, m)) = call_params.iter().find(|(k, _)| k == "m") else {
+        return Ok(1.0);
+    };
+    if !m.is_finite() || *m <= 0.0 {
+        return Err(ParseError::Syntax {
+            line: call_lineno,
+            msg: format!("m={m} on this instance: the multiplier must be finite and positive"),
+        });
+    }
+    Ok(*m)
+}
+
+/// Scale one flattened element by the instance multiplier `m`.
+///
+/// `m` copies in parallel, done exactly rather than by replication: the elements
+/// that have a closed form get it, and everything else is refused by name. A
+/// factor quietly ignored is a wrong answer of exactly the size of the factor,
+/// and this is the seam where a foundry wrapper's `m=2` arrives.
+fn scale_by_multiplier(el: Element, m: f64, lineno: usize) -> Result<Element, ParseError> {
+    let refuse = |what: &str, why: &str| {
+        Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "m= on this instance would have to scale {what}, and {why}. Remove \
+                 the multiplier and instantiate the copies, or give the subcircuit \
+                 its own `m` parameter and scale inside it"
+            ),
+        })
+    };
+    Ok(match el {
+        // Parallel copies: conductance adds, capacitance adds, inductance divides.
+        Element::Resistor {
+            name,
+            pos,
+            neg,
+            resistance,
+        } => Element::Resistor {
+            name,
+            pos,
+            neg,
+            resistance: resistance / m,
+        },
+        Element::Capacitor {
+            name,
+            pos,
+            neg,
+            capacitance,
+        } => Element::Capacitor {
+            name,
+            pos,
+            neg,
+            capacitance: capacitance * m,
+        },
+        Element::Inductor {
+            name,
+            pos,
+            neg,
+            inductance,
+        } => Element::Inductor {
+            name,
+            pos,
+            neg,
+            inductance: inductance / m,
+        },
+        // m current sources in parallel drive m times the current. Only a DC
+        // value is scaled: every waveform shape has amplitude terms mixed with
+        // times, and scaling the wrong field is a wrong answer that looks like a
+        // feature. m voltage sources in parallel hold the same voltage, so a
+        // voltage source needs nothing.
+        Element::CurrentSource {
+            name,
+            pos,
+            neg,
+            waveform: crate::Waveform::Dc(v),
+            ac,
+        } => Element::CurrentSource {
+            name,
+            pos,
+            neg,
+            waveform: crate::Waveform::Dc(v * m),
+            ac: ac.map(|a| crate::AcSpec {
+                mag: a.mag * m,
+                ..a
+            }),
+        },
+        Element::CurrentSource { ref name, .. } => {
+            return refuse(
+                &format!("the waveform of current source '{name}'"),
+                "only a DC value has one amplitude to scale",
+            )
+        }
+        el @ Element::VoltageSource { .. } => el,
+        Element::Behavioral {
+            name,
+            pos,
+            neg,
+            kind,
+            expr,
+        } => match kind {
+            crate::BehavioralKind::Current => Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr: crate::expr::Expr::Bin(
+                    crate::expr::BinOp::Mul,
+                    Box::new(expr),
+                    Box::new(crate::expr::Expr::Num(m)),
+                ),
+            },
+            crate::BehavioralKind::Voltage => Element::Behavioral {
+                name,
+                pos,
+                neg,
+                kind,
+                expr,
+            },
+        },
+        // A compiled model owns its own multiplier: OSDI defines `m` as an
+        // instance parameter, so pass it down rather than guessing which of the
+        // model's contributions scale. If the model does not declare it, applying
+        // the parameter fails by name, which is the right failure.
+        Element::XOsdi {
+            name,
+            nets,
+            model_name,
+            mut params,
+        } => {
+            match params.iter_mut().find(|(k, _)| k == "m") {
+                Some((_, v)) => *v *= m,
+                None => params.push(("m".to_string(), m)),
+            }
+            Element::XOsdi {
+                name,
+                nets,
+                model_name,
+                params,
+            }
+        }
+        Element::Diode { ref name, .. } | Element::Bjt { ref name, .. } => {
+            return refuse(
+                &format!("'{name}'"),
+                "a junction device scales by area, which is a model parameter here \
+                 rather than a factor on its current",
+            )
+        }
+        Element::Mosfet { ref name, .. } => {
+            return refuse(
+                &format!("'{name}'"),
+                "a MOSFET scales by width, and multiplying W is not the same circuit \
+                 as m fingers in parallel",
+            )
+        }
+        el => {
+            return refuse(
+                &format!("a {}", element_kind(&el)),
+                "there is no exact scaling for it",
+            )
+        }
+    })
+}
+
+/// A human name for an element kind, for a message that has to say what it could
+/// not scale.
+fn element_kind(el: &Element) -> &'static str {
+    match el {
+        Element::Resistor { .. } => "resistor",
+        Element::Capacitor { .. } => "capacitor",
+        Element::Inductor { .. } => "inductor",
+        Element::CoupledInductors { .. } => "coupled-inductor pair",
+        Element::VoltageSwitch { .. } | Element::CurrentSwitch { .. } => "switch",
+        Element::TransmissionLine { .. } => "transmission line",
+        Element::VoltageSource { .. } => "voltage source",
+        Element::CurrentSource { .. } => "current source",
+        Element::Diode { .. } => "diode",
+        Element::Mosfet { .. } => "MOSFET",
+        Element::Bjt { .. } => "BJT",
+        Element::XOsdi { .. } => "device instance",
+        Element::Behavioral { .. } => "behavioural source",
+    }
 }
 
 /// Expand one `.subckt` instance into a flat `Vec<Element>`.
@@ -1205,6 +1409,15 @@ pub(super) fn expand_instance(
                 out.elements.push(el);
             }
         }
+    }
+
+    let m = instance_multiplier(def, call_params, call_lineno)?;
+    if m != 1.0 {
+        out.elements = out
+            .elements
+            .into_iter()
+            .map(|el| scale_by_multiplier(el, m, call_lineno))
+            .collect::<Result<Vec<_>, _>>()?;
     }
 
     expanding.remove(def_name);

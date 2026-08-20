@@ -35,7 +35,7 @@ fairchild does with a syntactically plausible line using that letter.
 |---|---|---|---|
 | `A` | XSPICE code model | ❌ | error |
 | `B` | behavioural (arbitrary) source | ✅ `V=`/`I=` expression (unbraced only) | — |
-| `C` | capacitor | ✅ + ESR/ESL parasitics | — |
+| `C` | capacitor | ✅ + ESR/ESL parasitics, `m=` | — |
 | `D` | diode | ✅ | — |
 | `E` | VCVS — linear voltage-controlled voltage source | ✅ | — |
 | `F` | CCCS — current-controlled current source | ✅ | — |
@@ -44,13 +44,13 @@ fairchild does with a syntactically plausible line using that letter.
 | `I` | independent current source | ✅ | — |
 | `J` | JFET | ❌ | error |
 | `K` | mutual inductance | ✅ | — |
-| `L` | inductor | ✅ + ESR parasitic | — |
+| `L` | inductor | ✅ + ESR parasitic, `m=` | — |
 | `M` | MOSFET | ✅ Level 1 only — `LEVEL≠1` warns loudly | — |
 | `N` | numerical device (NUMD, NBJT) | ❌ | error |
 | `O` | lossy transmission line (LTRA) | ❌ | error |
 | `P` | coupled multiconductor line | ❌ | error |
 | `Q` | BJT | ✅ Gummel-Poon L1 | — |
-| `R` | resistor | ✅ + ESR/ESL parasitics | — |
+| `R` | resistor | ✅ + parallel-C parasitic, `m=` | — |
 | `S` | voltage-controlled switch | ✅ | — |
 | `T` | lossless transmission line | ✅ | — |
 | `U` | uniform RC line (URC) | ❌ | error |
@@ -534,6 +534,49 @@ X1 p q rdiv n=2*3         ← also now an error: an unreadable instance-paramete
 
 ---
 
+### 4.12 An unrecognised parameter on a passive line was dropped — FIXED
+
+```spice
+R1 in 0 1k tc1=0.001      ← the tempco vanished; the resistor was 1 kΩ at every T
+C1 in 0 1n m=3            ← the multiplier vanished; the capacitor was 1 nF
+R2 in 0 1k esr=notanumber ← the value did not parse, so the key vanished too
+```
+
+`R`, `L` and `C` lines accept `key=value` parasitics, and the loop that read them
+matched five keys with `_ => {}` under an `if let Ok(val)`. So an unknown key was
+dropped, and so was a key whose value did not parse. The element stayed at its bare
+value and the run reported a clean answer for a different component — and the error
+is exactly the size of the factor that went missing.
+
+**Fixed.** An unrecognised key and an unreadable value are both errors, naming the
+key and listing what is accepted there. `m` is now one of the accepted ones.
+
+**`m=` — the instance multiplier — lands here**, being the parameter that made the
+drop worth finding. `m` means *m of this in parallel*, and it is applied exactly
+rather than by replication:
+
+| | with `m` |
+|---|---|
+| resistor, inductor | value ÷ m |
+| capacitor | value × m |
+| DC current source, current-mode `B` | value × m |
+| voltage source | unchanged — m in parallel hold the same voltage |
+| a compiled (OSDI) device | `m` passed down as its own instance parameter |
+
+On a **subcircuit instance** the same rule applies to everything the body
+flattened to. Two refusals rather than a guess:
+
+- **An element with no exact scaling** — a diode or BJT (which scale by *area*, a
+  model parameter here), a MOSFET (which scales by *width*, and m fingers in
+  parallel is not the same circuit as m×W), a switch, a transmission line, a
+  non-DC source waveform. The message names the element and why.
+- **A definition that declares `m` itself** keeps it: a wrapper that takes `m` and
+  forwards it to the device inside is doing the scaling itself, and doing it here
+  as well would double the factor. So a declared `m` is an ordinary parameter and
+  nothing is scaled.
+
+---
+
 ## 5. The Spectre dialect
 
 Foundry model libraries are written in Spectre (`.scs`), so fairchild reads that
@@ -597,15 +640,15 @@ skipped, or refused.
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 
-1. **`m=` instance multiplier**, on a subcircuit instance and on a device. A
-   wrapper passes it through and we refuse it, which is safe but stops a deck that
-   uses it at all.
-2. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
+1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-3. **Model binning and `level=` routing** — what actually stands between this and
+2. **Model binning and `level=` routing** — what actually stands between this and
    a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
    silent wrong answer, so geometry outside every bin must be a hard error.
+3. **`m=` on the elements that refuse it** — a MOSFET wants `nf`-style finger
+   semantics and a junction device wants area, so each needs a decision rather
+   than a factor.
 4. Everything else in §1–§2 is a clean error and can wait for a use case.
 
 ## How to update this document

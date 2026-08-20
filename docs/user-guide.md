@@ -83,10 +83,16 @@ C1  out 0  1u
 ### Passive elements
 
 ```
-R<name>  <pos> <neg>  <resistance>
-C<name>  <pos> <neg>  <capacitance>     [IC=<v0>]
-L<name>  <pos> <neg>  <inductance>      [IC=<i0>]
+R<name>  <pos> <neg>  <resistance>      [m=<n>] [cpar=<F>]
+C<name>  <pos> <neg>  <capacitance>     [IC=<v0>] [m=<n>] [esr=<Ω>] [esl=<H>] [rpar=<Ω>]
+L<name>  <pos> <neg>  <inductance>      [IC=<i0>] [m=<n>] [rser=<Ω>] [cpar=<F>]
 ```
+
+`m=<n>` is the instance multiplier — *n of this element in parallel* — applied
+exactly: a resistance or inductance divides, a capacitance multiplies, and the
+parasitics scale with the copies they belong to. Any other `key=value` on these
+lines is an **error** naming the key: ignoring one would leave the element at its
+bare value and give a clean answer for a different component.
 
 ### Independent sources
 
@@ -839,7 +845,15 @@ R1 a b {rtot}
 X1 in 0 rdiv n=2                    ← rsh=500, rtot=1000
 ```
 
-Two things are refused rather than guessed:
+**`m=` on the instance** means m of the whole subcircuit in parallel, and scales
+everything the body flattened to (see [Passive elements](#passive-elements)).
+`m` is the simulator's parameter, so it needs no declaration — but a definition
+that *declares* `m` owns it, and nothing is scaled here, because a wrapper that
+forwards `m` to the device inside is already doing the scaling. An element with no
+exact scaling — a diode, a MOSFET, a switch — is an error naming it, since a factor
+quietly ignored is a wrong answer exactly the size of the factor.
+
+Two more things are refused rather than guessed:
 
 - **A parameter the definition does not declare.** `X1 in 0 rdiv nn=2` is an error
   naming `nn` and listing what `rdiv` declares — a typo that left the default in

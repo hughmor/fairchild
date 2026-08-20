@@ -2062,6 +2062,137 @@ R1 a b 1k
         assert!((got[1] - 5000.0).abs() < 1e-9, "{got:?}");
     }
 
+    /// `m=` on a subcircuit instance means m of it in parallel. Scaled exactly
+    /// rather than by replication: conductance and capacitance add, inductance
+    /// divides.
+    #[test]
+    fn m_on_a_subcircuit_instance_scales_its_elements() {
+        let net = parse_spice(
+            "* multiplier\n\
+             .subckt rc a b\n\
+             R1 a b 1k\n\
+             C1 a b 1n\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rc m=4\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        let c = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Capacitor { capacitance, .. } => Some(*capacitance),
+                _ => None,
+            })
+            .unwrap();
+        assert!((r - 250.0).abs() < 1e-9, "r={r}");
+        assert!((c - 4e-9).abs() < 1e-18, "c={c}");
+    }
+
+    /// A definition that declares `m` owns it: a wrapper taking `m` and forwarding
+    /// it to the device inside is doing the scaling itself, and doing it here as
+    /// well would double the factor.
+    #[test]
+    fn a_declared_m_is_the_decks_own_parameter() {
+        let net = parse_spice(
+            "* the deck scales it itself\n\
+             .subckt rr a b m=1\n\
+             R1 a b {1000/m}\n\
+             .ends\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 rr m=2\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            (r - 500.0).abs() < 1e-9,
+            "the multiplier was applied twice: r={r}, want 500"
+        );
+    }
+
+    /// A factor quietly ignored is a wrong answer exactly the size of the factor,
+    /// so an element with no exact scaling is named instead.
+    #[test]
+    fn m_over_an_element_that_cannot_scale_is_refused() {
+        let err = parse_spice(
+            "* m over a diode\n\
+             .subckt d1 a b\n\
+             D1 a b dmod\n\
+             .ends\n\
+             .model dmod D IS=1e-14\n\
+             V1 in 0 DC 1\n\
+             X1 in 0 d1 m=2\n\
+             .op\n.end\n",
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("d1"), "must name the element: {msg}");
+        assert!(msg.contains("area"), "must say why: {msg}");
+    }
+
+    /// `m=` on a passive line is the same multiplier, and exact there too.
+    #[test]
+    fn m_on_a_passive_line_scales_it() {
+        let net = parse_spice(
+            "* device multiplier\n\
+             V1 in 0 DC 1\n\
+             R1 in 0 1k m=4\n\
+             C1 in 0 1n m=3\n\
+             .op\n.end\n",
+        )
+        .unwrap();
+        let r = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Resistor { resistance, .. } => Some(*resistance),
+                _ => None,
+            })
+            .unwrap();
+        let c = net
+            .elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Capacitor { capacitance, .. } => Some(*capacitance),
+                _ => None,
+            })
+            .unwrap();
+        assert!((r - 250.0).abs() < 1e-9, "r={r}");
+        assert!((c - 3e-9).abs() < 1e-18, "c={c}");
+    }
+
+    /// An unrecognised `k=v` on a passive line was dropped in silence, which left
+    /// the element at its bare value — a tempco or a multiplier that goes missing
+    /// is exactly the size of the error it causes.
+    #[test]
+    fn an_unknown_parameter_on_a_passive_line_is_refused() {
+        for deck in [
+            "* tempco\nV1 in 0 DC 1\nR1 in 0 1k tc1=0.001\n.op\n.end\n",
+            "* unreadable value\nV1 in 0 DC 1\nC1 in 0 1n esr=notanumber\n.op\n.end\n",
+        ] {
+            let err = parse_spice(deck).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("line 3"), "{msg}");
+        }
+    }
+
     /// A `.if` in a subcircuit body is evaluated per instance, against that
     /// instance's parameters. It used to be refused outright, because collecting
     /// it would have evaluated the condition once against the definition's
