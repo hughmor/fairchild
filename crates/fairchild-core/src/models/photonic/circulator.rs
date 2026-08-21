@@ -133,6 +133,19 @@ impl Device for NativeCirculator {
         false
     }
 
+    /// The two `out`-role ports take port 1's tag, matching the λ ties stamped
+    /// below. Bidirectional-only, so the per-channel stride is 3 ports × 5
+    /// wires and λ sits last in each port.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let n = self.n_channels;
+        (0..n)
+            .flat_map(|k| {
+                let base = 15 * k;
+                [(base + 4, base + 5 + 4), (base + 4, base + 10 + 4)]
+            })
+            .collect()
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}

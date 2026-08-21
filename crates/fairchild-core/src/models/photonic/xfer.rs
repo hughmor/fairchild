@@ -568,6 +568,22 @@ impl Device for NativeOptical2x2 {
     /// `dw_dv_<k>` coupling is invisible to the adjoint unless declared.  Only
     /// the channels that actually take a control voltage: an `explicit[k]`
     /// channel has a matrix pinned by parameters and no voltage dependence.
+    /// Both inputs reach both outputs — same rule as `fc_dcoupler`, and for the
+    /// same reason: a ring fed only through its add port must still carry a
+    /// label. Structural, so nothing latches.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        let (p2, p3, p4) = (wpc * n, 2 * wpc * n, 3 * wpc * n);
+        (0..n)
+            .flat_map(|k| {
+                let (i1, i2) = (wpc * k + lam, p2 + wpc * k + lam);
+                let (t, d) = (p3 + wpc * k + lam, p4 + wpc * k + lam);
+                [(i1, t), (i1, d), (i2, t), (i2, d)]
+            })
+            .collect()
+    }
+
     fn frozen_jacobian_columns(&self) -> Vec<usize> {
         let ctl_base = 4 * self.wpc * self.n_channels;
         let mut cols: Vec<usize> = (0..self.n_channels)

@@ -26,8 +26,8 @@
 //! severs the KCL and leaves nodes held by nothing but `gmin`.
 //!
 //! So each device declares how a label moves through it
-//! ([`Device::lambda_routing`]) and where one originates
-//! ([`Device::lambda_emitted`]). Same shape as bundle arity: knowledge that used
+//! ([`crate::device::Device::lambda_routing`]) and where one originates
+//! ([`crate::device::Device::lambda_emitted`]). Same shape as bundle arity: knowledge that used
 //! to be inferred from a structure a device happens to build, moved next to the
 //! device that knows it.
 //!
@@ -42,7 +42,8 @@
 
 use std::collections::HashMap;
 
-use crate::device::Device;
+use crate::device::SimContext;
+use crate::device_registry::{DeviceRegistry, ParamSet};
 use fairchild_parser::{Element, Netlist};
 
 /// Every λ net's wavelength, in metres.
@@ -73,13 +74,11 @@ impl LambdaMap {
     pub fn unreached(&self) -> &[String] {
         &self.unreached
     }
-}
 
-/// The net name each of an element's terminals connects to.
-fn terminal_nets(el: &Element) -> Option<&[String]> {
-    match el {
-        Element::XOsdi { nets, .. } => Some(nets),
-        _ => None,
+    /// Every net this map speaks for. These are the nets that must *not* become
+    /// MNA rows: their value is decided here instead of solved for.
+    pub fn nets(&self) -> impl Iterator<Item = &str> {
+        self.by_net.keys().map(String::as_str)
     }
 }
 
@@ -93,45 +92,83 @@ fn terminal_nets(el: &Element) -> Option<&[String]> {
 /// net is recorded so a caller can report it, since two sources at different
 /// wavelengths on one wire is a deck bug rather than a physical mixture.
 ///
-/// `fallback` is what an unreached net takes — `lambda_center_m`, matching the
-/// bootstrap an undriven λ wire gets today.
-pub fn resolve(netlist: &Netlist, devices: &[Box<dyn Device>], fallback: f64) -> LambdaMap {
-    // Element order and device order agree: `build_devices` walks the elements.
-    // Zip rather than index so a mismatch truncates instead of panicking.
+/// An unreached net takes `ctx.lambda_center_m`, matching the bootstrap an
+/// undriven λ wire gets today.
+///
+/// # Why this builds its own devices
+///
+/// Only a device knows where its labels go, and the answer depends on its
+/// bundle width — so the declarations have to be *asked of instances*, not
+/// looked up in a table keyed by model name. But the row layout depends on the
+/// answer, so this cannot wait for the real instances: they are bound to the
+/// matrix this pass decides the shape of. So each `X` element gets a throwaway
+/// instance with every terminal unbound. `lambda_routing`/`lambda_emitted` are
+/// pure functions of a device's shape and parameters, neither of which a node
+/// index changes, so the throwaway answers exactly as the real one would.
+///
+/// An unknown model is skipped rather than reported: `build_devices` raises that
+/// error, with the element name, moments later.
+pub fn resolve(netlist: &Netlist, ctx: &SimContext, registry: &DeviceRegistry) -> LambdaMap {
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut seeds: Vec<(String, f64)> = Vec::new();
-    // Every λ net in the deck, not only the ones some routing mentions. A dark
+    // Every λ net in the deck, not only the ones some routing mentions: a dark
     // port is still a λ net and must still get an answer — an AWGR's unused
-    // input, a ring's dark add. Asking the netlist rather than the declarations
-    // is what makes the map total.
-    let mut lambda_nets: Vec<String> = netlist
-        .optical_nets
-        .iter()
-        .filter(|n| fairchild_parser::is_lambda_wire(n))
-        .cloned()
-        .collect();
+    // input, a ring's dark add. `lambda_terminals` is what makes it total.
+    let mut lambda_nets: Vec<String> = Vec::new();
 
-    for (el, dev) in netlist
-        .elements
-        .iter()
-        .filter(|e| matches!(e, Element::XOsdi { .. }))
-        .zip(devices.iter())
-    {
-        let Some(nets) = terminal_nets(el) else {
+    for el in &netlist.elements {
+        let Element::XOsdi {
+            nets,
+            model_name,
+            params,
+            ..
+        } = el
+        else {
             continue;
         };
+        let Some(factory) = registry.get(model_name) else {
+            continue;
+        };
+        let unbound = vec![None; nets.len()];
+        let dev = factory(&unbound, &ParamSet::new(params), ctx);
+        for t in dev.lambda_terminals() {
+            if let Some(n) = nets.get(t) {
+                lambda_nets.push(n.clone());
+            }
+        }
         for (from, to) in dev.lambda_routing() {
             if let (Some(a), Some(b)) = (nets.get(from), nets.get(to)) {
                 edges.push((a.clone(), b.clone()));
-                lambda_nets.push(a.clone());
-                lambda_nets.push(b.clone());
             }
         }
         for (t, wl) in dev.lambda_emitted() {
             if let Some(n) = nets.get(t) {
                 seeds.push((n.clone(), wl));
-                lambda_nets.push(n.clone());
             }
+        }
+    }
+
+    // A voltage source on a λ net is a deck author naming a wavelength by hand
+    // — the idiom every hand-wired bundle in the tree and the test suite uses,
+    // and the only way to label a bundle whose light comes from outside the
+    // deck. It has to seed resolution: silently substituting the band centre
+    // for a wire someone explicitly drove to 1551 nm is exactly the class of
+    // wrong answer this codebase refuses to ship. Only nets some device already
+    // agreed are λ nets qualify, so an ordinary supply is never mistaken for
+    // one.
+    let declared: std::collections::HashSet<&str> =
+        lambda_nets.iter().map(String::as_str).collect();
+    for el in &netlist.elements {
+        let Element::VoltageSource {
+            pos,
+            waveform: fairchild_parser::Waveform::Dc(v),
+            ..
+        } = el
+        else {
+            continue;
+        };
+        if *v > 0.0 && declared.contains(pos.as_str()) {
+            seeds.push((pos.clone(), *v));
         }
     }
 
@@ -165,7 +202,7 @@ pub fn resolve(netlist: &Netlist, devices: &[Box<dyn Device>], fallback: f64) ->
         .cloned()
         .collect();
     for n in &unreached {
-        by_net.insert(n.clone(), fallback);
+        by_net.insert(n.clone(), ctx.lambda_center_m);
     }
 
     LambdaMap { by_net, unreached }

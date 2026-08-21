@@ -174,6 +174,14 @@ impl Device for NativePhotodetector {
         }
     }
 
+    /// A photodetector ends the path — it absorbs the light rather than passing
+    /// it on — but its input port still carries a label. Declared so resolution
+    /// speaks for that net too.
+    fn lambda_terminals(&self) -> Vec<usize> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        (0..n).map(|k| wpc * k + wpc - 1).collect()
+    }
+
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         let n = self.n_channels;
         let wpc = self.wpc;

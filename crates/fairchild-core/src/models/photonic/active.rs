@@ -201,6 +201,10 @@ impl Device for ActiveOpticalDevice {
         self.seg.lambda_routing()
     }
 
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        self.seg.set_resolved_lambda(per_terminal);
+    }
+
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let intensity = self.seg.channel_intensities(x);
         let pert = self.model.eval(x, &intensity, ctx);

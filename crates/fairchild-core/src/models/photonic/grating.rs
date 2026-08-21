@@ -85,6 +85,15 @@ impl Device for NativeGratingCoupler {
         }
     }
 
+    /// Straight through, channel for channel.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        (0..n)
+            .map(|k| (wpc * k + lam, wpc * n + wpc * k + lam))
+            .collect()
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}

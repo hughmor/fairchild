@@ -233,7 +233,12 @@ Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 ## 9. Photonic devices
 
 All native Rust, all using the slowly-varying-envelope `(re, im, λ)`
-representation. **None of these is validated against an external simulator** —
+representation. λ is a **label**, not an unknown: every device declares where a
+wavelength enters it, where it goes, and which of its terminals carry one, and
+the wavelength on every λ net is resolved once before the solve. A device reads
+its channel wavelength from that resolution, so nothing differentiates against
+λ and no device chooses between two λ wires at run time. **None of these is
+validated against an external simulator** —
 the tests are analytic closed forms, bit-for-bit characterisation pins, and
 equivalence tests between two spellings of the same circuit. That is a real
 gap. The cheapest way to close it is a cross-check of the linear passives

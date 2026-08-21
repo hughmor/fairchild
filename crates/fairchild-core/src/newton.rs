@@ -233,7 +233,12 @@ pub fn build_devices_with_footprints(
     // to attribute a row back to the device that owns it.
     let extras_base = topo.size;
     let topo_arc = Arc::new(topo.clone());
-    for el in &netlist.elements {
+    // Which element each device came from, so the λ pass below can hand a
+    // device the wavelengths on its own nets. Filled by watching the vector
+    // grow rather than threaded through `push_device`'s dozen call sites — one
+    // list, kept true by construction rather than by a promise.
+    let mut dev_elem: Vec<usize> = Vec::new();
+    for (elem_idx, el) in netlist.elements.iter().enumerate() {
         match el {
             Element::Diode {
                 anode,
@@ -420,9 +425,45 @@ pub fn build_devices_with_footprints(
             }
             _ => {}
         }
+        while dev_elem.len() < devices.len() {
+            dev_elem.push(elem_idx);
+        }
     }
+    apply_resolved_lambda(netlist, &mut devices, &dev_elem, ctx, registry);
     check_exclusive_potential_drivers(&devices, netlist, topo, extras_base)?;
     Ok((devices, foot))
+}
+
+/// Hand every device the wavelength resolved for each of its terminals.
+///
+/// λ is a label, not a state: it is routed from sources, never computed, so it
+/// is resolved once here rather than solved for (see [`crate::lambda`]). Doing
+/// it inside the builder is what makes it unforgettable — a caller that
+/// assembles devices by hand cannot end up with a photonic device evaluating
+/// its phase at the wrong colour.
+///
+/// A terminal no λ net reached takes the band centre, which is exactly what an
+/// undriven λ wire used to bootstrap to.
+fn apply_resolved_lambda(
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    dev_elem: &[usize],
+    ctx: &SimContext,
+    registry: &DeviceRegistry,
+) {
+    let map = crate::lambda::resolve(netlist, ctx, registry);
+    let mut per_terminal: Vec<f64> = Vec::new();
+    for (dev, &ei) in devices.iter_mut().zip(dev_elem) {
+        let Some(Element::XOsdi { nets, .. }) = netlist.elements.get(ei) else {
+            continue;
+        };
+        per_terminal.clear();
+        per_terminal.extend(
+            nets.iter()
+                .map(|n| map.get(n).unwrap_or(ctx.lambda_center_m)),
+        );
+        dev.set_resolved_lambda(&per_terminal);
+    }
 }
 
 /// Refuse a netlist in which two devices pin the same node's potential.

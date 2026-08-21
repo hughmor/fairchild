@@ -227,9 +227,12 @@ pub struct NativeMux {
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     filter: ChannelFilter,
-    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// Field transmission per channel, refreshed each eval from `lambda_m`.
     /// All ones until a `ChannelFilter` parameter is set.
     amp: Vec<f64>,
+    /// Each channel's resolved λ (m), read from the *input* side's tags.
+    /// Zero means "never told", which reads as the filter's own grid centre.
+    lambda_m: Vec<f64>,
 }
 
 impl Default for NativeMux {
@@ -251,6 +254,7 @@ impl NativeMux {
             branches: Vec::new(),
             filter: ChannelFilter::new(),
             amp: Vec::new(),
+            lambda_m: Vec::new(),
         }
     }
 }
@@ -280,6 +284,7 @@ impl Device for NativeMux {
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc * n];
         self.amp = vec![1.0; n];
+        self.lambda_m = vec![0.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -303,17 +308,26 @@ impl Device for NativeMux {
         bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    /// A bridge reads its λ tags from the input side, which `LAMBDA_BASE`
+    /// already names: slot `k` of that block.
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n_channels, self.wpc);
+        let base = Self::LAMBDA_BASE * wpc * n;
+        for k in 0..n {
+            if let Some(&v) = per_terminal.get(base + wpc * k + wpc - 1) {
+                self.lambda_m[k] = v;
+            }
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         if !self.filter.active {
             return;
         }
-        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        let n = self.n_channels;
         for k in 0..n {
-            // Read the λ this channel actually carries, from whichever side is
-            // the input; both layouts put the bus block first, so the channel
-            // block starts at wpc·n.
-            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
-                Some(i) if x[i].abs() > 1e-9 => x[i],
+            let lambda = match self.lambda_m.get(k) {
+                Some(&v) if v > 0.0 => v,
                 _ => self.filter.lambda0_m,
             };
             self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);
@@ -353,9 +367,12 @@ pub struct NativeDemux {
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     filter: ChannelFilter,
-    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// Field transmission per channel, refreshed each eval from `lambda_m`.
     /// All ones until a `ChannelFilter` parameter is set.
     amp: Vec<f64>,
+    /// Each channel's resolved λ (m), read from the *input* side's tags.
+    /// Zero means "never told", which reads as the filter's own grid centre.
+    lambda_m: Vec<f64>,
 }
 
 impl Default for NativeDemux {
@@ -376,6 +393,7 @@ impl NativeDemux {
             branches: Vec::new(),
             filter: ChannelFilter::new(),
             amp: Vec::new(),
+            lambda_m: Vec::new(),
         }
     }
 }
@@ -405,6 +423,7 @@ impl Device for NativeDemux {
         self.nodes = terminals.to_vec();
         self.branches = vec![None; wpc * n];
         self.amp = vec![1.0; n];
+        self.lambda_m = vec![0.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -428,17 +447,26 @@ impl Device for NativeDemux {
         bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    /// A bridge reads its λ tags from the input side, which `LAMBDA_BASE`
+    /// already names: slot `k` of that block.
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n_channels, self.wpc);
+        let base = Self::LAMBDA_BASE * wpc * n;
+        for k in 0..n {
+            if let Some(&v) = per_terminal.get(base + wpc * k + wpc - 1) {
+                self.lambda_m[k] = v;
+            }
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         if !self.filter.active {
             return;
         }
-        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        let n = self.n_channels;
         for k in 0..n {
-            // Read the λ this channel actually carries, from whichever side is
-            // the input; both layouts put the bus block first, so the channel
-            // block starts at wpc·n.
-            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
-                Some(i) if x[i].abs() > 1e-9 => x[i],
+            let lambda = match self.lambda_m.get(k) {
+                Some(&v) if v > 0.0 => v,
                 _ => self.filter.lambda0_m,
             };
             self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);

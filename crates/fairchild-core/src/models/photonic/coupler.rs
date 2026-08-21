@@ -142,6 +142,25 @@ impl Device for NativeDirectionalCoupler {
         }
     }
 
+    /// Both inputs reach both outputs, so both are declared. Resolution takes
+    /// whichever input a source actually reached — which is what
+    /// [`LambdaSelect`] was latching for, decided structurally instead of from
+    /// values that are still settling. Two *different* wavelengths arriving on
+    /// one coupler is a deck bug either way; the first declared wins and the
+    /// disagreement is recorded, rather than being averaged into a wire.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        let (b, c, d) = (wpc * n, 2 * wpc * n, 3 * wpc * n);
+        (0..n)
+            .flat_map(|k| {
+                let (a_l, b_l) = (wpc * k + lam, b + wpc * k + lam);
+                let (c_l, d_l) = (c + wpc * k + lam, d + wpc * k + lam);
+                [(a_l, c_l), (a_l, d_l), (b_l, c_l), (b_l, d_l)]
+            })
+            .collect()
+    }
+
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         // Latch which input carries the λ tag; see LambdaSelect.
         let (wpc, n, lam) = (self.wpc, self.n_channels, self.wpc - 1);

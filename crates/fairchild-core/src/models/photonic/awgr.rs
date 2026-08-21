@@ -144,7 +144,8 @@ pub struct NativeAwgr {
     table: Option<SpectrumTable>,
 
     // ── Cached evaluation state ──
-    /// λ read from every input slot last rebuild, `[i·N + k]`.
+    /// Resolved λ for every input slot, `[i·N + k]`. NaN until
+    /// `set_resolved_lambda` fills it, which reads as "use the device grid".
     lam_cache: Vec<f64>,
     /// Compiled stamp list: (branch slot, output node, weighted inputs).
     rows: Vec<StampRow>,
@@ -220,15 +221,6 @@ impl NativeAwgr {
     #[inline]
     fn out_wire(&self, j: usize, k: usize, w: usize) -> NodeId {
         self.nodes[self.wpc * self.n * (self.n + j) + self.wpc * k + w]
-    }
-
-    /// Read input port `i` slot `k`'s λ wire, bootstrapped to the reference
-    /// wavelength when undriven (matching `OpticalSegment::lambda_of`).
-    fn lambda_in(&self, x: &[f64], i: usize, k: usize) -> f64 {
-        match self.in_wire(i, k, self.wpc - 1) {
-            Some(idx) if x[idx].abs() > 1e-9 => x[idx],
-            _ => self.lambda0_m,
-        }
     }
 
     /// The channel grid implied by the current parameters.
@@ -320,7 +312,16 @@ impl NativeAwgr {
                 let mut re_ins: Vec<(NodeId, f64)> = Vec::with_capacity(2 * n);
                 let mut im_ins: Vec<(NodeId, f64)> = Vec::with_capacity(2 * n);
                 for i in 0..n {
-                    let lambda = self.lam_cache[i * n + k];
+                    // NaN means resolution never reached this input — a dark
+                    // port, or a caller that built the device by hand. The
+                    // device's own grid centre is the same answer the λ wire
+                    // used to bootstrap to.
+                    let cached = self.lam_cache[i * n + k];
+                    let lambda = if cached.is_finite() {
+                        cached
+                    } else {
+                        self.lambda0_m
+                    };
                     let (a, b) = self.t_ij(&spec, lambda, i, j, k, t_k);
                     out_power[i * n + k] += a * a + b * b;
                     let (in_re, in_im) = (self.in_wire(i, k, 0), self.in_wire(i, k, 1));
@@ -579,6 +580,36 @@ impl Device for NativeAwgr {
     /// `lambda_src` outside `0..N` (`-1` by convention) means the outputs take
     /// the device's own grid instead of mirroring anything, so there is no edge
     /// to declare — see `lambda_emitted`.
+    /// Every port's λ terminal, both sides — not just the routed ones.
+    ///
+    /// The router mirrors one input port's tags onto its outputs, but it
+    /// *evaluates* each input port's passband at that port's own λ, so a label
+    /// on port 3 is read even though nothing routes it. Left to the default
+    /// (the routing endpoints), ports other than `lambda_src` would resolve to
+    /// the band centre and every off-centre channel would be read on the wrong
+    /// passband.
+    fn lambda_terminals(&self) -> Vec<usize> {
+        let (n, wpc) = (self.n, self.wpc);
+        let lam = wpc - 1;
+        let port = wpc * n;
+        (0..2 * n)
+            .flat_map(|p| (0..n).map(move |k| port * p + wpc * k + lam))
+            .collect()
+    }
+
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n, self.wpc);
+        let lam = wpc - 1;
+        for i in 0..n {
+            for k in 0..n {
+                if let Some(&v) = per_terminal.get(wpc * n * i + wpc * k + lam) {
+                    self.lam_cache[i * n + k] = v;
+                }
+            }
+        }
+        self.built = false;
+    }
+
     fn lambda_routing(&self) -> Vec<(usize, usize)> {
         let (n, wpc) = (self.n, self.wpc);
         let Ok(src) = usize::try_from(self.lambda_src) else {
@@ -626,25 +657,12 @@ impl Device for NativeAwgr {
         out
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
-        // Coefficients depend only on the input λ tags (and on parameters,
-        // which invalidate directly). Lasers are CW, so after the first NR
-        // iteration this is a comparison and nothing else.
-        let n = self.n;
-        let mut changed = !self.built;
-        for i in 0..n {
-            for k in 0..n {
-                let lam = self.lambda_in(x, i, k);
-                let slot = i * n + k;
-                // The cache starts as NaN, so the first pass always rebuilds.
-                let prev = self.lam_cache[slot];
-                if !prev.is_finite() || (lam - prev).abs() > 1e-18 {
-                    self.lam_cache[slot] = lam;
-                    changed = true;
-                }
-            }
-        }
-        if changed {
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+        // Coefficients depend only on the input λ tags and on parameters, and
+        // both are settled before the first iterate — λ by resolution, params by
+        // `set_real_param` clearing `built`. This used to re-scan the λ wires
+        // every iteration to notice them arriving; they no longer arrive.
+        if !self.built {
             self.rebuild(ctx);
         }
     }

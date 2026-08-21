@@ -125,8 +125,11 @@ pub struct OpticalSegment {
     pub pin_at_ref: bool,
     /// Group delay `τ_g = L·n_g/c` (s).
     tau_g_s: f64,
-    /// Bootstrap λ for the first NR iterate (x = 0): `wl_ref_m`.
-    lambda_bootstrap_m: f64,
+    /// Each channel's resolved wavelength (m), handed down by
+    /// [`Device::set_resolved_lambda`](crate::device::Device::set_resolved_lambda)
+    /// at build time. Zero means "never told", which reads as `wl_ref_m` — the
+    /// same answer an undriven λ wire used to bootstrap to.
+    lambda_m: Vec<f64>,
     n_channels: usize,
     /// Smallest optical wire count that would have been usable, recorded when
     /// `setup_instance` is handed one it cannot use. Without it
@@ -175,7 +178,7 @@ impl OpticalSegment {
             alpha_neper_m,
             pin_at_ref: false,
             tau_g_s: length_m * n_g / C0,
-            lambda_bootstrap_m: 1.55e-6,
+            lambda_m: Vec::new(),
             n_channels: 0,
             min_wires: None,
             wpc: 3,
@@ -214,7 +217,6 @@ impl OpticalSegment {
     /// `Device::setup_model`). Defaults the dispersion reference to the band
     /// centre too, unless the user already overrode `wl_ref_m`.
     pub fn setup_model(&mut self, ctx: &SimContext) {
-        self.lambda_bootstrap_m = ctx.lambda_center_m;
         if (self.wl_ref_m - 1.55e-6).abs() < 1e-12 {
             self.wl_ref_m = ctx.lambda_center_m;
         }
@@ -245,6 +247,7 @@ impl OpticalSegment {
             self.n_channels = 0;
             self.nodes.clear();
             self.branches.clear();
+            self.lambda_m.clear();
             return;
         }
         self.min_wires = None;
@@ -252,6 +255,7 @@ impl OpticalSegment {
         self.n_channels = n;
         self.nodes = optical_terminals.to_vec();
         self.branches = vec![None; wpc * n];
+        self.lambda_m = vec![0.0; n];
         self.c_cached = vec![1.0; n];
         self.s_cached = vec![0.0; n];
         let nc = self.ctrl_nodes.len();
@@ -355,19 +359,27 @@ impl OpticalSegment {
         }
     }
 
-    /// Read the per-channel λ wire (bootstrapped to `wl_ref_m` when undriven).
-    fn lambda_of(&self, x: &[f64], k: usize) -> f64 {
+    /// Take the per-channel λ resolved for this instance's input port.
+    ///
+    /// Terminal layout: λ sits at `wpc - 1` within a channel, and the input
+    /// block comes first. A segment's output λ equals its input λ by
+    /// construction (that is what `lambda_routing` declares), so reading the
+    /// input side is not a choice between two answers.
+    pub fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
         let lam = self.wpc - 1;
-        match self.nodes[self.wpc * k + lam] {
-            Some(i) => {
-                let v = x[i];
-                if v.abs() > 1e-9 {
-                    v
-                } else {
-                    self.wl_ref_m
-                }
+        for k in 0..self.n_channels {
+            if let Some(&v) = per_terminal.get(self.wpc * k + lam) {
+                self.lambda_m[k] = v;
             }
-            None => self.wl_ref_m,
+        }
+    }
+
+    /// Channel `k`'s wavelength (m), or `wl_ref_m` if resolution never reached
+    /// this instance — the same value an undriven λ wire bootstrapped to.
+    fn lambda_of(&self, k: usize) -> f64 {
+        match self.lambda_m.get(k) {
+            Some(&v) if v > 0.0 => v,
+            _ => self.wl_ref_m,
         }
     }
 
@@ -464,7 +476,7 @@ impl OpticalSegment {
         }
         let per = self.vals_per_channel();
         for k in 0..self.n_channels {
-            let lambda = self.lambda_of(x, k);
+            let lambda = self.lambda_of(k);
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
             // Δn_eff folds into the index (φ_eo = 2π·Δn_eff·L/λ); Δφ adds a
             // wavelength-independent rotation (heater, Pockels-with-fixed-gap…).

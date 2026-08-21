@@ -21,13 +21,9 @@ fn assert_resolution_matches_the_solve(label: &str, deck: &str) -> usize {
     let reg = DeviceRegistry::new();
     let r = dc_op_nr_with_registry(&net, &reg).expect("DC OP converges");
 
-    // Same devices the solve used, built the same way.
     let opts = fairchild_core::SimOptions::default();
     let ctx = opts.sim_context();
-    let mut topo = fairchild_core::CircuitTopology::build(&net);
-    let devices = fairchild_core::build_devices(&net, &mut topo, &ctx, &reg)
-        .expect("devices build for the resolution pass");
-    let map = lambda::resolve(&net, &devices, ctx.lambda_center_m);
+    let map = lambda::resolve(&net, &ctx, &reg);
 
     let mut checked = 0;
     for name in net.optical_nets.iter() {

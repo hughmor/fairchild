@@ -127,6 +127,16 @@ impl Device for NativeMzm {
         }
     }
 
+    /// Straight through, channel for channel: a modulator changes how much
+    /// light there is, never what colour it is.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        (0..n)
+            .map(|k| (wpc * k + lam, wpc * n + wpc * k + lam))
+            .collect()
+    }
+
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         let n = self.n_channels;
         let wpc = self.wpc;
