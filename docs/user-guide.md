@@ -1796,9 +1796,54 @@ order is positional and per channel — `[re, im, λ]` for channel 0, then chann
 answer rather than an error. `crates/fairchild-osdi/tests/models/wg_wdm2.va` is
 a worked two-channel example.
 
-The width is fixed at compile time, so today one source serves one channel
-count. Generating the ports per N from a single source is
-[issue #55](https://github.com/hughmor/fairchild/issues/55).
+### One source, any channel count
+
+Writing out `3·N` ports by hand serves exactly one N. To write a model once and
+run it at any width, declare the port as a **bundle** and let fairchild generate
+the ports for whatever the deck asks for:
+
+| construct | meaning |
+|---|---|
+| `optical_bundle p, q;` | ports whose width comes from the deck |
+| `N(p)` | that width — usable as a loop bound |
+| `E_RE(p,k)` / `E_IM(p,k)` | channel `k`'s field wires |
+| `WL(p,k)` | channel `k`'s wavelength **wire**, for passing the tag through |
+| `LAMBDA(p,k)` | channel `k`'s wavelength **value**, for the physics |
+
+```verilog
+module wg_bundle(a, b);
+    optical_bundle a, b;
+    parameter real l_um = 1000.0;
+    integer k;
+    analog begin
+        for (k = 0; k < N(a); k = k + 1) begin
+            ph = 2.0 * `M_PI * n_g * l_um * 1e-6 / LAMBDA(a, k);
+            OF(E_RE(b, k)) <+ amp * (OF(E_RE(a, k)) * cos(ph) + OF(E_IM(a, k)) * sin(ph));
+            OWL(WL(b, k)) <+ OWL(WL(a, k));
+        end
+    end
+endmodule
+```
+
+The channel count appears nowhere. `.optical_port bus 8` in the deck is the only
+place a width is written, and the model is compiled for that width and cached
+like any other source. Change the deck to 100 channels and the model does not
+change.
+
+**`WL` and `LAMBDA` are different things, deliberately.** `LAMBDA` is a
+generated parameter, so the physics reads a wavelength with no derivative
+attached — which is what keeps the ∂φ/∂λ ≈ 1e9 entry described above out of the
+Jacobian. `WL` is the wire, and exists only so the tag reaches whatever native
+device is downstream. Compute from `LAMBDA`; pass `WL` through.
+
+Set the wavelengths per channel on the instance — `wl_0=1546.12n wl_1=1546.92n`
+— or leave them at `wl_default`.
+
+The loop form is fixed at `for (k = 0; k < N(p); k = k + 1) begin … end`.
+Anything else is refused by name rather than expanded into something plausible,
+because a mis-generated model is a silently wrong device. `--emit-generated DIR`
+writes the expanded source so you can read exactly what was compiled — the first
+thing worth looking at when a model behaves at one channel and not at eight.
 
 Still native-only: bidirectional propagation, `DelayLine` group delay, and
 `PhotonicActiveModel` composition. And a model must still take λ from a

@@ -150,6 +150,15 @@ pub enum ArityDecl {
     /// takes the whole bus, and if one channel each hits it, it does not.  Same
     /// rule a `.subckt` instance already follows.
     Terminals(usize),
+    /// A model written against the bundle-port dialect, which has no single
+    /// terminal count: it is generated for whatever width the deck asks for.
+    /// Any shape `scalars + per_channel·N` fits, for `N >= 1`.
+    Bundle {
+        /// Ports that are not part of a bundle.
+        scalars: usize,
+        /// Terminals every extra channel adds: `bundles × wires_per_channel`.
+        per_channel: usize,
+    },
 }
 
 pub struct DeviceRegistry {
@@ -858,6 +867,17 @@ impl ArityOracle for DeviceRegistry {
                     // the mismatch it already reports well.
                     None
                 }
+            }
+            // A generated model serves any width, so the only question is
+            // whether the flattened shape is one an integer channel count
+            // produces at all.
+            ArityDecl::Bundle {
+                scalars,
+                per_channel,
+            } => {
+                let rest = q.flattened.checked_sub(scalars)?;
+                (per_channel > 0 && rest % per_channel == 0 && rest / per_channel >= 1)
+                    .then_some(BundleArity::Aware)
             }
         }
     }

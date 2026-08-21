@@ -156,6 +156,14 @@ struct Cli {
     #[arg(long = "no-va-compile")]
     no_va_compile: bool,
 
+    /// Write the expanded per-channel-count source of a bundle-dialect
+    /// Verilog-A model here, instead of beside the artefact cache.  A model
+    /// written once for any N is compiled at the width the deck declares, and
+    /// this is how you read what was actually compiled — the first thing wanted
+    /// when a model behaves at one channel and not at eight.
+    #[arg(long = "emit-generated", value_name = "DIR")]
+    emit_generated: Option<PathBuf>,
+
     /// Bundle all `.alter` × `.temp` corner outputs into the single
     /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
     /// preserving the historic concatenated layout.
@@ -325,6 +333,7 @@ fn va_options(cli: &Cli) -> VaOptions {
         include_dirs: cli.va_include.clone(),
         cache_dir: None,
         no_compile: cli.no_va_compile,
+        generated_dir: cli.emit_generated.clone(),
     }
     .or_env()
 }
@@ -379,12 +388,14 @@ fn build_registry(
             }
         }
 
-        fairchild_osdi::load_libraries(
+        fairchild_osdi::load_libraries_with_widths(
             &netlist.osdi_paths,
             &netlist.va_sources,
             netlist_dir.map(|p| p.as_path()),
             va,
             &mut registry,
+            &fairchild_parser::instantiated_widths(netlist),
+            fairchild_parser::wires_per_channel(netlist),
         )
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");

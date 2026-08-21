@@ -1137,12 +1137,14 @@ fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<
 
     #[cfg(feature = "osdi")]
     {
-        fairchild_osdi::load_libraries(
+        fairchild_osdi::load_libraries_with_widths(
             &netlist.osdi_paths,
             &netlist.va_sources,
             netlist_dir.map(|p| p.as_path()),
             &fairchild_osdi::VaOptions::from_env(),
             &mut registry,
+            &fairchild_parser::instantiated_widths(netlist),
+            fairchild_parser::wires_per_channel(netlist),
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         // `.model <card> <module> (...)` cards naming a descriptor we just

@@ -13,6 +13,45 @@ pub use spice::{
     PermissiveArity, StaticArity,
 };
 
+/// Which flattened terminal counts each model name is instantiated at.
+///
+/// A Verilog-A source written against the bundle-port dialect has no fixed port
+/// count — it is generated for the width the deck declared — so the loader has
+/// to be told the widths before it can build anything. By the time a netlist
+/// exists its `X` lines are already flattened, so each one's net count *is* the
+/// terminal count, and no re-derivation is needed.
+///
+/// Run on the first of the two load passes, whose whole job is to tell the
+/// registry what to build.
+pub fn instantiated_widths(
+    net: &Netlist,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> {
+    let mut out: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> =
+        Default::default();
+    for el in &net.elements {
+        if let Element::XOsdi {
+            model_name, nets, ..
+        } = el
+        {
+            out.entry(model_name.clone())
+                .or_default()
+                .insert(nets.len());
+        }
+    }
+    out
+}
+
+/// Wires per optical channel this netlist uses: 5 when any bundle is
+/// bidirectional, else 3. The generated port list has to match.
+pub fn wires_per_channel(net: &Netlist) -> usize {
+    net.bundle_ports
+        .iter()
+        .map(|p| p.wires_per_channel())
+        .max()
+        .unwrap_or(3)
+        .max(3)
+}
+
 /// The `AC <mag> [phase]` small-signal excitation on a source line.
 ///
 /// Orthogonal to the time-domain `waveform`: a source may carry a DC operating
