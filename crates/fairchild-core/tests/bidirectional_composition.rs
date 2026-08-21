@@ -337,3 +337,59 @@ R0 a0 0 1k\nR1 a1 0 1k\n.op\n.end\n",
         );
     }
 }
+
+// ── absorbed power does not care which way a photon travels (#51) ──────────
+
+/// `channel_intensities` read the forward wires only, so under
+/// `enable_bidirectional=1` the returning field heated nothing: a junction in
+/// front of a mirror saw half the light it was actually absorbing.
+///
+/// The anchor is a closed form fed by the backward field the solve itself
+/// reports, so it is not an agreement between the segment and the drive — the
+/// prediction is arithmetic on a measured amplitude:
+///
+///   Δn      = dn_dt · R_th · α · L · (I_fw_in + I_bw_in)
+///   Δφ(R)   = 2π · L · (Δn(R) − Δn(0)) / λ = 2π · L · C · I_bw_in / λ
+///
+/// The forward input is the laser and does not move with `reflectance`, so the
+/// whole difference between the two runs is the backward field. Against the old
+/// code the difference is exactly zero.
+#[test]
+fn backward_light_heats_the_junction_it_passes_through() {
+    let deck = |refl: f64| {
+        format!(
+            ".optical_port a\n\
+             .optical_port b\n\
+             Xl a fc_cw_laser power_mW=10 wavelength_nm=1550\n\
+             Xpn a b c 0 fc_pn_ps_full L_um=500 alpha_dB_cm=2.0 dn_dt=1e-4 r_th=5000 beta_tpa=0\n\
+             Vb c 0 DC 0\n\
+             Xf b fc_facet reflectance={refl}\n"
+        )
+    };
+    let phase = |r: &fairchild_core::newton::NrResult| {
+        let re = r.node_voltage("b_re_fw_0").unwrap();
+        let im = r.node_voltage("b_im_fw_0").unwrap();
+        im.atan2(re)
+    };
+
+    let dark = run(&deck(0.0));
+    let lit = run(&deck(0.9));
+
+    let i_bw = power(&lit, "b", "bw", 0);
+    assert!(
+        i_bw > 1e-4,
+        "the mirror must actually return light: I_bw={i_bw:.6} W"
+    );
+
+    let alpha = 2.0 * (10.0f64).ln() / 10.0 * 100.0; // dB/cm → Np/m
+    let l_m = 500e-6;
+    let c = 1e-4 * 5000.0 * alpha * l_m; // Δn per watt of absorbed-power input
+    let expect = 2.0 * std::f64::consts::PI * l_m * (c * i_bw) / 1550e-9;
+    let got = (phase(&dark) - phase(&lit)).abs();
+
+    assert!(
+        (got - expect).abs() < 2e-4,
+        "backward light contributed a Δφ of {got:.6} rad; the field the solve \
+         reports (I_bw={i_bw:.6} W) implies {expect:.6} rad"
+    );
+}

@@ -4,6 +4,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum OsdiError {
+    /// A source using the bundle-port dialect could not be expanded.
+    ///
+    /// Always refuse rather than generate something plausible: a mis-expanded
+    /// model is a silently wrong device, and the author has no way to see the
+    /// generated source unless they ask for it (`--emit-generated`).
+    #[error("Verilog-A bundle dialect: {detail}")]
+    Dialect { detail: String },
+
     /// The library loaded, but speaks an interface this runtime cannot read.
     ///
     /// Worth naming the compiler: when fairchild drove the compile itself, the

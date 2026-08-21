@@ -233,7 +233,12 @@ pub fn build_devices_with_footprints(
     // to attribute a row back to the device that owns it.
     let extras_base = topo.size;
     let topo_arc = Arc::new(topo.clone());
-    for el in &netlist.elements {
+    // Which element each device came from, so the λ pass below can hand a
+    // device the wavelengths on its own nets. Filled by watching the vector
+    // grow rather than threaded through `push_device`'s dozen call sites — one
+    // list, kept true by construction rather than by a promise.
+    let mut dev_elem: Vec<usize> = Vec::new();
+    for (elem_idx, el) in netlist.elements.iter().enumerate() {
         match el {
             Element::Diode {
                 anode,
@@ -420,9 +425,56 @@ pub fn build_devices_with_footprints(
             }
             _ => {}
         }
+        while dev_elem.len() < devices.len() {
+            dev_elem.push(elem_idx);
+        }
     }
+    apply_resolved_lambda(netlist, &mut devices, &dev_elem, topo, ctx, registry);
     check_exclusive_potential_drivers(&devices, netlist, topo, extras_base)?;
     Ok((devices, foot))
+}
+
+/// Hand every device the wavelength resolved for each of its terminals.
+///
+/// λ is a label, not a state: it is routed from sources, never computed, so it
+/// is resolved once here rather than solved for (see [`crate::lambda`]). Doing
+/// it inside the builder is what makes it unforgettable — a caller that
+/// assembles devices by hand cannot end up with a photonic device evaluating
+/// its phase at the wrong colour.
+///
+/// A terminal no λ net reached takes the band centre, which is exactly what an
+/// undriven λ wire used to bootstrap to.
+fn apply_resolved_lambda(
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    dev_elem: &[usize],
+    topo: &CircuitTopology,
+    ctx: &SimContext,
+    registry: &DeviceRegistry,
+) {
+    // Normally the topology already resolved λ — it had to, to know which nets
+    // were not rows. Resolve again only for a caller that built its topology
+    // with `CircuitTopology::build`, so a hand-assembled device list still
+    // evaluates at the right wavelength instead of the band centre.
+    let owned;
+    let map = if topo.lambda.is_empty() {
+        owned = crate::lambda::resolve(netlist, ctx, registry);
+        &owned
+    } else {
+        &topo.lambda
+    };
+    let mut per_terminal: Vec<f64> = Vec::new();
+    for (dev, &ei) in devices.iter_mut().zip(dev_elem) {
+        let Some(Element::XOsdi { nets, .. }) = netlist.elements.get(ei) else {
+            continue;
+        };
+        per_terminal.clear();
+        per_terminal.extend(
+            nets.iter()
+                .map(|n| map.get(n).unwrap_or(ctx.lambda_center_m)),
+        );
+        dev.set_resolved_lambda(&per_terminal);
+    }
 }
 
 /// Refuse a netlist in which two devices pin the same node's potential.
@@ -1099,7 +1151,7 @@ fn nr_inner(
     let n_nodes = topo.n_nodes();
     // Not every unknown is a volt — see `crate::tolerance`.  Built here rather
     // than per iteration; `topo.size` is settled by the time any solver runs.
-    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
+    let tol = crate::tolerance::Tolerances::build(topo, opts);
 
     // Sparsity pattern is fixed across this NR loop — devices stamp the
     // same matrix positions each iteration, only the values change.  The
@@ -1120,20 +1172,6 @@ fn nr_inner(
     // search actually runs (it needs a clamped step first).
     let mut trial: Option<crate::mna::MnaMatrix> = None;
     let mut first_stamp = true;
-    // Which rows are λ wires (metres), so the volt-scaled trust region can skip
-    // them. Same membership test as `Tolerances::build`: gated on optical_nets
-    // so an electrical net merely *named* like a λ wire keeps volt semantics.
-    let lambda_rows = {
-        let mut m = vec![false; topo.size];
-        for net in &netlist.optical_nets {
-            if fairchild_parser::is_lambda_wire(net) {
-                if let Some(&r) = topo.node_index.get(net) {
-                    m[r] = true;
-                }
-            }
-        }
-        m
-    };
     let mut warned_clamp = false;
 
     for _iter in 0..opts.itl1 {
@@ -1205,15 +1243,15 @@ fn nr_inner(
             }
         };
 
-        // `vmax` is a limit in VOLTS, so only rows carrying volts may set it.
-        // A λ wire is metres (~1.55e-6) and a step of a whole wavelength is
-        // normal, not a trust-region violation.
+        // `vmax` is a limit in VOLTS, so only node rows may set it. λ wires used
+        // to be exempted here: they carry metres (~1.55e-6), and a volt-scaled
+        // clamp once shrank every λ in a circuit to 1e-19 m because one
+        // under-constrained heater node wanted 1e12 V. λ is no longer an
+        // unknown at all (see `crate::lambda`), so the exemption has nothing
+        // left to exempt.
         let mut max_dv = 0.0f64;
         let mut max_dv_row = 0usize;
         for i in 0..n_nodes {
-            if lambda_rows[i] {
-                continue;
-            }
             let d = (x_new[i] - x[i]).abs();
             if d > max_dv {
                 max_dv = d;
@@ -1244,25 +1282,10 @@ fn nr_inner(
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
-            // λ rows take the full step. λ is a label propagated from the
-            // sources, not a dynamical state that needs damping, and scaling it
-            // is actively destructive: it enters the phase as 2π·n·L/λ, so a
-            // λ scaled by 5e-13 makes every optical phase in the circuit wrong
-            // by twelve orders of magnitude. On giona_fc one under-constrained
-            // heater node wanting 1e12 V dragged every λ to 1e-19 m, and no
-            // iteration could recover because the clamp reproduced it exactly
-            // every time.
             let delta: Vec<f64> = x
                 .iter()
                 .zip(x_new.iter())
-                .enumerate()
-                .map(|(i, (o, n))| {
-                    if lambda_rows[i] {
-                        n - o
-                    } else {
-                        scale * (n - o)
-                    }
-                })
+                .map(|(o, n)| scale * (n - o))
                 .collect();
             // A scale this small means the step carries no information: the
             // offending row is almost certainly under-constrained rather than
@@ -1561,7 +1584,7 @@ pub fn dc_op_nr_with_registry_opts(
     }
     check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let mut topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
 
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;

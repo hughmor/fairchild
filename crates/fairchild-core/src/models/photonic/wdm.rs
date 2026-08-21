@@ -181,7 +181,11 @@ fn stamp_route(
     amp: f64,
     bus_out: bool,
 ) {
-    for w in 0..wpc {
+    // The λ wire is the last of the `wpc`, and it is not routed here at all: a
+    // wavelength is resolved before the solve, so it has no equation and no
+    // branch row. Only the field wires do.
+    let bpc = wpc - 1;
+    for w in 0..bpc {
         let bus_w = nodes[wpc * k + w];
         let ch_w = nodes[wpc * (n + k) + w];
         // Wires 2 and 3 of a 5-wire bundle are the backward pair. Under
@@ -193,24 +197,43 @@ fn stamp_route(
         } else {
             (ch_w, bus_w)
         };
-        // The λ label is a name for the channel, not a field: never attenuated,
-        // and it rides the forward direction whichever way the field goes.
-        let g = if w == wpc - 1 { 1.0 } else { amp };
-        stamp_potential_eq(mat, branches, wpc * k + w, dst, &[(src, -g)]);
+        stamp_potential_eq(mat, branches, bpc * k + w, dst, &[(src, -amp)]);
     }
 }
 
 /// Identity-routing combiner: N single-channel optical bundles → 1 N-channel
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
+/// λ routing for a bundle bridge: slot `k` of the input block becomes slot `k`
+/// of the output block.
+///
+/// Both blocks are `wpc·n` wires wide — a mux's bus carries `n` channels and its
+/// `n` single-channel ports carry one each — so the two are the same shape and
+/// the mapping is slot for slot. Which block is the input is exactly what
+/// `LAMBDA_BASE` already records.
+fn bridge_lambda_routing(lambda_base: usize, wpc: usize, n: usize) -> Vec<(usize, usize)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let lam = wpc - 1;
+    let in_base = lambda_base * wpc * n;
+    let out_base = (1 - lambda_base) * wpc * n;
+    (0..n)
+        .map(|k| (in_base + wpc * k + lam, out_base + wpc * k + lam))
+        .collect()
+}
+
 pub struct NativeMux {
     n_channels: usize,
     wpc: usize,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     filter: ChannelFilter,
-    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// Field transmission per channel, refreshed each eval from `lambda_m`.
     /// All ones until a `ChannelFilter` parameter is set.
     amp: Vec<f64>,
+    /// Each channel's resolved λ (m), read from the *input* side's tags.
+    /// Zero means "never told", which reads as the filter's own grid centre.
+    lambda_m: Vec<f64>,
 }
 
 impl Default for NativeMux {
@@ -232,6 +255,7 @@ impl NativeMux {
             branches: Vec::new(),
             filter: ChannelFilter::new(),
             amp: Vec::new(),
+            lambda_m: Vec::new(),
         }
     }
 }
@@ -259,8 +283,9 @@ impl Device for NativeMux {
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; (wpc - 1) * n];
         self.amp = vec![1.0; n];
+        self.lambda_m = vec![0.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -277,17 +302,33 @@ impl Device for NativeMux {
         self.filter.set(&name.to_lowercase(), value)
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    /// A bridge is not slot-for-slot within one bundle, so `OpticalSegment`'s
+    /// declaration does not cover it: a mux moves port `k`'s label onto bus slot
+    /// `k`, and a demux the other way.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
+    }
+
+    /// A bridge reads its λ tags from the input side, which `LAMBDA_BASE`
+    /// already names: slot `k` of that block.
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n_channels, self.wpc);
+        let base = Self::LAMBDA_BASE * wpc * n;
+        for k in 0..n {
+            if let Some(&v) = per_terminal.get(base + wpc * k + wpc - 1) {
+                self.lambda_m[k] = v;
+            }
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         if !self.filter.active {
             return;
         }
-        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        let n = self.n_channels;
         for k in 0..n {
-            // Read the λ this channel actually carries, from whichever side is
-            // the input; both layouts put the bus block first, so the channel
-            // block starts at wpc·n.
-            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
-                Some(i) if x[i].abs() > 1e-9 => x[i],
+            let lambda = match self.lambda_m.get(k) {
+                Some(&v) if v > 0.0 => v,
                 _ => self.filter.lambda0_m,
             };
             self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);
@@ -327,9 +368,12 @@ pub struct NativeDemux {
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
     filter: ChannelFilter,
-    /// Field transmission per channel, refreshed from the λ wires each eval.
+    /// Field transmission per channel, refreshed each eval from `lambda_m`.
     /// All ones until a `ChannelFilter` parameter is set.
     amp: Vec<f64>,
+    /// Each channel's resolved λ (m), read from the *input* side's tags.
+    /// Zero means "never told", which reads as the filter's own grid centre.
+    lambda_m: Vec<f64>,
 }
 
 impl Default for NativeDemux {
@@ -350,6 +394,7 @@ impl NativeDemux {
             branches: Vec::new(),
             filter: ChannelFilter::new(),
             amp: Vec::new(),
+            lambda_m: Vec::new(),
         }
     }
 }
@@ -377,8 +422,9 @@ impl Device for NativeDemux {
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; (wpc - 1) * n];
         self.amp = vec![1.0; n];
+        self.lambda_m = vec![0.0; n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -395,17 +441,33 @@ impl Device for NativeDemux {
         self.filter.set(&name.to_lowercase(), value)
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+    /// A bridge is not slot-for-slot within one bundle, so `OpticalSegment`'s
+    /// declaration does not cover it: a mux moves port `k`'s label onto bus slot
+    /// `k`, and a demux the other way.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
+    }
+
+    /// A bridge reads its λ tags from the input side, which `LAMBDA_BASE`
+    /// already names: slot `k` of that block.
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n_channels, self.wpc);
+        let base = Self::LAMBDA_BASE * wpc * n;
+        for k in 0..n {
+            if let Some(&v) = per_terminal.get(base + wpc * k + wpc - 1) {
+                self.lambda_m[k] = v;
+            }
+        }
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         if !self.filter.active {
             return;
         }
-        let (n, lam_w) = (self.n_channels, self.wpc - 1);
+        let n = self.n_channels;
         for k in 0..n {
-            // Read the λ this channel actually carries, from whichever side is
-            // the input; both layouts put the bus block first, so the channel
-            // block starts at wpc·n.
-            let lambda = match self.nodes[Self::LAMBDA_BASE * self.wpc * n + self.wpc * k + lam_w] {
-                Some(i) if x[i].abs() > 1e-9 => x[i],
+            let lambda = match self.lambda_m.get(k) {
+                Some(&v) if v > 0.0 => v,
                 _ => self.filter.lambda0_m,
             };
             self.amp[k] = self.filter.amp(lambda, k, n, ctx.temperature);

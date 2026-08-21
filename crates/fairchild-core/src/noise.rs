@@ -413,7 +413,7 @@ pub fn noise_analysis(
 ) -> Result<NoiseResult, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let mut topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
 
     // DC operating point.
@@ -625,7 +625,7 @@ fn run_dc_op(
     let empty: IndexMap<String, (f64, f64)> = IndexMap::new();
     let n_nodes = topo.n_nodes();
     // Not every unknown is a volt — see `crate::tolerance`.
-    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
+    let tol = crate::tolerance::Tolerances::build(topo, opts);
     let mut x = vec![0.0f64; topo.size];
 
     for _ in 0..opts.itl1 {

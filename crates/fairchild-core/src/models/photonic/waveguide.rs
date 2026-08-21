@@ -1,5 +1,5 @@
 use super::dB_per_cm_to_neper_per_m;
-use super::segment::OpticalSegment;
+use super::segment::{OpticalSegment, PerChannel};
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
@@ -67,12 +67,27 @@ impl Device for NativeWaveguide {
         self.seg.set_param(&name.to_lowercase(), value)
     }
 
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        self.seg.lambda_routing()
+    }
+
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        self.seg.set_resolved_lambda(per_terminal);
+    }
+
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         // Engage the delay line only in transient runs, when the option is on,
         // and when there is a finite group delay. DC/AC and the default
         // (instantaneous) path are unaffected. Passive ⇒ no perturbation.
         let delay_active = flags.transient && ctx.waveguide_delay && self.seg.tau_g_s() > 0.0;
-        self.seg.refresh(x, 0.0, 0.0, 0.0, delay_active, ctx);
+        self.seg.refresh(
+            x,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            delay_active,
+            ctx,
+        );
     }
 
     fn load_residual(&self, b: &mut [f64]) {

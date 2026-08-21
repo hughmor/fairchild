@@ -1,0 +1,60 @@
+// wg_wdm2 — a two-channel optical waveguide, ports written out by hand.
+//
+// The fixture for "an OSDI model can carry a WDM bundle" (#52). Stage 1 makes
+// dispatch work for a model whose terminal count is fixed at compile time; a
+// hand-written N=2 module is exactly that. Stage 3 (#55) removes the need to
+// write one per N.
+//
+// Port order is the one `.optical_port p 2` flattens to, and it is positional:
+// channel 0's (re, im, wl) then channel 1's, input bundle before output bundle.
+// 12 terminals total, which is what the arity inference matches against.
+//
+// The two channels carry DIFFERENT loss on purpose. With equal inputs a crossed
+// index would be invisible if both channels were identical, so the asymmetry is
+// the test: each output must show its own channel's attenuation.
+//
+// λ comes from parameters, never off the wire — see optical.vams. The wires are
+// passed through so the model still composes with native devices.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module wg_wdm2(in_re_0, in_im_0, in_wl_0, in_re_1, in_im_1, in_wl_1,
+               out_re_0, out_im_0, out_wl_0, out_re_1, out_im_1, out_wl_1);
+
+    inout in_re_0, in_im_0, in_wl_0, in_re_1, in_im_1, in_wl_1;
+    inout out_re_0, out_im_0, out_wl_0, out_re_1, out_im_1, out_wl_1;
+
+    optical_field  in_re_0, in_im_0, in_re_1, in_im_1;
+    optical_field  out_re_0, out_im_0, out_re_1, out_im_1;
+    optical_lambda in_wl_0, in_wl_1, out_wl_0, out_wl_1;
+
+    parameter real l_um          = 1000.0 from (0:inf);
+    parameter real n_g           = 4.2    from (0:inf);
+    parameter real alpha_dB_cm_0 = 3.0    from [0:inf);   // channel 0
+    parameter real alpha_dB_cm_1 = 12.0   from [0:inf);   // channel 1, 4x
+    parameter real wl_0_nm       = 1550.0 from (0:inf);
+    parameter real wl_1_nm       = 1551.0 from (0:inf);
+
+    real l_m, a0, a1, p0, p1;
+
+    analog begin
+        l_m = l_um * 1e-6;
+
+        // Power dB per cm, so the AMPLITUDE factor divides by 20.
+        a0 = pow(10.0, -alpha_dB_cm_0 * (l_um * 1e-4) / 20.0);
+        a1 = pow(10.0, -alpha_dB_cm_1 * (l_um * 1e-4) / 20.0);
+
+        p0 = 2.0 * `M_PI * n_g * l_m / (wl_0_nm * 1e-9);
+        p1 = 2.0 * `M_PI * n_g * l_m / (wl_1_nm * 1e-9);
+
+        OF(out_re_0) <+ a0 * (OF(in_re_0) * cos(p0) + OF(in_im_0) * sin(p0));
+        OF(out_im_0) <+ a0 * (OF(in_im_0) * cos(p0) - OF(in_re_0) * sin(p0));
+        OF(out_re_1) <+ a1 * (OF(in_re_1) * cos(p1) + OF(in_im_1) * sin(p1));
+        OF(out_im_1) <+ a1 * (OF(in_im_1) * cos(p1) - OF(in_re_1) * sin(p1));
+
+        OWL(out_wl_0) <+ OWL(in_wl_0);
+        OWL(out_wl_1) <+ OWL(in_wl_1);
+    end
+endmodule

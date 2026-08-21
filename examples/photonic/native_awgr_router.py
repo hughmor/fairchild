@@ -21,8 +21,8 @@ Run:  python3 examples/photonic/native_awgr_router.py [--png out.png]
 These decks set no solver options.  They used to need a tight `vntol`, because
 the lambda wires carry ~1.55e-6 and a *voltage* tolerance of 1e-6 let Newton
 stop with lambda ~10 pm out -- a real detuning for a 40 GHz passband.  Lambda
-rows now carry their own `lambdatol` in the solver, so the deck no longer has to
-know about it.  See docs/photonic-models.md, `fc_awgr`.
+is not a solver unknown any more -- it is resolved before the solve -- so the
+deck no longer has to know about it.  See docs/photonic-models.md, `fc_awgr`.
 """
 import argparse
 import sys
@@ -63,7 +63,7 @@ def deck(lit_ports, lam_nm, extra="", n=N):
         f" {side}{p}_{k}_re {side}{p}_{k}_im {side}{p}_{k}_wl"
         for side in ("in", "out") for p in range(n) for k in range(n)
     )
-    # No .options: λ wires carry their own `lambdatol` in the solver now.
+    # No .options: λ is resolved before the solve, not converged to.
     lines += [f"Xr{wires} fc_awgr{extra}", ".op", ".end"]
     return "\n".join(lines) + "\n"
 

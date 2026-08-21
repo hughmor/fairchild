@@ -1,4 +1,4 @@
-use super::{stamp_potential_eq, LambdaSelect};
+use super::stamp_potential_eq;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
@@ -40,7 +40,6 @@ pub struct NativeDirectionalCoupler {
     min_terminals: Option<usize>,
     nodes: Vec<NodeId>,
     branches: Vec<Option<usize>>,
-    lam_src: LambdaSelect,
 }
 
 impl NativeDirectionalCoupler {
@@ -64,7 +63,6 @@ impl NativeDirectionalCoupler {
             nodes: Vec::new(),
             min_terminals: None,
             branches: Vec::new(),
-            lam_src: LambdaSelect::default(),
         }
     }
 }
@@ -100,10 +98,10 @@ impl Device for NativeDirectionalCoupler {
         self.n_channels = n;
         self.nodes = terminals.to_vec();
         // Per channel: 4 fw branches (re, im for c and d) + (if bidir) 4 bw
-        // branches (re, im for a and b) + 2 λ branches (c_λ, d_λ).
-        let bpc = if wpc == 5 { 10 } else { 6 };
+        // branches (re, im for a and b). λ gets none: a wavelength is resolved
+        // before the solve, so there is no equation to stamp for it.
+        let bpc = if wpc == 5 { 8 } else { 4 };
         self.branches = vec![None; bpc * n];
-        self.lam_src.resize(n);
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -142,16 +140,26 @@ impl Device for NativeDirectionalCoupler {
         }
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        // Latch which input carries the λ tag; see LambdaSelect.
-        let (wpc, n, lam) = (self.wpc, self.n_channels, self.wpc - 1);
-        let port_b = wpc * n;
-        for k in 0..n {
-            let a_l = self.nodes[wpc * k + lam];
-            let b_l = self.nodes[port_b + wpc * k + lam];
-            self.lam_src.observe(k, a_l, b_l, x);
-        }
+    /// Both inputs reach both outputs, so both are declared. Resolution takes
+    /// whichever input a source actually reached — which is what
+    /// [`LambdaSelect`] was latching for, decided structurally instead of from
+    /// values that are still settling. Two *different* wavelengths arriving on
+    /// one coupler is a deck bug either way; the first declared wins and the
+    /// disagreement is recorded, rather than being averaged into a wire.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        let (b, c, d) = (wpc * n, 2 * wpc * n, 3 * wpc * n);
+        (0..n)
+            .flat_map(|k| {
+                let (a_l, b_l) = (wpc * k + lam, b + wpc * k + lam);
+                let (c_l, d_l) = (c + wpc * k + lam, d + wpc * k + lam);
+                [(a_l, c_l), (a_l, d_l), (b_l, c_l), (b_l, d_l)]
+            })
+            .collect()
     }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
@@ -161,25 +169,19 @@ impl Device for NativeDirectionalCoupler {
         let kl = self.kappa_per_m * self.length_m;
         let t = kl.cos();
         let s = kl.sin();
-        let bpc = if wpc == 5 { 10 } else { 6 };
-        let lam = wpc - 1;
+        let bpc = if wpc == 5 { 8 } else { 4 };
         let port_b = wpc * n;
         let port_c = 2 * wpc * n;
         let port_d = 3 * wpc * n;
         for k in 0..n {
             let a_re_fw = self.nodes[wpc * k];
             let a_im_fw = self.nodes[wpc * k + 1];
-            let a_l = self.nodes[wpc * k + lam];
             let b_re_fw = self.nodes[port_b + wpc * k];
             let b_im_fw = self.nodes[port_b + wpc * k + 1];
-            let b_l = self.nodes[port_b + wpc * k + lam];
-            let src_l = self.lam_src.pick(k, a_l, b_l);
             let c_re_fw = self.nodes[port_c + wpc * k];
             let c_im_fw = self.nodes[port_c + wpc * k + 1];
-            let c_l = self.nodes[port_c + wpc * k + lam];
             let d_re_fw = self.nodes[port_d + wpc * k];
             let d_im_fw = self.nodes[port_d + wpc * k + 1];
-            let d_l = self.nodes[port_d + wpc * k + lam];
             // Forward: c, d are outputs computed from a, b inputs.
             stamp_potential_eq(
                 mat,
@@ -209,10 +211,6 @@ impl Device for NativeDirectionalCoupler {
                 d_im_fw,
                 &[(b_im_fw, -t), (a_re_fw, s)],
             );
-            // λ wires: both outputs mirror the latched input (a unless only b
-            // is lit) — one driver per loop, so no bind-loop on d_λ.
-            stamp_potential_eq(mat, &self.branches, bpc * k + 4, c_l, &[(src_l, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l, &[(src_l, -1.0)]);
             if wpc == 5 {
                 // Bw: a, b are outputs computed from c, d inputs (same matrix,
                 // reciprocal coupler).
@@ -227,28 +225,28 @@ impl Device for NativeDirectionalCoupler {
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 6,
+                    bpc * k + 4,
                     a_re_bw,
                     &[(c_re_bw, -t), (d_im_bw, -s)],
                 );
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 7,
+                    bpc * k + 5,
                     a_im_bw,
                     &[(c_im_bw, -t), (d_re_bw, s)],
                 );
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 8,
+                    bpc * k + 6,
                     b_re_bw,
                     &[(d_re_bw, -t), (c_im_bw, -s)],
                 );
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 9,
+                    bpc * k + 7,
                     b_im_bw,
                     &[(d_im_bw, -t), (c_re_bw, s)],
                 );

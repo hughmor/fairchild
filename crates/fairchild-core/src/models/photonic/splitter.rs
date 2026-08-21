@@ -71,7 +71,7 @@ impl Device for NativeSplitter {
         // (if bidir) 2 bw branches (re, im for in_a).  Note: under bidir the
         // splitter behaves like a combiner in reverse — bw light from out_a
         // and out_b combine back into in.  re_bw_in = k_a · re_bw_a + k_b · re_bw_b.
-        let bpc = if wpc == 5 { 8 } else { 6 };
+        let bpc = if wpc == 5 { 6 } else { 4 };
         self.branches = vec![None; bpc * n];
     }
 
@@ -114,6 +114,20 @@ impl Device for NativeSplitter {
         }
     }
 
+    /// One input, two outputs: both copies carry the input's label.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        (0..n)
+            .flat_map(|k| {
+                [
+                    (wpc * k + lam, wpc * n + wpc * k + lam),
+                    (wpc * k + lam, 2 * wpc * n + wpc * k + lam),
+                ]
+            })
+            .collect()
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}
@@ -121,8 +135,7 @@ impl Device for NativeSplitter {
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let n = self.n_channels;
         let wpc = self.wpc;
-        let bpc = if wpc == 5 { 8 } else { 6 };
-        let lam = wpc - 1;
+        let bpc = if wpc == 5 { 6 } else { 4 };
         let port_c = wpc * n;
         let port_d = 2 * wpc * n;
         let k_a = self.r.max(0.0).sqrt();
@@ -130,13 +143,10 @@ impl Device for NativeSplitter {
         for k in 0..n {
             let a_re_fw = self.nodes[wpc * k];
             let a_im_fw = self.nodes[wpc * k + 1];
-            let a_l = self.nodes[wpc * k + lam];
             let c_re_fw = self.nodes[port_c + wpc * k];
             let c_im_fw = self.nodes[port_c + wpc * k + 1];
-            let c_l = self.nodes[port_c + wpc * k + lam];
             let d_re_fw = self.nodes[port_d + wpc * k];
             let d_im_fw = self.nodes[port_d + wpc * k + 1];
-            let d_l = self.nodes[port_d + wpc * k + lam];
             // Forward: c, d are scaled outputs of a.
             stamp_potential_eq(mat, &self.branches, bpc * k, c_re_fw, &[(a_re_fw, -k_a)]);
             stamp_potential_eq(
@@ -146,22 +156,20 @@ impl Device for NativeSplitter {
                 c_im_fw,
                 &[(a_im_fw, -k_a)],
             );
-            stamp_potential_eq(mat, &self.branches, bpc * k + 2, c_l, &[(a_l, -1.0)]);
             stamp_potential_eq(
                 mat,
                 &self.branches,
-                bpc * k + 3,
+                bpc * k + 2,
                 d_re_fw,
                 &[(a_re_fw, -k_b)],
             );
             stamp_potential_eq(
                 mat,
                 &self.branches,
-                bpc * k + 4,
+                bpc * k + 3,
                 d_im_fw,
                 &[(a_im_fw, -k_b)],
             );
-            stamp_potential_eq(mat, &self.branches, bpc * k + 5, d_l, &[(a_l, -1.0)]);
             if wpc == 5 {
                 // Backward: in.bw is the (reciprocal) combination of out_a.bw and out_b.bw.
                 // The same coupling matrix applies on the way back:
@@ -176,14 +184,14 @@ impl Device for NativeSplitter {
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 6,
+                    bpc * k + 4,
                     a_re_bw,
                     &[(c_re_bw, -k_a), (d_re_bw, -k_b)],
                 );
                 stamp_potential_eq(
                     mat,
                     &self.branches,
-                    bpc * k + 7,
+                    bpc * k + 5,
                     a_im_bw,
                     &[(c_im_bw, -k_a), (d_im_bw, -k_b)],
                 );

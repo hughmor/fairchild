@@ -1,4 +1,4 @@
-use super::{stamp_potential_eq, LambdaSelect};
+use super::stamp_potential_eq;
 use crate::delay::DelayLine;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
@@ -127,11 +127,11 @@ pub struct NativeOptical2x2 {
     branches: Vec<Option<usize>>,
     delay: DelayLine,
     delayed: Vec<f64>,
-    lam_src: LambdaSelect,
 }
 
-/// Branch rows per channel: thru_re, thru_im, drop_re, drop_im, thru_λ, drop_λ.
-const BRANCHES_PER_CHANNEL: usize = 6;
+/// Branch rows per channel: thru_re, thru_im, drop_re, drop_im. λ gets none —
+/// a wavelength is resolved before the solve, so there is no equation for it.
+const BRANCHES_PER_CHANNEL: usize = 4;
 /// Delay-line snapshot values per channel: in1_re, in1_im, in2_re, in2_im.
 const DELAY_VALS_PER_CHANNEL: usize = 4;
 
@@ -162,7 +162,6 @@ impl NativeOptical2x2 {
             branches: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
-            lam_src: LambdaSelect::default(),
         }
     }
 
@@ -272,16 +271,10 @@ impl NativeOptical2x2 {
         }
     }
 
-    /// Node ids for channel `k`: (in1_re, in1_im, in1_λ, in2_re, in2_im,
-    /// thru_re, thru_im, thru_λ, drop_re, drop_im, drop_λ).
+    /// Field node ids for channel `k`: (in1_re, in1_im, in2_re, in2_im,
+    /// thru_re, thru_im, drop_re, drop_im). No λ wires — the transfer matrix
+    /// never needed them, and nothing drives them any more.
     #[allow(clippy::type_complexity)]
-    /// The second input port's λ wire — `channel_nodes` skips it because the
-    /// transfer matrix never needs it, but λ selection does.
-    fn channel_lambda_in2(&self, k: usize) -> NodeId {
-        let (wpc, n) = (self.wpc, self.n_channels);
-        self.nodes[wpc * n + wpc * k + wpc - 1]
-    }
-
     fn channel_nodes(
         &self,
         k: usize,
@@ -294,25 +287,18 @@ impl NativeOptical2x2 {
         NodeId,
         NodeId,
         NodeId,
-        NodeId,
-        NodeId,
-        NodeId,
     ) {
         let (wpc, n) = (self.wpc, self.n_channels);
-        let lam = wpc - 1;
         let (p1, p2, p3, p4) = (0, wpc * n, 2 * wpc * n, 3 * wpc * n);
         (
             self.nodes[p1 + wpc * k],
             self.nodes[p1 + wpc * k + 1],
-            self.nodes[p1 + wpc * k + lam],
             self.nodes[p2 + wpc * k],
             self.nodes[p2 + wpc * k + 1],
             self.nodes[p3 + wpc * k],
             self.nodes[p3 + wpc * k + 1],
-            self.nodes[p3 + wpc * k + lam],
             self.nodes[p4 + wpc * k],
             self.nodes[p4 + wpc * k + 1],
-            self.nodes[p4 + wpc * k + lam],
         )
     }
 }
@@ -350,7 +336,6 @@ impl Device for NativeOptical2x2 {
         self.n_channels = n;
         self.nodes = terminals.to_vec();
         self.branches = vec![None; BRANCHES_PER_CHANNEL * n];
-        self.lam_src.resize(n);
         // Size the per-channel state, then replay params captured before N was
         // known (parameters are set on the model card, ahead of instancing).
         self.w0 = vec![0.0; n];
@@ -418,12 +403,6 @@ impl Device for NativeOptical2x2 {
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
-        // Latch which input port carries the λ tag; see LambdaSelect.
-        for k in 0..self.n_channels {
-            let (_, _, in1_l, ..) = self.channel_nodes(k);
-            let in2_l = self.channel_lambda_in2(k);
-            self.lam_src.observe(k, in1_l, in2_l, x);
-        }
         // Passivity guard, once, on the first eval — the registry applies
         // instance params *after* setup_instance, so this is the earliest point
         // at which the matrix is final. Weight mode is unitary by construction
@@ -485,8 +464,7 @@ impl Device for NativeOptical2x2 {
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let delay_active = self.delay.is_active();
         for k in 0..self.n_channels {
-            let (in1_re, in1_im, in1_l, in2_re, in2_im, t_re, t_im, t_l, d_re, d_im, d_l) =
-                self.channel_nodes(k);
+            let (in1_re, in1_im, in2_re, in2_im, t_re, t_im, d_re, d_im) = self.channel_nodes(k);
             let m = &self.s[k];
             let g = self.il_amp;
             let base = BRANCHES_PER_CHANNEL * k;
@@ -544,14 +522,6 @@ impl Device for NativeOptical2x2 {
                     stamp_potential_eq(mat, &self.branches, slot, out, &ins);
                 }
             }
-            // λ labels pass through from whichever input is lit — in1 when
-            // both are (a wavelength tag is not delayed).  Latched, so a
-            // closed loop keeps one driver and drop_λ never binds to itself.
-            // Same rule as fc_dcoupler; see LambdaSelect.
-            let in2_l = self.channel_lambda_in2(k);
-            let src_l = self.lam_src.pick(k, in1_l, in2_l);
-            stamp_potential_eq(mat, &self.branches, base + 4, t_l, &[(src_l, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, base + 5, d_l, &[(src_l, -1.0)]);
         }
     }
 
@@ -568,6 +538,22 @@ impl Device for NativeOptical2x2 {
     /// `dw_dv_<k>` coupling is invisible to the adjoint unless declared.  Only
     /// the channels that actually take a control voltage: an `explicit[k]`
     /// channel has a matrix pinned by parameters and no voltage dependence.
+    /// Both inputs reach both outputs — same rule as `fc_dcoupler`, and for the
+    /// same reason: a ring fed only through its add port must still carry a
+    /// label. Structural, so nothing latches.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        let lam = wpc - 1;
+        let (p2, p3, p4) = (wpc * n, 2 * wpc * n, 3 * wpc * n);
+        (0..n)
+            .flat_map(|k| {
+                let (i1, i2) = (wpc * k + lam, p2 + wpc * k + lam);
+                let (t, d) = (p3 + wpc * k + lam, p4 + wpc * k + lam);
+                [(i1, t), (i1, d), (i2, t), (i2, d)]
+            })
+            .collect()
+    }
+
     fn frozen_jacobian_columns(&self) -> Vec<usize> {
         let ctl_base = 4 * self.wpc * self.n_channels;
         let mut cols: Vec<usize> = (0..self.n_channels)
@@ -587,7 +573,7 @@ impl Device for NativeOptical2x2 {
         let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
         let mut snap = vec![0.0; self.n_channels * DELAY_VALS_PER_CHANNEL];
         for k in 0..self.n_channels {
-            let (in1_re, in1_im, _, in2_re, in2_im, ..) = self.channel_nodes(k);
+            let (in1_re, in1_im, in2_re, in2_im, ..) = self.channel_nodes(k);
             let s = DELAY_VALS_PER_CHANNEL * k;
             snap[s] = read(in1_re);
             snap[s + 1] = read(in1_im);

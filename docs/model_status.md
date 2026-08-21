@@ -233,7 +233,12 @@ Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 ## 9. Photonic devices
 
 All native Rust, all using the slowly-varying-envelope `(re, im, λ)`
-representation. **None of these is validated against an external simulator** —
+representation. λ is a **label**, not an unknown: every device declares where a
+wavelength enters it, where it goes, and which of its terminals carry one, and
+the wavelength on every λ net is resolved once before the solve. A device reads
+its channel wavelength from that resolution, so nothing differentiates against
+λ and no device chooses between two λ wires at run time. **None of these is
+validated against an external simulator** —
 the tests are analytic closed forms, bit-for-bit characterisation pins, and
 equivalence tests between two spellings of the same circuit. That is a real
 gap. The cheapest way to close it is a cross-check of the linear passives
@@ -260,7 +265,7 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 | `fc_mzm` | `v_pi`, `alpha`, `alpha_db`/`il_db`, `e_r`, `e_r_db`, `f_c` | ⚠️ analytic |
 | `fc_optical_2x2` | `s11`, `s12`, `s21`, `s22`, `il_db`, `tau_s`, `allow_gain`, per-channel `w`/`dw_dv_<k>` | ⚠️ analytic + power conservation |
 | `fc_photodetector` | `responsivity`, `i_dark`, `r_shunt`, `r_series`, `c_par`/`c_j0` | ⚠️ analytic (`native_pd_r_series`); owns no optical wire, and sums both propagation directions into one photocurrent |
-| Phase shifters (`fc_pn_ps`, `fc_thermal_ps`, `fc_pn_th_ps`, … + `LEVEL`) | `dn_dv`, `da_dv`, `g_pn`, `v_pi_l`, `c_j0`, `v_bi`, `m_j`, `i_sat`, `n_diode`, `tau_carrier`, `dn_dv_inj`, `da_dv_inj`, `dn_di`, `da_di`, `beta_tpa`, `a_eff_m2`, `r_th`, `dn_dt`, `r_series`, `r_heater`, `p_pi`, `tau_th`, plus the `fc_waveguide` geometry set | ⚠️ characterisation pins + an equivalence test vs a discrete `C`; fitted against measured chip data in `experiments/giona` but that comparison is not a committed regression |
+| Phase shifters (`fc_pn_ps`, `fc_thermal_ps`, `fc_pn_th_ps`, … + `LEVEL`) | `dn_dv`, `da_dv`, `g_pn`, `v_pi_l`, `c_j0`, `v_bi`, `m_j`, `i_sat`, `n_diode`, `tau_carrier`, `dn_dv_inj`, `da_dv_inj`, `dn_di`, `da_di`, `beta_tpa`, `a_eff_m2`, `r_th`, `dn_dt`, `r_series`, `r_heater`, `p_pi`, `tau_th`, plus the `fc_waveguide` geometry set | ⚠️ characterisation pins + an equivalence test vs a discrete `C`; the LEVEL-4 optical back-action (`beta_tpa`, `r_th`, `dn_dt`) is pinned on a WDM bus against hand-computed absorbed-power and per-channel cross-TPA budgets, forward and backward (`native_pn_ps_full.rs`, `bidirectional_composition.rs`); fitted against measured chip data in `experiments/giona` but that comparison is not a committed regression |
 | `fc_phase_shifter_expr` | `dneff`, `dalpha` (expression strings over `V`, `T`, `lambda`) | ⚠️ in-tree |
 
 ### Photonic capability gaps

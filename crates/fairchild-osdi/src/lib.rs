@@ -53,11 +53,12 @@
 
 pub mod compile;
 pub mod device;
+pub mod dialect;
 pub mod error;
 pub mod ffi;
 mod loader;
 
-pub use compile::{load_libraries, VaCompiler, VaOptions};
+pub use compile::{load_libraries, load_libraries_with_widths, VaCompiler, VaOptions};
 pub use device::OsdiDevice;
 pub use error::OsdiError;
 pub use loader::OsdiLibrary;

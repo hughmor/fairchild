@@ -19,6 +19,92 @@ use crate::delay::DelayLine;
 use crate::device::{NodeId, SimContext};
 use crate::mna::MnaMatrix;
 
+/// A quantity a drive reports for the optical bundle: usually one value that
+/// applies to every channel, sometimes one per channel.
+///
+/// `OpticalPerturbation` used to carry plain `f64`s, which made a whole class of
+/// physics inexpressible — anything depending on a channel's own wavelength or
+/// field. The concrete casualty was multi-wavelength TPA: cross-TPA between
+/// distinct frequencies is twice self-TPA, so the loss on channel `j` is
+/// `β/A_eff·(I_j + 2·Σ_{k≠j} I_k)`, which is not one number.
+///
+/// `Uniform` exists so the drives whose effect genuinely is shared pay no
+/// allocation for the generality. This is rebuilt on every Newton iteration,
+/// once more per control node per finite-difference probe.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PerChannel {
+    /// One value, every channel.
+    Uniform(f64),
+    /// One value per channel, in channel order.
+    Each(Vec<f64>),
+}
+
+impl PerChannel {
+    /// Channel `k`'s value. Out of range reads 0 rather than panicking: a drive
+    /// returning a short vector has a bug, but a wrong number beats a crash
+    /// mid-solve, and the segment's own channel count is the authority.
+    pub fn at(&self, k: usize) -> f64 {
+        match self {
+            PerChannel::Uniform(v) => *v,
+            PerChannel::Each(v) => v.get(k).copied().unwrap_or(0.0),
+        }
+    }
+
+    /// Whether every channel shares one value.
+    pub fn is_uniform(&self) -> bool {
+        matches!(self, PerChannel::Uniform(_))
+    }
+
+    fn combine(&self, other: &Self, f: impl Fn(f64, f64) -> f64) -> Self {
+        match (self, other) {
+            (PerChannel::Uniform(a), PerChannel::Uniform(b)) => PerChannel::Uniform(f(*a, *b)),
+            (PerChannel::Each(a), PerChannel::Uniform(b)) => {
+                PerChannel::Each(a.iter().map(|x| f(*x, *b)).collect())
+            }
+            (PerChannel::Uniform(a), PerChannel::Each(b)) => {
+                PerChannel::Each(b.iter().map(|y| f(*a, *y)).collect())
+            }
+            (PerChannel::Each(a), PerChannel::Each(b)) => {
+                PerChannel::Each(a.iter().zip(b).map(|(x, y)| f(*x, *y)).collect())
+            }
+        }
+    }
+
+    /// Elementwise sum — how a composite drive adds its two halves.
+    pub fn add(&self, other: &Self) -> Self {
+        self.combine(other, |a, b| a + b)
+    }
+
+    /// `(self − other) / h`: the finite difference the segment's Newton
+    /// cross-terms are built from.
+    pub fn diff_by(&self, other: &Self, h: f64) -> Self {
+        self.combine(other, |a, b| (a - b) / h)
+    }
+
+    /// Zero on every channel.
+    pub fn zero() -> Self {
+        PerChannel::Uniform(0.0)
+    }
+}
+
+impl Default for PerChannel {
+    fn default() -> Self {
+        PerChannel::Uniform(0.0)
+    }
+}
+
+impl From<f64> for PerChannel {
+    fn from(v: f64) -> Self {
+        PerChannel::Uniform(v)
+    }
+}
+
+impl From<Vec<f64>> for PerChannel {
+    fn from(v: Vec<f64>) -> Self {
+        PerChannel::Each(v)
+    }
+}
+
 /// Input couplings for a `stamp_potential_eq` row: `(node, coefficient)` pairs.
 /// Empty in delay mode (the output is driven by a history source on the RHS).
 type Couplings<'a> = &'a [(NodeId, f64)];
@@ -39,8 +125,11 @@ pub struct OpticalSegment {
     pub pin_at_ref: bool,
     /// Group delay `τ_g = L·n_g/c` (s).
     tau_g_s: f64,
-    /// Bootstrap λ for the first NR iterate (x = 0): `wl_ref_m`.
-    lambda_bootstrap_m: f64,
+    /// Each channel's resolved wavelength (m), handed down by
+    /// [`Device::set_resolved_lambda`](crate::device::Device::set_resolved_lambda)
+    /// at build time. Zero means "never told", which reads as `wl_ref_m` — the
+    /// same answer an undriven λ wire used to bootstrap to.
+    lambda_m: Vec<f64>,
     n_channels: usize,
     /// Smallest optical wire count that would have been usable, recorded when
     /// `setup_instance` is handed one it cannot use. Without it
@@ -89,7 +178,7 @@ impl OpticalSegment {
             alpha_neper_m,
             pin_at_ref: false,
             tau_g_s: length_m * n_g / C0,
-            lambda_bootstrap_m: 1.55e-6,
+            lambda_m: Vec::new(),
             n_channels: 0,
             min_wires: None,
             wpc: 3,
@@ -120,6 +209,16 @@ impl OpticalSegment {
         self.wpc
     }
 
+    /// Auxiliary branch rows per channel: one per *driven field* wire.
+    ///
+    /// One fewer than the wire count, because the λ wire is not driven — a
+    /// wavelength is resolved before the solve, so there is no equation to
+    /// stamp and no row to stamp it into. Getting this wrong by one leaves an
+    /// empty branch row, which `gmin` makes non-singular and therefore silent.
+    fn bpc(wpc: usize) -> usize {
+        wpc - 1
+    }
+
     pub fn refresh_tau(&mut self) {
         self.tau_g_s = self.length_m * self.n_g / C0;
     }
@@ -128,7 +227,6 @@ impl OpticalSegment {
     /// `Device::setup_model`). Defaults the dispersion reference to the band
     /// centre too, unless the user already overrode `wl_ref_m`.
     pub fn setup_model(&mut self, ctx: &SimContext) {
-        self.lambda_bootstrap_m = ctx.lambda_center_m;
         if (self.wl_ref_m - 1.55e-6).abs() < 1e-12 {
             self.wl_ref_m = ctx.lambda_center_m;
         }
@@ -159,13 +257,15 @@ impl OpticalSegment {
             self.n_channels = 0;
             self.nodes.clear();
             self.branches.clear();
+            self.lambda_m.clear();
             return;
         }
         self.min_wires = None;
         let n = optical_terminals.len() / stride;
         self.n_channels = n;
         self.nodes = optical_terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; Self::bpc(wpc) * n];
+        self.lambda_m = vec![0.0; n];
         self.c_cached = vec![1.0; n];
         self.s_cached = vec![0.0; n];
         let nc = self.ctrl_nodes.len();
@@ -184,6 +284,21 @@ impl OpticalSegment {
         self.dc_dv = vec![0.0; n * nodes.len()];
         self.ds_dv = vec![0.0; n * nodes.len()];
         self.ctrl_v0 = vec![0.0; nodes.len()];
+    }
+
+    /// `(from, to)` terminal pairs carrying a wavelength label through this
+    /// segment: channel `k`'s input λ wire to its output λ wire.
+    ///
+    /// Terminal numbering is the segment's own, which for every device built on
+    /// one is also the device's — optical bundle wires come first, electrical
+    /// last. λ sits at `wpc - 1` within a channel, and the output block starts
+    /// at `wpc · n_channels`.
+    pub fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let lam = self.wpc - 1;
+        let out_base = self.wpc * self.n_channels;
+        (0..self.n_channels)
+            .map(|k| (self.wpc * k + lam, out_base + self.wpc * k + lam))
+            .collect()
     }
 
     /// Number of optical bundle wires this segment occupies (`2·wpc·N`).
@@ -254,31 +369,59 @@ impl OpticalSegment {
         }
     }
 
-    /// Read the per-channel λ wire (bootstrapped to `wl_ref_m` when undriven).
-    fn lambda_of(&self, x: &[f64], k: usize) -> f64 {
+    /// Take the per-channel λ resolved for this instance's input port.
+    ///
+    /// Terminal layout: λ sits at `wpc - 1` within a channel, and the input
+    /// block comes first. A segment's output λ equals its input λ by
+    /// construction (that is what `lambda_routing` declares), so reading the
+    /// input side is not a choice between two answers.
+    pub fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
         let lam = self.wpc - 1;
-        match self.nodes[self.wpc * k + lam] {
-            Some(i) => {
-                let v = x[i];
-                if v.abs() > 1e-9 {
-                    v
-                } else {
-                    self.wl_ref_m
-                }
+        for k in 0..self.n_channels {
+            if let Some(&v) = per_terminal.get(self.wpc * k + lam) {
+                self.lambda_m[k] = v;
             }
-            None => self.wl_ref_m,
+        }
+    }
+
+    /// Channel `k`'s wavelength (m), or `wl_ref_m` if resolution never reached
+    /// this instance — the same value an undriven λ wire bootstrapped to.
+    fn lambda_of(&self, k: usize) -> f64 {
+        match self.lambda_m.get(k) {
+            Some(&v) if v > 0.0 => v,
+            _ => self.wl_ref_m,
         }
     }
 
     /// Per-channel input optical intensity |A_in|² (W), the input to any
-    /// photoconductive / detection back-action. Forward channel only.
+    /// photoconductive / detection back-action.
+    ///
+    /// Counts BOTH propagation directions. Under `enable_bidirectional` the
+    /// backward field enters at the far end of the segment, so its input wires
+    /// live in the `out` block (`out_base + wpc·k + 2/3`) — see `stamp`, where
+    /// the backward equation reads `out_*_bw` to drive `in_*_bw`. Absorption
+    /// does not care which way a photon travels, so a device that heats or
+    /// generates carriers from absorbed power must see both; reading the
+    /// forward wires only made backward light heat nothing at all.
     pub fn channel_intensities(&self, x: &[f64]) -> Vec<f64> {
         let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
+        let mag2 = |re: NodeId, im: NodeId| {
+            let (re, im) = (read(re), read(im));
+            re * re + im * im
+        };
+        let out_base = self.wpc * self.n_channels;
         (0..self.n_channels)
             .map(|k| {
-                let re = read(self.nodes[self.wpc * k]);
-                let im = read(self.nodes[self.wpc * k + 1]);
-                re * re + im * im
+                let fw = mag2(self.nodes[self.wpc * k], self.nodes[self.wpc * k + 1]);
+                let bw = if self.wpc == 5 {
+                    mag2(
+                        self.nodes[out_base + self.wpc * k + 2],
+                        self.nodes[out_base + self.wpc * k + 3],
+                    )
+                } else {
+                    0.0
+                };
+                fw + bw
             })
             .collect()
     }
@@ -296,9 +439,9 @@ impl OpticalSegment {
     pub fn refresh(
         &mut self,
         x: &[f64],
-        dn_eff: f64,
+        dn_eff: PerChannel,
         dphi: f64,
-        dalpha_neper_m: f64,
+        dalpha_neper_m: PerChannel,
         delay_active: bool,
         ctx: &SimContext,
     ) {
@@ -313,12 +456,12 @@ impl OpticalSegment {
     pub fn refresh_with_sens(
         &mut self,
         x: &[f64],
-        dn_eff: f64,
+        dn_eff: PerChannel,
         dphi: f64,
-        dalpha_neper_m: f64,
+        dalpha_neper_m: PerChannel,
         delay_active: bool,
         ctx: &SimContext,
-        dpert_dv: &[(f64, f64, f64)],
+        dpert_dv: &[(PerChannel, f64, PerChannel)],
     ) {
         self.delay.set_state(delay_active, ctx.time_s);
         if delay_active {
@@ -327,7 +470,8 @@ impl OpticalSegment {
         }
 
         let two_pi = 2.0 * std::f64::consts::PI;
-        let t_amp = (-(self.alpha_neper_m + dalpha_neper_m) * self.length_m / 2.0).exp();
+        // t_amp is per channel now: Δα may differ by channel (multi-λ TPA), so
+        // the amplitude factor cannot be hoisted out of the loop.
         let phi_ref = if self.pin_at_ref {
             two_pi * self.n_eff * self.length_m / self.wl_ref_m
         } else {
@@ -342,11 +486,12 @@ impl OpticalSegment {
         }
         let per = self.vals_per_channel();
         for k in 0..self.n_channels {
-            let lambda = self.lambda_of(x, k);
+            let lambda = self.lambda_of(k);
             let n_eff_lam = n_eff_at_lambda(self.n_eff, self.n_g, self.wl_ref_m, lambda);
             // Δn_eff folds into the index (φ_eo = 2π·Δn_eff·L/λ); Δφ adds a
             // wavelength-independent rotation (heater, Pockels-with-fixed-gap…).
-            let phi = two_pi * (n_eff_lam + dn_eff) * self.length_m / lambda - phi_ref + dphi;
+            let t_amp = (-(self.alpha_neper_m + dalpha_neper_m.at(k)) * self.length_m / 2.0).exp();
+            let phi = two_pi * (n_eff_lam + dn_eff.at(k)) * self.length_m / lambda - phi_ref + dphi;
             let (c, s) = (t_amp * phi.cos(), t_amp * phi.sin());
             self.c_cached[k] = c;
             self.s_cached[k] = s;
@@ -369,6 +514,7 @@ impl OpticalSegment {
             // ds/dV = (dt/dV)/t·s + c·(dφ/dV)
             let kphi = two_pi * self.length_m / lambda;
             for (i, (dn_dv, ddphi_dv, dalpha_dv)) in dpert_dv.iter().enumerate() {
+                let (dn_dv, dalpha_dv) = (dn_dv.at(k), dalpha_dv.at(k));
                 let dphi_dv = kphi * dn_dv + ddphi_dv;
                 // t_amp = exp(−(α+Δα)·L/2) ⇒ dt/dV = −t·(L/2)·dΔα/dV, so
                 // (dt/dV)/t is just −(L/2)·dΔα/dV and needs no division by t.
@@ -413,17 +559,15 @@ impl OpticalSegment {
         let delay_active = self.delay.is_active();
         let n = self.n_channels;
         let wpc = self.wpc;
+        let bpc = Self::bpc(wpc);
         let out_base = wpc * n;
-        let lam = wpc - 1;
         for k in 0..n {
             let c = self.c_cached[k];
             let s = self.s_cached[k];
             let in_re_fw = self.nodes[wpc * k];
             let in_im_fw = self.nodes[wpc * k + 1];
-            let in_l = self.nodes[wpc * k + lam];
             let out_re_fw = self.nodes[out_base + wpc * k];
             let out_im_fw = self.nodes[out_base + wpc * k + 1];
-            let out_l = self.nodes[out_base + wpc * k + lam];
             let (re_ins, im_ins): (Couplings, Couplings) = if delay_active {
                 (&[], &[])
             } else {
@@ -432,8 +576,8 @@ impl OpticalSegment {
                     &[(in_re_fw, s), (in_im_fw, -c)],
                 )
             };
-            stamp_potential_eq(mat, &self.branches, wpc * k, out_re_fw, re_ins);
-            stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw, im_ins);
+            stamp_potential_eq(mat, &self.branches, bpc * k, out_re_fw, re_ins);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw, im_ins);
             // Newton cross-terms: c and s are functions of the control voltage,
             // so the output equation is bilinear. Without these the coupling is
             // stamped frozen and Newton degenerates into successive
@@ -445,16 +589,14 @@ impl OpticalSegment {
                         continue;
                     };
                     let (g_re, g_im) = self.dout_dv(k, i);
-                    if let Some(j) = self.branches[wpc * k] {
+                    if let Some(j) = self.branches[bpc * k] {
                         mat.a[j][cn] -= g_re;
                     }
-                    if let Some(j) = self.branches[wpc * k + 1] {
+                    if let Some(j) = self.branches[bpc * k + 1] {
                         mat.a[j][cn] -= g_im;
                     }
                 }
             }
-            // λ passes through unchanged (a wavelength label is not delayed).
-            stamp_potential_eq(mat, &self.branches, wpc * k + lam, out_l, &[(in_l, -1.0)]);
             if wpc == 5 {
                 let in_re_bw = self.nodes[wpc * k + 2];
                 let in_im_bw = self.nodes[wpc * k + 3];
@@ -468,8 +610,8 @@ impl OpticalSegment {
                         &[(out_re_bw, s), (out_im_bw, -c)],
                     )
                 };
-                stamp_potential_eq(mat, &self.branches, wpc * k + 2, in_re_bw, bw_re_ins);
-                stamp_potential_eq(mat, &self.branches, wpc * k + 3, in_im_bw, bw_im_ins);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw, bw_re_ins);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw, bw_im_ins);
             }
         }
     }
@@ -480,6 +622,7 @@ impl OpticalSegment {
         // The Newton cross-terms carry an inhomogeneous offset −G·V0 (the
         // linearisation is about the previous iterate), independent of the
         // delay line.
+        let bpc = Self::bpc(self.wpc);
         if self.has_sens() {
             let nc = self.ctrl_nodes.len();
             for k in 0..self.n_channels {
@@ -489,10 +632,10 @@ impl OpticalSegment {
                     }
                     let (g_re, g_im) = self.dout_dv(k, i);
                     let v0 = self.ctrl_v0[i];
-                    if let Some(j) = self.branches[self.wpc * k] {
+                    if let Some(j) = self.branches[bpc * k] {
                         b[j] -= g_re * v0;
                     }
-                    if let Some(j) = self.branches[self.wpc * k + 1] {
+                    if let Some(j) = self.branches[bpc * k + 1] {
                         b[j] -= g_im * v0;
                     }
                 }
@@ -508,19 +651,19 @@ impl OpticalSegment {
             let s = self.s_cached[k];
             let dly_fw_re = self.delayed[per * k];
             let dly_fw_im = self.delayed[per * k + 1];
-            if let Some(j) = self.branches[self.wpc * k] {
+            if let Some(j) = self.branches[bpc * k] {
                 b[j] += c * dly_fw_re + s * dly_fw_im;
             }
-            if let Some(j) = self.branches[self.wpc * k + 1] {
+            if let Some(j) = self.branches[bpc * k + 1] {
                 b[j] += -s * dly_fw_re + c * dly_fw_im;
             }
             if self.wpc == 5 {
                 let dly_bw_re = self.delayed[per * k + 2];
                 let dly_bw_im = self.delayed[per * k + 3];
-                if let Some(j) = self.branches[self.wpc * k + 2] {
+                if let Some(j) = self.branches[bpc * k + 2] {
                     b[j] += c * dly_bw_re + s * dly_bw_im;
                 }
-                if let Some(j) = self.branches[self.wpc * k + 3] {
+                if let Some(j) = self.branches[bpc * k + 3] {
                     b[j] += -s * dly_bw_re + c * dly_bw_im;
                 }
             }
@@ -621,7 +764,14 @@ mod tests {
         let mut seg = lossless_segment(2.0);
         let x = vec![0.7, 0.0, 0.0, 0.0, 0.0, 0.0];
         // delay_active=false ⇒ instantaneous path.
-        seg.refresh(&x, 0.0, 0.0, 0.0, false, &SimContext::default());
+        seg.refresh(
+            &x,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            false,
+            &SimContext::default(),
+        );
         assert!(!seg.delay_active());
         seg.commit(&x);
         assert!(seg.delay_is_empty(), "no history accumulates when off");
@@ -636,20 +786,41 @@ mod tests {
         for step in 0..=3 {
             let t = step as f64;
             let x = vec![t, 0.0, 0.0, 0.0, 0.0, 0.0]; // in_re = t
-            seg.refresh(&x, 0.0, 0.0, 0.0, true, &ctx_delay(t));
+            seg.refresh(
+                &x,
+                PerChannel::zero(),
+                0.0,
+                PerChannel::zero(),
+                true,
+                &ctx_delay(t),
+            );
             assert!(seg.delay_active());
             seg.commit(&x);
         }
         // Query at t = 3 ⇒ delayed source is the input at t − τ = 1.
         let xq = vec![3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.0));
+        seg.refresh(
+            &xq,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            true,
+            &ctx_delay(3.0),
+        );
         assert!(
             (seg.delayed()[0] - 1.0).abs() < 1e-12,
             "got {}",
             seg.delayed()[0]
         );
         // Linear interpolation between samples: t − τ = 1.5 ⇒ 1.5.
-        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(3.5));
+        seg.refresh(
+            &xq,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            true,
+            &ctx_delay(3.5),
+        );
         assert!(
             (seg.delayed()[0] - 1.5).abs() < 1e-12,
             "got {}",
@@ -661,10 +832,24 @@ mod tests {
     fn delay_preserves_energy_and_stamps_residual() {
         let mut seg = lossless_segment(1.0);
         let x0 = vec![0.6, 0.8, 0.0, 0.0, 0.0, 0.0]; // |A| = 1
-        seg.refresh(&x0, 0.0, 0.0, 0.0, true, &ctx_delay(0.0));
+        seg.refresh(
+            &x0,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            true,
+            &ctx_delay(0.0),
+        );
         seg.commit(&x0);
         let xq = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        seg.refresh(&xq, 0.0, 0.0, 0.0, true, &ctx_delay(1.0));
+        seg.refresh(
+            &xq,
+            PerChannel::zero(),
+            0.0,
+            PerChannel::zero(),
+            true,
+            &ctx_delay(1.0),
+        );
         let mut b = vec![0.0; 9];
         seg.stamp_residual(&mut b);
         let out_mag2 = b[6] * b[6] + b[7] * b[7];

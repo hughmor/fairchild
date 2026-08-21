@@ -31,6 +31,7 @@
 //! The cost is one preprocessor run per source per process, even on a cache
 //! hit. That buys "cannot be stale", and it is the cheap half of a compile.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,6 +60,9 @@ pub struct VaOptions {
     pub cache_dir: Option<PathBuf>,
     /// `--no-va-compile`: refuse a `.va` source rather than compile it.
     pub no_compile: bool,
+    /// `--emit-generated <dir>`: where to write the expanded per-N source of a
+    /// bundle-dialect model. `None` keeps it beside the artefact cache.
+    pub generated_dir: Option<PathBuf>,
 }
 
 impl VaOptions {
@@ -72,6 +76,7 @@ impl VaOptions {
             compiler: std::env::var_os("FAIRCHILD_OPENVAF").map(PathBuf::from),
             include_dirs: Vec::new(),
             cache_dir: std::env::var_os("FAIRCHILD_VA_CACHE").map(PathBuf::from),
+            generated_dir: std::env::var_os("FAIRCHILD_VA_GENERATED").map(PathBuf::from),
             no_compile: false,
         }
     }
@@ -83,6 +88,14 @@ impl VaOptions {
         self.compiler = self.compiler.or(env.compiler);
         self.cache_dir = self.cache_dir.or(env.cache_dir);
         self
+    }
+
+    /// Where generated per-N sources are written. Beside the artefact cache by
+    /// default; `--emit-generated` points it somewhere the author can read.
+    pub fn generated_dir(&self) -> PathBuf {
+        self.generated_dir
+            .clone()
+            .unwrap_or_else(|| self.cache_dir().join("generated"))
     }
 
     fn cache_dir(&self) -> PathBuf {
@@ -349,6 +362,34 @@ pub fn load_libraries(
     opts: &VaOptions,
     registry: &mut DeviceRegistry,
 ) -> Result<Vec<PathBuf>, OsdiError> {
+    load_libraries_with_widths(
+        osdi_paths,
+        va_sources,
+        base_dir,
+        opts,
+        registry,
+        &BTreeMap::new(),
+        3,
+    )
+}
+
+/// [`load_libraries`], told which terminal counts the deck instantiates each
+/// model at.
+///
+/// A source written against the bundle-port dialect has no fixed port count — it
+/// is generated for the width the deck declared — so loading one needs to know
+/// the widths in advance. `wanted` maps a model name to the flattened terminal
+/// counts seen on its `X` lines, which the first of the two load passes has
+/// already worked out. Ordinary Verilog-A ignores all of this.
+pub fn load_libraries_with_widths(
+    osdi_paths: &[String],
+    va_sources: &[String],
+    base_dir: Option<&Path>,
+    opts: &VaOptions,
+    registry: &mut DeviceRegistry,
+    wanted: &BTreeMap<String, BTreeSet<usize>>,
+    wpc: usize,
+) -> Result<Vec<PathBuf>, OsdiError> {
     let mut loaded = Vec::with_capacity(osdi_paths.len() + va_sources.len());
 
     // Told not to compile, and asked to: say so about the deck's own first
@@ -370,13 +411,77 @@ pub fn load_libraries(
 
     for src in va_sources {
         let src = resolve(src, base_dir);
-        let compiled = compile(
-            compiler
-                .as_ref()
-                .expect("sources present, compiling allowed"),
-            &src,
-            opts,
-        )?;
+        let compiler = compiler
+            .as_ref()
+            .expect("sources present, compiling allowed");
+
+        // Bundle-port dialect? Then this source is a template, and one artefact
+        // per requested channel count comes out of it.
+        let text = std::fs::read_to_string(&src).map_err(|e| OsdiError::CompileFailed {
+            path: src.clone(),
+            stderr: format!("cannot read: {e}"),
+        })?;
+        if let Some(m) = crate::dialect::scan(&text)? {
+            let widths: Vec<usize> = wanted
+                .get(&m.name)
+                .into_iter()
+                .flatten()
+                .filter_map(|&flat| m.channels_for(flat, wpc))
+                .collect();
+            if widths.is_empty() {
+                // Nothing in the deck instantiates it. Generating a default N
+                // would be a guess, and a guessed width is a wrong device, so
+                // register the shape and let the arity oracle refuse anything
+                // that does not fit.
+                registry.declare_arity(
+                    m.name.clone(),
+                    fairchild_core::ArityDecl::Bundle {
+                        scalars: m.scalars.len(),
+                        per_channel: m.bundles.len() * wpc,
+                    },
+                );
+                continue;
+            }
+            // The generated source lives in the cache, not beside the author's
+            // file, so its relative `include`s would no longer resolve — the
+            // compiler searches the source's own directory, and that is now the
+            // cache. Put the original's directory on the include path so the
+            // author's `include "optical.vams"` means what they wrote.
+            let mut gen_opts = opts.clone();
+            if let Some(dir) = src.parent() {
+                gen_opts.include_dirs.push(dir.to_path_buf());
+            }
+            for n in widths {
+                let expanded = crate::dialect::expand(&text, &m, n, wpc)?;
+                let gen_path = generated_path(&src, n, opts)?;
+                std::fs::write(&gen_path, &expanded).map_err(|e| OsdiError::CompileFailed {
+                    path: gen_path.clone(),
+                    stderr: format!("cannot write generated source: {e}"),
+                })?;
+                let compiled = compile(compiler, &gen_path, &gen_opts)?;
+                load_one_with_lambda(
+                    &compiled,
+                    registry,
+                    Some(crate::device::BundleLambda {
+                        terminals: m.lambda_terminals(n, wpc),
+                        routing: m.lambda_routing(n, wpc),
+                        channels: n,
+                        wpc,
+                    }),
+                )?;
+                loaded.push(compiled);
+            }
+            registry.declare_arity(
+                m.name.clone(),
+                fairchild_core::ArityDecl::Bundle {
+                    scalars: m.scalars.len(),
+                    per_channel: m.bundles.len() * wpc,
+                },
+            );
+            continue;
+        }
+
+        let compiled = compile(compiler, &src, opts)?;
         load_one(&compiled, registry)?;
         loaded.push(compiled);
     }
@@ -388,6 +493,23 @@ pub fn load_libraries(
     Ok(loaded)
 }
 
+/// Where a generated per-N source lands: beside the cache, named for its width,
+/// and kept rather than written to a temporary. An author debugging a model that
+/// works at N=1 and misbehaves at N=8 needs to be able to read what was actually
+/// compiled.
+fn generated_path(src: &Path, n: usize, opts: &VaOptions) -> Result<PathBuf, OsdiError> {
+    let dir = opts.generated_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| OsdiError::CacheDir {
+        path: dir.clone(),
+        detail: e.to_string(),
+    })?;
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string());
+    Ok(dir.join(format!(
+        "{}.n{n}.va",
+        stem.unwrap_or_else(|| "model".into())
+    )))
+}
+
 fn resolve(path: &str, base_dir: Option<&Path>) -> PathBuf {
     let p = Path::new(path);
     match base_dir {
@@ -397,10 +519,19 @@ fn resolve(path: &str, base_dir: Option<&Path>) -> PathBuf {
 }
 
 fn load_one(path: &Path, registry: &mut DeviceRegistry) -> Result<(), OsdiError> {
+    load_one_with_lambda(path, registry, None)
+}
+
+/// As [`load_one`], carrying the λ geometry of a bundle-dialect elaboration.
+fn load_one_with_lambda(
+    path: &Path,
+    registry: &mut DeviceRegistry,
+    lambda: Option<crate::device::BundleLambda>,
+) -> Result<(), OsdiError> {
     // SAFETY: the path came from the deck; `OsdiLibrary::open` validates the
     // OSDI version and descriptor layout before anything is called through.
     let lib = unsafe { OsdiLibrary::open(path) }.map_err(|e| e.with_context(path))?;
-    Arc::new(lib).register_into(registry);
+    Arc::new(lib).register_into_with_lambda(registry, lambda);
     Ok(())
 }
 

@@ -416,14 +416,87 @@ pub trait Device: Send + Sync {
     /// for the adjoint solve alone and leaves the Newton iteration matrix
     /// untouched, so declaring a column costs nothing at solve time.
     ///
-    /// λ wires do not need declaring — the adjoint finds them from the netlist,
-    /// since every optical device freezes those and there is no point making
-    /// fourteen models say so.  Declare the *electrical* columns an optical
-    /// device reads: drive voltages, control wires, thermal nodes.
+    /// λ wires do not need declaring, and no longer *can* be: a wavelength is
+    /// resolved before the solve rather than solved for, so there is no λ
+    /// column to freeze.  Declare the *electrical* columns an optical device
+    /// reads: drive voltages, control wires, thermal nodes.
     ///
     /// `crate::adjoint::jacobian_check` is the oracle for this: any mismatch in
     /// an undeclared column is a missing declaration or a wrong stamp.
     fn frozen_jacobian_columns(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// How a wavelength label moves through this device, as
+    /// `(from_terminal, to_terminal)` pairs in the device's own terminal
+    /// numbering.
+    ///
+    /// A wavelength is a label, not a state: measured across every photonic deck
+    /// in the tree, each λ row read exactly a source's wavelength and never
+    /// anything computed (`tests/lambda_is_a_label.rs`). Resolving it before the
+    /// solve is what stopped it being an MNA unknown — which took 864 of 2840
+    /// rows off the giona RNN and deleted `LambdaSelect`'s latch, the
+    /// `lambdatol` tolerance class and λ's trust-region exemption with them.
+    ///
+    /// It has to be *declared* rather than read off the assembled matrix,
+    /// because the matrix is exactly what is going away. This is the same shape
+    /// as bundle arity: knowledge that used to be inferred from a structure the
+    /// device happens to build, moved next to the device that knows it.
+    ///
+    /// Default is empty — correct for anything with no optical ports, and for a
+    /// terminator like a photodetector that ends the path.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
+
+    /// The resolved wavelength at each of this device's terminals, in metres,
+    /// in terminal order.
+    ///
+    /// Called once per build, after `setup_instance` and before the first
+    /// `eval`. λ is resolved before the solve (`crate::lambda`), so a device
+    /// that needs a channel's wavelength — to evaluate a propagation phase, a
+    /// filter passband, a router's grid — reads it from here instead of from a
+    /// matrix row. Non-λ terminals carry the band centre; a device indexes the
+    /// λ positions of its own layout and ignores the rest.
+    ///
+    /// Default is a no-op: correct for every device whose physics does not
+    /// depend on wavelength, which is all of the electrical ones.
+    fn set_resolved_lambda(&mut self, _per_terminal: &[f64]) {}
+
+    /// Every terminal of this device that carries a wavelength label.
+    ///
+    /// This is what makes the λ net set *total*: a label's value is decided
+    /// before the solve, so every wire that carries one has to be enumerable
+    /// without looking at a matrix. It used to be read off net names — anything
+    /// ending `_wl_<k>` that a `.optical_port` had declared — which cannot see a
+    /// PCell that hand-wires its bundle (`examples/photonic/pcells/source_bank.sp`
+    /// names them `a1w`), and every real deck in this tree does exactly that.
+    ///
+    /// The default derives it from the two declarations that already exist, so a
+    /// device that routes or emits a label says nothing extra. Override only
+    /// when a device *reads* a label on a terminal it neither routes from nor
+    /// emits at: `fc_awgr` evaluates each input port's passband at that port's
+    /// own λ while mirroring only one port's tag onto its outputs, so the other
+    /// ports' λ terminals appear nowhere in its routing.
+    fn lambda_terminals(&self) -> Vec<usize> {
+        let mut t: Vec<usize> = self
+            .lambda_routing()
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .chain(self.lambda_emitted().into_iter().map(|(t, _)| t))
+            .collect();
+        t.sort_unstable();
+        t.dedup();
+        t
+    }
+
+    /// Wavelengths this device *originates*, as `(terminal, λ in metres)`.
+    ///
+    /// A source is where resolution starts. Native emitters already hold this as
+    /// a parameter and merely deliver it through the matrix, so exposing it costs
+    /// nothing; a model that writes its λ wire in `analog` and declares nothing
+    /// cannot be resolved, and is worth a diagnostic rather than a silent zero.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
         Vec::new()
     }
 }

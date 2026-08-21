@@ -2,7 +2,7 @@ use crate::warn_user;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fairchild_parser::{Expr, ModelCard};
+use fairchild_parser::{ArityOracle, ArityQuery, BundleArity, Expr, ModelCard};
 
 use crate::device::{Device, NodeId, SimContext};
 use crate::models::{
@@ -133,8 +133,38 @@ type Factory = Arc<ModelFactory>;
 /// Built-in models are registered via `register_builtin_diodes` /
 /// `register_builtin_mosfets`. External models (e.g. OSDI) register themselves
 /// by capturing an Arc to their library, keeping it alive for the device's lifetime.
+/// How a registered model's WDM dispatch is decided.
+///
+/// The parser used to hold this as a hardcoded list of `fc_*` names, which
+/// could only ever match a name written literally on an X-line — so no
+/// `.model`-card-named instance was ever found there, and the tier names drifted
+/// out of it twice.  Recording it next to the registration keeps one place
+/// interpreting the concept (#52).
+#[derive(Clone, Copy, Debug)]
+pub enum ArityDecl {
+    /// Declared outright, for a device whose channel count is derived from
+    /// `terminals.len()` at setup — every native photonic model.
+    Fixed(BundleArity),
+    /// A fixed terminal count, from an OSDI descriptor.  The instance is placed
+    /// by shape: if flattening the referenced bundles hits this count the model
+    /// takes the whole bus, and if one channel each hits it, it does not.  Same
+    /// rule a `.subckt` instance already follows.
+    Terminals(usize),
+    /// A model written against the bundle-port dialect, which has no single
+    /// terminal count: it is generated for whatever width the deck asks for.
+    /// Any shape `scalars + per_channel·N` fits, for `N >= 1`.
+    Bundle {
+        /// Ports that are not part of a bundle.
+        scalars: usize,
+        /// Terminals every extra channel adds: `bundles × wires_per_channel`.
+        per_channel: usize,
+    },
+}
+
 pub struct DeviceRegistry {
     factories: HashMap<String, Factory>,
+    /// WDM dispatch per model name, consulted through the `ArityOracle` impl.
+    arities: HashMap<String, ArityDecl>,
     /// MOSFET model cards stored for W/L instance-param injection in build_devices.
     pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
     /// BJT model cards: model_name → (is_pnp, params).
@@ -187,6 +217,7 @@ impl DeviceRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
             factories: HashMap::new(),
+            arities: HashMap::new(),
             mosfet_cards: HashMap::new(),
             bjt_cards: HashMap::new(),
             switch_cards: HashMap::new(),
@@ -196,6 +227,29 @@ impl DeviceRegistry {
         // `fc_splitter`.
         reg.register_native_photonics();
         reg
+    }
+
+    /// Every model name this registry can build.
+    ///
+    /// Exists so a test can check the registry against the parser's
+    /// `bundle_arity_for`. The parser cannot ask the registry what a model is
+    /// (`fairchild-core` depends on `fairchild-parser`, so the dependency runs
+    /// the wrong way) and the arity list is therefore a hand-maintained second
+    /// list of the same facts. A test can see both, so the disagreement is
+    /// catchable even though the dispatch cannot be unified.
+    pub fn registered_names(&self) -> impl Iterator<Item = &str> {
+        self.factories.keys().map(String::as_str)
+    }
+
+    /// Record how `name` handles WDM bundles.  Call it beside the registration
+    /// of any model that can carry an optical or electrical bundle port.
+    pub fn declare_arity(&mut self, name: impl Into<String>, decl: ArityDecl) {
+        self.arities.insert(name.into().to_lowercase(), decl);
+    }
+
+    /// Declared arity for `name`, if any.
+    pub fn arity_decl(&self, name: &str) -> Option<ArityDecl> {
+        self.arities.get(&name.to_lowercase()).copied()
     }
 
     /// Register a factory for `name`. Overwrites any previous entry.
@@ -395,6 +449,16 @@ impl DeviceRegistry {
     pub fn register_builtin_mosfets(&mut self, cards: &[ModelCard]) {
         for card in cards {
             let kind = card.kind.to_lowercase();
+
+            // A card-named instance is looked up by the CARD's name, never by
+            // its kind, so the card must inherit its kind's WDM dispatch.
+            // Without this no card-based photonic device could carry a bundle
+            // at all: `.model awg2 fc_awgr` was refused on the very buses an
+            // AWG router exists to route, and a `.model … fc_pn_ps LEVEL=4`
+            // could not take a WDM bus that bare `fc_pn_ps_full` accepted (#52).
+            if let Some(decl @ ArityDecl::Fixed(_)) = self.arity_decl(&kind) {
+                self.declare_arity(card.name.clone(), decl);
+            }
             let is_pmos = match kind.as_str() {
                 "nmos" => false,
                 "pmos" => true,
@@ -442,6 +506,16 @@ impl DeviceRegistry {
     pub fn register_builtin_bjts(&mut self, cards: &[ModelCard]) {
         for card in cards {
             let kind = card.kind.to_lowercase();
+
+            // A card-named instance is looked up by the CARD's name, never by
+            // its kind, so the card must inherit its kind's WDM dispatch.
+            // Without this no card-based photonic device could carry a bundle
+            // at all: `.model awg2 fc_awgr` was refused on the very buses an
+            // AWG router exists to route, and a `.model … fc_pn_ps LEVEL=4`
+            // could not take a WDM bus that bare `fc_pn_ps_full` accepted (#52).
+            if let Some(decl @ ArityDecl::Fixed(_)) = self.arity_decl(&kind) {
+                self.declare_arity(card.name.clone(), decl);
+            }
             let is_pnp = match kind.as_str() {
                 "npn" => false,
                 "pnp" => true,
@@ -479,6 +553,16 @@ impl DeviceRegistry {
     pub fn register_photonic_models(&mut self, cards: &[ModelCard]) {
         for card in cards {
             let kind = card.kind.to_lowercase();
+
+            // A card-named instance is looked up by the CARD's name, never by
+            // its kind, so the card must inherit its kind's WDM dispatch.
+            // Without this no card-based photonic device could carry a bundle
+            // at all: `.model awg2 fc_awgr` was refused on the very buses an
+            // AWG router exists to route, and a `.model … fc_pn_ps LEVEL=4`
+            // could not take a WDM bus that bare `fc_pn_ps_full` accepted (#52).
+            if let Some(decl @ ArityDecl::Fixed(_)) = self.arity_decl(&kind) {
+                self.declare_arity(card.name.clone(), decl);
+            }
 
             // An AWG router backed by measured spectra. The file path is a
             // string, and an X-line's instance params are numeric only, so a
@@ -666,6 +750,48 @@ impl DeviceRegistry {
     /// - `fc_thermal_ps`    — thermal phase shifter (Joule heating → φ = π·P/P_pi).
     /// - `fc_pn_ps`         — PN-junction phase shifter (Δn_eff = dn_dv·V).
     pub fn register_native_photonics(&mut self) {
+        // WDM dispatch, declared here beside the factories rather than in a
+        // separate list in the parser (#52).  Every photonic device is
+        // bundle-aware: pure-optical ones run independent per-channel
+        // propagation, and ones with electrical state share a single physical
+        // interface across all N channels.  WDM is the rule, not the exception.
+        //
+        // The two lasers are deliberately Scalar — one laser emits one
+        // wavelength; combine them with `fc_mux` for a WDM bus.
+        for name in [
+            "fc_waveguide",
+            "fc_dcoupler",
+            "fc_splitter",
+            "fc_grating_coupler",
+            "fc_photodetector",
+            "fc_mzm",
+            "fc_circulator",
+            "fc_facet",
+            "fc_optical_2x2",
+            "fc_awgr",
+            "fc_thermal_ps",
+            "fc_thermal_ps_rc",
+            "fc_pn_ps",
+            "fc_pn_ps_cap",
+            "fc_pn_ps_inj",
+            "fc_pn_ps_full",
+            "fc_pn_th_ps",
+            "fc_pn_th_ps_cap",
+            "fc_pn_th_ps_inj",
+            "fc_pn_th_ps_full",
+            // A card kind rather than a factory name — its instances are named
+            // after the card. Declared so the inheritance below can find it.
+            "fc_phase_shifter_expr",
+        ] {
+            self.declare_arity(name, ArityDecl::Fixed(BundleArity::Aware));
+        }
+        for name in ["fc_mux", "fc_demux"] {
+            self.declare_arity(name, ArityDecl::Fixed(BundleArity::Bridge));
+        }
+        for name in ["fc_cw_laser", "fc_driven_laser"] {
+            self.declare_arity(name, ArityDecl::Fixed(BundleArity::Scalar));
+        }
+
         // Passive / simple natives (Default-constructible).
         self.register_default::<NativeWaveguide>("fc_waveguide");
         self.register_default::<NativeDirectionalCoupler>("fc_dcoupler");
@@ -714,6 +840,46 @@ impl DeviceRegistry {
     /// Look up a factory by model name.
     pub fn get(&self, name: &str) -> Option<&Factory> {
         self.factories.get(name)
+    }
+}
+
+/// The registry answers the parser's WDM dispatch question.
+///
+/// This is what replaces the hardcoded name list as the authority: the registry
+/// is the thing that actually knows what a model name resolves to, including a
+/// `.model` card's name, which the parser can never know.  Returning `None`
+/// leaves the parser on its static fallback, so a name we have not registered
+/// behaves exactly as it did before.
+impl ArityOracle for DeviceRegistry {
+    fn arity(&self, q: &ArityQuery) -> Option<BundleArity> {
+        match self.arity_decl(q.model_name)? {
+            ArityDecl::Fixed(a) => Some(a),
+            // Placed by shape.  Flattening wins ties: a one-channel bundle makes
+            // both counts equal, and there the two dispatches are the same
+            // expansion anyway.
+            ArityDecl::Terminals(n) => {
+                if q.flattened == n {
+                    Some(BundleArity::Aware)
+                } else if q.single == n {
+                    Some(BundleArity::Scalar)
+                } else {
+                    // Neither shape fits. Say nothing and let the parser report
+                    // the mismatch it already reports well.
+                    None
+                }
+            }
+            // A generated model serves any width, so the only question is
+            // whether the flattened shape is one an integer channel count
+            // produces at all.
+            ArityDecl::Bundle {
+                scalars,
+                per_channel,
+            } => {
+                let rest = q.flattened.checked_sub(scalars)?;
+                (per_channel > 0 && rest % per_channel == 0 && rest / per_channel >= 1)
+                    .then_some(BundleArity::Aware)
+            }
+        }
     }
 }
 

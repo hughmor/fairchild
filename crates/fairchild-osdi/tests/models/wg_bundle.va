@@ -1,0 +1,44 @@
+// wg_bundle — a straight optical waveguide for ANY number of WDM channels.
+//
+// The whole point of the bundle-port dialect: the channel count appears nowhere
+// in this file. `optical_bundle` declares a port whose width the deck decides,
+// `N(a)` reads that width, and the accessors address one channel at a time. The
+// same source is compiled at whatever N a deck asks for.
+//
+// Compare `wg_wdm2.va`, which is this model with two channels written out by
+// hand — 12 declared ports and a duplicated body, and useful at exactly N = 2.
+//
+// λ: `LAMBDA(a, k)` is channel k's wavelength, a generated parameter the
+// elaborator fills from whatever source the deck routes to this instance. There
+// is no λ wire to read and no tag to pass on: a wavelength is resolved before
+// the solve rather than solved for, so the λ ports below carry no equation.
+// (There used to be a `WL(a, k)` accessor and a hand-written
+// `OWL(WL(b,k)) <+ OWL(WL(a,k));` passthrough. Contributing from the wire was
+// the footgun — φ is thousands of radians, so ∂φ/∂λ is of order 1e9 per metre
+// and Newton stopped converging — and now there is nothing to contribute from.)
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module wg_bundle(a, b);
+    optical_bundle a, b;
+
+    parameter real l_um        = 1000.0 from (0:inf);
+    parameter real n_g         = 4.2    from (0:inf);
+    parameter real alpha_dB_cm = 3.0    from [0:inf);
+
+    real l_m, amp, ph;
+    integer k;
+
+    analog begin
+        l_m = l_um * 1e-6;
+        // POWER dB per cm, so the amplitude factor divides by 20.
+        amp = pow(10.0, -alpha_dB_cm * (l_um * 1e-4) / 20.0);
+        for (k = 0; k < N(a); k = k + 1) begin
+            ph = 2.0 * `M_PI * n_g * l_m / LAMBDA(a, k);
+            OF(E_RE(b, k)) <+ amp * (OF(E_RE(a, k)) * cos(ph) + OF(E_IM(a, k)) * sin(ph));
+            OF(E_IM(b, k)) <+ amp * (OF(E_IM(a, k)) * cos(ph) - OF(E_RE(a, k)) * sin(ph));
+        end
+    end
+endmodule

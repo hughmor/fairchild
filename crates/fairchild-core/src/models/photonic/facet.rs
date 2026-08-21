@@ -187,6 +187,14 @@ impl Device for NativeFacet {
         true
     }
 
+    /// A facet ends the path: nothing to route, but its port still carries a
+    /// label, and the set of λ terminals has to be total for resolution to
+    /// speak for every λ net in the deck.
+    fn lambda_terminals(&self) -> Vec<usize> {
+        let (wpc, n) = (self.wpc, self.n_channels);
+        (0..n).map(|k| wpc * k + wpc - 1).collect()
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
         if !self.checked {
             self.resolve();

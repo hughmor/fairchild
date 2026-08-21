@@ -10,11 +10,14 @@ use fairchild_core::netlist_edit::set_element_param;
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
-    tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
+    tran_nr_with_registry_var_opts, ArityDecl, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
-use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Netlist};
+use fairchild_parser::{
+    check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, BundleArity, Netlist,
+    PermissiveArity, StaticArity,
+};
 
 /// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
 /// its four call sites when the OSDI feature is off.
@@ -84,7 +87,7 @@ struct Cli {
     /// Override an arbitrary solver option.  Format: KEY=VALUE.  Layered on
     /// top of any `.options` directives in the netlist.  Can be repeated.
     ///
-    /// Recognised keys: reltol, abstol, vntol, lambdatol, gmin, vmax, itl1, itl4,
+    /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
     /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
     /// variable_step, waveguide_delay, cond_estimate, equilibrate.
     ///
@@ -152,6 +155,14 @@ struct Cli {
     /// route for CI, where models arrive as pre-built `.osdi` artefacts.
     #[arg(long = "no-va-compile")]
     no_va_compile: bool,
+
+    /// Write the expanded per-channel-count source of a bundle-dialect
+    /// Verilog-A model here, instead of beside the artefact cache.  A model
+    /// written once for any N is compiled at the width the deck declares, and
+    /// this is how you read what was actually compiled — the first thing wanted
+    /// when a model behaves at one channel and not at eight.
+    #[arg(long = "emit-generated", value_name = "DIR")]
+    emit_generated: Option<PathBuf>,
 
     /// Bundle all `.alter` × `.temp` corner outputs into the single
     /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
@@ -322,6 +333,7 @@ fn va_options(cli: &Cli) -> VaOptions {
         include_dirs: cli.va_include.clone(),
         cache_dir: None,
         no_compile: cli.no_va_compile,
+        generated_dir: cli.emit_generated.clone(),
     }
     .or_env()
 }
@@ -376,12 +388,14 @@ fn build_registry(
             }
         }
 
-        fairchild_osdi::load_libraries(
+        fairchild_osdi::load_libraries_with_widths(
             &netlist.osdi_paths,
             &netlist.va_sources,
             netlist_dir.map(|p| p.as_path()),
             va,
             &mut registry,
+            &fairchild_parser::instantiated_widths(netlist),
+            fairchild_parser::wires_per_channel(netlist),
         )
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -416,7 +430,32 @@ fn main() {
         fairchild_core::set_quiet(true);
     }
 
-    let mut netlist = parse_spice_file(&cli.file).unwrap_or_else(|e| {
+    // Two passes, because WDM dispatch is the registry's answer and the
+    // registry is built from what a parse produces (#52).  Pass one is
+    // permissive and exists only to harvest `.model` cards and model-file
+    // paths — nothing about those depends on how bundles expand — so the
+    // registry it feeds can then place every instance by what its name really
+    // resolves to, including a card's own name, which the parser cannot know.
+    // Parsing is milliseconds; this is not a hot path.
+    let parse_dir = cli.file.parent().map(|p| p.to_path_buf());
+    // Pass one's warnings are pass two's, so emitting them would double every
+    // one. Silence the library for the probe and put the setting back.
+    let was_quiet = fairchild_parser::warn::quiet();
+    fairchild_parser::warn::set_quiet(true);
+    let probe = parse_spice_file_with_arity(&cli.file, &PermissiveArity);
+    let arity_reg = probe
+        .as_ref()
+        .ok()
+        .map(|n| build_registry(n, parse_dir.as_ref(), true, &va_options(&cli)));
+    fairchild_parser::warn::set_quiet(was_quiet);
+
+    // A pass-one failure is a real parse error; report it from the pass that
+    // uses the honest oracle so the message is the one the user should see.
+    let mut netlist = match arity_reg {
+        Some(reg) => parse_spice_file_with_arity(&cli.file, &reg),
+        None => parse_spice_file_with_arity(&cli.file, &StaticArity),
+    }
+    .unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
@@ -472,7 +511,13 @@ fn main() {
         std::process::exit(0);
     }
 
-    // --list-models: print model cards
+    // --list-models: what the deck registers, and the shape of each one.
+    //
+    // The question this answers is "why is my model Scalar" — which used to have
+    // no answer at all, and now has one, because WDM dispatch is a property the
+    // registry can be asked about (#52). For a bundle-dialect source it also says
+    // which channel counts were generated, since one source serves any N and the
+    // artefacts are otherwise invisible in a cache (#55).
     if cli.list_models {
         if netlist.models.is_empty() {
             println!("(no .model cards found)");
@@ -488,6 +533,73 @@ fn main() {
         }
         for path in &netlist.osdi_paths {
             println!(".osdi {path}");
+        }
+
+        #[cfg(feature = "osdi")]
+        {
+            let dir = cli.file.parent().map(|p| p.to_path_buf());
+            let va = va_options(&cli);
+            let reg = build_registry(&netlist, dir.as_ref(), true, &va);
+            // Widths a bundle source was generated for, from the artefacts
+            // themselves rather than from what we think we asked for.
+            let mut built: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+            if let Ok(entries) = std::fs::read_dir(va.generated_dir()) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some((stem, rest)) = name.split_once(".n") {
+                        if let Some(n) = rest.strip_suffix(".va").and_then(|d| d.parse().ok()) {
+                            built.entry(stem.to_string()).or_default().push(n);
+                        }
+                    }
+                }
+            }
+            let mut names: Vec<&str> = reg.registered_names().collect();
+            names.sort_unstable();
+            let mut printed_header = false;
+            for name in names {
+                let Some(decl) = reg.arity_decl(name) else {
+                    continue;
+                };
+                let shape = match decl {
+                    ArityDecl::Bundle {
+                        scalars,
+                        per_channel,
+                    } => {
+                        let widths = built
+                            .iter()
+                            .find(|(k, _)| name.starts_with(k.as_str()) || k.starts_with(name))
+                            .map(|(_, v)| {
+                                let mut v = v.clone();
+                                v.sort_unstable();
+                                v.iter()
+                                    .map(|n| n.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "none yet".into());
+                        format!(
+                            "bundle ports, {per_channel} terminals per channel + {scalars} \
+                             scalar; built for N = {widths}"
+                        )
+                    }
+                    ArityDecl::Terminals(n) => {
+                        format!("{n} terminals, fixed — takes a bundle only at that exact width")
+                    }
+                    ArityDecl::Fixed(a) => match a {
+                        BundleArity::Aware => "bundle-aware (native)".to_string(),
+                        BundleArity::Bridge => "bundle bridge (native)".to_string(),
+                        BundleArity::Scalar => "single channel".to_string(),
+                    },
+                };
+                if name.starts_with("fc_") && matches!(decl, ArityDecl::Fixed(_)) {
+                    continue; // built-ins: not what the deck author is asking about
+                }
+                if !printed_header {
+                    println!("\nregistered models:");
+                    printed_header = true;
+                }
+                println!("  {name:<24} {shape}");
+            }
         }
         std::process::exit(0);
     }

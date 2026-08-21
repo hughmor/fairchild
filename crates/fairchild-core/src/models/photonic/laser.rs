@@ -17,21 +17,20 @@ use crate::mna::MnaMatrix;
 /// drives it — a laser straight into a photodetector — nothing stamps into that
 /// node's row at all, and `stamp_gmin` pins such a row at `V = 0`, so it still
 /// reads exactly zero.
-fn emitted_wires(wpc: usize) -> usize {
-    if wpc == 5 {
-        3
-    } else {
-        wpc
-    }
+fn emitted_wires(_wpc: usize) -> usize {
+    2
 }
 
-/// Bind branch rows for the wires `emitted_wires` counts: `re`, `im`, and λ
-/// (the last wire), leaving the backward pair unbound.
-fn bind_emitted(branches: &mut [Option<usize>], wpc: usize, first_idx: usize) {
+/// Bind branch rows for the wires `emitted_wires` counts: `re` and `im`.
+///
+/// The backward pair stays unbound (a laser does not drive light back into
+/// itself), and so does λ: the wavelength is a parameter, declared through
+/// [`Device::lambda_emitted`] and resolved before the solve, so there is no
+/// equation left to stamp for it.
+fn bind_emitted(branches: &mut [Option<usize>], _wpc: usize, first_idx: usize) {
     branches.fill(None);
     branches[0] = Some(first_idx);
     branches[1] = Some(first_idx + 1);
-    branches[wpc - 1] = Some(first_idx + 2);
 }
 
 /// Relative-intensity-noise generator for a laser emitting `(re_amp, im_amp)`
@@ -221,6 +220,12 @@ impl Device for NativeCwLaser {
         self.src_scale = scale;
     }
 
+    /// A source is where λ resolution starts. The value is already a parameter
+    /// here — the matrix was only ever the delivery mechanism.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        vec![(self.wpc - 1, self.wavelen_m)]
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -233,9 +238,8 @@ impl Device for NativeCwLaser {
         if let Some(j) = self.branches[1] {
             b[j] += self.src_scale * self.im_amp;
         }
-        if let Some(j) = self.branches[self.wpc - 1] {
-            b[j] += self.wavelen_m;
-        }
+        // λ gets no branch and no row: the wavelength is a parameter, declared
+        // through `lambda_emitted` and resolved before the solve.
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
@@ -482,6 +486,14 @@ impl Device for NativeDrivenLaser {
         self.v_op = v;
     }
 
+    /// Same as the CW laser: the wavelength is a parameter, so resolution can
+    /// start here. Chirp — a λ that moves with the drive — is not modelled, and
+    /// would need an outer iteration around resolution rather than a wire that
+    /// every downstream device watches move.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        vec![(self.wpc - 1, self.wavelen_m)]
+    }
+
     fn load_residual(&self, b: &mut [f64]) {
         // Branch row k enforces V(wire_k) − dA/dV·cos·(V_p − V_n) = const, so
         // the RHS carries the linearisation offset A_op − dA/dV·V_op.
@@ -493,11 +505,7 @@ impl Device for NativeDrivenLaser {
         if let Some(j) = self.branches[1] {
             b[j] += offset * im_w;
         }
-        // The backward wires get no branch at all — see `bind_emitted`.
-        let lam = self.wpc - 1;
-        if let Some(j) = self.branches[lam] {
-            b[j] += self.wavelen_m;
-        }
+        // The backward wires and λ get no branch at all — see `bind_emitted`.
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {

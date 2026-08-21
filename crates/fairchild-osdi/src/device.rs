@@ -91,6 +91,36 @@ pub struct OsdiDevice {
     /// while building a diagnostic. Passing null here segfaults any model that
     /// emits one — which every foundry compact model does about its defaults.
     handle: CString,
+    /// Set only for a device elaborated from the bundle-port dialect: which of
+    /// its terminals carry a wavelength label, and how a label moves between
+    /// them. `None` for ordinary Verilog-A, which has no bundle structure to
+    /// derive either from.
+    bundle_lambda: Option<BundleLambda>,
+    /// `wl_<k>` values the deck wrote on this instance, in the order they
+    /// arrived. Recorded so `set_resolved_lambda` can say when a hand-set
+    /// wavelength disagrees with the one the deck's own sources imply, instead
+    /// of overwriting it in silence.
+    wl_given: Vec<(usize, f64)>,
+}
+
+/// Where a bundle-dialect model's wavelength labels live, computed once at
+/// elaboration from the module header and the width the deck asked for.
+///
+/// This exists because λ is resolved before the solve, and resolution can only
+/// speak for nets some device *declares*. Without it a bundle model in the
+/// middle of an optical path leaves everything downstream of it unreached, and
+/// an unreached port falls back to the band centre — a wrong wavelength with no
+/// diagnostic, which is the exact failure mode this codebase refuses.
+#[derive(Debug, Clone)]
+pub struct BundleLambda {
+    /// Terminals carrying a label — see `BundleModule::lambda_terminals`.
+    pub terminals: Vec<usize>,
+    /// `(from, to)` label routing — see `BundleModule::lambda_routing`.
+    pub routing: Vec<(usize, usize)>,
+    /// Channel count this instance was generated for.
+    pub channels: usize,
+    /// Wires per channel (3 or 5).
+    pub wpc: usize,
 }
 
 // SAFETY: descriptor is read-only after construction; Vec storage is thread-safe.
@@ -128,6 +158,8 @@ impl OsdiDevice {
             // the model dereferences this while formatting a diagnostic, so it
             // must be a real string from the start.
             handle: descriptor_name(descriptor),
+            bundle_lambda: None,
+            wl_given: Vec::new(),
         }
     }
 
@@ -161,7 +193,15 @@ impl OsdiDevice {
             // the model dereferences this while formatting a diagnostic, so it
             // must be a real string from the start.
             handle: descriptor_name(descriptor),
+            bundle_lambda: None,
+            wl_given: Vec::new(),
         })
+    }
+
+    /// Attach the λ geometry of a bundle-dialect elaboration. Called by the
+    /// registrar, before setup, because it changes nothing the setup reads.
+    pub fn set_bundle_lambda(&mut self, lambda: BundleLambda) {
+        self.bundle_lambda = Some(lambda);
     }
 
     #[inline]
@@ -837,6 +877,61 @@ impl Device for OsdiDevice {
         self.q_prev2 = Some(std::mem::replace(&mut self.q_prev, q_now));
     }
 
+    fn lambda_terminals(&self) -> Vec<usize> {
+        self.bundle_lambda
+            .as_ref()
+            .map(|b| b.terminals.clone())
+            .unwrap_or_default()
+    }
+
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        self.bundle_lambda
+            .as_ref()
+            .map(|b| b.routing.clone())
+            .unwrap_or_default()
+    }
+
+    /// Fill the generated `wl_<k>` parameters from the resolved wavelengths.
+    ///
+    /// `LAMBDA(p, k)` expands to `wl_<k>` whatever `p` is — a bundle model has
+    /// one channel grid, so slot `k` *is* a wavelength — which is why one value
+    /// per slot is the whole answer. It is read off the first bundle port's slot
+    /// `k`; after resolution every bundle port of this instance carries the same
+    /// label on that slot, because `lambda_routing` says so.
+    ///
+    /// A deck may still write `wl_0=…` on the instance, and it still takes
+    /// effect for a channel no source reaches. Where a source *does* reach it
+    /// and disagrees, resolution wins and says so: two answers for one
+    /// wavelength is a deck bug, and picking one silently is how a model ends up
+    /// evaluating a passband at a colour that is nowhere in the circuit.
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let Some(b) = self.bundle_lambda.clone() else {
+            return;
+        };
+        let given = std::mem::take(&mut self.wl_given);
+        let lam = b.wpc - 1;
+        for k in 0..b.channels {
+            // The first bundle's offset is `terminals[0] - lam`; slot k sits
+            // `wpc·k` further on.
+            let Some(&first) = b.terminals.first() else {
+                return;
+            };
+            let Some(&resolved) = per_terminal.get(first - lam + b.wpc * k + lam) else {
+                continue;
+            };
+            if let Some(&(_, prev)) = given.iter().find(|&&(i, _)| i == k) {
+                if (prev - resolved).abs() > 1e-18 {
+                    fairchild_core::warn_user!(
+                        "{}: instance sets wl_{k}={prev:e} m but the deck's sources put \
+                         {resolved:e} m on that channel; the resolved wavelength wins",
+                        self.handle.to_string_lossy()
+                    );
+                }
+            }
+            self.set_real_param(&format!("wl_{k}"), resolved);
+        }
+    }
+
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         let desc = self.desc();
         let access_fn = match desc.access {
@@ -884,6 +979,12 @@ impl Device for OsdiDevice {
             if !ptr.is_null() {
                 unsafe {
                     *(ptr as *mut f64) = value;
+                }
+                if let Some(k) = name
+                    .strip_prefix("wl_")
+                    .and_then(|d| d.parse::<usize>().ok())
+                {
+                    self.wl_given.push((k, value));
                 }
                 self.refresh_instance();
                 return true;

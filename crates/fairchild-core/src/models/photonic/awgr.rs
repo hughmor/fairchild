@@ -144,19 +144,18 @@ pub struct NativeAwgr {
     table: Option<SpectrumTable>,
 
     // ── Cached evaluation state ──
-    /// λ read from every input slot last rebuild, `[i·N + k]`.
+    /// Resolved λ for every input slot, `[i·N + k]`. NaN until
+    /// `set_resolved_lambda` fills it, which reads as "use the device grid".
     lam_cache: Vec<f64>,
     /// Compiled stamp list: (branch slot, output node, weighted inputs).
     rows: Vec<StampRow>,
-    /// λ branch rows driven to a constant (slot, wavelength) — the fallback
-    /// when there is no input tag to mirror.
-    lambda_rhs: Vec<(usize, f64)>,
     built: bool,
     warned_gain: bool,
 }
 
-/// Branch rows per output channel slot: out_re, out_im, out_λ.
-const BRANCHES_PER_SLOT: usize = 3;
+/// Branch rows per output channel slot: out_re, out_im. λ gets none — a
+/// wavelength is resolved before the solve, so it has no equation to stamp.
+const BRANCHES_PER_SLOT: usize = 2;
 
 /// One compiled output equation: which branch row, which output node, and the
 /// weighted input nodes feeding it.
@@ -191,7 +190,6 @@ impl NativeAwgr {
             table: None,
             lam_cache: Vec::new(),
             rows: Vec::new(),
-            lambda_rhs: Vec::new(),
             built: false,
             warned_gain: false,
         }
@@ -220,15 +218,6 @@ impl NativeAwgr {
     #[inline]
     fn out_wire(&self, j: usize, k: usize, w: usize) -> NodeId {
         self.nodes[self.wpc * self.n * (self.n + j) + self.wpc * k + w]
-    }
-
-    /// Read input port `i` slot `k`'s λ wire, bootstrapped to the reference
-    /// wavelength when undriven (matching `OpticalSegment::lambda_of`).
-    fn lambda_in(&self, x: &[f64], i: usize, k: usize) -> f64 {
-        match self.in_wire(i, k, self.wpc - 1) {
-            Some(idx) if x[idx].abs() > 1e-9 => x[idx],
-            _ => self.lambda0_m,
-        }
     }
 
     /// The channel grid implied by the current parameters.
@@ -305,12 +294,10 @@ impl NativeAwgr {
 
     /// Recompute every coefficient and recompile the stamp list.
     fn rebuild(&mut self, ctx: &SimContext) {
-        let (n, wpc) = (self.n, self.wpc);
-        let lam_w = wpc - 1;
+        let n = self.n;
         let t_k = ctx.temperature;
         let spec = self.spectrum();
         self.rows.clear();
-        self.lambda_rhs.clear();
         // Per-input energy accounting for the passivity warning.
         let mut out_power = vec![0.0f64; n * n];
 
@@ -320,7 +307,16 @@ impl NativeAwgr {
                 let mut re_ins: Vec<(NodeId, f64)> = Vec::with_capacity(2 * n);
                 let mut im_ins: Vec<(NodeId, f64)> = Vec::with_capacity(2 * n);
                 for i in 0..n {
-                    let lambda = self.lam_cache[i * n + k];
+                    // NaN means resolution never reached this input — a dark
+                    // port, or a caller that built the device by hand. The
+                    // device's own grid centre is the same answer the λ wire
+                    // used to bootstrap to.
+                    let cached = self.lam_cache[i * n + k];
+                    let lambda = if cached.is_finite() {
+                        cached
+                    } else {
+                        self.lambda0_m
+                    };
                     let (a, b) = self.t_ij(&spec, lambda, i, j, k, t_k);
                     out_power[i * n + k] += a * a + b * b;
                     let (in_re, in_im) = (self.in_wire(i, k, 0), self.in_wire(i, k, 1));
@@ -335,29 +331,6 @@ impl NativeAwgr {
                 }
                 self.rows.push((slot, self.out_wire(j, k, 0), re_ins));
                 self.rows.push((slot + 1, self.out_wire(j, k, 1), im_ins));
-
-                // λ tag: mirror input port `lambda_src`'s tag for this slot,
-                // falling back to the device's own grid wavelength when that
-                // wire does not exist in the netlist.
-                //
-                // The test is deliberately *structural* (does the node exist)
-                // rather than "is it driven": the first rebuild happens on the
-                // zero initial guess, where nothing is driven yet, so a
-                // value-based test would freeze every output onto the grid and
-                // throw away the input comb's detuning.
-                let src_wire = usize::try_from(self.lambda_src)
-                    .ok()
-                    .filter(|&s| s < n)
-                    .and_then(|s| self.in_wire(s, k, lam_w));
-                let out_lam = self.out_wire(j, k, lam_w);
-                match src_wire {
-                    Some(_) => self.rows.push((slot + 2, out_lam, vec![(src_wire, -1.0)])),
-                    None => {
-                        self.rows.push((slot + 2, out_lam, Vec::new()));
-                        self.lambda_rhs
-                            .push((slot + 2, self.grid().lambda_center(k, t_k)));
-                    }
-                }
             }
         }
         self.built = true;
@@ -457,12 +430,12 @@ impl Device for NativeAwgr {
         // every row the device owns, and this device owns 9N² of them: at N=8
         // that is a 332k-entry clique standing in for a true footprint of ~6k,
         // and it grows as N⁴ rather than N³.
-        let (n, wpc) = (self.n, self.wpc);
+        let n = self.n;
         let mut pairs = Vec::with_capacity(12 * n * n * n);
         for j in 0..n {
             for k in 0..n {
                 let base = BRANCHES_PER_SLOT * (j * n + k);
-                // Output wire w is driven by branch row `base + w` (re, im, λ).
+                // Output wire w is driven by branch row `base + w` (re, im).
                 for w in 0..BRANCHES_PER_SLOT {
                     let (Some(row), Some(out)) = (self.branches[base + w], self.out_wire(j, k, w))
                     else {
@@ -487,11 +460,6 @@ impl Device for NativeAwgr {
                                 pairs.push((row, inp));
                             }
                         }
-                    }
-                    if let (Some(row), Some(inp)) =
-                        (self.branches[base + 2], self.in_wire(i, k, wpc - 1))
-                    {
-                        pairs.push((row, inp));
                     }
                 }
             }
@@ -567,36 +535,106 @@ impl Device for NativeAwgr {
         hit
     }
 
-    fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
-        // Coefficients depend only on the input λ tags (and on parameters,
-        // which invalidate directly). Lasers are CW, so after the first NR
-        // iteration this is a comparison and nothing else.
-        let n = self.n;
-        let mut changed = !self.built;
+    /// Every output slot `k` mirrors ONE input port's slot `k` tag — port
+    /// `lambda_src`, port 0 by default — not the port the field came from.
+    ///
+    /// I assumed at first that a label follows the field's cyclic permutation
+    /// (`i` → `(i+k) mod N`). It does not, and the device is right: a slot IS a
+    /// wavelength across the whole router, which is exactly why the router is
+    /// representable at all. Which port a photon arrived on changes where its
+    /// energy goes, not what colour it is. `rebuild` stamps precisely this.
+    ///
+    /// `lambda_src` outside `0..N` (`-1` by convention) means the outputs take
+    /// the device's own grid instead of mirroring anything, so there is no edge
+    /// to declare — see `lambda_emitted`.
+    /// Every port's λ terminal, both sides — not just the routed ones.
+    ///
+    /// The router mirrors one input port's tags onto its outputs, but it
+    /// *evaluates* each input port's passband at that port's own λ, so a label
+    /// on port 3 is read even though nothing routes it. Left to the default
+    /// (the routing endpoints), ports other than `lambda_src` would resolve to
+    /// the band centre and every off-centre channel would be read on the wrong
+    /// passband.
+    fn lambda_terminals(&self) -> Vec<usize> {
+        let (n, wpc) = (self.n, self.wpc);
+        let lam = wpc - 1;
+        let port = wpc * n;
+        (0..2 * n)
+            .flat_map(|p| (0..n).map(move |k| port * p + wpc * k + lam))
+            .collect()
+    }
+
+    fn set_resolved_lambda(&mut self, per_terminal: &[f64]) {
+        let (n, wpc) = (self.n, self.wpc);
+        let lam = wpc - 1;
         for i in 0..n {
             for k in 0..n {
-                let lam = self.lambda_in(x, i, k);
-                let slot = i * n + k;
-                // The cache starts as NaN, so the first pass always rebuilds.
-                let prev = self.lam_cache[slot];
-                if !prev.is_finite() || (lam - prev).abs() > 1e-18 {
-                    self.lam_cache[slot] = lam;
-                    changed = true;
+                if let Some(&v) = per_terminal.get(wpc * n * i + wpc * k + lam) {
+                    self.lam_cache[i * n + k] = v;
                 }
             }
         }
-        if changed {
+        self.built = false;
+    }
+
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (n, wpc) = (self.n, self.wpc);
+        let Ok(src) = usize::try_from(self.lambda_src) else {
+            return Vec::new();
+        };
+        if n == 0 || src >= n {
+            return Vec::new();
+        }
+        let lam = wpc - 1;
+        let port = wpc * n;
+        let out_base = port * n;
+        let mut pairs = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for k in 0..n {
+                pairs.push((
+                    port * src + wpc * k + lam,
+                    out_base + port * j + wpc * k + lam,
+                ));
+            }
+        }
+        pairs
+    }
+
+    /// With `lambda_src` outside `0..N` the router originates its own labels
+    /// from its channel grid rather than mirroring an input, so it is a source
+    /// as far as resolution is concerned.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        let (n, wpc) = (self.n, self.wpc);
+        if n == 0 || usize::try_from(self.lambda_src).is_ok_and(|s| s < n) {
+            return Vec::new();
+        }
+        let lam = wpc - 1;
+        let port = wpc * n;
+        let out_base = port * n;
+        let grid = self.grid();
+        let mut out = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for k in 0..n {
+                out.push((
+                    out_base + port * j + wpc * k + lam,
+                    grid.lambda_center(k, self.t_nom_k),
+                ));
+            }
+        }
+        out
+    }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
+        // Coefficients depend only on the input λ tags and on parameters, and
+        // both are settled before the first iterate — λ by resolution, params by
+        // `set_real_param` clearing `built`. This used to re-scan the λ wires
+        // every iteration to notice them arriving; they no longer arrive.
+        if !self.built {
             self.rebuild(ctx);
         }
     }
 
-    fn load_residual(&self, b: &mut [f64]) {
-        for &(slot, lambda) in &self.lambda_rhs {
-            if let Some(row) = self.branches[slot] {
-                b[row] += lambda;
-            }
-        }
-    }
+    fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         for (slot, out, ins) in &self.rows {

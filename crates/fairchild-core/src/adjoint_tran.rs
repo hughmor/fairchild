@@ -173,7 +173,7 @@ impl TranAdjoint {
         let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
         reject_inductance(netlist, &st)?;
 
-        let frozen = frozen_columns(netlist, st.topology(), st.devices());
+        let frozen = frozen_columns(st.topology(), st.devices());
         let mut out = TranAdjoint {
             netlist: netlist.clone(),
             opts: opts.clone(),
@@ -768,7 +768,7 @@ pub fn jacobian_check_tran(
     st.stamp_at(&x);
     let stamped = CircuitTopology::to_dense(&st.matrix().a, n);
 
-    let frozen = frozen_columns(netlist, st.topology(), st.devices());
+    let frozen = frozen_columns(st.topology(), st.devices());
     let mut f_plus = vec![0.0; n];
     let mut f_minus = vec![0.0; n];
     let mut probe = x.clone();
