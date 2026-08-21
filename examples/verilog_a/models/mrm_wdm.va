@@ -1,0 +1,171 @@
+// mrm_wdm — a silicon microring modulator for ANY number of WDM channels.
+//
+// The worked example for writing a WDM optical model in Verilog-A. The channel
+// count appears nowhere in this file: `optical_bundle` declares ports whose
+// width the deck decides, `N(bus_in)` reads it, and the accessors address one
+// channel at a time. Run the same source against one wavelength or a hundred.
+//
+// ── What it models ───────────────────────────────────────────────────────────
+//
+//   * A PN junction with real carrier transport, not a bare Shockley law:
+//     injected carriers accumulate with a finite lifetime, so the ring's
+//     response lags its drive.
+//   * Free-carrier dispersion and absorption from that carrier density — the
+//     plasma effect, which is how a depletion/injection modulator actually
+//     tunes.
+//   * Optical absorption feeding BACK into carriers (two-photon absorption
+//     generates them) and into heat.
+//   * A resistive heater whose resistance follows its own temperature rise, so
+//     the trim power is self-consistent rather than assumed.
+//   * A thermo-optic index shift from the total temperature rise, which is what
+//     a heater is for.
+//   * A ring resonance evaluated PER CHANNEL at that channel's own wavelength,
+//     so a comb sees a different detuning on every line.
+//
+// Everything above is coupled: junction current makes carriers, carriers absorb
+// light, absorbed light makes heat, heat moves the resonance, and the resonance
+// decides how much light there is to absorb.
+//
+// ── Two conventions worth knowing before you copy this ───────────────────────
+//
+// **λ comes from `LAMBDA(port, k)`, and there is no λ wire to read.** A
+// wavelength is resolved before the solve, from whatever source the deck routes
+// to this instance, so `LAMBDA` is a parameter the elaborator fills and the
+// physics may use it freely. You do not pass a wavelength tag along; nothing
+// downstream needs you to.
+//
+// **Temperature is an internal node here, carrying kelvin.** Verilog-A internal
+// nodes get real MNA rows, so `V(th)` is a genuine solved unknown and the
+// self-heating below is a real fixed point, not an estimate. The caveat is that
+// it is an *electrical* node holding a temperature, so the solver's voltage
+// tolerance governs it — a proper thermal discipline with its own tolerances is
+// fairchild issue #43. Until then this is the honest way to do it, and it is the
+// same trick several vendor models use.
+//
+// ── What it does NOT model ───────────────────────────────────────────────────
+//
+// Bidirectional propagation (the backward wires are not read), the ring's
+// photon lifetime (the cavity is treated as instantaneous — valid well below the
+// ~9 ps photon lifetime), and thermal crosstalk to neighbouring rings. Coupling
+// is a fixed `t`; a real device's coupler is wavelength-dependent.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n);
+
+    // Width bound at elaboration from the deck's `.optical_port bus N`.
+    optical_bundle bus_in, bus_out;
+    // Your own ports still need a direction — the dialect declares the bundle
+    // wires it generates, not the ones you wrote.
+    inout anode, cathode, htr_p, htr_n;
+    electrical anode, cathode, htr_p, htr_n;
+
+    // Internal state. Both get real MNA rows.
+    electrical nc;   // carrier density, m^-3, as a potential
+    electrical th;   // temperature rise above ambient, K, as a potential
+
+    // ── geometry and coupling ────────────────────────────────────────────────
+    parameter real radius_um   = 8.0    from (0:inf);  // ring radius
+    parameter real n_g         = 4.2    from (0:inf);  // group index
+    parameter real n_eff0      = 2.3022 from (0:inf);  // effective index, unbiased
+    parameter real t_coupl     = 0.983  from (0:1);    // field self-coupling
+    parameter real alpha_bg    = 246.4  from [0:inf);  // background loss, Np/m
+
+    // ── junction ─────────────────────────────────────────────────────────────
+    parameter real i_sat       = 5.1e-8 from (0:inf);  // saturation current, A
+    parameter real n_ideal     = 2.0    from (0:inf);  // ideality
+    parameter real tau_c       = 10e-9  from (0:inf);  // carrier lifetime, s
+    parameter real vol_active  = 1.2e-18 from (0:inf); // active volume, m^3
+
+    // ── plasma dispersion (Soref-Bennett, linearised) ────────────────────────
+    parameter real dn_dnc      = -8.8e-28;             // index per carrier, m^3
+    parameter real dalpha_dnc  = 8.5e-24;              // loss per carrier, m^2
+
+    // ── two-photon absorption ────────────────────────────────────────────────
+    parameter real beta_tpa    = 7.9e-12 from [0:inf); // m/W
+    parameter real a_eff       = 1.3e-13 from (0:inf); // effective area, m^2
+
+    // ── thermal ──────────────────────────────────────────────────────────────
+    parameter real r_th        = 4.2e4  from (0:inf);  // K/W
+    parameter real c_th        = 3.1e-12 from (0:inf); // J/K
+    parameter real dn_dt       = 1.86e-4;              // thermo-optic, 1/K
+    parameter real r_htr0      = 184.4  from (0:inf);  // heater R at ambient
+    parameter real alpha_r     = 1.7e-3;               // heater tempco, 1/K
+
+    real vt, v_j, i_d, gen_tpa, p_abs, p_htr, r_htr, dT, ncar;
+    real l_ring, n_eff, alpha_tot, amp_rt, lam, phi, ca, sa;
+    real re_num, im_num, den, e_re, e_im, p_ch;
+    integer k;
+
+    analog begin
+        l_ring = 2.0 * `M_PI * radius_um * 1e-6;
+        vt     = `P_K * $temperature / `P_Q;
+
+        // ── junction: current in, carriers out ───────────────────────────────
+        v_j = V(anode, cathode);
+        i_d = i_sat * (limexp(v_j / (n_ideal * vt)) - 1.0);
+        I(anode, cathode) <+ i_d;
+
+        dT   = V(th);
+        ncar = V(nc);
+
+        // ── per-channel optics, pass one: how much light is absorbed ─────────
+        // Index and loss are shared (one ring, one carrier pool, one
+        // temperature); the DETUNING is per channel, because each line sits at
+        // its own wavelength.
+        n_eff     = n_eff0 + dn_dnc * ncar + dn_dt * dT;
+        alpha_tot = alpha_bg + dalpha_dnc * ncar;
+        amp_rt    = exp(-alpha_tot * l_ring / 2.0);
+
+        p_abs   = 0.0;
+        gen_tpa = 0.0;
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            p_ch = OF(E_RE(bus_in, k)) * OF(E_RE(bus_in, k))
+                 + OF(E_IM(bus_in, k)) * OF(E_IM(bus_in, k));
+            // Absorbed power is additive over channels; TPA generation goes as
+            // intensity squared, so it is per channel and cannot be lumped.
+            p_abs   = p_abs + p_ch * (1.0 - exp(-alpha_tot * l_ring));
+            gen_tpa = gen_tpa + beta_tpa * p_ch * p_ch / (a_eff * a_eff);
+        end
+
+        // ── carriers: injection + two-photon generation, one lifetime ────────
+        // A first-order pool: dNc/dt = I/(q·V) + G_tpa − Nc/τ. Written as a
+        // current balance on `nc` so the solver integrates it like any state.
+        I(nc) <+ ddt(V(nc)) + V(nc) / tau_c
+               - i_d / (`P_Q * vol_active) - gen_tpa;
+
+        // ── heater, with its resistance following its own rise ───────────────
+        r_htr = r_htr0 * (1.0 + alpha_r * dT);
+        I(htr_p, htr_n) <+ V(htr_p, htr_n) / r_htr;
+        p_htr = V(htr_p, htr_n) * V(htr_p, htr_n) / r_htr;
+
+        // ── temperature: one node, every heat source ─────────────────────────
+        // C·dT/dt + T/R = P_heater + P_absorbed + P_junction. Solved, so the
+        // heater's resistance and the rise it causes agree with each other.
+        I(th) <+ c_th * ddt(V(th)) + V(th) / r_th
+               - p_htr - p_abs - v_j * i_d;
+
+        // ── per-channel optics, pass two: the ring transfer ──────────────────
+        // All-pass ring, field form:  E_out/E_in = (t − A·e^{jφ}) / (1 − t·A·e^{jφ})
+        // written out in real arithmetic. φ is per channel because λ is.
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            lam = LAMBDA(bus_in, k);
+            phi = 2.0 * `M_PI * n_eff * l_ring / lam;
+            ca  = amp_rt * cos(phi);
+            sa  = amp_rt * sin(phi);
+
+            // (t − ca − j·sa) · conj(1 − t·ca − j·t·sa), over |den|²
+            re_num = (t_coupl - ca) * (1.0 - t_coupl * ca) + t_coupl * sa * sa;
+            im_num = sa * (t_coupl * (t_coupl - ca) - (1.0 - t_coupl * ca));
+            den    = (1.0 - t_coupl * ca) * (1.0 - t_coupl * ca)
+                   + (t_coupl * sa) * (t_coupl * sa);
+
+            e_re = OF(E_RE(bus_in, k));
+            e_im = OF(E_IM(bus_in, k));
+            OF(E_RE(bus_out, k)) <+ (e_re * re_num - e_im * im_num) / den;
+            OF(E_IM(bus_out, k)) <+ (e_re * im_num + e_im * re_num) / den;
+        end
+    end
+endmodule

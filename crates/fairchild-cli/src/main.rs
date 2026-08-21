@@ -10,12 +10,12 @@ use fairchild_core::netlist_edit::set_element_param;
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
-    tran_nr_with_registry_var_opts, DeviceRegistry, SimOptions,
+    tran_nr_with_registry_var_opts, ArityDecl, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
 use fairchild_parser::{
-    check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, Netlist,
+    check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, BundleArity, Netlist,
     PermissiveArity, StaticArity,
 };
 
@@ -511,7 +511,13 @@ fn main() {
         std::process::exit(0);
     }
 
-    // --list-models: print model cards
+    // --list-models: what the deck registers, and the shape of each one.
+    //
+    // The question this answers is "why is my model Scalar" — which used to have
+    // no answer at all, and now has one, because WDM dispatch is a property the
+    // registry can be asked about (#52). For a bundle-dialect source it also says
+    // which channel counts were generated, since one source serves any N and the
+    // artefacts are otherwise invisible in a cache (#55).
     if cli.list_models {
         if netlist.models.is_empty() {
             println!("(no .model cards found)");
@@ -527,6 +533,73 @@ fn main() {
         }
         for path in &netlist.osdi_paths {
             println!(".osdi {path}");
+        }
+
+        #[cfg(feature = "osdi")]
+        {
+            let dir = cli.file.parent().map(|p| p.to_path_buf());
+            let va = va_options(&cli);
+            let reg = build_registry(&netlist, dir.as_ref(), true, &va);
+            // Widths a bundle source was generated for, from the artefacts
+            // themselves rather than from what we think we asked for.
+            let mut built: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+            if let Ok(entries) = std::fs::read_dir(va.generated_dir()) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some((stem, rest)) = name.split_once(".n") {
+                        if let Some(n) = rest.strip_suffix(".va").and_then(|d| d.parse().ok()) {
+                            built.entry(stem.to_string()).or_default().push(n);
+                        }
+                    }
+                }
+            }
+            let mut names: Vec<&str> = reg.registered_names().collect();
+            names.sort_unstable();
+            let mut printed_header = false;
+            for name in names {
+                let Some(decl) = reg.arity_decl(name) else {
+                    continue;
+                };
+                let shape = match decl {
+                    ArityDecl::Bundle {
+                        scalars,
+                        per_channel,
+                    } => {
+                        let widths = built
+                            .iter()
+                            .find(|(k, _)| name.starts_with(k.as_str()) || k.starts_with(name))
+                            .map(|(_, v)| {
+                                let mut v = v.clone();
+                                v.sort_unstable();
+                                v.iter()
+                                    .map(|n| n.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "none yet".into());
+                        format!(
+                            "bundle ports, {per_channel} terminals per channel + {scalars} \
+                             scalar; built for N = {widths}"
+                        )
+                    }
+                    ArityDecl::Terminals(n) => {
+                        format!("{n} terminals, fixed — takes a bundle only at that exact width")
+                    }
+                    ArityDecl::Fixed(a) => match a {
+                        BundleArity::Aware => "bundle-aware (native)".to_string(),
+                        BundleArity::Bridge => "bundle bridge (native)".to_string(),
+                        BundleArity::Scalar => "single channel".to_string(),
+                    },
+                };
+                if name.starts_with("fc_") && matches!(decl, ArityDecl::Fixed(_)) {
+                    continue; // built-ins: not what the deck author is asking about
+                }
+                if !printed_header {
+                    println!("\nregistered models:");
+                    printed_header = true;
+                }
+                println!("  {name:<24} {shape}");
+            }
         }
         std::process::exit(0);
     }
