@@ -80,67 +80,6 @@ pub(super) fn n_eff_at_lambda(n_eff_0: f64, n_g_0: f64, wl_ref_m: f64, lambda: f
     n_eff_0 + (lambda - wl_ref_m) * (n_eff_0 - n_g_0) / wl_ref_m
 }
 
-/// Picks which input port's λ wire a two-input device's outputs mirror.
-///
-/// λ is static metadata carried on a wire, not a solved signal: lasers drive it
-/// (even at `source_scale = 0`, so it is available from the first NR iteration)
-/// and every device forwards it.  A two-input device has to choose, and always
-/// choosing the first input breaks any topology fed only through the second —
-/// light into a ring's **add** port arrives with no λ tag, so the ring evaluates
-/// its phase at λ = 0 and silently never resonates.
-///
-/// Choosing "whichever is lit" per iteration is worse: in a ring the choice
-/// flip-flops and the λ equations go singular, because `x = x` pins nothing.
-/// So the rule is: prefer the first input, switch to the second only while the
-/// first is dark, and **latch** the first choice that sees light.  In an
-/// add-fed ring the drop coupler latches its add port on the iteration the tag
-/// appears, and the bus coupler then latches the loop — one injection point,
-/// no cycle.  In a bus-fed ring nothing changes: the first input is lit from
-/// iteration one.
-///
-/// ponytail: a heuristic standing in for structure.  The real fix is to resolve
-/// λ once at setup by walking the optical graph out from each source, which
-/// also deletes one unknown per channel per device.  Do that if this ever
-/// mis-latches.
-#[derive(Default)]
-pub(super) struct LambdaSelect {
-    /// Per channel: true = mirror the second input, false = the first.
-    use_second: Vec<bool>,
-    /// Per channel: the choice is fixed once either input has shown light.
-    latched: Vec<bool>,
-}
-
-impl LambdaSelect {
-    pub(super) fn resize(&mut self, n_channels: usize) {
-        self.use_second = vec![false; n_channels];
-        self.latched = vec![false; n_channels];
-    }
-
-    /// Observe both inputs' λ at the current iterate.  Call from `eval`.
-    pub(super) fn observe(&mut self, k: usize, first: NodeId, second: NodeId, x: &[f64]) {
-        if k >= self.latched.len() || self.latched[k] {
-            return;
-        }
-        let val = |n: NodeId| n.and_then(|i| x.get(i).copied()).unwrap_or(0.0);
-        let (a, b) = (val(first), val(second));
-        if a != 0.0 {
-            self.latched[k] = true;
-        } else if b != 0.0 {
-            self.use_second[k] = true;
-            self.latched[k] = true;
-        }
-    }
-
-    /// The λ node the outputs should mirror on channel `k`.
-    pub(super) fn pick(&self, k: usize, first: NodeId, second: NodeId) -> NodeId {
-        if self.use_second.get(k).copied().unwrap_or(false) {
-            second
-        } else {
-            first
-        }
-    }
-}
-
 /// Stamp `V(out) = Σ k_i · V(in_i)` into one auxiliary branch row.
 pub(super) fn stamp_potential_eq(
     mat: &mut MnaMatrix,

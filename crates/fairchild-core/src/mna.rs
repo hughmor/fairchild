@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::device::NodeId;
 use crate::error::SimError;
+use crate::lambda::LambdaMap;
 
 /// The topology/index maps for a circuit — built once, reused across time steps.
 ///
@@ -28,6 +29,19 @@ pub struct CircuitTopology {
     pub vsrc_index: IndexMap<String, usize>,
     /// Total matrix dimension = n_nodes + n_vsources + n_device_extras.
     pub size: usize,
+    /// Nets carrying a wavelength label, and the wavelength each carries.
+    ///
+    /// These are **not** rows. A wavelength is routed from a source and never
+    /// computed, so it is resolved before the solve (see [`crate::lambda`]) and
+    /// occupies no unknown — 848 of 2840 on the giona 8-neuron RNN. They stay
+    /// named, because the X-line ABI is positional and a deck still probes
+    /// `V(bus_wl_0)`: [`CircuitTopology::node_voltage`] answers from here when
+    /// the name is not a row.
+    ///
+    /// Empty for a topology built by [`CircuitTopology::build`], which keeps λ
+    /// as ordinary nodes — correct for a deck with no photonics, and harmless
+    /// (redundant rows, right answers) for one with.
+    pub lambda: LambdaMap,
 }
 
 /// How the assembler should treat an inductor that has no companion state.
@@ -53,13 +67,31 @@ pub enum InductorDc {
 const G_DC_SHORT: f64 = 1e6;
 
 impl CircuitTopology {
+    /// Index a netlist with every net as a row. Use
+    /// [`build_resolved`](Self::build_resolved) for anything photonic: this one
+    /// leaves λ as unknowns.
     pub fn build(netlist: &Netlist) -> CircuitTopology {
-        let (node_index, vsrc_index) = index_circuit(netlist);
+        Self::with_lambda(netlist, LambdaMap::default())
+    }
+
+    /// Index a netlist with λ resolved first, so its label nets never become
+    /// rows. This is what every analysis entry point uses.
+    pub fn build_resolved(
+        netlist: &Netlist,
+        ctx: &crate::device::SimContext,
+        registry: &crate::device_registry::DeviceRegistry,
+    ) -> CircuitTopology {
+        Self::with_lambda(netlist, crate::lambda::resolve(netlist, ctx, registry))
+    }
+
+    fn with_lambda(netlist: &Netlist, lambda: LambdaMap) -> CircuitTopology {
+        let (node_index, vsrc_index) = index_circuit(netlist, &lambda);
         let size = node_index.len() + vsrc_index.len();
         CircuitTopology {
             node_index,
             vsrc_index,
             size,
+            lambda,
         }
     }
 
@@ -167,9 +199,12 @@ impl CircuitTopology {
         if node == "0" || node == "gnd" {
             return Ok(0.0);
         }
-        self.node_index
+        if let Some(&i) = self.node_index.get(node) {
+            return Ok(x[i]);
+        }
+        // A λ label is not a row, but it is still a net a deck can probe.
+        self.lambda
             .get(node)
-            .map(|&i| x[i])
             .ok_or_else(|| SimError::UnknownNode(node.to_string()))
     }
 
@@ -1079,9 +1114,34 @@ fn stamp_current_source_at(b: &mut [f64], pos: NodeId, neg: NodeId, value: f64) 
 // Index builder
 // ---------------------------------------------------------------------------
 
-fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String, usize>) {
+/// Which nets get a row, and which voltage sources get a branch row.
+///
+/// `lambda` names the nets whose value is decided before the solve. Those are
+/// skipped — unless some element other than an `X` instance's own λ terminal
+/// also touches the net. Hand-wiring `Vwl bus_wl_0 0 DC 1.55e-6` is the
+/// documented way to label light entering from outside the deck, and the test
+/// suite is full of it; keeping such a net as a row costs one redundant
+/// unknown, pinned to the same value resolution reached, and keeps `.dc`
+/// sweeps, `.ac` drives and `set_source` working on the source by name. The
+/// nets that go away are the ones only photonic devices touch, which on any
+/// real deck is all of them.
+fn index_circuit(
+    netlist: &Netlist,
+    lambda: &LambdaMap,
+) -> (IndexMap<String, usize>, IndexMap<String, usize>) {
     let mut node_index: IndexMap<String, usize> = IndexMap::new();
     let mut vsrc_index: IndexMap<String, usize> = IndexMap::new();
+    let mut skip: std::collections::HashSet<&str> = lambda.nets().collect();
+    if !skip.is_empty() {
+        for el in &netlist.elements {
+            if matches!(el, Element::XOsdi { .. }) {
+                continue;
+            }
+            for net in element_nets(el) {
+                skip.remove(net);
+            }
+        }
+    }
 
     for el in &netlist.elements {
         match el {
@@ -1089,12 +1149,12 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
             | Element::Capacitor { pos, neg, .. }
             | Element::Inductor { pos, neg, .. }
             | Element::CurrentSource { pos, neg, .. } => {
-                add_node(&mut node_index, pos);
-                add_node(&mut node_index, neg);
+                add_node(&mut node_index, &skip, pos);
+                add_node(&mut node_index, &skip, neg);
             }
             Element::Diode { anode, cathode, .. } => {
-                add_node(&mut node_index, anode);
-                add_node(&mut node_index, cathode);
+                add_node(&mut node_index, &skip, anode);
+                add_node(&mut node_index, &skip, cathode);
             }
             Element::Mosfet {
                 drain,
@@ -1103,10 +1163,10 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 bulk,
                 ..
             } => {
-                add_node(&mut node_index, drain);
-                add_node(&mut node_index, gate);
-                add_node(&mut node_index, source);
-                add_node(&mut node_index, bulk);
+                add_node(&mut node_index, &skip, drain);
+                add_node(&mut node_index, &skip, gate);
+                add_node(&mut node_index, &skip, source);
+                add_node(&mut node_index, &skip, bulk);
             }
             Element::Bjt {
                 collector,
@@ -1115,20 +1175,20 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 substrate,
                 ..
             } => {
-                add_node(&mut node_index, collector);
-                add_node(&mut node_index, base);
-                add_node(&mut node_index, emitter);
-                add_node(&mut node_index, substrate);
+                add_node(&mut node_index, &skip, collector);
+                add_node(&mut node_index, &skip, base);
+                add_node(&mut node_index, &skip, emitter);
+                add_node(&mut node_index, &skip, substrate);
             }
             Element::VoltageSource { name, pos, neg, .. } => {
-                add_node(&mut node_index, pos);
-                add_node(&mut node_index, neg);
+                add_node(&mut node_index, &skip, pos);
+                add_node(&mut node_index, &skip, neg);
                 let n = vsrc_index.len();
                 vsrc_index.entry(name.clone()).or_insert(n);
             }
             Element::XOsdi { nets, .. } => {
                 for net in nets {
-                    add_node(&mut node_index, net);
+                    add_node(&mut node_index, &skip, net);
                 }
             }
             Element::Behavioral {
@@ -1138,8 +1198,8 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 kind,
                 ..
             } => {
-                add_node(&mut node_index, pos);
-                add_node(&mut node_index, neg);
+                add_node(&mut node_index, &skip, pos);
+                add_node(&mut node_index, &skip, neg);
                 if *kind == fairchild_parser::BehavioralKind::Voltage {
                     let n = vsrc_index.len();
                     vsrc_index.entry(name.clone()).or_insert(n);
@@ -1156,16 +1216,16 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 ctrl_neg,
                 ..
             } => {
-                add_node(&mut node_index, pos);
-                add_node(&mut node_index, neg);
-                add_node(&mut node_index, ctrl_pos);
-                add_node(&mut node_index, ctrl_neg);
+                add_node(&mut node_index, &skip, pos);
+                add_node(&mut node_index, &skip, neg);
+                add_node(&mut node_index, &skip, ctrl_pos);
+                add_node(&mut node_index, &skip, ctrl_neg);
             }
             Element::CurrentSwitch { pos, neg, .. } => {
                 // The control is a voltage source's branch row, which that
                 // source already registered — no node of its own.
-                add_node(&mut node_index, pos);
-                add_node(&mut node_index, neg);
+                add_node(&mut node_index, &skip, pos);
+                add_node(&mut node_index, &skip, neg);
             }
             Element::TransmissionLine {
                 a_pos,
@@ -1174,10 +1234,10 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
                 b_neg,
                 ..
             } => {
-                add_node(&mut node_index, a_pos);
-                add_node(&mut node_index, a_neg);
-                add_node(&mut node_index, b_pos);
-                add_node(&mut node_index, b_neg);
+                add_node(&mut node_index, &skip, a_pos);
+                add_node(&mut node_index, &skip, a_neg);
+                add_node(&mut node_index, &skip, b_pos);
+                add_node(&mut node_index, &skip, b_neg);
                 // The two branch-current rows are device extra nodes, allocated
                 // by build_devices via num_extra_nodes/bind_extra_nodes.
             }
@@ -1187,10 +1247,59 @@ fn index_circuit(netlist: &Netlist) -> (IndexMap<String, usize>, IndexMap<String
     (node_index, vsrc_index)
 }
 
-fn add_node(map: &mut IndexMap<String, usize>, node: &str) {
-    if node != "0" {
+fn add_node(map: &mut IndexMap<String, usize>, skip: &std::collections::HashSet<&str>, node: &str) {
+    if node != "0" && !skip.contains(node) {
         let n = map.len();
         map.entry(node.to_string()).or_insert(n);
+    }
+}
+
+/// Every net name an element connects to, whatever its kind.
+///
+/// Only used to decide which λ nets something other than a photonic device
+/// needs as a row, so a missing arm costs a redundant unknown rather than a
+/// wrong answer — but list them all anyway, because a redundant unknown on a λ
+/// net is a row that reads 0 while resolution says 1.55 µm.
+fn element_nets(el: &Element) -> Vec<&str> {
+    match el {
+        Element::Resistor { pos, neg, .. }
+        | Element::Capacitor { pos, neg, .. }
+        | Element::Inductor { pos, neg, .. }
+        | Element::VoltageSource { pos, neg, .. }
+        | Element::CurrentSource { pos, neg, .. }
+        | Element::Behavioral { pos, neg, .. }
+        | Element::CurrentSwitch { pos, neg, .. } => vec![pos, neg],
+        Element::Diode { anode, cathode, .. } => vec![anode, cathode],
+        Element::Mosfet {
+            drain,
+            gate,
+            source,
+            bulk,
+            ..
+        } => vec![drain, gate, source, bulk],
+        Element::Bjt {
+            collector,
+            base,
+            emitter,
+            substrate,
+            ..
+        } => vec![collector, base, emitter, substrate],
+        Element::VoltageSwitch {
+            pos,
+            neg,
+            ctrl_pos,
+            ctrl_neg,
+            ..
+        } => vec![pos, neg, ctrl_pos, ctrl_neg],
+        Element::TransmissionLine {
+            a_pos,
+            a_neg,
+            b_pos,
+            b_neg,
+            ..
+        } => vec![a_pos, a_neg, b_pos, b_neg],
+        Element::XOsdi { nets, .. } => nets.iter().map(String::as_str).collect(),
+        Element::CoupledInductors { .. } => Vec::new(),
     }
 }
 

@@ -116,7 +116,7 @@ impl Device for NativeCirculator {
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        self.branches = vec![None; 8 * n];
+        self.branches = vec![None; 6 * n];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -167,10 +167,10 @@ impl Device for NativeCirculator {
                     self.nodes[pb + 4], // λ
                 )
             };
-            let (p0_re_fw, p0_im_fw, p0_re_bw, p0_im_bw, p0_lam) = port_wires(0);
-            let (p1_re_fw, p1_im_fw, p1_re_bw, p1_im_bw, p1_lam) = port_wires(1);
-            let (p2_re_fw, p2_im_fw, p2_re_bw, p2_im_bw, p2_lam) = port_wires(2);
-            let b = 8 * k;
+            let (p0_re_fw, p0_im_fw, p0_re_bw, p0_im_bw, _) = port_wires(0);
+            let (p1_re_fw, p1_im_fw, p1_re_bw, p1_im_bw, _) = port_wires(1);
+            let (p2_re_fw, p2_im_fw, p2_re_bw, p2_im_bw, _) = port_wires(2);
+            let b = 6 * k;
             // In at port 1, out at port 2 — both on the forward wires, because
             // that is the direction along the chain from 1 to 2.
             stamp_potential_eq(mat, &self.branches, b, p1_re_fw, &[(p0_re_fw, -1.0)]);
@@ -183,9 +183,6 @@ impl Device for NativeCirculator {
             // port 3's backward wires and leaving on port 1's.
             stamp_potential_eq(mat, &self.branches, b + 4, p0_re_bw, &[(p2_re_bw, -1.0)]);
             stamp_potential_eq(mat, &self.branches, b + 5, p0_im_bw, &[(p2_im_bw, -1.0)]);
-            // λ ties: the two `out`-role ports take port 1's tag.
-            stamp_potential_eq(mat, &self.branches, b + 6, p1_lam, &[(p0_lam, -1.0)]);
-            stamp_potential_eq(mat, &self.branches, b + 7, p2_lam, &[(p0_lam, -1.0)]);
         }
     }
 

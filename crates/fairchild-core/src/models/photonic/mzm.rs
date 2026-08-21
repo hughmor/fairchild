@@ -83,7 +83,7 @@ impl Device for NativeMzm {
         let n = (terminals.len() - 2) / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        let bpc = if wpc == 5 { 5 } else { 3 };
+        let bpc = if wpc == 5 { 4 } else { 2 };
         self.branches = vec![None; bpc * n];
     }
 
@@ -155,17 +155,14 @@ impl Device for NativeMzm {
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         let n = self.n_channels;
         let wpc = self.wpc;
-        let bpc = if wpc == 5 { 5 } else { 3 };
-        let lam = wpc - 1;
+        let bpc = if wpc == 5 { 4 } else { 2 };
         let out_base = wpc * n;
         let t = self.t_amp_cached;
         for k in 0..n {
             let in_re_fw = self.nodes[wpc * k];
             let in_im_fw = self.nodes[wpc * k + 1];
-            let in_l = self.nodes[wpc * k + lam];
             let out_re_fw = self.nodes[out_base + wpc * k];
             let out_im_fw = self.nodes[out_base + wpc * k + 1];
-            let out_l = self.nodes[out_base + wpc * k + lam];
             stamp_potential_eq(mat, &self.branches, bpc * k, out_re_fw, &[(in_re_fw, -t)]);
             stamp_potential_eq(
                 mat,
@@ -173,13 +170,6 @@ impl Device for NativeMzm {
                 bpc * k + 1,
                 out_im_fw,
                 &[(in_im_fw, -t)],
-            );
-            stamp_potential_eq(
-                mat,
-                &self.branches,
-                bpc * k + (bpc - 1),
-                out_l,
-                &[(in_l, -1.0)],
             );
             if wpc == 5 {
                 // MZM is reciprocal: same t_amp applies to backward path.

@@ -149,15 +149,13 @@ pub struct NativeAwgr {
     lam_cache: Vec<f64>,
     /// Compiled stamp list: (branch slot, output node, weighted inputs).
     rows: Vec<StampRow>,
-    /// λ branch rows driven to a constant (slot, wavelength) — the fallback
-    /// when there is no input tag to mirror.
-    lambda_rhs: Vec<(usize, f64)>,
     built: bool,
     warned_gain: bool,
 }
 
-/// Branch rows per output channel slot: out_re, out_im, out_λ.
-const BRANCHES_PER_SLOT: usize = 3;
+/// Branch rows per output channel slot: out_re, out_im. λ gets none — a
+/// wavelength is resolved before the solve, so it has no equation to stamp.
+const BRANCHES_PER_SLOT: usize = 2;
 
 /// One compiled output equation: which branch row, which output node, and the
 /// weighted input nodes feeding it.
@@ -192,7 +190,6 @@ impl NativeAwgr {
             table: None,
             lam_cache: Vec::new(),
             rows: Vec::new(),
-            lambda_rhs: Vec::new(),
             built: false,
             warned_gain: false,
         }
@@ -297,12 +294,10 @@ impl NativeAwgr {
 
     /// Recompute every coefficient and recompile the stamp list.
     fn rebuild(&mut self, ctx: &SimContext) {
-        let (n, wpc) = (self.n, self.wpc);
-        let lam_w = wpc - 1;
+        let n = self.n;
         let t_k = ctx.temperature;
         let spec = self.spectrum();
         self.rows.clear();
-        self.lambda_rhs.clear();
         // Per-input energy accounting for the passivity warning.
         let mut out_power = vec![0.0f64; n * n];
 
@@ -336,29 +331,6 @@ impl NativeAwgr {
                 }
                 self.rows.push((slot, self.out_wire(j, k, 0), re_ins));
                 self.rows.push((slot + 1, self.out_wire(j, k, 1), im_ins));
-
-                // λ tag: mirror input port `lambda_src`'s tag for this slot,
-                // falling back to the device's own grid wavelength when that
-                // wire does not exist in the netlist.
-                //
-                // The test is deliberately *structural* (does the node exist)
-                // rather than "is it driven": the first rebuild happens on the
-                // zero initial guess, where nothing is driven yet, so a
-                // value-based test would freeze every output onto the grid and
-                // throw away the input comb's detuning.
-                let src_wire = usize::try_from(self.lambda_src)
-                    .ok()
-                    .filter(|&s| s < n)
-                    .and_then(|s| self.in_wire(s, k, lam_w));
-                let out_lam = self.out_wire(j, k, lam_w);
-                match src_wire {
-                    Some(_) => self.rows.push((slot + 2, out_lam, vec![(src_wire, -1.0)])),
-                    None => {
-                        self.rows.push((slot + 2, out_lam, Vec::new()));
-                        self.lambda_rhs
-                            .push((slot + 2, self.grid().lambda_center(k, t_k)));
-                    }
-                }
             }
         }
         self.built = true;
@@ -458,12 +430,12 @@ impl Device for NativeAwgr {
         // every row the device owns, and this device owns 9N² of them: at N=8
         // that is a 332k-entry clique standing in for a true footprint of ~6k,
         // and it grows as N⁴ rather than N³.
-        let (n, wpc) = (self.n, self.wpc);
+        let n = self.n;
         let mut pairs = Vec::with_capacity(12 * n * n * n);
         for j in 0..n {
             for k in 0..n {
                 let base = BRANCHES_PER_SLOT * (j * n + k);
-                // Output wire w is driven by branch row `base + w` (re, im, λ).
+                // Output wire w is driven by branch row `base + w` (re, im).
                 for w in 0..BRANCHES_PER_SLOT {
                     let (Some(row), Some(out)) = (self.branches[base + w], self.out_wire(j, k, w))
                     else {
@@ -488,11 +460,6 @@ impl Device for NativeAwgr {
                                 pairs.push((row, inp));
                             }
                         }
-                    }
-                    if let (Some(row), Some(inp)) =
-                        (self.branches[base + 2], self.in_wire(i, k, wpc - 1))
-                    {
-                        pairs.push((row, inp));
                     }
                 }
             }
@@ -667,13 +634,7 @@ impl Device for NativeAwgr {
         }
     }
 
-    fn load_residual(&self, b: &mut [f64]) {
-        for &(slot, lambda) in &self.lambda_rhs {
-            if let Some(row) = self.branches[slot] {
-                b[row] += lambda;
-            }
-        }
-    }
+    fn load_residual(&self, _b: &mut [f64]) {}
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
         for (slot, out, ins) in &self.rows {

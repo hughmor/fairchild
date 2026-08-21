@@ -389,7 +389,7 @@ pub fn tran_nr_with_registry_var_opts(
     let mut ctx = opts.sim_context();
     let step = step.min(opts.max_step);
     let (topo, mut x) = if opts.uic {
-        let topo = CircuitTopology::build(netlist);
+        let topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
         let mut x = vec![0.0f64; topo.size];
         for (name, value) in &netlist.ic {
             if let Some(&i) = topo.node_index.get(name) {

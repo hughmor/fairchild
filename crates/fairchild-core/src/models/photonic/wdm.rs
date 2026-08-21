@@ -181,7 +181,11 @@ fn stamp_route(
     amp: f64,
     bus_out: bool,
 ) {
-    for w in 0..wpc {
+    // The λ wire is the last of the `wpc`, and it is not routed here at all: a
+    // wavelength is resolved before the solve, so it has no equation and no
+    // branch row. Only the field wires do.
+    let bpc = wpc - 1;
+    for w in 0..bpc {
         let bus_w = nodes[wpc * k + w];
         let ch_w = nodes[wpc * (n + k) + w];
         // Wires 2 and 3 of a 5-wire bundle are the backward pair. Under
@@ -193,10 +197,7 @@ fn stamp_route(
         } else {
             (ch_w, bus_w)
         };
-        // The λ label is a name for the channel, not a field: never attenuated,
-        // and it rides the forward direction whichever way the field goes.
-        let g = if w == wpc - 1 { 1.0 } else { amp };
-        stamp_potential_eq(mat, branches, wpc * k + w, dst, &[(src, -g)]);
+        stamp_potential_eq(mat, branches, bpc * k + w, dst, &[(src, -amp)]);
     }
 }
 
@@ -282,7 +283,7 @@ impl Device for NativeMux {
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; (wpc - 1) * n];
         self.amp = vec![1.0; n];
         self.lambda_m = vec![0.0; n];
     }
@@ -421,7 +422,7 @@ impl Device for NativeDemux {
         let n = terminals.len() / stride;
         self.n_channels = n;
         self.nodes = terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; (wpc - 1) * n];
         self.amp = vec![1.0; n];
         self.lambda_m = vec![0.0; n];
     }

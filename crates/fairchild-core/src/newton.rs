@@ -429,7 +429,7 @@ pub fn build_devices_with_footprints(
             dev_elem.push(elem_idx);
         }
     }
-    apply_resolved_lambda(netlist, &mut devices, &dev_elem, ctx, registry);
+    apply_resolved_lambda(netlist, &mut devices, &dev_elem, topo, ctx, registry);
     check_exclusive_potential_drivers(&devices, netlist, topo, extras_base)?;
     Ok((devices, foot))
 }
@@ -448,10 +448,21 @@ fn apply_resolved_lambda(
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     dev_elem: &[usize],
+    topo: &CircuitTopology,
     ctx: &SimContext,
     registry: &DeviceRegistry,
 ) {
-    let map = crate::lambda::resolve(netlist, ctx, registry);
+    // Normally the topology already resolved λ — it had to, to know which nets
+    // were not rows. Resolve again only for a caller that built its topology
+    // with `CircuitTopology::build`, so a hand-assembled device list still
+    // evaluates at the right wavelength instead of the band centre.
+    let owned;
+    let map = if topo.lambda.is_empty() {
+        owned = crate::lambda::resolve(netlist, ctx, registry);
+        &owned
+    } else {
+        &topo.lambda
+    };
     let mut per_terminal: Vec<f64> = Vec::new();
     for (dev, &ei) in devices.iter_mut().zip(dev_elem) {
         let Some(Element::XOsdi { nets, .. }) = netlist.elements.get(ei) else {
@@ -1602,7 +1613,7 @@ pub fn dc_op_nr_with_registry_opts(
     }
     check_connectivity(netlist)?;
     let ctx = opts.sim_context();
-    let mut topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
 
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;

@@ -245,7 +245,7 @@ pub fn dc_sensitivity(
     params: &[ParamRef],
 ) -> Result<Sensitivities, SimError> {
     let ctx = opts.sim_context();
-    let mut topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     let plan = StampPlan::new(&topo, netlist, &footprints);
@@ -569,7 +569,7 @@ pub fn jacobian_check(
     atol: f64,
 ) -> Result<Vec<JacobianMismatch>, SimError> {
     let ctx = opts.sim_context();
-    let mut topo = CircuitTopology::build(netlist);
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     let plan = StampPlan::new(&topo, netlist, &footprints);

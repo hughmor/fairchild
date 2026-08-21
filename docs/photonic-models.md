@@ -64,9 +64,13 @@ Every "optical port" is a **3-wire bundle** `(re, im, λ)`:
 - `re`, `im` — slowly-varying-envelope (SVEA) complex amplitude in √W. The
   optical power at the port is `|A|² = V(re)² + V(im)²`. The carrier
   frequency is implicit; only the envelope is solved.
-- `λ` — propagation wavelength in metres. A device-local wire that allows
-  wavelength-dependent physics (e.g. waveguide propagation phase) without
-  forcing a global parameter.
+- `λ` — propagation wavelength in metres. A **label**, not an unknown: it is
+  routed from whatever source emits it and never computed, so it is resolved
+  once before the solve and occupies no matrix row. The wire keeps its name —
+  `V(bus_wl_0)` reports the resolved wavelength, and the positional `X`-line ABI
+  is unchanged — but nothing solves for it, nothing differentiates against it,
+  and it does not appear in the signal list a run returns. Removing it took 864
+  of 2840 unknowns off the giona 8-neuron RNN.
 
 `.optical_port NAME [N]` declares a bundle. **Every photonic device is
 bundle-aware**: a single device instance handles all N optical channels.
@@ -104,10 +108,10 @@ voltage / current per electrical pin. See
 
 ### Band centre
 
-Photonic devices need a default wavelength for things like the initial
-NR iterate (when no laser has yet driven the λ wire) and for any
-device parameter that defaults to "the design wavelength". One global
-option sets this band-wide default:
+Photonic devices need a default wavelength for an optical port no source
+reaches — a dark add port, an unused router input — and for any device
+parameter that defaults to "the design wavelength". One global option sets this
+band-wide default:
 
 ```spice
 .options lambda_center_nm=1310    * O-band
@@ -121,8 +125,12 @@ Or via the CLI: `--opt lambda_center_nm=1310`. Or in Python:
 Devices with their own `wavelength_nm` parameter (the laser's output
 wavelength, the PN-PS's reference wavelength) override the band centre
 when set explicitly. The waveguide doesn't have a `wavelength_nm`
-parameter at all — its λ comes entirely from the input wire and the
-band-centre is only a bootstrap fallback.
+parameter at all — its λ comes entirely from whatever source reaches its input
+port, and the band centre applies only when none does.
+
+A DC voltage source on a λ wire is the other way to set one: `Vwl bus_wl_0 0 DC
+1.551e-6` labels light that enters the deck from outside. It is read as a source
+of wavelength, not as a circuit element.
 
 All values internally are SI. Convenience aliases like `L_um` and
 `wavelength_nm` accept the named unit and convert. **Beware SPICE SI
@@ -353,12 +361,10 @@ X<name>  in  out  fc_waveguide  [param=val …]
 | `wl_ref_nm` | 1550 | Reference wavelength at which `n_eff` and `n_g` are quoted. Alias: `wl_ref_m` in metres. Defaults from `.options lambda_center_nm`. |
 | `alpha_dB_cm` | 2.0 | Power loss (dB/cm). |
 
-The `wavelength_nm` parameter is accepted for backward compatibility but
-no longer does anything — the waveguide reads λ directly from the input
-bundle's λ wire, and the laser drives that wire to whatever wavelength it
-was configured with. A hard-coded 1.55 µm is used only to seed the very
-first NR iterate (where the wire is still at 0 V); after iteration 1 the
-laser's value wins.
+The `wavelength_nm` parameter is accepted for backward compatibility but no
+longer does anything — the waveguide's λ is whatever wavelength resolution
+routed to its input port, which is the emitting laser's `wavelength_nm`. The
+band centre applies only to a port no source reaches.
 
 **Physics.** `A_out = A_in · exp(−α L / 2) · exp(−j β L)` with
 `β = 2π · n_eff(λ) / λ` and `α` in nepers/m (the `alpha_dB_cm` value is
@@ -372,10 +378,9 @@ n_eff(λ) = n_eff(λ_0) + (λ − λ_0) · (n_eff(λ_0) − n_g(λ_0)) / λ_0
 so that `n_g(λ_0) = n_eff − λ · dn_eff/dλ` reproduces by construction.
 This is the correct physics for ring resonator FSR / Q calculations and
 for any wavelength sweep where the propagation phase is the observable.
-The `λ` wire is read at evaluation time, so wavelength-dependent
-propagation phase is captured automatically — this is what makes the
-ring resonator example see a true resonance dip when you sweep the
-laser wavelength.
+The wavelength routed to the input port sets the phase, so wavelength-dependent
+propagation is captured automatically — this is what makes the ring resonator
+example see a true resonance dip when you sweep the laser wavelength.
 
 **Group delay (optional).** By default the transmission is instantaneous —
 correct for DC and steady-state spectra. With `.options waveguide_delay=1` the
@@ -417,13 +422,14 @@ mass-action numbers in `examples/photonic/native_mrr_modulator.sp` use
 `kappa_L=0.336` (≈ 11% cross-coupled power) for a critically-coupled ring.
 
 **Physics.** Lossless coupling matrix `[c; d] = [cos(κL), j sin(κL); j sin(κL), cos(κL)] · [a; b]`.
-In SVEA `(re, im)` form this is six direct-potential equations. `c_λ = a_λ`,
-and `d_λ = a_λ` too — the second was originally `d_λ = b_λ` but that creates
-a feedback loop with no driving source in closed-loop topologies (e.g. ring
-resonators) and causes the PN PS to read `λ ≈ 0`. Both outputs now route
-the input-arm-`a` wavelength. For asymmetric WDM topologies where you
-genuinely want different wavelengths on the two arms, that's a future
-device — file an issue.
+In SVEA `(re, im)` form this is four direct-potential equations. λ needs none:
+both inputs reach both outputs, and resolution takes the label from whichever
+input a source actually reached — so an add-fed ring, where port `a` is dark,
+carries its wavelength. This used to be a run-time choice between two wires
+that latched on the first iteration either showed light, and before that a fixed
+`c_λ = d_λ = a_λ` that made an add-fed ring resonate at the band centre. Two
+*different* wavelengths arriving on one coupler is still not modelled; the first
+declared wins and the disagreement is recorded rather than averaged.
 
 ### `fc_splitter` — 1×2 Y-junction (configurable loss + asymmetry)
 
@@ -581,7 +587,7 @@ outside port to an inside one in both directions, which is a two-port device and
 not this one.
 
 Light reflected all the way back to a laser is absorbed there: `fc_cw_laser`
-and `fc_driven_laser` drive only `(re, im, λ)`, never the backward pair, so the
+and `fc_driven_laser` drive only `(re, im)`, never the backward pair, so the
 returning wave is whatever the chain puts on that wire. (They used to *drive*
 the backward wires to zero, which reads as a perfect absorber and behaves as a
 second opinion — the node ended up over-determined and the returned power came
@@ -602,8 +608,8 @@ bundle does not have).
 
 Wire convention is the along-chain one, so the circulator composes like any
 other device: port 1 plays an `in` role and ports 2 and 3 play `out` roles, per
-the table in [Bidirectional propagation](#bidirectional-propagation). λ is tied
-from port 1 onto the other two.
+the table in [Bidirectional propagation](#bidirectional-propagation). The label
+on ports 2 and 3 is port 1's.
 
 Typical use — round-trip monitoring of a device-under-test (DUT). Wire it as a
 chain and the directions follow:
@@ -660,12 +666,13 @@ Channel count `N` is inferred from instance arity (number of positional nets
 minus 1). All parameters are optional.
 
 **Physics.** By default, identity routing per channel: `V(bus_k.re) =
-V(ch_k.re)`, `V(bus_k.im) = V(ch_k.im)`, `V(bus_k.λ) = V(ch_k.λ)` for
-k = 0..N-1 — a topology marker, not a filter.
+V(ch_k.re)` and `V(bus_k.im) = V(ch_k.im)` for k = 0..N-1 — a topology marker,
+not a filter. Channel `k`'s label moves onto bus slot `k` (a demux moves it
+back), which is a routing declaration rather than an equation.
 
 Setting any parameter below switches on a **diagonal** spectral response:
 channel `k` is scaled by its own passband, evaluated at the wavelength that
-channel actually carries. λ labels are never attenuated.
+channel actually carries.
 
 | Param | Default | Meaning |
 |---|---|---|
@@ -812,9 +819,9 @@ Xr in0 in1 in2 in3 in4 in5 in6 in7  out0 out1 out2 out3 out4 out5 out6 out7
 `.options vntol=1e-14 reltol=1e-12` to any deck containing an `fc_awgr`,
 because a λ wire tested against a *volt* tolerance could stop ~10 pm out and
 the router would silently report the wrong wavelength's transmission (measured
-at N = 8: routed output 0 instead of 1.109; N ≤ 5 hid it). λ rows now carry
-their own `lambdatol`, so that workaround is obsolete — delete it from any deck
-that still has it.
+at N = 8: routed output 0 instead of 1.109; N ≤ 5 hid it). λ is not solved for
+at all any more, so there is nothing left to converge and the workaround is
+obsolete — delete it from any deck that still has it.
 
 **Measured spectra.** The file path is a string and X-line instance params are
 numeric, so a measured router comes in through a `.model` card:
@@ -1061,9 +1068,8 @@ X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
 **WDM behaviour.** `fc_pn_ps` is bundle-aware. On an N-channel optical
 bus, ONE `fc_pn_ps` instance handles all N optical paths and presents ONE
 shared electrical interface — the V_pn supply sees exactly `g_pn`, not
-`N · g_pn`. Per-channel wavelength is read independently from each
-channel's λ wire, so a single Vπ-driven modulator naturally produces
-wavelength-diverse phase shifts.
+`N · g_pn`. Each channel's wavelength is resolved independently, so a single
+Vπ-driven modulator naturally produces wavelength-diverse phase shifts.
 
 **Physics.** Optical: `φ = φ_prop + φ_eo` where
 

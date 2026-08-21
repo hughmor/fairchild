@@ -209,6 +209,16 @@ impl OpticalSegment {
         self.wpc
     }
 
+    /// Auxiliary branch rows per channel: one per *driven field* wire.
+    ///
+    /// One fewer than the wire count, because the λ wire is not driven — a
+    /// wavelength is resolved before the solve, so there is no equation to
+    /// stamp and no row to stamp it into. Getting this wrong by one leaves an
+    /// empty branch row, which `gmin` makes non-singular and therefore silent.
+    fn bpc(wpc: usize) -> usize {
+        wpc - 1
+    }
+
     pub fn refresh_tau(&mut self) {
         self.tau_g_s = self.length_m * self.n_g / C0;
     }
@@ -254,7 +264,7 @@ impl OpticalSegment {
         let n = optical_terminals.len() / stride;
         self.n_channels = n;
         self.nodes = optical_terminals.to_vec();
-        self.branches = vec![None; wpc * n];
+        self.branches = vec![None; Self::bpc(wpc) * n];
         self.lambda_m = vec![0.0; n];
         self.c_cached = vec![1.0; n];
         self.s_cached = vec![0.0; n];
@@ -549,17 +559,15 @@ impl OpticalSegment {
         let delay_active = self.delay.is_active();
         let n = self.n_channels;
         let wpc = self.wpc;
+        let bpc = Self::bpc(wpc);
         let out_base = wpc * n;
-        let lam = wpc - 1;
         for k in 0..n {
             let c = self.c_cached[k];
             let s = self.s_cached[k];
             let in_re_fw = self.nodes[wpc * k];
             let in_im_fw = self.nodes[wpc * k + 1];
-            let in_l = self.nodes[wpc * k + lam];
             let out_re_fw = self.nodes[out_base + wpc * k];
             let out_im_fw = self.nodes[out_base + wpc * k + 1];
-            let out_l = self.nodes[out_base + wpc * k + lam];
             let (re_ins, im_ins): (Couplings, Couplings) = if delay_active {
                 (&[], &[])
             } else {
@@ -568,8 +576,8 @@ impl OpticalSegment {
                     &[(in_re_fw, s), (in_im_fw, -c)],
                 )
             };
-            stamp_potential_eq(mat, &self.branches, wpc * k, out_re_fw, re_ins);
-            stamp_potential_eq(mat, &self.branches, wpc * k + 1, out_im_fw, im_ins);
+            stamp_potential_eq(mat, &self.branches, bpc * k, out_re_fw, re_ins);
+            stamp_potential_eq(mat, &self.branches, bpc * k + 1, out_im_fw, im_ins);
             // Newton cross-terms: c and s are functions of the control voltage,
             // so the output equation is bilinear. Without these the coupling is
             // stamped frozen and Newton degenerates into successive
@@ -581,16 +589,14 @@ impl OpticalSegment {
                         continue;
                     };
                     let (g_re, g_im) = self.dout_dv(k, i);
-                    if let Some(j) = self.branches[wpc * k] {
+                    if let Some(j) = self.branches[bpc * k] {
                         mat.a[j][cn] -= g_re;
                     }
-                    if let Some(j) = self.branches[wpc * k + 1] {
+                    if let Some(j) = self.branches[bpc * k + 1] {
                         mat.a[j][cn] -= g_im;
                     }
                 }
             }
-            // λ passes through unchanged (a wavelength label is not delayed).
-            stamp_potential_eq(mat, &self.branches, wpc * k + lam, out_l, &[(in_l, -1.0)]);
             if wpc == 5 {
                 let in_re_bw = self.nodes[wpc * k + 2];
                 let in_im_bw = self.nodes[wpc * k + 3];
@@ -604,8 +610,8 @@ impl OpticalSegment {
                         &[(out_re_bw, s), (out_im_bw, -c)],
                     )
                 };
-                stamp_potential_eq(mat, &self.branches, wpc * k + 2, in_re_bw, bw_re_ins);
-                stamp_potential_eq(mat, &self.branches, wpc * k + 3, in_im_bw, bw_im_ins);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 2, in_re_bw, bw_re_ins);
+                stamp_potential_eq(mat, &self.branches, bpc * k + 3, in_im_bw, bw_im_ins);
             }
         }
     }
@@ -616,6 +622,7 @@ impl OpticalSegment {
         // The Newton cross-terms carry an inhomogeneous offset −G·V0 (the
         // linearisation is about the previous iterate), independent of the
         // delay line.
+        let bpc = Self::bpc(self.wpc);
         if self.has_sens() {
             let nc = self.ctrl_nodes.len();
             for k in 0..self.n_channels {
@@ -625,10 +632,10 @@ impl OpticalSegment {
                     }
                     let (g_re, g_im) = self.dout_dv(k, i);
                     let v0 = self.ctrl_v0[i];
-                    if let Some(j) = self.branches[self.wpc * k] {
+                    if let Some(j) = self.branches[bpc * k] {
                         b[j] -= g_re * v0;
                     }
-                    if let Some(j) = self.branches[self.wpc * k + 1] {
+                    if let Some(j) = self.branches[bpc * k + 1] {
                         b[j] -= g_im * v0;
                     }
                 }
@@ -644,19 +651,19 @@ impl OpticalSegment {
             let s = self.s_cached[k];
             let dly_fw_re = self.delayed[per * k];
             let dly_fw_im = self.delayed[per * k + 1];
-            if let Some(j) = self.branches[self.wpc * k] {
+            if let Some(j) = self.branches[bpc * k] {
                 b[j] += c * dly_fw_re + s * dly_fw_im;
             }
-            if let Some(j) = self.branches[self.wpc * k + 1] {
+            if let Some(j) = self.branches[bpc * k + 1] {
                 b[j] += -s * dly_fw_re + c * dly_fw_im;
             }
             if self.wpc == 5 {
                 let dly_bw_re = self.delayed[per * k + 2];
                 let dly_bw_im = self.delayed[per * k + 3];
-                if let Some(j) = self.branches[self.wpc * k + 2] {
+                if let Some(j) = self.branches[bpc * k + 2] {
                     b[j] += c * dly_bw_re + s * dly_bw_im;
                 }
-                if let Some(j) = self.branches[self.wpc * k + 3] {
+                if let Some(j) = self.branches[bpc * k + 3] {
                     b[j] += -s * dly_bw_re + c * dly_bw_im;
                 }
             }

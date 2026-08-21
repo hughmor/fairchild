@@ -145,11 +145,11 @@ impl TranStepper {
             // DC operating point's internal-node values are discarded with
             // them.  Worth removing, but that moves every matrix index in the
             // tree and belongs in its own change.
-            let mut t = CircuitTopology::build(&netlist);
+            let mut t = CircuitTopology::build_resolved(&netlist, &ctx, registry);
             let _ = build_devices_with_footprints(&netlist, &mut t, &ctx, registry)?;
             (t, x0.to_vec())
         } else if opts.uic {
-            let topo = CircuitTopology::build(&netlist);
+            let topo = CircuitTopology::build_resolved(&netlist, &ctx, registry);
             let mut x = vec![0.0f64; topo.size];
             for (name, value) in &netlist.ic {
                 if let Some(&i) = topo.node_index.get(name) {
