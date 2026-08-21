@@ -271,14 +271,34 @@ impl OpticalSegment {
     }
 
     /// Per-channel input optical intensity |A_in|² (W), the input to any
-    /// photoconductive / detection back-action. Forward channel only.
+    /// photoconductive / detection back-action.
+    ///
+    /// Counts BOTH propagation directions. Under `enable_bidirectional` the
+    /// backward field enters at the far end of the segment, so its input wires
+    /// live in the `out` block (`out_base + wpc·k + 2/3`) — see `stamp`, where
+    /// the backward equation reads `out_*_bw` to drive `in_*_bw`. Absorption
+    /// does not care which way a photon travels, so a device that heats or
+    /// generates carriers from absorbed power must see both; reading the
+    /// forward wires only made backward light heat nothing at all.
     pub fn channel_intensities(&self, x: &[f64]) -> Vec<f64> {
         let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
+        let mag2 = |re: NodeId, im: NodeId| {
+            let (re, im) = (read(re), read(im));
+            re * re + im * im
+        };
+        let out_base = self.wpc * self.n_channels;
         (0..self.n_channels)
             .map(|k| {
-                let re = read(self.nodes[self.wpc * k]);
-                let im = read(self.nodes[self.wpc * k + 1]);
-                re * re + im * im
+                let fw = mag2(self.nodes[self.wpc * k], self.nodes[self.wpc * k + 1]);
+                let bw = if self.wpc == 5 {
+                    mag2(
+                        self.nodes[out_base + self.wpc * k + 2],
+                        self.nodes[out_base + self.wpc * k + 3],
+                    )
+                } else {
+                    0.0
+                };
+                fw + bw
             })
             .collect()
     }

@@ -102,3 +102,131 @@ Vh hp 0 DC {vh}
         "heater should rotate by −π/2; got Δφ={dphi:.6}"
     );
 }
+
+// ── WDM back-action: the whole bus heats, not channel 0 (#51) ──────────────
+//
+// `FullPnDrive` used to read its optical back-action from `intensity_w.first()`
+// — channel 0 alone — and then apply the resulting Δn/Δα to every channel. So a
+// shared effect was driven by a single slot: 1/N of the truth with all channels
+// lit, and *exactly zero* whenever channel 0 alone was dark.
+//
+// Both tests below use one wavelength on all four lasers, which makes the
+// channels physically identical and lets slot-independence be asserted directly.
+// `r_th` defaults to 0 (self-heating off), which is why nothing else caught this.
+
+/// Four single-channel lasers muxed onto one 4-channel bus, into one junction.
+fn wdm4(p: [f64; 4]) -> fairchild_core::NrResult {
+    let netlist = format!(
+        "\
+.optical_port c0
+.optical_port c1
+.optical_port c2
+.optical_port c3
+.optical_port bus 4
+.optical_port out 4
+Xl0 c0 fc_cw_laser power_mW={} wavelength_nm=1550
+Xl1 c1 fc_cw_laser power_mW={} wavelength_nm=1550
+Xl2 c2 fc_cw_laser power_mW={} wavelength_nm=1550
+Xl3 c3 fc_cw_laser power_mW={} wavelength_nm=1550
+Xmux bus c0 c1 c2 c3 fc_mux
+Xpn bus out a 0 fc_pn_ps_full L_um=500 alpha_dB_cm=2.0 dn_dt=1e-4 r_th=5000 beta_tpa=0
+Vb a 0 DC 0
+.op
+.end
+",
+        p[0], p[1], p[2], p[3]
+    );
+    let net = parse_spice(&netlist).unwrap();
+    dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP converges")
+}
+
+fn phase_of(r: &fairchild_core::NrResult, ch: usize) -> f64 {
+    let re = r.node_voltage(&format!("out_re_{ch}")).unwrap();
+    let im = r.node_voltage(&format!("out_im_{ch}")).unwrap();
+    im.atan2(re)
+}
+
+/// ABSOLUTE anchor: the self-heating phase shift against a hand-computed power
+/// budget. Tripling the lit power must triple Δn, and the increment is a closed
+/// form, so this cannot be satisfied by the segment and the drive merely
+/// agreeing with each other (`#32`'s shared-fault trap).
+///
+///   α      = 2.0 dB/cm · ln(10)/10 · 100 = 46.0517 Np/m
+///   Δn     = dn_dt · R_th · α · L · ΣI = 1e-4 · 5000 · 46.0517 · 500e-6 · ΣI
+///   Δφ     = 2π · L · Δ(Δn) / λ
+///
+/// With 10 mW per channel, going from one lit channel (ΣI = 10 mW) to three
+/// (ΣI = 30 mW) gives Δ(Δn) = 2 · 1.15129e-4 and Δφ = 0.466757 rad.
+/// Against the bug both runs have channel 0 dark, so both see zero heating and
+/// Δφ is exactly 0.
+#[test]
+fn wdm_self_heating_sums_the_bus_and_matches_a_hand_power_budget() {
+    let alpha = 2.0 * (10.0f64).ln() / 10.0 * 100.0;
+    let l_m = 500e-6;
+    let dn_per_watt = 1e-4 * 5000.0 * alpha * l_m;
+    let expect = 2.0 * std::f64::consts::PI * l_m * (2.0 * dn_per_watt * 10e-3) / 1550e-9;
+
+    let one = wdm4([0.0, 10.0, 0.0, 0.0]);
+    let three = wdm4([0.0, 10.0, 10.0, 10.0]);
+    let got = phase_of(&one, 1) - phase_of(&three, 1);
+
+    assert!(
+        (got.abs() - expect).abs() < 1e-4,
+        "Δφ on channel 1 from tripling the lit power: got {got:.6} rad, \
+         hand-computed {expect:.6} rad (α={alpha:.4} Np/m, Δn/W={dn_per_watt:.6})"
+    );
+}
+
+/// Slot independence: with identical wavelengths, one lit channel must heat the
+/// junction the same amount whichever slot it occupies. Against the bug, slot 0
+/// is the only one that heats at all, so the two outputs differ.
+#[test]
+fn wdm_back_action_does_not_depend_on_which_slot_is_lit() {
+    let ch0 = wdm4([10.0, 0.0, 0.0, 0.0]);
+    let ch2 = wdm4([0.0, 0.0, 10.0, 0.0]);
+    let (re0, im0) = (
+        ch0.node_voltage("out_re_0").unwrap(),
+        ch0.node_voltage("out_im_0").unwrap(),
+    );
+    let (re2, im2) = (
+        ch2.node_voltage("out_re_2").unwrap(),
+        ch2.node_voltage("out_im_2").unwrap(),
+    );
+    assert!(
+        (re0 - re2).abs() < 1e-9 && (im0 - im2).abs() < 1e-9,
+        "lit slot 0 gives ({re0:.9}, {im0:.9}), lit slot 2 gives ({re2:.9}, {im2:.9}) \
+         — identical wavelengths and powers, so the back-action must not care which slot"
+    );
+}
+
+/// The parser's `bundle_arity_for` is a second, hand-maintained list of a fact
+/// the registry already knows, because `fairchild-core` depends on
+/// `fairchild-parser` and the dispatch therefore cannot be unified. Two lists
+/// are two chances to disagree: six LEVEL leaf names (`fc_pn_ps_full`,
+/// `fc_pn_ps_inj`, `fc_pn_th_ps_{cap,inj,full}`, `fc_phase_shifter_expr`) were
+/// registered as devices but absent from the arity list, so each was silently
+/// `Scalar` and refused a WDM bus that the identical device accepted under its
+/// family name. A test can see both lists even though the parser cannot.
+#[test]
+fn every_registered_photonic_model_declares_its_arity() {
+    use fairchild_parser::{bundle_arity_for, BundleArity};
+    // Deliberately single-channel: one laser emits one wavelength. Combine them
+    // with `fc_mux` for WDM. Anything else `fc_*` is expected bundle-aware.
+    const SCALAR_BY_DESIGN: &[&str] = &["fc_cw_laser", "fc_driven_laser"];
+
+    let reg = DeviceRegistry::new();
+    let mut wrong: Vec<&str> = reg
+        .registered_names()
+        .filter(|n| n.starts_with("fc_"))
+        .filter(|n| !SCALAR_BY_DESIGN.contains(n))
+        .filter(|n| bundle_arity_for(n) == BundleArity::Scalar)
+        .collect();
+    wrong.sort_unstable();
+    assert!(
+        wrong.is_empty(),
+        "these photonic models are registered but fall through to BundleArity::Scalar, \
+         so a multi-channel bundle is refused on them: {wrong:?}. Add them to \
+         bundle_arity_for in fairchild-parser, or to SCALAR_BY_DESIGN here if being \
+         single-channel is the intent."
+    );
+}

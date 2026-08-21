@@ -835,8 +835,21 @@ impl PhotonicActiveModel for FullPnDrive {
         let dvj_dv = 1.0 / (1.0 + g_d * self.r_series);
         self.dc_eff_dv_cached = (dc_j_dvj + self.tau_carrier * g_d / vt) * dvj_dv;
 
-        // Optical intensity (channel 0) drives TPA + self-heating back-action.
-        let intensity = intensity_w.first().copied().unwrap_or(0.0).max(0.0);
+        // Optical intensity drives TPA + self-heating back-action. It is the sum
+        // over the WHOLE bus (and both directions — `channel_intensities` counts
+        // them), not channel 0: a segment carries one perturbation that applies
+        // to every channel, so a shared effect must be driven by the shared
+        // total. Reading `.first()` under-counted by 1/N with all channels lit,
+        // and gave *exactly zero* back-action whenever channel 0 alone was dark.
+        //
+        // Self-heating is exact this way — absorbed power is additive. TPA is
+        // improved but still approximate: with several wavelengths in one mode,
+        // cross-TPA between distinct frequencies is twice self-TPA, so the true
+        // loss on channel j is β/A_eff·(I_j + 2·Σ_{k≠j} I_k). Representing that
+        // needs a per-channel Δα, which `OpticalPerturbation` does not carry;
+        // the total is the no-cross-enhancement bound. Stated in
+        // docs/photonic-models.md rather than left for a reader to discover.
+        let intensity = intensity_w.iter().copied().sum::<f64>().max(0.0);
         let inj = (e - 1.0).max(0.0);
         let i_fwd = i_diode.max(0.0);
         let v_rev = (-v_junc).max(0.0);

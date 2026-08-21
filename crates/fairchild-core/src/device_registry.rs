@@ -198,6 +198,18 @@ impl DeviceRegistry {
         reg
     }
 
+    /// Every model name this registry can build.
+    ///
+    /// Exists so a test can check the registry against the parser's
+    /// `bundle_arity_for`. The parser cannot ask the registry what a model is
+    /// (`fairchild-core` depends on `fairchild-parser`, so the dependency runs
+    /// the wrong way) and the arity list is therefore a hand-maintained second
+    /// list of the same facts. A test can see both, so the disagreement is
+    /// catchable even though the dispatch cannot be unified.
+    pub fn registered_names(&self) -> impl Iterator<Item = &str> {
+        self.factories.keys().map(String::as_str)
+    }
+
     /// Register a factory for `name`. Overwrites any previous entry.
     pub fn register(
         &mut self,

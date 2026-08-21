@@ -90,9 +90,23 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
         // not the exception.
         "fc_waveguide" | "fc_splitter" | "fc_dcoupler" | "fc_grating_coupler" | "fc_pn_ps"
         | "fc_pn_ps_cap" | "fc_pn_th_ps" | "fc_thermal_ps" | "fc_thermal_ps_rc" | "fc_mzm"
-        | "fc_photodetector" | "fc_circulator" | "fc_optical_2x2" | "fc_awgr" | "fc_facet" => {
-            BundleArity::Aware
-        }
+        | "fc_photodetector" | "fc_circulator" | "fc_optical_2x2" | "fc_awgr" | "fc_facet"
+        // The tier names. Each is the same device as the family name above with
+        // a LEVEL selected, and `docs/photonic-models.md` documents both
+        // spellings as first-class — `fc_pn_ps_cap` and `fc_thermal_ps_rc` were
+        // already here, so the list always meant to carry them and these five
+        // were simply missed. The omission was a plain disagreement between two
+        // lists: `fc_pn_ps_full` was refused on a WDM bus that `fc_pn_ps LEVEL=4`
+        // — the identical device — accepted. Guarded by
+        // `every_registered_photonic_model_declares_its_arity` in fairchild-core.
+        //
+        // NOTE this whole match only ever sees a name the user wrote on an
+        // X-line, so it cannot help a `.model`-card-named device: the lookup key
+        // is the card's name, not its kind. That is #52, and it is why a
+        // card-named `fc_awgr` (the only route to table mode) is refused on the
+        // very bundles it exists to route.
+        | "fc_pn_ps_inj" | "fc_pn_ps_full" | "fc_pn_th_ps_cap" | "fc_pn_th_ps_inj"
+        | "fc_pn_th_ps_full" => BundleArity::Aware,
         // `fc_cw_laser` / `fc_driven_laser` deliberately stay Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for
         // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
