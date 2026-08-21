@@ -636,6 +636,25 @@ Two of those rows are worth a sentence:
 Nothing here is SILENT: a statement is either transliterated, reported as
 skipped, or refused.
 
+### 4.10 An `=` inside a `$` comment parsed as an assignment — FIXED
+
+`$` is the standard SPICE end-of-line comment, and nothing stripped it. It
+survived into tokenisation and worked only by accident — a `.param` line ignored
+the leftover words because they had no `=`:
+
+```spice
+.param sw_mode = 0    $ 0 = off, 1 = on      ← "0 = off," read as another .param
+.param vth = 0.45     $ from silicon, T = 25C
+R1 a 0 1k             $ load = 1k            ← "invalid number ''"
+```
+
+Loud, not silent — a parse error, and recorded here because the diagnostic
+blamed the user's *comment* for being an undefined parameter, which points away
+from the problem. Fixed by stripping at the first `$` that follows whitespace,
+in `logical_lines`, before `+` continuations are joined. A `$` inside quotes
+(`sfile="a$b.csv"`, `.param x='1+2'`) and one mid-token (`a$b`) are data and
+survive. fairchild issue #57.
+
 ## 6. What is left
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
