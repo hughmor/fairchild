@@ -1,0 +1,25 @@
+// Three `$limit` calls, one per case fairchild's limiter installer has to
+// handle: the name and arity it implements, a name it has never heard of, and a
+// name it knows at an arity it does not.
+//
+// OpenVAF forwards whatever string literal the model wrote and does not
+// validate limiter names, so all three reach `OSDI_LIM_TABLE` as separate
+// entries with `func_ptr = NULL` — the simulator is expected to fill them in.
+// A single null left behind is a jump to address 0 on the first `eval`, because
+// the call is guarded only by the `ENABLE_LIM` flag that fairchild sets whenever
+// a model declares limit state.
+`include "disciplines.vams"
+
+module lim_probe(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter real vt = 0.02585;
+    parameter real vcrit = 0.6145;
+    real v1, v2, v3;
+    analog begin
+        v1 = $limit(V(a, b), "pnjlim", vt, vcrit);
+        v2 = $limit(V(a, b), "no_such_limiter", vt, vcrit);
+        v3 = $limit(V(a, b), "pnjlim", vt);
+        I(a, b) <+ 1e-3 * (v1 + v2 + v3) / 3.0;
+    end
+endmodule

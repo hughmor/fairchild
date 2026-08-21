@@ -10,6 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The Verilog-A compiler the OSDI tests compile their fixtures with. Pinned:
+  # the version string goes into every cache key, and a floating "latest" would
+  # change what the tests ran against without saying so.
+  OPENVAF_VERSION: v24.0.1mob
 
 jobs:
   test:
@@ -48,11 +52,79 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install suite-sparse ngspice
 
+      # The Linux release of openvaf-r links against the system LLVM 21 — its
+      # bundled `lib/` is four symlinks into `/usr/lib/x86_64-linux-gnu`, and
+      # nothing else. Noble ships LLVM 18 at the newest, so the runtime comes
+      # from apt.llvm.org (the same snapshot the release was built against, by
+      # date). The macOS tarball carries a real `libLLVM.dylib` and needs none of
+      # this.
+      - name: Install LLVM 21 runtime (Linux, for openvaf-r)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libllvm21
+
+      # The OSDI tests compile Verilog-A from `crates/fairchild-osdi/tests/models`
+      # with the real compiler. A prebuilt release is used rather than a build
+      # from source: building OpenVAF needs an LLVM *development* install and
+      # several minutes, against a download of 26 MB (Linux) or 61 MB (macOS).
+      - name: Cache openvaf-r
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/openvaf
+          key: ${{ runner.os }}-openvaf-${{ env.OPENVAF_VERSION }}
+
+      - name: Install openvaf-r
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.local/openvaf/bin/openvaf-r" ]; then
+            case "${{ runner.os }}" in
+              Linux) asset="openvaf-r-$OPENVAF_VERSION-linux-x86_64.tar.gz" ;;
+              macOS) asset="openvaf-r-$OPENVAF_VERSION-macos-aarch64.tar.gz" ;;
+            esac
+            url="https://github.com/OpenVAF/OpenVAF-Reloaded/releases/download/$OPENVAF_VERSION/$asset"
+            # Straight into place, stripping the tarball's own top directory. An
+            # earlier version downloaded, extracted and then moved the result by
+            # glob — and the glob matched the tarball as well as the directory it
+            # had just produced, so `mv` saw two sources and demanded an existing
+            # target.
+            mkdir -p "$HOME/.local/openvaf"
+            curl -fsSL "$url" | tar xz -C "$HOME/.local/openvaf" --strip-components=1
+            # The macOS tarball's Mach-O files were modified after signing
+            # (their install names were rewritten), so the kernel refuses to run
+            # them: SIGKILL, before any output. Re-signing ad hoc is the fix, and
+            # it has to cover the dylibs too — the binary dies on the first one
+            # it loads.
+            if [ "${{ runner.os }}" = "macOS" ]; then
+              for f in "$HOME/.local/openvaf"/lib/*.dylib "$HOME/.local/openvaf/bin/openvaf-r"; do
+                codesign --force --sign - "$f"
+              done
+            fi
+            # On Linux that `lib/` holds only dangling symlinks — they point at
+            # `../../x86_64-linux-gnu/`, which is the packaging machine's system
+            # path, not ours. Left in place they are worse than useless: put them
+            # on the loader's path and the dangling `libLLVM.so.21.1` shadows the
+            # good copy apt just installed.
+            if [ "${{ runner.os }}" = "Linux" ]; then
+              rm -rf "$HOME/.local/openvaf/lib"
+            fi
+          fi
+          echo "$HOME/.local/openvaf/bin" >> "$GITHUB_PATH"
+
       # Every ngspice golden test skips itself — green, having compared nothing —
-      # when ngspice is not on PATH. That is 9 suites of reference comparison
+      # when ngspice is not on PATH, and every OSDI test does the same without a
+      # Verilog-A compiler. That is a dozen suites of reference comparison
       # silently doing nothing, so fail loudly here instead.
-      - name: Assert ngspice is on PATH
-        run: command -v ngspice
+      - name: Assert ngspice and openvaf-r are on PATH
+        run: |
+          command -v ngspice
+          command -v openvaf-r
+          openvaf-r --version
 
       - name: Check formatting
         run: cargo fmt --all -- --check

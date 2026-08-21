@@ -23,15 +23,38 @@ The Rust toolchain is pinned by `rust-toolchain.toml` and rustup installs it on
 the first `cargo` call. Don't pin a version anywhere else; two sources of truth
 is how they drift apart.
 
-**ngspice** is needed for the comparison suites. Without it those tests *skip*
-rather than fail, so you can develop without it — but CI installs it and asserts
-it is on `PATH`, because nine suites silently comparing nothing is worse than a
+**ngspice** is needed for the comparison suites, and **openvaf-r** for the OSDI
+suites — those compile Verilog-A from `crates/fairchild-osdi/tests/models` and
+run the result, because the only honest fixture for a compiled model is a
+compiled model. Without either, the tests that need it *skip* rather than fail,
+so you can develop without them — but CI installs both and asserts they are on
+`PATH`, because a dozen suites silently comparing nothing is worse than a
 missing dependency.
 
 ```bash
 brew install ngspice suite-sparse        # macOS
 sudo apt-get install ngspice libsuitesparse-dev
 ```
+
+openvaf-r ships prebuilt, so there is nothing to build — but each platform's
+release has a quirk worth knowing before you conclude it is broken:
+
+```bash
+# https://github.com/OpenVAF/OpenVAF-Reloaded/releases — put bin/openvaf-r on PATH.
+#
+# Linux: the tarball is the binary plus four *dangling* symlinks; it ships no
+# LLVM. Install the runtime it links against (LLVM 21, newer than Ubuntu 24.04
+# carries), from apt.llvm.org:
+#   sudo apt-get install -y libllvm21          # after adding llvm-toolchain-<rel>-21
+# Do not put the tarball's own lib/ on LD_LIBRARY_PATH: its dangling
+# libLLVM.so.21.1 shadows the real one.
+#
+# macOS: re-sign before first use. The release's Mach-O files were modified after
+# signing, so the kernel kills the process on exec — SIGKILL, no output at all:
+#   for f in lib/*.dylib bin/openvaf-r; do codesign --force --sign - "$f"; done
+```
+
+`FAIRCHILD_OPENVAF=<path>` points at one that is not on `PATH`.
 
 **Python bindings**: `maturin develop --release` (maturin ≥ 1.8 — 1.7 cannot
 parse PEP 639 metadata and fails outright).

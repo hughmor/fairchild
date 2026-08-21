@@ -14,28 +14,18 @@
 //! cannot enumerate them, and anything unrecognised has to degrade to an
 //! identity limiter rather than a crash.
 //!
-//! Runs against `osdi-mock`, which exports the same table shape, so this needs
-//! no OpenVAF and runs in CI.
+//! `lim_probe.va` asks for all three cases in one module, and the compiler puts
+//! them in the table: the name and arity we implement, a name nobody
+//! implements, and a known name at an arity we do not. The retired mock built
+//! that table by hand, which meant the shape being tested was our own guess at
+//! it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fairchild_osdi::ffi::{FnPnjlim, OsdiLimFunction};
 use fairchild_osdi::OsdiLibrary;
 
-fn mock_path() -> PathBuf {
-    let mut p = std::env::current_exe().expect("current_exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    p.push(format!("libosdi_mock.{ext}"));
-    p
-}
+mod common;
 
 /// Read the table out of the library we just loaded. `dlopen` of an
 /// already-loaded library returns the same handle and the same table, so this
@@ -46,24 +36,41 @@ unsafe fn lim_table(path: &Path) -> &'static [OsdiLimFunction] {
     assert!(!h.is_null(), "dlopen failed");
     let tbl = libc::dlsym(h, c"OSDI_LIM_TABLE".as_ptr()) as *const OsdiLimFunction;
     let len = *(libc::dlsym(h, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32);
-    assert!(!tbl.is_null(), "mock should export OSDI_LIM_TABLE");
+    assert!(
+        !tbl.is_null(),
+        "a model calling $limit must export OSDI_LIM_TABLE"
+    );
     std::slice::from_raw_parts(tbl, len as usize)
 }
 
 #[test]
 fn no_lim_table_entry_is_left_null() {
-    let path = mock_path();
-    if !path.exists() {
-        eprintln!("osdi-mock not found at {path:?}; run `cargo build -p osdi-mock`.");
+    let Some(path) = common::compiled("lim_probe") else {
         return;
-    }
-
+    };
     let _lib = unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed");
     let table = unsafe { lim_table(&path) };
+
+    // One entry per `$limit` call in the model, in source order.
+    assert_eq!(table.len(), 3, "lim_probe.va makes three $limit calls");
+    let names: Vec<(String, u32)> = table
+        .iter()
+        .map(|e| {
+            let n = unsafe { std::ffi::CStr::from_ptr(e.name) }
+                .to_string_lossy()
+                .into_owned();
+            (n, e.num_args)
+        })
+        .collect();
     assert_eq!(
-        table.len(),
-        3,
-        "mock should export all three installer cases"
+        names,
+        vec![
+            ("pnjlim".to_string(), 2),
+            ("no_such_limiter".to_string(), 2),
+            ("pnjlim".to_string(), 1),
+        ],
+        "the compiler forwards names and arities verbatim; the installer has to \
+         cope with all three"
     );
 
     // THE invariant: not one entry may be left null, whether or not fairchild
@@ -130,4 +137,42 @@ fn no_lim_table_entry_is_left_null() {
         );
         assert!(!check);
     }
+}
+
+/// And the model has to actually run: a `$limit` call means `num_states > 0`,
+/// which turns on `ENABLE_LIM` and makes every one of those entries live.
+#[test]
+fn a_limiting_model_solves() {
+    let Some(path) = common::compiled("lim_probe") else {
+        return;
+    };
+    let deck = format!(
+        "* a model that limits\n\
+         .osdi {}\n\
+         V1 in 0 DC 1\n\
+         Xl in 0 lim_probe\n\
+         .op\n\
+         .end\n",
+        path.display()
+    );
+    let netlist = fairchild_parser::parse_spice(&deck).expect("parse");
+    let mut registry = fairchild_core::DeviceRegistry::new();
+    registry.register_builtin_models(&netlist.models);
+    fairchild_osdi::load_libraries(
+        &netlist.osdi_paths,
+        &netlist.va_sources,
+        None,
+        &Default::default(),
+        &mut registry,
+    )
+    .expect("load");
+    let r = fairchild_core::dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed");
+
+    // Below vcrit nothing is limited, so all three $limit calls pass V through
+    // and the current is 1 mS · 1 V.
+    let i = r.vsrc_current("v1").expect("v1");
+    assert!(
+        (i.abs() - 1e-3).abs() < 1e-9,
+        "supply current {i} A, want 1 mA"
+    );
 }

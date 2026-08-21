@@ -27,7 +27,7 @@ use fairchild_core::reactive::charge_current;
 use crate::ffi::{
     OsdiDescriptor, OsdiInitInfo, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas, ANALYSIS_DC,
     ANALYSIS_TRAN, CALC_REACT_JACOBIAN, CALC_REACT_RESIDUAL, CALC_RESIST_JACOBIAN,
-    CALC_RESIST_RESIDUAL, ENABLE_LIM, INIT_LIM, PARA_KIND_INST, PARA_KIND_MODEL,
+    CALC_RESIST_RESIDUAL, ENABLE_LIM, INIT_LIM,
 };
 use crate::loader::OsdiLibrary;
 
@@ -843,8 +843,18 @@ impl Device for OsdiDevice {
             Some(f) => f,
             None => return false,
         };
-        // param_opvar layout: [inst_params(0..n_inst) | model_params(n_inst..n_total) | opvars]
-        // The access() id is the ABSOLUTE param_opvar index (not relative within kind).
+        // `param_opvar` layout: [inst_params(0..n_inst) | model_params(n_inst..) | opvars],
+        // and the `access()` id is that **plain absolute index** — no
+        // `PARA_KIND_*` bits. The generated function switches on the id and
+        // decides *where* to look from `ACCESS_FLAG_INSTANCE`: set means the
+        // instance struct, clear means the model's copy.
+        //
+        // Getting that wrong made every instance parameter unsettable: an id of
+        // `PARA_KIND_INST | i` (0x4000_0000 | i) matched no case, so `access`
+        // returned null, the value was dropped, and the caller warned "unknown
+        // parameter" about one the model does declare — a MOSFET's `W` and `L`, a
+        // `$mfactor`. Model parameters escaped because `PARA_KIND_MODEL` is 0.
+        // The mock had no parameters at all, which is why this stood.
         let n_total = desc.num_params as usize;
         let n_inst = desc.num_instance_params as usize;
         if n_total == 0 || desc.param_opvar.is_null() {
@@ -852,49 +862,31 @@ impl Device for OsdiDevice {
         }
         let params = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_total) };
 
-        // Instance params: absolute indices 0..n_inst, kind = PARA_KIND_INST.
-        for (i, param) in params.iter().enumerate().take(n_inst) {
-            if osdi_param_name_matches(param, name) {
-                let id = PARA_KIND_INST | i as u32;
-                let ptr = unsafe {
-                    access_fn(
-                        self.inst_ptr(),
-                        self.model_ptr(),
-                        id,
-                        crate::ffi::ACCESS_FLAG_SET,
-                    )
-                };
-                if !ptr.is_null() {
-                    unsafe {
-                        *(ptr as *mut f64) = value;
-                    }
-                    return true;
-                }
+        for (i, param) in params.iter().enumerate() {
+            if !osdi_param_name_matches(param, name) {
+                continue;
             }
-        }
-
-        // Model params: absolute indices n_inst..n_total, kind = PARA_KIND_MODEL.
-        for (i, param) in params.iter().enumerate().skip(n_inst) {
-            if osdi_param_name_matches(param, name) {
-                let id = PARA_KIND_MODEL | i as u32;
-                let ptr = unsafe {
-                    access_fn(
-                        std::ptr::null_mut(),
-                        self.model_ptr(),
-                        id,
-                        crate::ffi::ACCESS_FLAG_SET,
-                    )
-                };
-                if !ptr.is_null() {
-                    unsafe {
-                        *(ptr as *mut f64) = value;
-                    }
-                    // Re-run setup_instance so the instance struct picks up the new model value.
-                    // OpenVAF caches model-param-derived quantities in the instance during
-                    // setup_instance; eval() reads from instance, not directly from model.
-                    self.refresh_instance();
-                    return true;
+            // An instance parameter is written into instance memory; a model
+            // parameter into the model's. Either way the write sets the model's
+            // "given" flag, so re-running `setup_instance` keeps the new value
+            // instead of overwriting it with the default — and re-running is
+            // required, because OpenVAF caches parameter-derived quantities in
+            // the instance during setup and `eval` reads only those.
+            let (inst, flags) = if i < n_inst {
+                (
+                    self.inst_ptr(),
+                    crate::ffi::ACCESS_FLAG_SET | crate::ffi::ACCESS_FLAG_INSTANCE,
+                )
+            } else {
+                (std::ptr::null_mut(), crate::ffi::ACCESS_FLAG_SET)
+            };
+            let ptr = unsafe { access_fn(inst, self.model_ptr(), i as u32, flags) };
+            if !ptr.is_null() {
+                unsafe {
+                    *(ptr as *mut f64) = value;
                 }
+                self.refresh_instance();
+                return true;
             }
         }
 
@@ -960,6 +952,17 @@ fn osdi_param_name_matches(param: &OsdiParamOpvar, target: &str) -> bool {
     if param.name.is_null() {
         return false;
     }
+    // A SPICE deck spells the instance multiplier `m=`; Verilog-A calls it
+    // `$mfactor`, and OpenVAF gives every module one implicitly. They are the
+    // same quantity — the model scales its own contributions by it — so the deck's
+    // spelling has to reach it. Without this, `m=` on a compiled device warned
+    // "unknown parameter" and the factor was lost, which is a wrong answer
+    // exactly the size of the factor.
+    let target = if target.eq_ignore_ascii_case("m") {
+        "$mfactor"
+    } else {
+        target
+    };
     let n = param.num_alias as usize + 1; // primary + aliases
     let names = unsafe { std::slice::from_raw_parts(param.name, n) };
     for &name_ptr in names {

@@ -1,35 +1,25 @@
 //! `.va` source in, registered device out — the whole path fairchild now owns.
 //!
-//! OpenVAF is not a test dependency: the compiler here is a shell stub that
-//! answers `--version`, implements `--print-expansion` as `cat`, and "compiles"
-//! by copying the `osdi-mock` cdylib to the requested output. That is enough to
-//! exercise everything between a deck naming Verilog-A and a stampable device —
-//! compiler discovery, the cache, `dlopen`, descriptor registration — in CI,
-//! where no Verilog-A toolchain exists.
+//! The compiler here is a shell stub that answers `--version`, implements
+//! `--print-expansion` as `cat`, and "compiles" by copying a prepared `.osdi`
+//! to the requested output. Stubbing it is what makes the cache testable: the
+//! stub counts its own invocations, so a hit and a miss are distinguishable,
+//! which they would not be if a real compile ran each time.
 //!
-//! What it deliberately does not prove: that OpenVAF compiles any particular
-//! model correctly. That needs OpenVAF, and lives in the tests that skip
-//! without it.
+//! The artefact it copies is real, compiled once from `tests/models` by the
+//! installed compiler — so `dlopen` and descriptor registration are exercised
+//! against the genuine article. Without a compiler these tests skip, like every
+//! other test in this directory.
+//!
+//! What this deliberately does not prove: that OpenVAF compiles any particular
+//! model correctly. That is the other tests' job.
 
 use std::path::{Path, PathBuf};
 
 use fairchild_core::DeviceRegistry;
 use fairchild_osdi::{load_libraries, VaOptions};
 
-fn mock_path() -> PathBuf {
-    let mut p = std::env::current_exe().expect("current_exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    p.push(format!("libosdi_mock.{ext}"));
-    p
-}
+mod common;
 
 fn scratch(tag: &str) -> PathBuf {
     // Per-process: parallel `cargo test` runs must not delete each other's.
@@ -40,8 +30,8 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// A stub `openvaf-r`. `counter` gains a line per real compile, so a test can
-/// tell a cache hit from a recompile.
-fn stub_compiler(dir: &Path, mock: &Path, counter: &Path) -> PathBuf {
+/// tell a cache hit from a recompile. `artefact` is the `.osdi` it "produces".
+fn stub_compiler(dir: &Path, artefact: &Path, counter: &Path) -> PathBuf {
     let path = dir.join("stub-openvaf-r");
     std::fs::write(
         &path,
@@ -58,7 +48,7 @@ fn stub_compiler(dir: &Path, mock: &Path, counter: &Path) -> PathBuf {
              echo compiled >> '{}'\n\
              cp '{}' \"$out\"\n",
             counter.display(),
-            mock.display(),
+            artefact.display(),
         ),
     )
     .unwrap();
@@ -104,14 +94,12 @@ fn compiles(counter: &Path) -> usize {
 /// the step this change exists to remove from the user's hands.
 #[test]
 fn a_va_source_registers_its_device() {
-    let mock = mock_path();
-    if !mock.exists() {
-        eprintln!("osdi-mock not found at {mock:?}; run `cargo build -p osdi-mock`.");
+    let Some(artefact) = common::compiled("rc_shunt") else {
         return;
-    }
+    };
     let dir = scratch("register");
     let counter = dir.join("compiles");
-    let stub = stub_compiler(&dir, &mock, &counter);
+    let stub = stub_compiler(&dir, &artefact, &counter);
     std::fs::write(dir.join("m.va"), "module m(a,b); end\n").unwrap();
 
     let opts = VaOptions {
@@ -130,7 +118,7 @@ fn a_va_source_registers_its_device() {
         "the artefact is a real .osdi file, portable to any OSDI simulator"
     );
     assert!(
-        registry.get("test_conductance").is_some(),
+        registry.get("rc_shunt").is_some(),
         "the compiled model must reach the registry, not merely the disk"
     );
     assert_eq!(compiles(&counter), 1);
@@ -141,14 +129,12 @@ fn a_va_source_registers_its_device() {
 /// shows up as a wrong answer.
 #[test]
 fn the_cache_hits_on_unchanged_source_and_misses_on_edited() {
-    let mock = mock_path();
-    if !mock.exists() {
-        eprintln!("osdi-mock not found at {mock:?}; run `cargo build -p osdi-mock`.");
+    let Some(artefact) = common::compiled("rc_shunt") else {
         return;
-    }
+    };
     let dir = scratch("cache");
     let counter = dir.join("compiles");
-    let stub = stub_compiler(&dir, &mock, &counter);
+    let stub = stub_compiler(&dir, &artefact, &counter);
     let src = dir.join("m.va");
     std::fs::write(&src, "module m(a,b); end\n").unwrap();
 
@@ -182,18 +168,16 @@ fn the_cache_hits_on_unchanged_source_and_misses_on_edited() {
 /// artefacts, and the returned order says which is which.
 #[test]
 fn va_sources_and_osdi_artefacts_load_in_a_defined_order() {
-    let mock = mock_path();
-    if !mock.exists() {
-        eprintln!("osdi-mock not found at {mock:?}; run `cargo build -p osdi-mock`.");
+    let Some(artefact) = common::compiled("rc_shunt") else {
         return;
-    }
+    };
     let dir = scratch("mixed");
     let counter = dir.join("compiles");
-    let stub = stub_compiler(&dir, &mock, &counter);
+    let stub = stub_compiler(&dir, &artefact, &counter);
     std::fs::write(dir.join("m.va"), "module m(a,b); end\n").unwrap();
     // A pre-built artefact, i.e. the offline route the explicit `.osdi` keeps.
     let prebuilt = dir.join("prebuilt.osdi");
-    std::fs::copy(&mock, &prebuilt).unwrap();
+    std::fs::copy(&artefact, &prebuilt).unwrap();
 
     let opts = VaOptions {
         compiler: Some(stub),
@@ -212,7 +196,7 @@ fn va_sources_and_osdi_artefacts_load_in_a_defined_order() {
 
     assert_eq!(loaded.len(), 2);
     assert!(loaded[1].ends_with("prebuilt.osdi"), "{loaded:?}");
-    assert!(registry.get("test_conductance").is_some());
+    assert!(registry.get("rc_shunt").is_some());
 }
 
 /// `--no-va-compile` refuses a `.va` source, and does so whatever the cache

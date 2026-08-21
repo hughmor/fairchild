@@ -1,0 +1,13 @@
+// A model with a real *instance* parameter, the way a compact model carries
+// geometry: `(* type = "instance" *)` is what makes `w` settable per instance
+// rather than per card. Everything else is a model parameter, and the two live
+// in different halves of the descriptor's parameter table.
+`include "disciplines.vams"
+
+module inst_param(a, b);
+    inout a, b;
+    electrical a, b;
+    (* type = "instance" *) parameter real w = 1e-6 from (0:inf);
+    parameter real gsheet = 1e3 from (0:inf);
+    analog I(a, b) <+ gsheet * w * V(a, b);
+endmodule
