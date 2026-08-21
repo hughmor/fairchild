@@ -221,6 +221,12 @@ impl Device for NativeCwLaser {
         self.src_scale = scale;
     }
 
+    /// A source is where λ resolution starts. The value is already a parameter
+    /// here — the matrix was only ever the delivery mechanism.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        vec![(self.wpc - 1, self.wavelen_m)]
+    }
+
     fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -480,6 +486,14 @@ impl Device for NativeDrivenLaser {
             0.0
         };
         self.v_op = v;
+    }
+
+    /// Same as the CW laser: the wavelength is a parameter, so resolution can
+    /// start here. Chirp — a λ that moves with the drive — is not modelled, and
+    /// would need an outer iteration around resolution rather than a wire that
+    /// every downstream device watches move.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        vec![(self.wpc - 1, self.wavelen_m)]
     }
 
     fn load_residual(&self, b: &mut [f64]) {

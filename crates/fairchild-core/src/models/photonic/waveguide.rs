@@ -67,6 +67,10 @@ impl Device for NativeWaveguide {
         self.seg.set_param(&name.to_lowercase(), value)
     }
 
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        self.seg.lambda_routing()
+    }
+
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         // Engage the delay line only in transient runs, when the option is on,
         // and when there is a finite group delay. DC/AC and the default

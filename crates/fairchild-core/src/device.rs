@@ -426,4 +426,36 @@ pub trait Device: Send + Sync {
     fn frozen_jacobian_columns(&self) -> Vec<usize> {
         Vec::new()
     }
+
+    /// How a wavelength label moves through this device, as
+    /// `(from_terminal, to_terminal)` pairs in the device's own terminal
+    /// numbering.
+    ///
+    /// A wavelength is a label, not a state: measured across every photonic deck
+    /// in the tree, each λ row reads exactly a source's wavelength and never
+    /// anything computed (`tests/lambda_is_a_label.rs`). Resolving it before the
+    /// solve is what lets it stop being an MNA unknown — which deletes ~30 % of
+    /// the rows on a photonic deck, `LambdaSelect`'s latch, the `lambdatol`
+    /// tolerance class, and the trust-region exclusion λ needs today.
+    ///
+    /// It has to be *declared* rather than read off the assembled matrix,
+    /// because the matrix is exactly what is going away. This is the same shape
+    /// as bundle arity: knowledge that used to be inferred from a structure the
+    /// device happens to build, moved next to the device that knows it.
+    ///
+    /// Default is empty — correct for anything with no optical ports, and for a
+    /// terminator like a photodetector that ends the path.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
+
+    /// Wavelengths this device *originates*, as `(terminal, λ in metres)`.
+    ///
+    /// A source is where resolution starts. Native emitters already hold this as
+    /// a parameter and merely deliver it through the matrix, so exposing it costs
+    /// nothing; a model that writes its λ wire in `analog` and declares nothing
+    /// cannot be resolved, and is worth a diagnostic rather than a silent zero.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        Vec::new()
+    }
 }

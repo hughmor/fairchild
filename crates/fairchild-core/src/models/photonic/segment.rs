@@ -272,6 +272,21 @@ impl OpticalSegment {
         self.ctrl_v0 = vec![0.0; nodes.len()];
     }
 
+    /// `(from, to)` terminal pairs carrying a wavelength label through this
+    /// segment: channel `k`'s input λ wire to its output λ wire.
+    ///
+    /// Terminal numbering is the segment's own, which for every device built on
+    /// one is also the device's — optical bundle wires come first, electrical
+    /// last. λ sits at `wpc - 1` within a channel, and the output block starts
+    /// at `wpc · n_channels`.
+    pub fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let lam = self.wpc - 1;
+        let out_base = self.wpc * self.n_channels;
+        (0..self.n_channels)
+            .map(|k| (self.wpc * k + lam, out_base + self.wpc * k + lam))
+            .collect()
+    }
+
     /// Number of optical bundle wires this segment occupies (`2·wpc·N`).
     ///
     /// A refused setup leaves the segment with zero channels, so report the

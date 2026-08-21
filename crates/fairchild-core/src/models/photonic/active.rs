@@ -197,6 +197,10 @@ impl Device for ActiveOpticalDevice {
         s || m
     }
 
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        self.seg.lambda_routing()
+    }
+
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let intensity = self.seg.channel_intensities(x);
         let pert = self.model.eval(x, &intensity, ctx);

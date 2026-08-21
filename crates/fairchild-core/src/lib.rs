@@ -9,6 +9,7 @@ pub mod delay;
 pub mod device;
 pub mod device_registry;
 pub mod error;
+pub mod lambda;
 pub mod measure;
 pub mod mna;
 pub mod models;
