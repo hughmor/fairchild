@@ -71,10 +71,13 @@ jobs:
               macOS) asset="openvaf-r-$OPENVAF_VERSION-macos-aarch64.tar.gz" ;;
             esac
             url="https://github.com/OpenVAF/OpenVAF-Reloaded/releases/download/$OPENVAF_VERSION/$asset"
-            mkdir -p "$HOME/.local/openvaf-dl"
-            curl -fsSL "$url" -o "$HOME/.local/openvaf-dl/$asset"
-            tar xzf "$HOME/.local/openvaf-dl/$asset" -C "$HOME/.local/openvaf-dl"
-            mv "$HOME/.local/openvaf-dl/openvaf-r-$OPENVAF_VERSION-"* "$HOME/.local/openvaf"
+            # Straight into place, stripping the tarball's own top directory. An
+            # earlier version downloaded, extracted and then moved the result by
+            # glob — and the glob matched the tarball as well as the directory it
+            # had just produced, so `mv` saw two sources and demanded an existing
+            # target.
+            mkdir -p "$HOME/.local/openvaf"
+            curl -fsSL "$url" | tar xz -C "$HOME/.local/openvaf" --strip-components=1
             # The macOS tarball's Mach-O files were modified after signing
             # (their install names were rewritten), so the kernel refuses to run
             # them: SIGKILL, before any output. Re-signing ad hoc is the fix, and
