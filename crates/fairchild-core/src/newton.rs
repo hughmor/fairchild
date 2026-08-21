@@ -179,10 +179,27 @@ fn push_device(
 ) {
     let mut rows: Vec<usize> = terminals.iter().flatten().copied().collect();
     let extras = dev.num_extra_nodes();
+    let mut extra_first = None;
     if extras > 0 {
         let first = topo.allocate_extra_rows(extras);
         dev.bind_extra_nodes(first);
         rows.extend(first..first + extras);
+        extra_first = Some(first);
+    }
+    // Which of this device's rows carry kelvin. Asked after the extras are
+    // allocated, since a self-heating node is usually one of them, and resolved
+    // here because this is the only point where a device's own node numbering
+    // and its MNA rows are both in hand. A terminal tied to ground is `None` and
+    // is skipped: row 0 does not exist, and a temperature clamped to ambient has
+    // no unknown to bound.
+    for k in dev.thermal_nodes() {
+        let row = match k.checked_sub(terminals.len()) {
+            None => terminals[k],
+            Some(off) => extra_first.filter(|_| off < extras).map(|f| f + off),
+        };
+        if let Some(r) = row {
+            topo.thermal_rows.push(r);
+        }
     }
     rows.extend(dev.extra_stamp_rows());
     rows.sort_unstable();
@@ -1243,15 +1260,28 @@ fn nr_inner(
             }
         };
 
-        // `vmax` is a limit in VOLTS, so only node rows may set it. λ wires used
-        // to be exempted here: they carry metres (~1.55e-6), and a volt-scaled
-        // clamp once shrank every λ in a circuit to 1e-19 m because one
-        // under-constrained heater node wanted 1e12 V. λ is no longer an
-        // unknown at all (see `crate::lambda`), so the exemption has nothing
-        // left to exempt.
+        // `vmax` is a limit in VOLTS, so only rows that carry volts may set it.
+        //
+        // λ wires used to be exempted here: they carry metres (~1.55e-6), and a
+        // volt-scaled clamp once shrank every λ in a circuit to 1e-19 m because
+        // one under-constrained heater node wanted 1e12 V. λ is no longer an
+        // unknown at all (see `crate::lambda`) — but thermal rows are, and they
+        // fail the same way in the other direction: a device settling 40 K above
+        // ambient asks for a 40-unit step, which sets `max_dv` and scales
+        // *every* electrical unknown down by 80×. The circuit still converges,
+        // and takes a great many more iterations to do it for no reason.
+        //
+        // So the exemption is by unit, not by name: a row `Tolerances` bounds in
+        // something other than volts does not get a vote on a volt-scaled trust
+        // region. Its own equation still constrains it — it is excluded from
+        // setting the clamp, not from being clamped.
+        let thermal: std::collections::HashSet<usize> = topo.thermal_rows.iter().copied().collect();
         let mut max_dv = 0.0f64;
         let mut max_dv_row = 0usize;
         for i in 0..n_nodes {
+            if thermal.contains(&i) {
+                continue;
+            }
             let d = (x_new[i] - x[i]).abs();
             if d > max_dv {
                 max_dv = d;

@@ -1,0 +1,79 @@
+// A resistor that heats itself, with its temperature a solved unknown.
+//
+// The smallest device that needs a thermal node rather than a parameter: R
+// depends on T, T depends on the power R dissipates, and neither is known until
+// the other is. A fixed point, not a formula.
+//
+//     R(T) = R0·(1 + α·ΔT)      P = V²/R(T)      ΔT = whatever the deck's
+//                                                     thermal network gives
+//
+// The thermal network is NOT in here. `h` is a port, so the deck writes
+//
+//     Rth h 0 500      ← 500 K/W to ambient
+//     Cth h 0 1u       ← 1 J/K of heat capacity
+//
+// with ordinary SPICE primitives, because on a thermal node they already mean
+// the right thing: the flow is watts and the potential is kelvin, so a resistor
+// stamps ΔT/R watts and its value is a thermal resistance in K/W. Two of these
+// sharing one `h` are thermally coupled; an R between two `h` nodes is
+// crosstalk. None of that is reachable from an `r_th` parameter.
+//
+// `Temp(h)` is a RISE above ambient. Ambient is `$temperature`, so absolute
+// temperature is `$temperature + Temp(h)` — keeping them apart is what lets a
+// deck sweep ambient with `.temp` while self-heating stays solved on top.
+
+`include "disciplines.vams"
+
+module self_heated_r(p, n, h);
+    inout p, n;
+    electrical p, n;
+    inout h;
+    thermal h;
+
+    parameter real r0      = 1000.0 from (0:inf);   // resistance at 27 °C
+    parameter real alpha_r = 4.0e-3;                // tempco on the RISE, 1/K
+    parameter real alpha_a = 1.0e-3;                // tempco on AMBIENT, 1/K
+
+    real r_cold, r_now;
+
+    analog begin
+        // Ambient and rise enter separately and with different coefficients, so
+        // a test can tell which one the model actually saw. If `Temp` returned
+        // an absolute temperature instead of a rise, no choice of these two
+        // reproduces both answers.
+        r_cold = r0 * (1.0 + alpha_a * ($temperature - 300.15));
+        r_now  = r_cold * (1.0 + alpha_r * Temp(h));
+        I(p, n) <+ V(p, n) / r_now;
+        // Dissipated power leaves the electrical world and enters the thermal
+        // one. Negative because it flows OUT of the device and INTO the node.
+        Pwr(h) <+ -V(p, n) * V(p, n) / r_now;
+    end
+endmodule
+
+// The same device with its thermal network kept inside, so the temperature is
+// an INTERNAL node rather than a port.
+//
+// Both spellings have to work, and they reach the solver by different routes: a
+// thermal port is one of the rows the device was handed, an internal one is a
+// row it asked for with `num_extra_nodes`. `push_device` translates the model's
+// own node numbering for both, and this module is what proves the second half.
+module self_heated_r_int(p, n);
+    inout p, n;
+    electrical p, n;
+
+    thermal h;   // internal — no port, so no deck can reach it
+
+    parameter real r0      = 1000.0 from (0:inf);
+    parameter real alpha_r = 4.0e-3;
+    parameter real r_th    = 500.0  from (0:inf);   // K/W
+    parameter real c_th    = 1.0e-6 from (0:inf);   // J/K
+
+    real r_now;
+
+    analog begin
+        r_now = r0 * (1.0 + alpha_r * Temp(h));
+        I(p, n) <+ V(p, n) / r_now;
+        Pwr(h) <+ c_th * ddt(Temp(h)) + Temp(h) / r_th
+                - V(p, n) * V(p, n) / r_now;
+    end
+endmodule

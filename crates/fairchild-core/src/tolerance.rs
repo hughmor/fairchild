@@ -10,6 +10,7 @@
 //! |---|---|---|
 //! | node | volts | 1 µV — correct, this is what it is for |
 //! | voltage-source branch | amps | 1 µA — 10⁶× looser than SPICE's `abstol` |
+//! | thermal | kelvin | 1 µK — eight digits on a temperature, nobody's ask |
 //!
 //! # The row class that is gone
 //!
@@ -25,11 +26,29 @@
 //! unknown whose unit is not volts and whose precision matters needs its own
 //! row class here, and the failure mode is a converged wrong answer.
 //!
+//! # The row class that arrived
+//!
+//! A `thermal` node carries a temperature rise in kelvin and its flow is watts.
+//! It takes `temptol` (1 mK). Which rows those are is not declared in the deck:
+//! OSDI carries a Verilog-A discipline's units through to the descriptor, so
+//! [`crate::device::Device::thermal_nodes`] reads it off the model and
+//! `push_device` records the rows on the topology. One statement, in the file
+//! that already had to be right.
+//!
+//! Unlike λ, this class is not about a *wrong* answer from a loose bound —
+//! `vntol` on kelvin is tighter than needed. It is about the other half of the
+//! same unit-mixing: `vmax` is a trust region in **volts**, and a thermal row
+//! allowed to set it clamps a 233 K step to 0.5 and scales every electrical
+//! unknown by 1/466. Newton then meets its step test on the clamped deltas
+//! rather than on the residual — 10× the iterations and a converged answer that
+//! is measurably off. `newton.rs` excludes thermal rows from setting the clamp
+//! for that reason; the shape is λ's, and it recurred within one release.
+//!
 //! # What is deliberately left alone
 //!
-//! Optical field amplitudes (√W, O(0.03)) and device-internal rows (series-R
-//! nodes, thermal-RC nodes in kelvin) still use `vntol`. For those the volt
-//! tolerance is *tighter* than they need rather than looser, which costs at
+//! Optical field amplitudes (√W, O(0.03)) and device-internal rows that are not
+//! thermal (series-R nodes, OSDI flow branches) still use `vntol`. For those the
+//! volt tolerance is *tighter* than they need rather than looser, which costs at
 //! most an iteration and cannot produce a wrong answer. They are listed here so
 //! the omission is a decision and not an oversight.
 
@@ -60,6 +79,18 @@ impl Tolerances {
         let n_nodes = topo.n_nodes();
         for row in per_row.iter_mut().skip(n_nodes).take(topo.vsrc_index.len()) {
             *row = (opts.abstol, opts.reltol);
+        }
+
+        // Thermal rows carry kelvin. `vntol` is a microvolt, which as a bound
+        // on a temperature is a demand for eight digits nobody asked for, and
+        // the same unit-mixing that made `vntol` meaningless against a 1.55e-6
+        // wavelength. Which rows these are comes from the models themselves —
+        // see `Device::thermal_nodes` — so a deck states nothing and cannot
+        // disagree.
+        for &row in &topo.thermal_rows {
+            if row < per_row.len() {
+                per_row[row] = (opts.temptol, opts.reltol);
+            }
         }
 
         Tolerances { per_row }

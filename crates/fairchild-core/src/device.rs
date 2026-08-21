@@ -346,6 +346,35 @@ pub trait Device: Send + Sync {
         Vec::new()
     }
 
+    /// Device node indices whose potential is a **temperature in kelvin**
+    /// rather than a voltage, so the solver can bound them with `temptol`
+    /// instead of `vntol`.
+    ///
+    /// Numbered as the device's own nodes are: `0..terminals.len()` are the
+    /// terminals it was handed, and the indices above that are the extra rows
+    /// `num_extra_nodes` asked for, in the same order. `push_device` translates
+    /// both into MNA rows, which is why one list covers a self-heating internal
+    /// node and a shared thermal port alike.
+    ///
+    /// A Verilog-A model declares this by declaring its node `thermal`, and
+    /// nothing else has to agree: OSDI carries the discipline's units through to
+    /// the descriptor, so this is read off the model rather than restated in the
+    /// deck. Default empty — a device with no temperature unknown says nothing.
+    ///
+    /// # What a thermal node is not
+    ///
+    /// It is not a different kind of row. The potential is kelvin and the flow
+    /// is watts, so KCL over that node is conservation of power, and a SPICE
+    /// `R h1 h2 4.2e4` across two of them stamps `ΔT/R` watts — a thermal
+    /// resistance of 42 kK/W, which is exactly right and is how an electrical
+    /// element earns its place in a thermal network. That is why there is no
+    /// discipline check here refusing R/C/I on a thermal net, as there is for
+    /// optical wires: the electrical primitives *are* the thermal primitives,
+    /// and refusing them would ban thermal crosstalk between two devices.
+    fn thermal_nodes(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
     /// How many extra MNA rows this device needs beyond its terminal nodes.
     ///
     /// Verilog-A models with potential contributions (`V(port) <+ value;`)
