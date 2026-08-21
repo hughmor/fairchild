@@ -200,7 +200,7 @@ impl TranStepper {
             })
             .collect();
 
-        let tol = crate::tolerance::Tolerances::build(&netlist, &topo, opts);
+        let tol = crate::tolerance::Tolerances::build(&topo, opts);
         let noise = crate::noise::TransientNoise::new(&netlist, &topo, opts);
 
         Ok(TranStepper {

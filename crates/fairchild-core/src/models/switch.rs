@@ -31,10 +31,10 @@
 //!
 //! "The previous state" is deliberately the state at the last accepted
 //! timepoint, not the last Newton iterate. Using the iterate would let the
-//! switch flip-flop within one NR loop — the same failure the photonic
-//! `LambdaSelect` latch exists to prevent. Outside the band the reference does
-//! not matter (the control decides), so this only fixes the ambiguous case, and
-//! it fixes it deterministically.
+//! switch flip-flop within one NR loop — the same failure the photonic λ
+//! selector used to latch against, before λ stopped being an unknown at all.
+//! Outside the band the reference does not matter (the control decides), so
+//! this only fixes the ambiguous case, and it fixes it deterministically.
 //!
 //! # Known divergence from ngspice: DC sweeps
 //!

@@ -1151,7 +1151,7 @@ fn nr_inner(
     let n_nodes = topo.n_nodes();
     // Not every unknown is a volt — see `crate::tolerance`.  Built here rather
     // than per iteration; `topo.size` is settled by the time any solver runs.
-    let tol = crate::tolerance::Tolerances::build(netlist, topo, opts);
+    let tol = crate::tolerance::Tolerances::build(topo, opts);
 
     // Sparsity pattern is fixed across this NR loop — devices stamp the
     // same matrix positions each iteration, only the values change.  The
@@ -1172,20 +1172,6 @@ fn nr_inner(
     // search actually runs (it needs a clamped step first).
     let mut trial: Option<crate::mna::MnaMatrix> = None;
     let mut first_stamp = true;
-    // Which rows are λ wires (metres), so the volt-scaled trust region can skip
-    // them. Same membership test as `Tolerances::build`: gated on optical_nets
-    // so an electrical net merely *named* like a λ wire keeps volt semantics.
-    let lambda_rows = {
-        let mut m = vec![false; topo.size];
-        for net in &netlist.optical_nets {
-            if fairchild_parser::is_lambda_wire(net) {
-                if let Some(&r) = topo.node_index.get(net) {
-                    m[r] = true;
-                }
-            }
-        }
-        m
-    };
     let mut warned_clamp = false;
 
     for _iter in 0..opts.itl1 {
@@ -1257,15 +1243,15 @@ fn nr_inner(
             }
         };
 
-        // `vmax` is a limit in VOLTS, so only rows carrying volts may set it.
-        // A λ wire is metres (~1.55e-6) and a step of a whole wavelength is
-        // normal, not a trust-region violation.
+        // `vmax` is a limit in VOLTS, so only node rows may set it. λ wires used
+        // to be exempted here: they carry metres (~1.55e-6), and a volt-scaled
+        // clamp once shrank every λ in a circuit to 1e-19 m because one
+        // under-constrained heater node wanted 1e12 V. λ is no longer an
+        // unknown at all (see `crate::lambda`), so the exemption has nothing
+        // left to exempt.
         let mut max_dv = 0.0f64;
         let mut max_dv_row = 0usize;
         for i in 0..n_nodes {
-            if lambda_rows[i] {
-                continue;
-            }
             let d = (x_new[i] - x[i]).abs();
             if d > max_dv {
                 max_dv = d;
@@ -1296,25 +1282,10 @@ fn nr_inner(
             let scale = opts.vmax / max_dv;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
-            // λ rows take the full step. λ is a label propagated from the
-            // sources, not a dynamical state that needs damping, and scaling it
-            // is actively destructive: it enters the phase as 2π·n·L/λ, so a
-            // λ scaled by 5e-13 makes every optical phase in the circuit wrong
-            // by twelve orders of magnitude. On giona_fc one under-constrained
-            // heater node wanting 1e12 V dragged every λ to 1e-19 m, and no
-            // iteration could recover because the clamp reproduced it exactly
-            // every time.
             let delta: Vec<f64> = x
                 .iter()
                 .zip(x_new.iter())
-                .enumerate()
-                .map(|(i, (o, n))| {
-                    if lambda_rows[i] {
-                        n - o
-                    } else {
-                        scale * (n - o)
-                    }
-                })
+                .map(|(o, n)| scale * (n - o))
                 .collect();
             // A scale this small means the step carries no information: the
             // offending row is almost certainly under-constrained rather than

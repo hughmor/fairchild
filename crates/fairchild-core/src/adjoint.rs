@@ -276,7 +276,7 @@ pub fn dc_sensitivity(
     // see `Device::frozen_jacobian_columns`.  It happens before the
     // factorisation and only touches the adjoint's copy of the matrix, so
     // Newton's iteration matrix is unaffected.
-    let frozen = frozen_columns(netlist, &topo, &devices);
+    let frozen = frozen_columns(&topo, &devices);
     let repaired = frozen
         .iter()
         .map(|&col| {
@@ -428,23 +428,16 @@ pub fn dc_sensitivity(
 
 /// Every column whose `∂f/∂x` has to be re-derived numerically for the adjoint.
 ///
-/// Two sources.  λ wires are found from the netlist: every optical device
-/// freezes λ (the alternative does not converge), so asking each of them to say
-/// so would be fourteen copies of one fact.  Everything else is declared by the
-/// device that froze it.
-pub(crate) fn frozen_columns(
-    netlist: &Netlist,
-    topo: &CircuitTopology,
-    devices: &[Box<dyn Device>],
-) -> Vec<usize> {
-    let mut cols: Vec<usize> = topo
-        .node_index
-        .iter()
-        .filter(|(net, _)| {
-            netlist.optical_nets.contains(*net) && fairchild_parser::is_lambda_wire(net)
-        })
-        .map(|(_, &i)| i)
-        .collect();
+/// Declared by the device that froze it, and only that.  λ columns used to be
+/// added here from the netlist as well: every optical device froze λ, because
+/// `∂φ/∂λ = φ/λ` is of order 1e9 per metre and differentiating against it does
+/// not converge, and asking fourteen models to say so would have been fourteen
+/// copies of one fact.  That rule also only ever matched a λ net named
+/// `_wl_<k>` by an `.optical_port`, so it silently missed every PCell that
+/// hand-wires its bundle.  Both problems are gone with the rows: λ is resolved
+/// before the solve, no device reads a λ column, and there is no λ column.
+pub(crate) fn frozen_columns(topo: &CircuitTopology, devices: &[Box<dyn Device>]) -> Vec<usize> {
+    let mut cols: Vec<usize> = Vec::new();
     for dev in devices {
         cols.extend(dev.frozen_jacobian_columns());
     }
@@ -582,7 +575,7 @@ pub fn jacobian_check(
     }
 
     let mut mat = MnaMatrix::with_pattern(n, plan.pattern.clone());
-    let frozen = frozen_columns(netlist, &topo, &devices);
+    let frozen = frozen_columns(&topo, &devices);
     let stamp = |mat: &mut MnaMatrix, devices: &mut Vec<Box<dyn Device>>, at: &[f64]| {
         let _ = residual_l2(
             mat,

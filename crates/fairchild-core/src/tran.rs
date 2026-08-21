@@ -416,7 +416,7 @@ pub fn tran_nr_with_registry_var_opts(
     // Not every unknown is a volt — see `crate::tolerance`.  Serves both the NR
     // step test and the LTE norm below, so the step controller weighs a λ error
     // on the same scale that decides convergence.
-    let tol = crate::tolerance::Tolerances::build(netlist, &topo, opts);
+    let tol = crate::tolerance::Tolerances::build(&topo, opts);
 
     // Nodes constrained by voltage sources are excluded from LTE: their voltages
     // change due to the source waveform, not integration error.

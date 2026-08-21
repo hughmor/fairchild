@@ -102,6 +102,22 @@ impl OsdiLibrary {
     /// co-owns the library via `Arc`, so the library stays loaded as long as
     /// any of its devices are alive.
     pub fn register_into(self: &Arc<Self>, registry: &mut DeviceRegistry) {
+        self.register_into_with_lambda(registry, None);
+    }
+
+    /// As [`register_into`](Self::register_into), plus the λ geometry for a
+    /// device elaborated from the bundle-port dialect.
+    ///
+    /// A bundle model has to *declare* where its wavelength labels live, because
+    /// λ is resolved before the solve and resolution only speaks for nets a
+    /// device names. Left undeclared, a bundle model in the middle of an optical
+    /// path leaves every port downstream of it unreached, and an unreached port
+    /// takes the band centre — a wrong wavelength, silently.
+    pub fn register_into_with_lambda(
+        self: &Arc<Self>,
+        registry: &mut DeviceRegistry,
+        lambda: Option<crate::device::BundleLambda>,
+    ) {
         for (i, desc) in self.descriptors().enumerate() {
             let name = unsafe { CStr::from_ptr(desc.name) }
                 .to_str()
@@ -120,9 +136,13 @@ impl OsdiLibrary {
                 fairchild_core::ArityDecl::Terminals(desc.num_terminals as usize),
             );
             let lib = Arc::clone(self);
+            let lam = lambda.clone();
             registry.register(name, move |terminals, params: &ParamSet, ctx| {
                 let mut dev = OsdiDevice::from_library(Arc::clone(&lib), i)
                     .expect("descriptor index must be valid");
+                if let Some(l) = &lam {
+                    dev.set_bundle_lambda(l.clone());
+                }
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
                 params.apply(&mut dev);

@@ -459,7 +459,16 @@ pub fn load_libraries_with_widths(
                     stderr: format!("cannot write generated source: {e}"),
                 })?;
                 let compiled = compile(compiler, &gen_path, &gen_opts)?;
-                load_one(&compiled, registry)?;
+                load_one_with_lambda(
+                    &compiled,
+                    registry,
+                    Some(crate::device::BundleLambda {
+                        terminals: m.lambda_terminals(n, wpc),
+                        routing: m.lambda_routing(n, wpc),
+                        channels: n,
+                        wpc,
+                    }),
+                )?;
                 loaded.push(compiled);
             }
             registry.declare_arity(
@@ -510,10 +519,19 @@ fn resolve(path: &str, base_dir: Option<&Path>) -> PathBuf {
 }
 
 fn load_one(path: &Path, registry: &mut DeviceRegistry) -> Result<(), OsdiError> {
+    load_one_with_lambda(path, registry, None)
+}
+
+/// As [`load_one`], carrying the λ geometry of a bundle-dialect elaboration.
+fn load_one_with_lambda(
+    path: &Path,
+    registry: &mut DeviceRegistry,
+    lambda: Option<crate::device::BundleLambda>,
+) -> Result<(), OsdiError> {
     // SAFETY: the path came from the deck; `OsdiLibrary::open` validates the
     // OSDI version and descriptor layout before anything is called through.
     let lib = unsafe { OsdiLibrary::open(path) }.map_err(|e| e.with_context(path))?;
-    Arc::new(lib).register_into(registry);
+    Arc::new(lib).register_into_with_lambda(registry, lambda);
     Ok(())
 }
 

@@ -416,10 +416,10 @@ pub trait Device: Send + Sync {
     /// for the adjoint solve alone and leaves the Newton iteration matrix
     /// untouched, so declaring a column costs nothing at solve time.
     ///
-    /// λ wires do not need declaring — the adjoint finds them from the netlist,
-    /// since every optical device freezes those and there is no point making
-    /// fourteen models say so.  Declare the *electrical* columns an optical
-    /// device reads: drive voltages, control wires, thermal nodes.
+    /// λ wires do not need declaring, and no longer *can* be: a wavelength is
+    /// resolved before the solve rather than solved for, so there is no λ
+    /// column to freeze.  Declare the *electrical* columns an optical device
+    /// reads: drive voltages, control wires, thermal nodes.
     ///
     /// `crate::adjoint::jacobian_check` is the oracle for this: any mismatch in
     /// an undeclared column is a missing declaration or a wrong stamp.
@@ -432,11 +432,11 @@ pub trait Device: Send + Sync {
     /// numbering.
     ///
     /// A wavelength is a label, not a state: measured across every photonic deck
-    /// in the tree, each λ row reads exactly a source's wavelength and never
+    /// in the tree, each λ row read exactly a source's wavelength and never
     /// anything computed (`tests/lambda_is_a_label.rs`). Resolving it before the
-    /// solve is what lets it stop being an MNA unknown — which deletes ~30 % of
-    /// the rows on a photonic deck, `LambdaSelect`'s latch, the `lambdatol`
-    /// tolerance class, and the trust-region exclusion λ needs today.
+    /// solve is what stopped it being an MNA unknown — which took 864 of 2840
+    /// rows off the giona RNN and deleted `LambdaSelect`'s latch, the
+    /// `lambdatol` tolerance class and λ's trust-region exemption with them.
     ///
     /// It has to be *declared* rather than read off the assembled matrix,
     /// because the matrix is exactly what is going away. This is the same shape

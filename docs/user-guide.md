@@ -965,7 +965,6 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `reltol` | 1e-3 | NR relative tolerance |
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
-| `lambdatol` | 1e-13 | NR wavelength absolute tolerance (m), for λ wires |
 | `vmax` | 0.5 | Per-iteration |ΔV| clamp |
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
@@ -1240,14 +1239,11 @@ Convergence criteria:
 
 - `|ΔV| < vntol + reltol · |V|` for all node voltages.
 - `|ΔI| < abstol + reltol · |I|` for all branch currents.
-- `|Δλ| < lambdatol` for optical wavelength wires — absolute only.
-
   The tolerance is per *quantity*, not one number for the whole solution
-  vector: a λ wire carries metres (~1.55e-6), so a volt tolerance let
-  Newton stop a micron out. λ takes no relative term because
-  `reltol·|λ|` is scale-invariant — 1e-3 of 1.55 µm is 1.55 nm however
-  you spell the unit, which is still 5× a 40 GHz passband. See
-  `crates/fairchild-core/src/tolerance.rs`.
+  vector — see `crates/fairchild-core/src/tolerance.rs`. There used to be a
+  third class, `lambdatol`, for optical wavelength wires; λ is now resolved
+  before the solve rather than solved for, so there is no λ row to converge and
+  `.options lambdatol=…` warns that it no longer applies.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal
@@ -1754,15 +1750,16 @@ OpenVAF — an upstream Cadence-key problem, not a fairchild limitation.
 
 ### 14.3 Optical models
 
-fairchild carries an optical signal on ordinary real-valued MNA unknowns —
-three per channel — so a custom optical discipline needs no compiler support
-at all; OSDI passes it through as metadata.
+fairchild carries an optical signal on ordinary real-valued MNA unknowns — two
+per channel, plus a wavelength label that is resolved before the solve rather
+than solved for — so a custom optical discipline needs no compiler support at
+all; OSDI passes it through as metadata.
 
 | wire | carries | units |
 |---|---|---|
 | `<port>_re` | real part of the field envelope | sqrt(W) |
 | `<port>_im` | imaginary part | sqrt(W) |
-| `<port>_wl` | carrier wavelength | m |
+| `<port>_wl` | carrier wavelength — a label, not an unknown | m |
 
 Optical power is `re² + im²`. These are exactly the wires a native
 `.optical_port p` expands to (`p_re_0`, `p_im_0`, `p_wl_0`), so a Verilog-A
@@ -1773,15 +1770,17 @@ native one in a single deck.
 
 Two rules, both of which cost real debugging time to learn:
 
-**Take the wavelength from a parameter, never off the λ wire.** The wire
-exists so a chain stays self-consistent and native devices can read it. Do not
-put `OWL(...)` inside an expression you contribute from. Propagation phase is
+**λ is not a solver unknown, so never contribute to a λ wire.** The wire is
+declared — the port list is positional and a bundle is `wpc·N` wires wide either
+way — but it carries no equation: a wavelength is routed from its source, never
+computed, so fairchild resolves every λ net before the solve. Take the
+wavelength from a parameter and sweep it with `--param` or `set_param`. Writing
+`OWL(...) <+ …` in a fixed-port model contributes into a node the matrix does
+not have, which is a model that compiles, runs, and propagates nothing. (Before
+λ was resolved, the objection was the derivative: propagation phase is
 thousands of radians — 400 µm at n_g = 4.2 is about 6800 rad — so OpenVAF
-differentiating it against the λ unknown puts ∂φ/∂λ = φ/λ ≈ 1e9 per metre into
-the Jacobian, and Newton fails to converge at some wavelengths and not others.
-Native devices dodge this by freezing λ at the previous iterate, which
-Verilog-A has no way to express. Sweep wavelength with `--param` or
-`set_param` instead.
+differentiating it against a λ unknown put ∂φ/∂λ = φ/λ ≈ 1e9 per metre into the
+Jacobian and Newton failed to converge at some wavelengths and not others.)
 
 **`alpha_dB_cm` is power dB, so the amplitude factor divides by 20** —
 `10^(−dB/20)`. Everything under `legacy/` predates commit `0f689cb` and is a
@@ -1807,8 +1806,7 @@ the ports for whatever the deck asks for:
 | `optical_bundle p, q;` | ports whose width comes from the deck |
 | `N(p)` | that width — usable as a loop bound |
 | `E_RE(p,k)` / `E_IM(p,k)` | channel `k`'s field wires |
-| `WL(p,k)` | channel `k`'s wavelength **wire**, for passing the tag through |
-| `LAMBDA(p,k)` | channel `k`'s wavelength **value**, for the physics |
+| `LAMBDA(p,k)` | channel `k`'s wavelength, filled from the deck's sources |
 
 ```verilog
 module wg_bundle(a, b);
@@ -1819,7 +1817,6 @@ module wg_bundle(a, b);
         for (k = 0; k < N(a); k = k + 1) begin
             ph = 2.0 * `M_PI * n_g * l_um * 1e-6 / LAMBDA(a, k);
             OF(E_RE(b, k)) <+ amp * (OF(E_RE(a, k)) * cos(ph) + OF(E_IM(a, k)) * sin(ph));
-            OWL(WL(b, k)) <+ OWL(WL(a, k));
         end
     end
 endmodule
@@ -1830,14 +1827,21 @@ place a width is written, and the model is compiled for that width and cached
 like any other source. Change the deck to 100 channels and the model does not
 change.
 
-**`WL` and `LAMBDA` are different things, deliberately.** `LAMBDA` is a
-generated parameter, so the physics reads a wavelength with no derivative
-attached — which is what keeps the ∂φ/∂λ ≈ 1e9 entry described above out of the
-Jacobian. `WL` is the wire, and exists only so the tag reaches whatever native
-device is downstream. Compute from `LAMBDA`; pass `WL` through.
+**There is nothing to write about λ.** `LAMBDA(p, k)` becomes a generated
+`parameter real wl_k`, so the physics reads a wavelength with no derivative
+attached — and fairchild fills it from whatever source the deck routes to that
+port, which it also knows because a bundle model declares its λ terminals and
+its slot-for-slot routing. Nothing has to be passed along by hand.
 
-Set the wavelengths per channel on the instance — `wl_0=1546.12n wl_1=1546.92n`
-— or leave them at `wl_default`.
+There used to be a second accessor, `WL(p, k)`, for the λ *wire*, and the author
+wrote `OWL(WL(out,k)) <+ OWL(WL(in,k));` to carry the tag through the matrix.
+λ is no longer in the matrix; a source still using `WL` is refused by name, with
+the fix in the message.
+
+`wl_0=1546.12n wl_1=1546.92n` on the instance still works, and applies to a
+channel no source reaches. Where a source does reach it and disagrees, the
+resolved wavelength wins and says so — two answers for one wavelength is a deck
+bug, not a preference.
 
 The loop form is fixed at `for (k = 0; k < N(p); k = k + 1) begin … end`.
 Anything else is refused by name rather than expanded into something plausible,
@@ -1846,10 +1850,7 @@ writes the expanded source so you can read exactly what was compiled — the fir
 thing worth looking at when a model behaves at one channel and not at eight.
 
 Still native-only: bidirectional propagation, `DelayLine` group delay, and
-`PhotonicActiveModel` composition. And a model must still take λ from a
-parameter rather than the wire — see above; making that safe is
-[issue #54](https://github.com/hughmor/fairchild/issues/54). See
-[Photonic models](photonic-models.md).
+`PhotonicActiveModel` composition. See [Photonic models](photonic-models.md).
 
 ### 14.4 Instantiating
 

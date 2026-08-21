@@ -198,3 +198,93 @@ fn an_eight_channel_bus_through_a_ring_resolves_every_label() {
     deck += " fc_mux\nXpn bus out a 0 fc_pn_ps_full L_um=50\nVb a 0 DC 0\n.op\n.end\n";
     assert_resolution_matches_the_solve("giona-shaped bus", &deck);
 }
+
+// ── a model that declares nothing must say so ──────────────────────────────
+//
+// λ is resolved before the solve from what devices declare, so a model that
+// declares nothing is invisible to resolution: everything downstream of it takes
+// the band centre instead of the wavelength actually present. For a ring or a
+// filter that means evaluating a passband at a colour nowhere in the circuit.
+//
+// A hand-written fixed-port Verilog-A model is exactly this case and cannot fix
+// itself — its routing is inside compiled Verilog-A that fairchild does not
+// parse, whereas a bundle-dialect model escapes only because we generate its
+// header and therefore know its layout. Guessing from port names was ruled out:
+// pairing λ ports in declaration order is right until it silently is not, and a
+// PCell that hand-wires its bundle (`source_bank.sp` names them `a1w`) defeats
+// name-based reasoning outright.
+//
+// So it warns. It cannot error without refusing every optical Verilog-A model
+// written before the dialect existed, and a model whose λ ports pass a tag to
+// nothing downstream is harmless. These two tests pin *when* it speaks, because
+// a diagnostic that fires on the harmless case trains people to ignore it.
+
+/// Resolution over a deck, returning the λ nets it could not reach.
+fn unreached_nets(deck: &str) -> Vec<String> {
+    let net = parse_spice(deck).expect("deck parses");
+    let reg = DeviceRegistry::new();
+    let opts = fairchild_core::SimOptions::default();
+    let map = lambda::resolve(&net, &opts.sim_context(), &reg);
+    map.unreached().to_vec()
+}
+
+/// A device with no λ declarations breaks the chain: the net past it is
+/// unreached even though light is flowing through.
+///
+/// `fc_cw_laser` → `fc_waveguide` both declare, so `a` and `b` resolve. There is
+/// no native device that carries light and declares nothing — every one of them
+/// is declared now — so the condition is asserted the only way it can be
+/// without a compiler: the chain resolves end to end, and a *dark* branch does
+/// not. If a future device forgets to declare, the first half of this test is
+/// what changes.
+#[test]
+fn a_declared_chain_resolves_end_to_end_and_a_dark_branch_does_not() {
+    let dark = unreached_nets(
+        "\
+.optical_port a
+.optical_port b
+.optical_port lonely
+Xl a fc_cw_laser power_mW=1 wavelength_nm=1543.0
+Xw a b fc_waveguide L_um=100 n_g=4.2
+Xw2 lonely b fc_waveguide L_um=100 n_g=4.2
+.op
+.end
+",
+    );
+    // `lonely` is an input nothing drives — legitimately dark, and reported as
+    // such rather than silently taken for a wavelength.
+    assert!(
+        dark.iter().any(|n| n.starts_with("lonely")),
+        "an undriven optical input should be reported unreached, got {dark:?}"
+    );
+    assert!(
+        !dark.iter().any(|n| n.starts_with("a_") || n == "a"),
+        "the lit path must resolve, got {dark:?}"
+    );
+}
+
+/// A wavelength named by hand on the wire seeds resolution. This is the idiom
+/// every hand-wired bundle in the tree uses, and the only way to label light
+/// arriving from outside the deck — substituting the band centre for a wire
+/// someone explicitly drove to 1551 nm would be the wrong answer, quietly.
+#[test]
+fn a_voltage_source_on_a_lambda_net_names_the_wavelength() {
+    let deck = "\
+.optical_port a
+.optical_port b
+Vre a_re_0 0 DC 0.03162
+Vwl a_wl_0 0 DC 1.551e-6
+Xw a b fc_waveguide L_um=100 n_g=4.2
+.op
+.end
+";
+    let net = parse_spice(deck).expect("deck parses");
+    let reg = DeviceRegistry::new();
+    let opts = fairchild_core::SimOptions::default();
+    let map = lambda::resolve(&net, &opts.sim_context(), &reg);
+    let got = map.get("b_wl_0").expect("the output λ net resolves");
+    assert!(
+        (got - 1.551e-6).abs() < 1e-15,
+        "a hand-driven λ wire must propagate: got {got:e} m, expected 1.551e-6 m"
+    );
+}

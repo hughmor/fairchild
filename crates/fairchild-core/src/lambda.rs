@@ -6,15 +6,16 @@
 //! (`tests/lambda_is_a_label.rs` pins that). The solver has been doing label
 //! propagation through a linear subsystem embedded in the matrix.
 //!
-//! Leaving it there costs more than the rows it occupies — 848 of 2840 unknowns
+//! Leaving it there cost more than the rows it occupied — 864 of 2840 unknowns
 //! on the giona 8-neuron RNN, 30 % of the matrix. `vntol = 1e-6` is meaningless
 //! against a 1.55e-6 quantity, so λ needed its own tolerance class. A
 //! volt-scaled trust region once scaled λ from 1.55 µm to 1e-19 m and destroyed
 //! every optical phase in the circuit, so λ had to be excluded from that too.
-//! `LambdaSelect` latches which input to mirror from values that are still
-//! settling. And no device may differentiate against λ — propagation phase is
+//! `LambdaSelect` latched which input to mirror from values that were still
+//! settling. And no device could differentiate against λ — propagation phase is
 //! thousands of radians, so `∂φ/∂λ = φ/λ` is of order 1e9 per metre — which
-//! `adjoint.rs` already encodes by treating every λ column as frozen.
+//! `adjoint.rs` encoded by treating every λ column as frozen. All four are
+//! gone with the rows.
 //!
 //! # Why routing is declared, not inferred
 //!
@@ -116,12 +117,15 @@ pub fn resolve(netlist: &Netlist, ctx: &SimContext, registry: &DeviceRegistry) -
     // input, a ring's dark add. `lambda_terminals` is what makes it total.
     let mut lambda_nets: Vec<String> = Vec::new();
 
+    // Models that declared nothing at all, paired with the nets they touch, so
+    // the pass can say afterwards whether any of them sits on a lit path.
+    let mut silent: Vec<(&str, &str, &[String])> = Vec::new();
     for el in &netlist.elements {
         let Element::XOsdi {
+            name,
             nets,
             model_name,
             params,
-            ..
         } = el
         else {
             continue;
@@ -131,7 +135,11 @@ pub fn resolve(netlist: &Netlist, ctx: &SimContext, registry: &DeviceRegistry) -
         };
         let unbound = vec![None; nets.len()];
         let dev = factory(&unbound, &ParamSet::new(params), ctx);
-        for t in dev.lambda_terminals() {
+        let declared = dev.lambda_terminals();
+        if declared.is_empty() {
+            silent.push((name, model_name, nets));
+        }
+        for t in declared {
             if let Some(n) = nets.get(t) {
                 lambda_nets.push(n.clone());
             }
@@ -205,5 +213,60 @@ pub fn resolve(netlist: &Netlist, ctx: &SimContext, registry: &DeviceRegistry) -
         by_net.insert(n.clone(), ctx.lambda_center_m);
     }
 
+    warn_about_silent_models(&silent, &by_net, &unreached);
     LambdaMap { by_net, unreached }
+}
+
+/// Name any model that sits on a path whose wavelength is known and says
+/// nothing about what it does with the label.
+///
+/// A fixed-port Verilog-A optical model is the case: it has `in_wl` / `out_wl`
+/// ports and used to carry the tag through the matrix with
+/// `OWL(out_wl) <+ OWL(in_wl)`, which worked while λ was an unknown. It is not
+/// one any more, so that contribution goes to a node the matrix does not have,
+/// and everything downstream resolves to the band centre — a wrong wavelength
+/// with no diagnostic. Nothing here can infer which of its ports is an input,
+/// so the only honest answer is to say so.
+///
+/// Once per model name, and only when resolution actually reached one of its
+/// nets: a model on a dark branch has nothing to get wrong. A terminator (a
+/// photodetector written in Verilog-A) is a false positive, and is accepted as
+/// the price of not being silent about the case that is genuinely broken.
+fn warn_about_silent_models(
+    silent: &[(&str, &str, &[String])],
+    by_net: &HashMap<String, f64>,
+    unreached: &[String],
+) {
+    if silent.is_empty() {
+        return;
+    }
+    // Only a model on a LIT path is worth mentioning. One sitting entirely on
+    // dark ports routes nothing anyone can observe, and warning about it would
+    // train the reader to ignore the message that matters.
+    let dark: std::collections::HashSet<&str> = unreached.iter().map(String::as_str).collect();
+    let mut said: Vec<&str> = Vec::new();
+    for (inst, model, nets) in silent {
+        if said.contains(model) {
+            continue;
+        }
+        let lit: Vec<&str> = nets
+            .iter()
+            .filter(|n| by_net.contains_key(*n) && !dark.contains(n.as_str()))
+            .map(String::as_str)
+            .collect();
+        if lit.is_empty() {
+            continue;
+        }
+        said.push(model);
+        crate::warn_user!(
+            "X{inst} ('{model}') is wired to {} — an optical net whose wavelength is \
+             known — but declares no wavelength routing, so nothing downstream of it \
+             inherits a label and will be evaluated at the band centre instead of the \
+             colour actually present. A Verilog-A model written against the bundle-port \
+             dialect (`optical_bundle`) declares this for you; a fixed-port one cannot, \
+             because nothing can tell which of its ports is an input. Either port it to \
+             the dialect, or set the wavelength on the instances downstream.",
+            lit.join(", ")
+        );
+    }
 }

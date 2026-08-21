@@ -626,7 +626,7 @@ impl Circuit {
     ///   is not on the card and stays yours either way.
     ///
     ///   Solver options (apply to all analyses): `reltol`, `abstol`, `vntol`,
-    ///   `lambdatol`, `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
+    ///   `vmax`, `gmin`, `itl1`, `itl4`, `maxstep`,
     ///   `method` (`"be"` | `"tr"` | `"gear"`), `uic`, `temp` (°C),
     ///   `solver` (`"dense"` | `"sparse"` | `"auto"` | `"klu"`),
     ///   `variable_step` (bool, enables LTE-controlled variable-step transient),

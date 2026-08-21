@@ -21,18 +21,24 @@
 //! | `optical_bundle p, q;` | `3·N` (or `5·N`) `inout` ports per bundle, with disciplines |
 //! | `N(p)` | the channel count, as a literal |
 //! | `E_RE(p,k)` / `E_IM(p,k)` | `p_re_k` / `p_im_k` — the field wires |
-//! | `WL(p,k)` | `p_wl_k` — the wavelength *wire*, for passing the tag through |
-//! | `LAMBDA(p,k)` | a generated `parameter real wl_k` — the wavelength *value* |
+//! | `LAMBDA(p,k)` | a generated `parameter real wl_k`, filled by resolution |
 //!
-//! `WL` and `LAMBDA` are deliberately different things. Contributing from the λ
-//! wire is the one real footgun in optical Verilog-A: propagation phase is
+//! # There is no λ accessor, and no passthrough to write
+//!
+//! There used to be two: `WL(p,k)` for the λ *wire* and `LAMBDA(p,k)` for the
+//! *value*, with the author expected to pass the tag along by hand
+//! (`OWL(WL(b,k)) <+ OWL(WL(a,k));`) and compute from the parameter. The wire
+//! was the one real footgun in optical Verilog-A — propagation phase is
 //! thousands of radians, so `∂φ/∂λ = φ/λ` is of order 1e9 per metre, and letting
-//! the compiler differentiate that against the λ unknown stops Newton
-//! converging at some wavelengths and not others. `LAMBDA` is a parameter, so it
-//! has no derivative and cannot do that; `WL` exists only so a model can pass
-//! the tag along and stay composable with native devices. The rule the user
-//! guide currently states as advice — take the wavelength from a parameter,
-//! never off the wire — becomes something the dialect expresses.
+//! the compiler differentiate that against a λ unknown stops Newton converging
+//! at some wavelengths and not others.
+//!
+//! λ is no longer an unknown at all (see `fairchild_core::lambda`), so there is
+//! nothing to differentiate and nothing to propagate: the elaborator knows every
+//! λ net in the deck and fills `wl_k` from it. The λ ports are still declared —
+//! the `X`-line ABI is positional and a bundle is `wpc·N` wires wide either way —
+//! they simply carry no equation. A source that still writes `WL` is refused by
+//! name rather than silently expanded into a contribution that goes nowhere.
 //!
 //! # Not a Verilog-A parser
 //!
@@ -73,6 +79,62 @@ impl BundleModule {
     /// Terminal count at `n` channels: every bundle contributes `wpc·n`.
     pub fn terminals_at(&self, n: usize, wpc: usize) -> usize {
         self.scalars.len() + self.bundles.len() * wpc * n
+    }
+
+    /// Terminal offset of each bundle port, in declaration-list order, for a
+    /// module built at `n` channels with `wpc` wires per channel.
+    ///
+    /// Positional: this walks the *header* order, not the bundle order, because
+    /// a scalar port between two bundles shifts everything after it. Getting it
+    /// wrong points λ at a field wire, which reads as a wavelength of 0.06 m.
+    fn bundle_offsets(&self, n: usize, wpc: usize) -> Vec<usize> {
+        let mut offsets = Vec::with_capacity(self.bundles.len());
+        let mut at = 0usize;
+        for p in &self.header {
+            if self.bundles.contains(p) {
+                offsets.push(at);
+                at += wpc * n;
+            } else {
+                at += 1;
+            }
+        }
+        offsets
+    }
+
+    /// Every terminal of this module that carries a wavelength label: the last
+    /// wire of every channel of every bundle port.
+    pub fn lambda_terminals(&self, n: usize, wpc: usize) -> Vec<usize> {
+        let lam = wpc - 1;
+        self.bundle_offsets(n, wpc)
+            .into_iter()
+            .flat_map(|off| (0..n).map(move |k| off + wpc * k + lam))
+            .collect()
+    }
+
+    /// How a label moves through this module: within a channel slot, between
+    /// every pair of bundle ports, both ways.
+    ///
+    /// A bundle model has one channel grid — `LAMBDA(p,k)` expands to `wl_k`
+    /// whatever `p` is, so slot `k` *is* a wavelength across the whole module —
+    /// and that is what makes the routing derivable without asking the author
+    /// which port is an input. Resolution takes the label from whichever port a
+    /// source actually reached; the cycle the both-ways edges create terminates
+    /// because revisiting a net with the value it already has changes nothing.
+    pub fn lambda_routing(&self, n: usize, wpc: usize) -> Vec<(usize, usize)> {
+        let lam = wpc - 1;
+        let offsets = self.bundle_offsets(n, wpc);
+        let mut pairs = Vec::new();
+        for (i, &a) in offsets.iter().enumerate() {
+            for (j, &b) in offsets.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                for k in 0..n {
+                    pairs.push((a + wpc * k + lam, b + wpc * k + lam));
+                }
+            }
+        }
+        pairs
     }
 
     /// Solve `flattened` for a channel count, if one fits exactly.
@@ -204,6 +266,22 @@ pub fn expand(src: &str, m: &BundleModule, n: usize, wpc: usize) -> Result<Strin
             detail: format!("module `{}` cannot be built for 0 channels", m.name),
         });
     }
+    // `WL(p,k)` was the λ *wire* accessor, for a passthrough contribution the
+    // author had to write. λ is not an unknown any more, so there is no wire to
+    // contribute to and the line would expand into a contribution that goes
+    // nowhere — a silently dead model rather than a broken one. Refuse by name.
+    if decommented(src).contains("WL(") {
+        return Err(OsdiError::Dialect {
+            detail: format!(
+                "module `{}` uses `WL(...)`, which no longer exists: a wavelength is \
+                 resolved before the solve rather than solved for, so the λ wire carries \
+                 no equation and nothing has to pass it along. Delete the \
+                 `OWL(WL(out,k)) <+ OWL(WL(in,k));` line; read the wavelength with \
+                 `LAMBDA(port, k)`, which the elaborator fills from the deck's sources.",
+                m.name
+            ),
+        });
+    }
     let mut out = String::with_capacity(src.len() * 2);
     let uses_lambda = src.contains("LAMBDA(");
 
@@ -242,9 +320,10 @@ pub fn expand(src: &str, m: &BundleModule, n: usize, wpc: usize) -> Result<Strin
                 writeln!(out, "    optical_lambda {};", lam.join(", ")).unwrap();
             }
             if uses_lambda {
-                // One wavelength parameter per channel. Until λ is resolved
-                // before the solve, the deck sets these; after, the elaborator
-                // fills them and the author's source does not change.
+                // One wavelength parameter per channel, filled from resolution
+                // at build time (see `OsdiDevice::set_resolved_lambda`). The
+                // default is what a channel no source reaches falls back to,
+                // and what a deck sets when it wants to override.
                 writeln!(out, "    parameter real wl_default = 1550e-9 from (0:inf);").unwrap();
                 for k in 0..n {
                     writeln!(out, "    parameter real wl_{k} = wl_default from (0:inf);").unwrap();
@@ -363,7 +442,7 @@ fn substitute(line: &str, m: &BundleModule, var: &str, k: usize, n: usize, wpc: 
     }
     // Accessors take (port, index). The index is the loop variable, or a
     // literal, so a model may address one channel without a loop.
-    for (call, suffix) in [("E_RE", "re"), ("E_IM", "im"), ("WL", "wl")] {
+    for (call, suffix) in [("E_RE", "re"), ("E_IM", "im")] {
         s = replace_accessor(&s, call, m, var, k, |port, idx| {
             format!("{port}_{suffix}_{idx}")
         });
@@ -450,7 +529,6 @@ module wg_wdm(a, b, ctrl);
     analog begin
         for (k = 0; k < N(a); k = k + 1) begin
             OF(E_RE(b, k)) <+ OF(E_RE(a, k)) * cos(LAMBDA(a, k));
-            OWL(WL(b, k)) <+ OWL(WL(a, k));
         end
     end
 endmodule
@@ -494,10 +572,13 @@ endmodule
         assert!(!out.contains("for ("), "loop should be unrolled:\n{out}");
         assert!(out.contains("OF(b_re_0) <+ OF(a_re_0) * cos(wl_0);"));
         assert!(out.contains("OF(b_re_1) <+ OF(a_re_1) * cos(wl_1);"));
-        // λ: the wire is passed through, the value is a parameter. Confusing
-        // the two is the one real footgun in optical Verilog-A.
-        assert!(out.contains("OWL(b_wl_1) <+ OWL(a_wl_1);"));
+        // λ is a parameter the elaborator fills, and there is no λ wire to
+        // contribute to: the ports exist for the ABI and carry no equation.
         assert!(out.contains("parameter real wl_1 = wl_default"));
+        assert!(
+            !out.contains("OWL("),
+            "nothing should drive a λ wire:\n{out}"
+        );
         // Disciplines declared for the generated wires.
         assert!(out.contains("optical_field"));
         assert!(out.contains("optical_lambda"));
@@ -533,5 +614,38 @@ endmodule
     fn zero_channels_is_refused() {
         let m = scan(WG).unwrap().unwrap();
         assert!(expand(WG, &m, 0, 3).is_err());
+    }
+
+    /// A source written against the old dialect must be refused by name. λ has
+    /// no equation any more, so `OWL(WL(b,k)) <+ OWL(WL(a,k));` would expand
+    /// into a contribution that goes nowhere — a model that compiles, runs, and
+    /// propagates nothing.
+    #[test]
+    fn the_retired_lambda_wire_accessor_is_refused_by_name() {
+        let src = WG.replace(
+            "OF(E_RE(b, k)) <+ OF(E_RE(a, k)) * cos(LAMBDA(a, k));",
+            "OWL(WL(b, k)) <+ OWL(WL(a, k));",
+        );
+        let m = scan(&src).unwrap().unwrap();
+        let e = expand(&src, &m, 2, 3).unwrap_err();
+        let msg = format!("{e}");
+        assert!(msg.contains("WL("), "{msg}");
+        assert!(msg.contains("LAMBDA"), "the fix must be named: {msg}");
+    }
+
+    /// λ terminal indices are positional, and a scalar port between two bundles
+    /// shifts every terminal after it. `WG` has its scalar last; this checks the
+    /// arithmetic against a header where it is not.
+    #[test]
+    fn lambda_terminals_and_routing_follow_the_header_order() {
+        let src = "module m(a, ctrl, b);\n optical_bundle a, b;\n electrical ctrl;\nendmodule\n";
+        let m = scan(src).unwrap().unwrap();
+        // N=2, wpc=3: a occupies 0..6, ctrl is 6, b occupies 7..13.
+        assert_eq!(m.lambda_terminals(2, 3), vec![2, 5, 9, 12]);
+        let routing = m.lambda_routing(2, 3);
+        // Both ways, per slot: a↔b for k=0 and k=1.
+        assert_eq!(routing.len(), 4);
+        assert!(routing.contains(&(2, 9)) && routing.contains(&(9, 2)));
+        assert!(routing.contains(&(5, 12)) && routing.contains(&(12, 5)));
     }
 }

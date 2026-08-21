@@ -22,7 +22,12 @@ mod common;
 const L_UM: f64 = 1000.0;
 const N_G: f64 = 4.2;
 const ALPHA: f64 = 3.0;
-const WL_NM: f64 = 1550.0;
+/// Deliberately *not* the 1550 nm band centre. `wl_default` in the generated
+/// source is 1550 nm, and an unreached λ port falls back to the band centre, so
+/// a wavelength that never reached the model would land on 1550 either way. At
+/// 1310 nm the phase through 1 mm differs by thousands of radians, which shows
+/// up as a different `(re, im)` split against the native anchor.
+const WL_NM: f64 = 1310.0;
 
 /// A deck putting `model` on an n-channel bundle beside a native waveguide fed
 /// from the same lasers, so the two can be compared channel by channel.
@@ -54,6 +59,13 @@ fn power_of(r: &fairchild_core::NrResult, port: &str, ch: usize) -> f64 {
     let re = r.node_voltage(&format!("{port}_re_{ch}")).unwrap();
     let im = r.node_voltage(&format!("{port}_im_{ch}")).unwrap();
     re * re + im * im
+}
+
+fn field_of(r: &fairchild_core::NrResult, port: &str, ch: usize) -> (f64, f64) {
+    (
+        r.node_voltage(&format!("{port}_re_{ch}")).unwrap(),
+        r.node_voltage(&format!("{port}_im_{ch}")).unwrap(),
+    )
 }
 
 /// Build a registry with `wg_bundle.va` generated for exactly the widths this
@@ -111,7 +123,79 @@ fn run_at(powers: &[f64]) {
             "N={n} channel {ch}: got {dut:.12} W, hand-computed {expect:.12} W \
              from its own launched {launched:.6} W"
         );
+        // Power alone cannot see the wavelength — loss does not depend on it —
+        // and the native anchor cannot arbitrate the phase either, because
+        // `wg_bundle.va` propagates on `n_g` while `fc_waveguide` uses a
+        // dispersion-corrected `n_eff`. So the phase is checked against the
+        // model's own law, `A_out = A_in·amp·exp(−j·2π·n_g·L/λ)`, computed here
+        // from the laser's parameter. This is the half that fails if `wl_<k>` is
+        // not filled from resolution: at the 1550 nm `wl_default` the field
+        // comes out (−0.0356, +0.0726) instead of (+0.0633, −0.0503) on the
+        // 7 mW channel — 3000 rad of accumulated phase apart.
+        let ph = 2.0 * std::f64::consts::PI * N_G * (L_UM * 1e-6) / (WL_NM * 1e-9);
+        let amp = 10f64.powf(-ALPHA * (L_UM * 1e-4) / 20.0);
+        let a_in = launched.sqrt();
+        let (want_re, want_im) = (amp * a_in * ph.cos(), -amp * a_in * ph.sin());
+        let (dut_re, dut_im) = field_of(&r, "dut", ch);
+        assert!(
+            (dut_re - want_re).abs() < 1e-9 && (dut_im - want_im).abs() < 1e-9,
+            "N={n} channel {ch}: generated model gives ({dut_re:.9}, {dut_im:.9}), its \
+             own law at the laser's {WL_NM} nm gives ({want_re:.9}, {want_im:.9}) — the \
+             wavelength it evaluated its phase at is not the one the deck emits"
+        );
     }
+}
+
+/// A label has to reach what comes *after* a generated model.
+///
+/// The dialect used to make this the author's job: `OWL(WL(b,k)) <+ OWL(WL(a,k))`
+/// carried the tag through the matrix. λ is not a matrix quantity any more, so
+/// a bundle model instead *declares* its λ terminals and its slot-for-slot
+/// routing, and resolution walks through it. Left undeclared, everything
+/// downstream resolves to the band centre — the wrong wavelength with no
+/// diagnostic, which is the failure this checks for.
+///
+/// The anchor is the native waveguide's own dispersion-corrected law at the
+/// laser's 1310 nm, evaluated here. At the 1550 nm band centre the phase
+/// increment differs by hundreds of radians.
+#[test]
+fn a_label_reaches_the_native_device_downstream_of_a_generated_one() {
+    if !common::have_compiler() {
+        return;
+    }
+    const N_EFF: f64 = 2.445;
+    const TAIL_UM: f64 = 40.0;
+
+    let mut src = deck("wg_bundle", &[7.0]);
+    src = src.replace(
+        ".op\n.end\n",
+        &format!(
+            ".optical_port tail\n\
+             Xtail dut tail fc_waveguide L_um={TAIL_UM} n_eff={N_EFF} n_g={N_G} alpha_dB_cm=0\n\
+             .op\n.end\n"
+        ),
+    );
+    let (reg, net) = registry_for(&src);
+    let r = dc_op_nr_with_registry(&net, &reg).expect("DC OP converges");
+
+    let (a_re, a_im) = field_of(&r, "dut", 0);
+    let (b_re, b_im) = field_of(&r, "tail", 0);
+    // The native segment linearises dispersion about `wl_ref_m`, which defaults
+    // to the band centre.
+    let lambda = WL_NM * 1e-9;
+    let wl_ref = 1.55e-6;
+    let n_eff_lam = N_EFF + (lambda - wl_ref) * (N_EFF - N_G) / wl_ref;
+    let want = 2.0 * std::f64::consts::PI * n_eff_lam * (TAIL_UM * 1e-6) / lambda;
+    let got = -((b_im * a_re - b_re * a_im).atan2(b_re * a_re + b_im * a_im));
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let diff = (got - want).rem_euclid(two_pi);
+    let diff = diff.min(two_pi - diff);
+    assert!(
+        diff < 1e-6,
+        "the waveguide after the generated model turned the field by {got:.6} rad; \
+         the laser's {WL_NM} nm implies {want:.6} rad (mod 2π) — the label did not \
+         propagate through the Verilog-A bundle model"
+    );
 }
 
 #[test]

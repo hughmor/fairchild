@@ -1,21 +1,17 @@
-//! λ is propagated, never computed — the premise behind resolving it at setup.
+//! λ is propagated, never computed — the premise the whole design rests on.
 //!
-//! A wavelength wire occupies an MNA row, needs its own tolerance class
-//! (`lambdatol`, because `vntol=1e-6` is meaningless against a 1.55e-6
-//! quantity), has to be excluded from the `vmax` trust region (a volt-scaled
-//! region once scaled λ from 1.55 µm to 1e-19 m and destroyed every optical
-//! phase in the circuit), and needs `LambdaSelect`'s latch heuristic to decide
-//! which input to mirror. All of that exists because λ is solved.
+//! This was written while λ was still an MNA unknown, to establish that every λ
+//! row either was driven by a source or copied another λ row — that the solver
+//! was doing label propagation and nothing else. That is what made it safe to
+//! stop solving for λ; the rows are gone now (see `crate::lambda`,
+//! `lambda_is_not_an_unknown.rs`) and `V(p_wl_0)` reads the resolved label.
 //!
-//! It is solved, but it is never *computed*: every λ row is either driven by a
-//! source or copies another λ row. The solver is doing label propagation. This
-//! test pins that, because it is the fact that makes resolving λ before the
-//! solve possible at all — and if some future device ever genuinely computes a
-//! wavelength (four-wave mixing, a Raman shift), this is the test that will say
-//! so rather than letting the assumption rot.
-//!
-//! `crates/fairchild-core/src/models/photonic/mod.rs` carries the matching
-//! `ponytail:` note on `LambdaSelect`.
+//! It is kept because the premise still has to hold, and nothing else checks
+//! it: every wavelength in a converged deck must be one some source emits, or
+//! the band centre an unreached port takes. If a future device genuinely
+//! *computes* a wavelength — four-wave mixing, a Raman shift — resolution
+//! cannot express it, and this is the test that will say so rather than
+//! quietly reporting a pump's colour on an idler wire.
 
 use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
