@@ -36,12 +36,16 @@ brew install ngspice suite-sparse        # macOS
 sudo apt-get install ngspice libsuitesparse-dev
 ```
 
-openvaf-r ships prebuilt, and needs no LLVM of its own:
+openvaf-r ships prebuilt with the LLVM it needs, so there is nothing to build:
 
 ```bash
-# https://github.com/OpenVAF/OpenVAF-Reloaded/releases — bin/openvaf-r onto PATH.
-# On macOS the release's Mach-O files must be re-signed before they will run at
-# all (they were modified after signing, so the kernel kills them on exec):
+# https://github.com/OpenVAF/OpenVAF-Reloaded/releases — put bin/openvaf-r on PATH.
+#
+# Linux: the binary has no rpath to the bundled LLVM, so point the loader at it:
+#   export LD_LIBRARY_PATH=<unpacked>/lib
+#
+# macOS: re-sign before first use. The release's Mach-O files were modified after
+# signing, so the kernel kills the process on exec — SIGKILL, no output at all:
 #   for f in lib/*.dylib bin/openvaf-r; do codesign --force --sign - "$f"; done
 ```
 

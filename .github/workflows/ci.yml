@@ -90,6 +90,14 @@ jobs:
             fi
           fi
           echo "$HOME/.local/openvaf/bin" >> "$GITHUB_PATH"
+          # The Linux binary carries no rpath to the LLVM it ships with, so the
+          # loader has to be told where `lib/` is — otherwise it exits 127 on
+          # `libLLVM.so.21.1` before printing anything of its own. The macOS
+          # build resolves its dylibs through @executable_path and needs none of
+          # this.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            echo "LD_LIBRARY_PATH=$HOME/.local/openvaf/lib" >> "$GITHUB_ENV"
+          fi
 
       # Every ngspice golden test skips itself — green, having compared nothing —
       # when ngspice is not on PATH, and every OSDI test does the same without a
