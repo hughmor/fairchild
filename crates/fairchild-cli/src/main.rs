@@ -14,7 +14,10 @@ use fairchild_core::{
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
-use fairchild_parser::{check_disciplines, parse_spice_file, AcVariation, Analysis, Netlist};
+use fairchild_parser::{
+    check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, Netlist,
+    PermissiveArity, StaticArity,
+};
 
 /// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
 /// its four call sites when the OSDI feature is off.
@@ -416,7 +419,32 @@ fn main() {
         fairchild_core::set_quiet(true);
     }
 
-    let mut netlist = parse_spice_file(&cli.file).unwrap_or_else(|e| {
+    // Two passes, because WDM dispatch is the registry's answer and the
+    // registry is built from what a parse produces (#52).  Pass one is
+    // permissive and exists only to harvest `.model` cards and model-file
+    // paths — nothing about those depends on how bundles expand — so the
+    // registry it feeds can then place every instance by what its name really
+    // resolves to, including a card's own name, which the parser cannot know.
+    // Parsing is milliseconds; this is not a hot path.
+    let parse_dir = cli.file.parent().map(|p| p.to_path_buf());
+    // Pass one's warnings are pass two's, so emitting them would double every
+    // one. Silence the library for the probe and put the setting back.
+    let was_quiet = fairchild_parser::warn::quiet();
+    fairchild_parser::warn::set_quiet(true);
+    let probe = parse_spice_file_with_arity(&cli.file, &PermissiveArity);
+    let arity_reg = probe
+        .as_ref()
+        .ok()
+        .map(|n| build_registry(n, parse_dir.as_ref(), true, &va_options(&cli)));
+    fairchild_parser::warn::set_quiet(was_quiet);
+
+    // A pass-one failure is a real parse error; report it from the pass that
+    // uses the honest oracle so the message is the one the user should see.
+    let mut netlist = match arity_reg {
+        Some(reg) => parse_spice_file_with_arity(&cli.file, &reg),
+        None => parse_spice_file_with_arity(&cli.file, &StaticArity),
+    }
+    .unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
     });

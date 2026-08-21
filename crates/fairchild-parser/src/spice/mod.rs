@@ -5,7 +5,9 @@ mod element;
 mod subckt;
 mod waveforms;
 
-pub use bundles::{bundle_arity_for, BundleArity};
+pub use bundles::{
+    bundle_arity_for, ArityOracle, ArityQuery, BundleArity, PermissiveArity, StaticArity,
+};
 
 /// Parse a SPICE numeric literal, including the engineering suffixes a netlist
 /// accepts: `k`, `meg`, `m`, `u`, `n`, `p`, `f`, `g`, `t` (case-insensitive).
@@ -44,14 +46,25 @@ use std::path::{Path, PathBuf};
 /// [`parse_spice_file`] when the deck lives on disk — it resolves includes
 /// relative to the deck, which is what a library of `.subckt` files wants.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
+    parse_spice_with_arity(input, &StaticArity)
+}
+
+/// [`parse_spice`], with WDM dispatch decided by `oracle` rather than by the
+/// static table.  This is the second of the two passes a registry-backed load
+/// performs: see [`ArityOracle`] for why the policy is injected instead of
+/// owned.
+pub fn parse_spice_with_arity(
+    input: &str,
+    oracle: &dyn ArityOracle,
+) -> Result<Netlist, ParseError> {
     // Resolving here (rather than only in parse_spice_file) means a
     // programmatically-built deck — Python's `load_str`, a fit script's
     // card + netlist concatenation — can pull in shared PCell files too.
     let resolved = resolve_includes(input, None, 0)?;
-    parse_resolved(&resolved)
+    parse_resolved(&resolved, oracle)
 }
 
-fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
+fn parse_resolved(input: &str, oracle: &dyn ArityOracle) -> Result<Netlist, ParseError> {
     let all_lines = logical_lines(input);
     let mut netlist = Netlist::default();
 
@@ -290,8 +303,13 @@ fn parse_resolved(input: &str) -> Result<Netlist, ParseError> {
                     }
                     _ => None,
                 };
-                let expanded_elements =
-                    expand_bundle_ports(base_el, &netlist.bundle_ports, subckt_ports, *lineno)?;
+                let expanded_elements = expand_bundle_ports(
+                    base_el,
+                    &netlist.bundle_ports,
+                    subckt_ports,
+                    *lineno,
+                    oracle,
+                )?;
 
                 for el in expanded_elements {
                     let is_subckt_inst = if let Element::XOsdi { ref model_name, .. } = el {
@@ -562,6 +580,14 @@ fn extract_lib_section(content: &str, section: &str) -> Option<String> {
 /// Parse a SPICE netlist file, resolving `.include` directives relative to
 /// the file's parent directory.
 pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
+    parse_spice_file_with_arity(path, &StaticArity)
+}
+
+/// [`parse_spice_file`], with WDM dispatch decided by `oracle`.
+pub fn parse_spice_file_with_arity(
+    path: &Path,
+    oracle: &dyn ArityOracle,
+) -> Result<Netlist, ParseError> {
     let src = std::fs::read_to_string(path).map_err(|e| ParseError::Syntax {
         line: 0,
         msg: format!("cannot read '{}': {e}", path.display()),
@@ -574,7 +600,7 @@ pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
         src
     };
     let resolved = resolve_includes(&src, path.parent(), 0)?;
-    parse_resolved(&resolved)
+    parse_resolved(&resolved, oracle)
 }
 
 // ─── analysis directive parsers ───────────────────────────────────────────────
@@ -1387,7 +1413,11 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("no WDM semantics"), "{msg}");
-        assert!(msg.contains("bundle_arity_for"), "{msg}");
+        // The advice names the terminal count that would fit, because that is
+        // what now decides dispatch — it used to say "add it to
+        // bundle_arity_for", which stopped being where anyone can fix this once
+        // the registry became the authority (#52).
+        assert!(msg.contains("24 terminals"), "{msg}");
     }
 
     /// The same instance on 1-channel bundles expands in place — the case where

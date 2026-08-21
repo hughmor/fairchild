@@ -219,6 +219,13 @@ one thing a circulator is for.
 
 ### One physical device, all the modes
 
+Which devices are bundle-aware is the **device registry's** answer, not a list
+in the parser. A native model declares it where it is registered; a model loaded
+from an OSDI descriptor is placed by terminal count, the same rule a `.subckt`
+instance follows. That is why a `.model` card carrying a photonic kind works on
+a bundle — the card inherits its kind's dispatch — and why a user's own
+Verilog-A model can carry one too.
+
 A bundle-aware device such as `fc_pn_ps` is ONE physical junction interacting
 with N optical channels, not N devices. Shared physics integrates across every
 mode, and the stamps enforce it:

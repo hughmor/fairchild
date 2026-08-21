@@ -22,7 +22,10 @@ use fairchild_core::{
     tran_nr_with_registry_var_opts, AcResult, DcSweepResult, DeviceRegistry, NrResult, Output,
     ParamRef, SimError, SimOptions, TranAdjoint, TranResult,
 };
-use fairchild_parser::{parse_spice, parse_spice_file, AcVariation, Analysis, Netlist};
+use fairchild_parser::{
+    parse_spice_file_with_arity, parse_spice_with_arity, AcVariation, Analysis, ArityOracle,
+    Netlist, PermissiveArity,
+};
 
 // ---------------------------------------------------------------------------
 // Error conversion
@@ -458,8 +461,13 @@ impl Circuit {
     #[allow(clippy::useless_conversion)]
     pub fn load(&mut self, path: &str) -> PyResult<()> {
         let p = PathBuf::from(path);
-        let netlist = parse_spice_file(&p).map_err(parse_err)?;
-        self.netlist_dir = p.parent().map(|d| d.to_path_buf());
+        let dir = p.parent().map(|d| d.to_path_buf());
+        // See `two_pass` — WDM dispatch is the registry's answer, and the
+        // registry comes from a parse.
+        let netlist = two_pass(dir.as_ref(), |oracle| {
+            parse_spice_file_with_arity(&p, oracle).map_err(parse_err)
+        })?;
+        self.netlist_dir = dir;
         self.netlist = Some(netlist);
         Ok(())
     }
@@ -467,7 +475,9 @@ impl Circuit {
     /// Load a netlist from a SPICE string.
     #[allow(clippy::useless_conversion)]
     pub fn load_str(&mut self, src: &str) -> PyResult<()> {
-        let netlist = parse_spice(src).map_err(parse_err)?;
+        let netlist = two_pass(None, |oracle| {
+            parse_spice_with_arity(src, oracle).map_err(parse_err)
+        })?;
         self.netlist_dir = None;
         self.netlist = Some(netlist);
         Ok(())
@@ -1096,6 +1106,31 @@ fn apply_source_overrides(netlist: &mut Netlist, overrides: &HashMap<String, Vec
 /// The resolving and loading is `fairchild_osdi::load_libraries`, shared with
 /// the CLI. There is no command line here to carry `--openvaf`, so the compiler
 /// and cache come from `FAIRCHILD_OPENVAF` / `FAIRCHILD_VA_CACHE`.
+/// Parse twice, so the registry decides WDM dispatch (#52).
+///
+/// Pass one is permissive and only its `.model` cards and model-file paths are
+/// used — neither depends on how bundles expand. The registry built from those
+/// then places every instance by what its name really resolves to, which for a
+/// card-named device the parser can never work out on its own.
+fn two_pass(
+    netlist_dir: Option<&PathBuf>,
+    parse: impl Fn(&dyn ArityOracle) -> PyResult<Netlist>,
+) -> PyResult<Netlist> {
+    // Pass one's warnings are pass two's; emitting both would double every one.
+    let was_quiet = fairchild_parser::warn::quiet();
+    fairchild_parser::warn::set_quiet(true);
+    let probe = parse(&PermissiveArity).and_then(|n| {
+        let reg = build_registry(&n, netlist_dir)?;
+        Ok(reg)
+    });
+    fairchild_parser::warn::set_quiet(was_quiet);
+    match probe {
+        Ok(reg) => parse(&reg),
+        // Pass one failed: let the honest oracle produce the error the user sees.
+        Err(_) => parse(&fairchild_parser::StaticArity),
+    }
+}
+
 fn build_registry(netlist: &Netlist, netlist_dir: Option<&PathBuf>) -> PyResult<DeviceRegistry> {
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_models(&netlist.models);

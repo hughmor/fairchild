@@ -68,16 +68,73 @@ pub enum BundleArity {
     Bridge,
 }
 
-/// Return the WDM dispatch policy for a model name.  Centralises the
-/// hard-coded list of bundle-aware native photonics so the parser doesn't
-/// scatter `if model == "fc_pn_ps" || ...` chains.
+/// What an instance would look like under each dispatch, so an oracle can
+/// decide by shape rather than by name.
 ///
-/// The static `match` is not just convenience: `fairchild-core` depends on
-/// `fairchild-parser`, so the parser cannot ask the device registry what a
-/// model is.  A device outside this list therefore falls through to `Scalar`.
-/// That used to mean "silently replicate"; it now means "refuse a
-/// multi-channel bundle and say so", which is the failure mode a new
-/// bundle-aware model wants — the error names the fix.
+/// `flattened` and `single` are terminal counts: what the X-element would carry
+/// if every referenced bundle were expanded to all its wires, and what it would
+/// carry if each contributed one channel.  A model with a fixed terminal count
+/// — anything loaded from an OSDI descriptor — is placed by comparing the two
+/// against `num_terminals`, which is the rule a `.subckt` instance already
+/// follows.
+#[derive(Clone, Copy, Debug)]
+pub struct ArityQuery<'a> {
+    pub model_name: &'a str,
+    pub flattened: usize,
+    pub single: usize,
+}
+
+/// Who decides a model's WDM dispatch.
+///
+/// The parser cannot ask the device registry directly — `fairchild-core`
+/// depends on `fairchild-parser`, so the dependency runs the wrong way — which
+/// is why [`bundle_arity_for`] existed as a hand-maintained copy of what the
+/// registry knows.  Two lists of one fact drifted, repeatedly: five tier names
+/// were missing from it, and a `.model`-card-named instance is looked up under
+/// the *card's* name, so no card-based device could ever be found there at all.
+///
+/// Accepting a policy instead of owning one inverts that without inverting the
+/// crate dependency.  `None` means "no opinion" and falls back to the static
+/// table, so a parse with no registry behaves exactly as before.
+pub trait ArityOracle {
+    fn arity(&self, q: &ArityQuery) -> Option<BundleArity>;
+}
+
+/// The historic hard-coded table, as an oracle.  What `parse_spice` uses when
+/// no registry is available: parser unit tests, and any tool that only wants a
+/// syntax tree.
+pub struct StaticArity;
+
+impl ArityOracle for StaticArity {
+    fn arity(&self, q: &ArityQuery) -> Option<BundleArity> {
+        Some(bundle_arity_for(q.model_name))
+    }
+}
+
+/// Maximally permissive, for the first of two passes.
+///
+/// Pass one exists only to harvest `.model` cards and model-file paths so the
+/// registry can be built; its expansion is thrown away.  It must therefore not
+/// fail on the very case the second pass is there to get right — a card-named
+/// device on a wide bundle.  `Bridge` flattens and skips the channel-count
+/// agreement check, so almost any deck survives to pass two, where the real
+/// oracle produces the real answer and any real error.
+pub struct PermissiveArity;
+
+impl ArityOracle for PermissiveArity {
+    fn arity(&self, q: &ArityQuery) -> Option<BundleArity> {
+        match bundle_arity_for(q.model_name) {
+            BundleArity::Scalar => Some(BundleArity::Bridge),
+            known => Some(known),
+        }
+    }
+}
+
+/// Return the WDM dispatch policy for a model name.
+///
+/// No longer the authority — see [`ArityOracle`].  This is the fallback for a
+/// parse with no registry behind it, and it can only ever recognise a name
+/// written literally on an X-line.
 pub fn bundle_arity_for(model_name: &str) -> BundleArity {
     match model_name.to_lowercase().as_str() {
         // Bundle bridges — N single-channel ports ↔ one N-channel bus.
@@ -131,6 +188,7 @@ pub(super) fn expand_bundle_ports(
     ports: &[crate::BundlePort],
     subckt_ports: Option<usize>,
     lineno: usize,
+    oracle: &dyn ArityOracle,
 ) -> Result<Vec<Element>, ParseError> {
     let Element::XOsdi {
         name,
@@ -163,8 +221,28 @@ pub(super) fn expand_bundle_ports(
             params,
         }]);
     }
-    // Dispatch by WDM policy.  See `BundleArity` for semantics.
-    let arity = bundle_arity_for(&model_name);
+    // Dispatch by WDM policy.  See `BundleArity` for semantics.  The oracle
+    // decides; the static table is only the fallback when nothing better is
+    // available (see `ArityOracle`).  Both candidate terminal counts go with
+    // the query so an oracle holding a fixed-arity descriptor can place the
+    // instance by shape instead of by name.
+    let widths = |per_port: &dyn Fn(&crate::BundlePort) -> usize| -> usize {
+        nets.iter()
+            .zip(port_refs.iter())
+            .map(|(_, r)| match r {
+                Some(i) => per_port(&ports[*i]),
+                None => 1,
+            })
+            .sum()
+    };
+    let query = ArityQuery {
+        model_name: &model_name,
+        flattened: widths(&|p| p.channels * p.wires_per_channel()),
+        single: widths(&|p| p.wires_per_channel()),
+    };
+    let arity = oracle
+        .arity(&query)
+        .unwrap_or_else(|| bundle_arity_for(&model_name));
 
     // Helper: flatten every referenced bundle into its underlying wires, in
     // declaration order, into one combined net vector.
@@ -277,7 +355,9 @@ pub(super) fn expand_bundle_ports(
                  channels, and replicating it would duplicate any electrical port \
                  {max_n}× onto the same nodes. Connect a single channel, use \
                  fc_demux/fc_mux to split and recombine, or — if this model really is \
-                 bundle-aware — add it to bundle_arity_for in the parser."
+                 bundle-aware — give it {} terminals so the whole bus fits, since a \
+                 model's terminal count is what decides this.",
+                query.flattened
             ),
         });
     }

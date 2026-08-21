@@ -1787,10 +1787,24 @@ Verilog-A has no way to express. Sweep wavelength with `--param` or
 `10^(−dB/20)`. Everything under `legacy/` predates commit `0f689cb` and is a
 factor of two out.
 
-Verilog-A optical models are single-channel and forward-only. WDM bundle
-awareness, bidirectional propagation, `DelayLine` group delay and
-`PhotonicActiveModel` composition are native-Rust features a Verilog-A model
-cannot reach; see [Photonic models](photonic-models.md).
+**A Verilog-A model can carry a WDM bundle**, as long as it declares the ports
+for it. Dispatch is decided by terminal count: write out the `3·N` wires a
+channel bundle expands to (`5·N` under `enable_bidirectional`), and an
+`.optical_port bus N` connects to it as one instance serving the whole bus. The
+order is positional and per channel — `[re, im, λ]` for channel 0, then channel
+1, and so on, input bundle before output bundle — so a wrong guess is a wrong
+answer rather than an error. `crates/fairchild-osdi/tests/models/wg_wdm2.va` is
+a worked two-channel example.
+
+The width is fixed at compile time, so today one source serves one channel
+count. Generating the ports per N from a single source is
+[issue #55](https://github.com/hughmor/fairchild/issues/55).
+
+Still native-only: bidirectional propagation, `DelayLine` group delay, and
+`PhotonicActiveModel` composition. And a model must still take λ from a
+parameter rather than the wire — see above; making that safe is
+[issue #54](https://github.com/hughmor/fairchild/issues/54). See
+[Photonic models](photonic-models.md).
 
 ### 14.4 Instantiating
 

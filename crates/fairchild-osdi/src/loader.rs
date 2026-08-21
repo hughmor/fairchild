@@ -110,6 +110,15 @@ impl OsdiLibrary {
             if name.is_empty() {
                 continue;
             }
+            // A descriptor's terminal count is fixed at compile time, so WDM
+            // dispatch can be settled by shape: if flattening the referenced
+            // bundles lands on exactly this many terminals, the instance takes
+            // the whole bus. Same rule a `.subckt` instance already follows, and
+            // the reason a user's own model can carry a WDM bundle at all (#52).
+            registry.declare_arity(
+                name.clone(),
+                fairchild_core::ArityDecl::Terminals(desc.num_terminals as usize),
+            );
             let lib = Arc::clone(self);
             registry.register(name, move |terminals, params: &ParamSet, ctx| {
                 let mut dev = OsdiDevice::from_library(Arc::clone(&lib), i)

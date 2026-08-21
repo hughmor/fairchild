@@ -7,7 +7,11 @@ pub mod warn;
 pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
 pub use spectre::parse_spectre;
-pub use spice::{bundle_arity_for, parse_spice, parse_spice_file, parse_spice_value, BundleArity};
+pub use spice::{
+    bundle_arity_for, parse_spice, parse_spice_file, parse_spice_file_with_arity,
+    parse_spice_value, parse_spice_with_arity, ArityOracle, ArityQuery, BundleArity,
+    PermissiveArity, StaticArity,
+};
 
 /// The `AC <mag> [phase]` small-signal excitation on a source line.
 ///
