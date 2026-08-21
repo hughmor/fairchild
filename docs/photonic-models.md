@@ -237,15 +237,14 @@ mode, and the stamps enforce it:
 - Where a device carries thermal state, the heat is the sum of absorbed power
   across all channels and directions, and the resulting `Δn` applies to all of
   them.
-- Two-photon absorption is driven by that same total intensity, and the
-  resulting `Δα` likewise applies to every channel. This is exact for
-  self-TPA. It is a **bound, not the exact answer, for several wavelengths in
-  one mode**: cross-TPA between distinct frequencies is twice self-TPA, so the
-  true loss on channel *j* is `β/A_eff·(I_j + 2·Σ_{k≠j} I_k)` while the model
-  applies `β/A_eff·Σ_k I_k`. Representing the cross term needs a per-channel
-  `Δα`, which the single perturbation a segment carries cannot express. The
-  error is zero on a single channel and at most a factor of two on a fully
-  loaded bus, always in the direction of under-estimating loss.
+- Two-photon absorption is **per channel**, because cross-TPA between distinct
+  frequencies is twice self-TPA:
+  `α_TPA,j = β/A_eff·(I_j + 2·Σ_{k≠j} I_k) = β/A_eff·(2·Σ_k I_k − I_j)`.
+  A single channel reduces this to self-TPA exactly, so a one-channel deck is
+  unchanged; on a loaded bus each channel carries its own loss, and channels at
+  different powers are attenuated differently. A drive returns `Δn` and `Δα` as
+  a `PerChannel` value — one number when the effect really is shared, one per
+  channel when it is not.
 
 This is a consequence of the representation rather than something to be aware
 of while writing a netlist — but it is why you cannot model two independent

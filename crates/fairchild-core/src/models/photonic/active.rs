@@ -12,7 +12,7 @@
 //! `docs/photonic-models.md` documents every device built this way, including
 //! the tier tables for the phase-shifter families.
 
-use super::segment::OpticalSegment;
+use super::segment::{OpticalSegment, PerChannel};
 use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
@@ -29,11 +29,13 @@ use fairchild_parser::{EvalContext, Expr};
 /// All are mechanism-agnostic and additive — the segment never asks how they
 /// were produced — so any drive physics, and any composition of drives, reduces
 /// to this triple.
-#[derive(Clone, Copy, Debug, Default)]
+// No longer `Copy`: a per-channel value owns a Vec. Every consumer clones
+// explicitly, which keeps the allocation visible at the call site.
+#[derive(Clone, Debug, Default)]
 pub struct OpticalPerturbation {
-    pub dn_eff: f64,
+    pub dn_eff: PerChannel,
     pub dphi: f64,
-    pub dalpha_neper_m: f64,
+    pub dalpha_neper_m: PerChannel,
 }
 
 /// The active physics of an optical device: how electrical/thermal state and
@@ -117,7 +119,10 @@ pub struct ActiveOpticalDevice {
     /// per iteration, negligible against one linear solve.
     elec_nodes: Vec<NodeId>,
     /// Scratch for the finite difference, reused to avoid per-iteration allocs.
-    dpert_dv: Vec<(f64, f64, f64)>,
+    /// Per control node: `(d Δn/dV, d Δφ/dV, d Δα/dV)`. The two per-channel
+    /// members stay `Uniform` for every drive whose effect is shared, so the
+    /// common case allocates nothing.
+    dpert_dv: Vec<(PerChannel, f64, PerChannel)>,
     /// Smallest valid terminal count, recorded when `setup_instance` is handed a
     /// count it cannot use. Without it `num_terminals()` would report the
     /// unconfigured segment's 0 optical wires, and the caller's error message
@@ -170,7 +175,7 @@ impl Device for ActiveOpticalDevice {
         self.model.set_terminals(&terminals[optical_len..]);
         self.elec_nodes = terminals[optical_len..].to_vec();
         self.seg.set_control_nodes(&self.elec_nodes);
-        self.dpert_dv = vec![(0.0, 0.0, 0.0); self.elec_nodes.len()];
+        self.dpert_dv = vec![(PerChannel::zero(), 0.0, PerChannel::zero()); self.elec_nodes.len()];
     }
 
     fn num_extra_nodes(&self) -> usize {
@@ -203,7 +208,7 @@ impl Device for ActiveOpticalDevice {
             let mut xp = x.to_vec();
             for (i, node) in self.elec_nodes.iter().enumerate() {
                 let Some(j) = *node else {
-                    self.dpert_dv[i] = (0.0, 0.0, 0.0);
+                    self.dpert_dv[i] = (PerChannel::zero(), 0.0, PerChannel::zero());
                     continue;
                 };
                 let v = x[j];
@@ -212,9 +217,9 @@ impl Device for ActiveOpticalDevice {
                 let pp = self.model.eval(&xp, &intensity, ctx);
                 xp[j] = v;
                 self.dpert_dv[i] = (
-                    (pp.dn_eff - pert.dn_eff) / h,
+                    pp.dn_eff.diff_by(&pert.dn_eff, h),
                     (pp.dphi - pert.dphi) / h,
-                    (pp.dalpha_neper_m - pert.dalpha_neper_m) / h,
+                    pp.dalpha_neper_m.diff_by(&pert.dalpha_neper_m, h),
                 );
             }
             // The probing evals left the model's cached electrical state at the
@@ -231,9 +236,9 @@ impl Device for ActiveOpticalDevice {
         let delay_active = flags.transient && ctx.waveguide_delay && self.seg.tau_g_s() > 0.0;
         self.seg.refresh_with_sens(
             x,
-            pert.dn_eff,
+            pert.dn_eff.clone(),
             pert.dphi,
-            pert.dalpha_neper_m,
+            pert.dalpha_neper_m.clone(),
             delay_active,
             ctx,
             &self.dpert_dv,
@@ -479,9 +484,9 @@ impl PhotonicActiveModel for PnDrive {
         // Reverse-bias FCA loss: Δα = (dα/dV)·max(0, −V_pn).
         let v_rev = (-v_pn).max(0.0);
         OpticalPerturbation {
-            dn_eff: self.dn_dv * v_pn,
+            dn_eff: (self.dn_dv * v_pn).into(),
             dphi: 0.0,
-            dalpha_neper_m: self.da_dv * v_rev,
+            dalpha_neper_m: (self.da_dv * v_rev).into(),
         }
     }
 
@@ -624,9 +629,9 @@ impl PhotonicActiveModel for Injection {
         // Normalised injected carrier density (≥ 0; reverse bias contributes 0).
         let inj = (e - 1.0).max(0.0);
         OpticalPerturbation {
-            dn_eff: -self.dn_dv_inj * inj, // more carriers → lower index
+            dn_eff: (-self.dn_dv_inj * inj).into(), // more carriers → lower index
             dphi: 0.0,
-            dalpha_neper_m: self.da_dv_inj * inj,
+            dalpha_neper_m: (self.da_dv_inj * inj).into(),
         }
     }
 
@@ -835,37 +840,60 @@ impl PhotonicActiveModel for FullPnDrive {
         let dvj_dv = 1.0 / (1.0 + g_d * self.r_series);
         self.dc_eff_dv_cached = (dc_j_dvj + self.tau_carrier * g_d / vt) * dvj_dv;
 
-        // Optical intensity drives TPA + self-heating back-action. It is the sum
-        // over the WHOLE bus (and both directions — `channel_intensities` counts
-        // them), not channel 0: a segment carries one perturbation that applies
-        // to every channel, so a shared effect must be driven by the shared
-        // total. Reading `.first()` under-counted by 1/N with all channels lit,
-        // and gave *exactly zero* back-action whenever channel 0 alone was dark.
-        //
-        // Self-heating is exact this way — absorbed power is additive. TPA is
-        // improved but still approximate: with several wavelengths in one mode,
-        // cross-TPA between distinct frequencies is twice self-TPA, so the true
-        // loss on channel j is β/A_eff·(I_j + 2·Σ_{k≠j} I_k). Representing that
-        // needs a per-channel Δα, which `OpticalPerturbation` does not carry;
-        // the total is the no-cross-enhancement bound. Stated in
-        // docs/photonic-models.md rather than left for a reader to discover.
-        let intensity = intensity_w.iter().copied().sum::<f64>().max(0.0);
+        // Optical back-action, over the whole bus and both directions
+        // (`channel_intensities` counts both). A shared effect must be driven by
+        // the shared total: reading channel 0 alone under-counted by 1/N with
+        // every channel lit, and gave *exactly zero* whenever channel 0 was the
+        // dark one.
+        let total: f64 = intensity_w.iter().copied().map(|i| i.max(0.0)).sum();
         let inj = (e - 1.0).max(0.0);
         let i_fwd = i_diode.max(0.0);
         let v_rev = (-v_junc).max(0.0);
-        let alpha_tpa = self.beta_tpa_m_per_w * intensity / self.a_eff_m2;
-        // Extra loss beyond the segment's base α: reverse + forward FCA + TPA.
-        // Forward FCA has two equivalent parametrizations (see field docs).
-        let dalpha = self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd + alpha_tpa;
-        // Absorbed power uses the TOTAL loss (segment base α + dalpha).
-        let alpha_total = self.alpha_neper_m + dalpha;
-        let p_abs = alpha_total * self.length_m * intensity;
+        // Loss common to every channel: reverse + forward free-carrier
+        // absorption. Forward FCA has two equivalent parametrizations (see the
+        // field docs).
+        let dalpha_shared = self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd;
+
+        // TPA is PER CHANNEL, because cross-TPA between distinct frequencies is
+        // twice self-TPA:
+        //     α_TPA,j = β/A_eff · (I_j + 2·Σ_{k≠j} I_k) = β/A_eff · (2·Σ_k I_k − I_j)
+        // A single channel gives 2·I − I = I, so this reduces exactly to
+        // self-TPA and the one-channel answer is unchanged. Before there was
+        // anywhere to put a per-channel Δα this had to be the
+        // no-cross-enhancement bound `β/A_eff·Σ_k I_k`, under-estimating the
+        // loss by up to a factor of two on a fully loaded bus.
+        let tpa_of =
+            |i_j: f64| self.beta_tpa_m_per_w * (2.0 * total - i_j.max(0.0)) / self.a_eff_m2;
+
+        // Absorbed power is what heats the device, and it is additive over
+        // channels with each channel paying its own loss. One temperature, so
+        // the resulting Δn is shared.
+        let p_abs: f64 = intensity_w
+            .iter()
+            .map(|&i_j| {
+                let i_j = i_j.max(0.0);
+                (self.alpha_neper_m + dalpha_shared + tpa_of(i_j)) * self.length_m * i_j
+            })
+            .sum();
         let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
         // All three index changes are λ-dependent ⇒ fold into dn_eff.
         let dn_eff = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd + dn_self;
 
+        // One channel (or none) needs no vector: keep the scalar path allocation
+        // free, since this runs per Newton iteration and again per FD probe.
+        let dalpha = if intensity_w.len() <= 1 {
+            PerChannel::Uniform(dalpha_shared + tpa_of(total))
+        } else {
+            PerChannel::Each(
+                intensity_w
+                    .iter()
+                    .map(|&i_j| dalpha_shared + tpa_of(i_j))
+                    .collect(),
+            )
+        };
+
         OpticalPerturbation {
-            dn_eff,
+            dn_eff: dn_eff.into(),
             dphi: 0.0,
             dalpha_neper_m: dalpha,
         }
@@ -1029,9 +1057,9 @@ impl PhotonicActiveModel for Heater {
         let v = self.heat_p.map_or(0.0, |i| x[i]) - self.heat_n.map_or(0.0, |i| x[i]);
         let p = v * v / self.r_heater;
         OpticalPerturbation {
-            dn_eff: 0.0,
+            dn_eff: PerChannel::zero(),
             dphi: std::f64::consts::PI * p / self.p_pi,
-            dalpha_neper_m: 0.0,
+            dalpha_neper_m: PerChannel::zero(),
         }
     }
 
@@ -1121,9 +1149,9 @@ impl PhotonicActiveModel for HeaterRc {
         // Phase driven by the filtered heater power state T (power-equivalent W).
         let t = self.t_state_idx.map_or(0.0, |i| x[i]);
         OpticalPerturbation {
-            dn_eff: 0.0,
+            dn_eff: PerChannel::zero(),
             dphi: std::f64::consts::PI * t / self.p_pi,
-            dalpha_neper_m: 0.0,
+            dalpha_neper_m: PerChannel::zero(),
         }
     }
 
@@ -1247,9 +1275,9 @@ impl PhotonicActiveModel for WithHeater {
         let a = self.inner.eval(x, intensity_w, ctx);
         let b = self.heater.eval(x, intensity_w, ctx);
         OpticalPerturbation {
-            dn_eff: a.dn_eff + b.dn_eff,
+            dn_eff: a.dn_eff.add(&b.dn_eff),
             dphi: a.dphi + b.dphi,
-            dalpha_neper_m: a.dalpha_neper_m + b.dalpha_neper_m,
+            dalpha_neper_m: a.dalpha_neper_m.add(&b.dalpha_neper_m),
         }
     }
 
@@ -1380,9 +1408,9 @@ impl PhotonicActiveModel for ExprDrive {
             lambda: self.lambda_center_m,
         };
         OpticalPerturbation {
-            dn_eff: self.dneff.as_ref().map_or(0.0, |e| e.eval(&env)),
+            dn_eff: self.dneff.as_ref().map_or(0.0, |e| e.eval(&env)).into(),
             dphi: 0.0,
-            dalpha_neper_m: self.dalpha.as_ref().map_or(0.0, |e| e.eval(&env)),
+            dalpha_neper_m: self.dalpha.as_ref().map_or(0.0, |e| e.eval(&env)).into(),
         }
     }
 
@@ -1482,8 +1510,12 @@ mod tests {
         m.set_terminals(&[Some(0), Some(1)]); // anode=node0, cathode=node1
         let x = [0.7, 0.2]; // V_pn = 0.5
         let p = m.eval(&x, &[], &SimContext::default());
-        assert!((p.dn_eff - 1e-4 * 0.5).abs() < 1e-18, "dn_eff={}", p.dn_eff);
-        assert_eq!(p.dalpha_neper_m, 0.0);
+        assert!(
+            (p.dn_eff.at(0) - 1e-4 * 0.5).abs() < 1e-18,
+            "dn_eff={:?}",
+            p.dn_eff
+        );
+        assert_eq!(p.dalpha_neper_m, PerChannel::zero());
     }
 
     #[test]

@@ -230,3 +230,74 @@ fn every_registered_photonic_model_declares_its_arity() {
          single-channel is the intent."
     );
 }
+
+// ── cross-TPA is per channel, which one Δα cannot express (#54) ────────────
+
+/// Two-photon absorption between *distinct* frequencies is twice as strong as
+/// self-TPA, so on a loaded bus each channel sees its own loss:
+///
+///   α_TPA,j = β/A_eff · (I_j + 2·Σ_{k≠j} I_k) = β/A_eff · (2·Σ_k I_k − I_j)
+///
+/// With unequal channel powers those are different numbers, so this cannot be
+/// satisfied by any single bus-wide Δα — which is exactly what
+/// `OpticalPerturbation` used to carry. The previous best was the
+/// no-cross-enhancement bound `β/A_eff·Σ_k I_k`, identical on every channel.
+///
+/// Everything else is switched off so the anchor is closed-form: V = 0 kills
+/// depletion and injection, `r_th` defaults to 0 so nothing self-heats, and
+/// `alpha_dB_cm=0` leaves TPA as the only loss.
+#[test]
+fn cross_tpa_gives_each_channel_its_own_loss() {
+    const BETA: f64 = 7.9e-10;
+    const A_EFF: f64 = 1.257e-13;
+    const L_M: f64 = 500e-6;
+    const P0: f64 = 20e-3;
+    const P1: f64 = 5e-3;
+
+    let netlist = format!(
+        "\
+.optical_port c0
+.optical_port c1
+.optical_port bus 2
+.optical_port out 2
+Xl0 c0 fc_cw_laser power_mW={p0} wavelength_nm=1550
+Xl1 c1 fc_cw_laser power_mW={p1} wavelength_nm=1550
+Xmux bus c0 c1 fc_mux
+Xpn bus out a 0 fc_pn_ps_full L_um=500 alpha_dB_cm=0 beta_tpa={BETA} a_eff_m2={A_EFF}
+Vb a 0 DC 0
+.op
+.end
+",
+        p0 = P0 * 1e3,
+        p1 = P1 * 1e3
+    );
+    let net = parse_spice(&netlist).unwrap();
+    let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP converges");
+
+    let out = |ch: usize| {
+        let re = r.node_voltage(&format!("out_re_{ch}")).unwrap();
+        let im = r.node_voltage(&format!("out_im_{ch}")).unwrap();
+        re * re + im * im
+    };
+    // α_TPA,j = β/A_eff·(2·total − I_j); power survives exp(−α·L).
+    let total = P0 + P1;
+    let want = |i_j: f64| i_j * (-(BETA / A_EFF * (2.0 * total - i_j)) * L_M).exp();
+
+    for (ch, i_j) in [(0usize, P0), (1usize, P1)] {
+        let (got, expect) = (out(ch), want(i_j));
+        assert!(
+            (got - expect).abs() < 1e-9,
+            "channel {ch}: got {got:.9} W, hand-computed {expect:.9} W"
+        );
+    }
+
+    // And the discriminator: a single bus-wide Δα would attenuate both channels
+    // by the same factor. Here the factors differ, which is the whole point.
+    let f0 = out(0) / P0;
+    let f1 = out(1) / P1;
+    assert!(
+        (f0 - f1).abs() > 1e-3,
+        "the two channels are attenuated by {f0:.6} and {f1:.6} — a single Δα \
+         would make these identical, so this test would not be testing anything"
+    );
+}
