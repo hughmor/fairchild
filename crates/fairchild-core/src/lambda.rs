@@ -100,7 +100,16 @@ pub fn resolve(netlist: &Netlist, devices: &[Box<dyn Device>], fallback: f64) ->
     // Zip rather than index so a mismatch truncates instead of panicking.
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut seeds: Vec<(String, f64)> = Vec::new();
-    let mut lambda_nets: Vec<String> = Vec::new();
+    // Every λ net in the deck, not only the ones some routing mentions. A dark
+    // port is still a λ net and must still get an answer — an AWGR's unused
+    // input, a ring's dark add. Asking the netlist rather than the declarations
+    // is what makes the map total.
+    let mut lambda_nets: Vec<String> = netlist
+        .optical_nets
+        .iter()
+        .filter(|n| fairchild_parser::is_lambda_wire(n))
+        .cloned()
+        .collect();
 
     for (el, dev) in netlist
         .elements

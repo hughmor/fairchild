@@ -114,3 +114,91 @@ Xw2 a2 b2 fc_waveguide L_um=100 n_g=4.2
 ",
     );
 }
+
+// ── the three devices that are not slot-for-slot ───────────────────────────
+//
+// `OpticalSegment`'s declaration covers everything that passes a label straight
+// through, channel k in to channel k out. These three do not, so each declares
+// its own — and each is a different kind of not-straight-through, which is why
+// all three are here rather than one standing in for the others.
+
+/// A mux moves port `k`'s label onto bus slot `k`; a demux moves it back. The
+/// wavelengths are deliberately unequal, so a routing that crossed two channels
+/// would put the wrong number on the wrong wire rather than being invisible.
+#[test]
+fn a_mux_and_demux_move_labels_between_ports_and_slots() {
+    assert_resolution_matches_the_solve(
+        "mux then demux",
+        "\
+.optical_port c0
+.optical_port c1
+.optical_port c2
+.optical_port bus 3
+.optical_port mid 3
+.optical_port d0
+.optical_port d1
+.optical_port d2
+Xl0 c0 fc_cw_laser power_mW=1 wavelength_nm=1546.12
+Xl1 c1 fc_cw_laser power_mW=2 wavelength_nm=1550.00
+Xl2 c2 fc_cw_laser power_mW=3 wavelength_nm=1553.88
+Xmux bus c0 c1 c2 fc_mux
+Xwg bus mid fc_waveguide L_um=500 n_g=4.2
+Xdemux mid d0 d1 d2 fc_demux
+.op
+.end
+",
+    );
+}
+
+/// The router, and the one that corrected my assumption. A label does NOT
+/// follow the field's cyclic permutation: every output slot `k` mirrors one
+/// chosen input port's slot `k` tag (`lambda_src`, port 0 by default), because a
+/// slot *is* a wavelength across the whole router. Which port a photon arrived
+/// on decides where its energy goes, not what colour it is.
+///
+/// Sabotage-checked against the permutation reading, which puts channel 0's
+/// 1546.12 nm on the wrong output and shows up as an unreached net.
+#[test]
+fn an_awgr_output_mirrors_one_input_ports_tag_not_the_field_route() {
+    assert_resolution_matches_the_solve(
+        "2x2 awgr",
+        "\
+.optical_port a0
+.optical_port a1
+.optical_port i0 2
+.optical_port i1 2
+.optical_port o0 2
+.optical_port o1 2
+Xl0 a0 fc_cw_laser power_mW=1 wavelength_nm=1546.12
+Xl1 a1 fc_cw_laser power_mW=1 wavelength_nm=1550.00
+Xmux i0 a0 a1 fc_mux
+Xr i0 i1 o0 o1 fc_awgr
+.op
+.end
+",
+    );
+}
+
+/// The giona bus: eight lasers muxed onto one bundle through a ring bank. The
+/// shape the whole exercise is for, and the one where an eight-way routing
+/// mistake would be least visible.
+#[test]
+fn an_eight_channel_bus_through_a_ring_resolves_every_label() {
+    let mut deck = String::new();
+    for k in 0..8 {
+        deck += &format!(".optical_port c{k}\n");
+    }
+    deck += ".optical_port bus 8\n.optical_port out 8\n";
+    for k in 0..8 {
+        deck += &format!(
+            "Xl{k} c{k} fc_cw_laser power_mW=4 wavelength_nm={:.2}\n",
+            1546.12 + 0.8 * k as f64
+        );
+    }
+    deck += "Xmux bus";
+    for k in 0..8 {
+        deck += &format!(" c{k}");
+    }
+    deck += " fc_mux\nXpn bus out a 0 fc_pn_ps_full L_um=50\nVb a 0 DC 0\n.op\n.end\n";
+    assert_resolution_matches_the_solve("giona-shaped bus", &deck);
+}

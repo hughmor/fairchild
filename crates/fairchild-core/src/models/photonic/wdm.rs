@@ -202,6 +202,25 @@ fn stamp_route(
 
 /// Identity-routing combiner: N single-channel optical bundles → 1 N-channel
 /// bundle.  Pin 1 (and the first bundle wire block) is the bus output.
+/// λ routing for a bundle bridge: slot `k` of the input block becomes slot `k`
+/// of the output block.
+///
+/// Both blocks are `wpc·n` wires wide — a mux's bus carries `n` channels and its
+/// `n` single-channel ports carry one each — so the two are the same shape and
+/// the mapping is slot for slot. Which block is the input is exactly what
+/// `LAMBDA_BASE` already records.
+fn bridge_lambda_routing(lambda_base: usize, wpc: usize, n: usize) -> Vec<(usize, usize)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let lam = wpc - 1;
+    let in_base = lambda_base * wpc * n;
+    let out_base = (1 - lambda_base) * wpc * n;
+    (0..n)
+        .map(|k| (in_base + wpc * k + lam, out_base + wpc * k + lam))
+        .collect()
+}
+
 pub struct NativeMux {
     n_channels: usize,
     wpc: usize,
@@ -275,6 +294,13 @@ impl Device for NativeMux {
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         self.filter.set(&name.to_lowercase(), value)
+    }
+
+    /// A bridge is not slot-for-slot within one bundle, so `OpticalSegment`'s
+    /// declaration does not cover it: a mux moves port `k`'s label onto bus slot
+    /// `k`, and a demux the other way.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
@@ -393,6 +419,13 @@ impl Device for NativeDemux {
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
         self.filter.set(&name.to_lowercase(), value)
+    }
+
+    /// A bridge is not slot-for-slot within one bundle, so `OpticalSegment`'s
+    /// declaration does not cover it: a mux moves port `k`'s label onto bus slot
+    /// `k`, and a demux the other way.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        bridge_lambda_routing(Self::LAMBDA_BASE, self.wpc, self.n_channels)
     }
 
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {

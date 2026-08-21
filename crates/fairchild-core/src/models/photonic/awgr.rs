@@ -567,6 +567,65 @@ impl Device for NativeAwgr {
         hit
     }
 
+    /// Every output slot `k` mirrors ONE input port's slot `k` tag — port
+    /// `lambda_src`, port 0 by default — not the port the field came from.
+    ///
+    /// I assumed at first that a label follows the field's cyclic permutation
+    /// (`i` → `(i+k) mod N`). It does not, and the device is right: a slot IS a
+    /// wavelength across the whole router, which is exactly why the router is
+    /// representable at all. Which port a photon arrived on changes where its
+    /// energy goes, not what colour it is. `rebuild` stamps precisely this.
+    ///
+    /// `lambda_src` outside `0..N` (`-1` by convention) means the outputs take
+    /// the device's own grid instead of mirroring anything, so there is no edge
+    /// to declare — see `lambda_emitted`.
+    fn lambda_routing(&self) -> Vec<(usize, usize)> {
+        let (n, wpc) = (self.n, self.wpc);
+        let Ok(src) = usize::try_from(self.lambda_src) else {
+            return Vec::new();
+        };
+        if n == 0 || src >= n {
+            return Vec::new();
+        }
+        let lam = wpc - 1;
+        let port = wpc * n;
+        let out_base = port * n;
+        let mut pairs = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for k in 0..n {
+                pairs.push((
+                    port * src + wpc * k + lam,
+                    out_base + port * j + wpc * k + lam,
+                ));
+            }
+        }
+        pairs
+    }
+
+    /// With `lambda_src` outside `0..N` the router originates its own labels
+    /// from its channel grid rather than mirroring an input, so it is a source
+    /// as far as resolution is concerned.
+    fn lambda_emitted(&self) -> Vec<(usize, f64)> {
+        let (n, wpc) = (self.n, self.wpc);
+        if n == 0 || usize::try_from(self.lambda_src).is_ok_and(|s| s < n) {
+            return Vec::new();
+        }
+        let lam = wpc - 1;
+        let port = wpc * n;
+        let out_base = port * n;
+        let grid = self.grid();
+        let mut out = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for k in 0..n {
+                out.push((
+                    out_base + port * j + wpc * k + lam,
+                    grid.lambda_center(k, self.t_nom_k),
+                ));
+            }
+        }
+        out
+    }
+
     fn eval(&mut self, x: &[f64], _flags: EvalFlags, ctx: &SimContext) {
         // Coefficients depend only on the input λ tags (and on parameters,
         // which invalidate directly). Lasers are CW, so after the first NR
