@@ -1,0 +1,23 @@
+// A model that talks: one conductance, and a diagnostic about it.
+//
+// The physics is deliberately trivial — a 1 mS conductance, checkable against
+// Ohm's law — because the point of the fixture is the `$strobe`. On
+// macOS/aarch64 the Verilog-A compiler miscompiles every formatted-output task
+// (see `portability.rs`), so before that transform existed this model took the
+// process down during `setup_instance` with no output at all.
+//
+// Every real foundry model does this. `bsim4.va` carries 429 `$strobe` calls
+// about its own parameters, which is why none of them could be simulated here.
+`include "disciplines.vams"
+
+module talkative(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter real gd = 1e-3 from (0:inf);
+    analog begin
+        $strobe("talkative: gd = %g S", gd);
+        if (gd > 1.0)
+            $warning("talkative: gd = %g S is implausibly large", gd);
+        I(a, b) <+ gd * V(a, b);
+    end
+endmodule

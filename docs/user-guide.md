@@ -1765,7 +1765,8 @@ An ordinary Verilog-A module. What the fairchild runtime supports:
 | other `$limit` functions | degrades | identity limiter + a warning; runs unlimited, never crashes |
 | `$limexp` | **no** | OpenVAF 23.5 rejects it — a compile error, not a silent no-op |
 | `@(timer(…))` | **no** | OpenVAF 23.5 parses only `initial_step`/`final_step`, so a model cannot clock itself |
-| `$strobe`, `$finish` | no | |
+| `$strobe`, `$display`, `$warning`, `$error`, … | routed, except on macOS/aarch64 | a model's own messages come out through the same switch as fairchild's warnings, so `--quiet` governs them. On macOS/aarch64 they are **removed from the source before compiling** — see below |
+| `$finish` | no | |
 
 `ddt` is integrated with whatever `.options method` selects, through the same
 `crate::reactive` engine as a discrete `C`. A Verilog-A `ddt(C*V)` and a
@@ -1803,6 +1804,42 @@ model without it.
 
 A bare `exp()` is fine too — the Newton loop's Armijo line search carries it,
 checked to a 500 V drive — but limiting is what scales to stiffer circuits.
+
+### 14.1.1 A model's diagnostics, and one platform where they are removed
+
+A model talking to the simulator — `$strobe`, `$display`, `$warning`, `$error`,
+`$fatal` — arrives through the library's `osdi_log` hook and is printed like any
+other fairchild warning, so `--quiet` silences it. Its parameter-range
+complaints arrive separately, through the OSDI init-error interface, and are
+reported with the parameter they name.
+
+**On macOS/aarch64 those calls are removed from the source before it is
+compiled**, and fairchild says so:
+
+```
+warning: removed 429 call(s) to $strobe from 'bsim4.va' before compiling: the
+Verilog-A compiler miscompiles it on macos-aarch64 and the model would crash the
+run instead of printing. The circuit is unchanged, but any condition the model
+would have reported — including a parameter it considers out of range — is now
+invisible. Set FAIRCHILD_VA_KEEP_UNSUPPORTED=1 to compile the source as written.
+```
+
+This is an upstream code-generation bug, not a fairchild limitation: OpenVAF
+lowers `snprintf`'s three *fixed* arguments onto the stack, which AArch64 Apple's
+variadic convention passes in registers, so the model writes its message to
+whatever is in `x0` and the process dies inside `vsnprintf`. On x86-64 the two
+conventions coincide, which is why it does not show up on Linux.
+
+It matters because *every* real compact model talks: `bsim4.va` carries 429
+`$strobe` calls about its own parameters, and before this transform none of them
+could be simulated on an Apple-silicon machine at all — `SIGSEGV`, no output.
+The constitutive equations are untouched, so the circuit is the circuit; what is
+lost is the model's own commentary, and that is what the warning is for.
+
+`FAIRCHILD_VA_KEEP_UNSUPPORTED=1` compiles the source exactly as written, which
+is how to check whether an upstream fix has landed. The transformed source is
+kept next to the artefact cache (`--emit-generated <dir>` puts it somewhere you
+choose) so you can read what was actually compiled.
 
 ### 14.2 Compiling
 
