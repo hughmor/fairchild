@@ -21,7 +21,7 @@ use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::parse_spice;
 
-mod common;
+use crate::common;
 
 /// Closed form for the self-heated resistor's operating point.
 ///

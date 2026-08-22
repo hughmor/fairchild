@@ -113,7 +113,7 @@ macro_rules! diode_golden_test {
     ($name:ident, $netlist_file:expr, $queries:expr, $tol_rel:expr) => {
         #[test]
         fn $name() {
-            let netlist_str = include_str!(concat!("../../../tests/golden/", $netlist_file));
+            let netlist_str = include_str!(concat!("../../../../tests/golden/", $netlist_file));
 
             let fc = fairchild_nr_op(netlist_str).expect("fairchild NR solve failed");
 

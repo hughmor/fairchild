@@ -105,7 +105,7 @@ fn fairchild_tran_at(
 
 #[test]
 fn rc_step_vs_ngspice() {
-    let netlist_str = include_str!("../../../tests/golden/rc_step.sp");
+    let netlist_str = include_str!("../../../../tests/golden/rc_step.sp");
 
     // Fairchild: 1µs fixed step (h/τ = 0.1%, BE error < 0.05%)
     let times = [1e-3_f64, 2e-3, 5e-3];
@@ -138,7 +138,7 @@ fn rc_step_vs_ngspice() {
 
 #[test]
 fn rl_step_vs_ngspice() {
-    let netlist_str = include_str!("../../../tests/golden/rl_step.sp");
+    let netlist_str = include_str!("../../../../tests/golden/rl_step.sp");
 
     let times = [1e-3_f64, 2e-3, 5e-3];
     let fc_vals = fairchild_tran_at(netlist_str, 1e-6, 5e-3, "out", &times);

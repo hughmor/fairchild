@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use fairchild_core::DeviceRegistry;
 use fairchild_osdi::{load_libraries, VaOptions};
 
-mod common;
+use crate::common;
 
 fn scratch(tag: &str) -> PathBuf {
     // Per-process: parallel `cargo test` runs must not delete each other's.

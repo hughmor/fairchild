@@ -17,7 +17,7 @@ use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_osdi::{load_libraries_with_widths, VaOptions};
 use fairchild_parser::{instantiated_widths, parse_spice_with_arity, PermissiveArity};
 
-mod common;
+use crate::common;
 
 const L_UM: f64 = 1000.0;
 const N_G: f64 = 4.2;

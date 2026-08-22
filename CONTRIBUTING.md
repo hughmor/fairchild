@@ -10,8 +10,22 @@ attach the deck, what you expected, and what you got.
 git clone https://github.com/hughmor/fairchild
 cd fairchild
 cargo build --release
-cargo test --workspace
+cargo test --workspace                   # ~2 min from a clean build
 git config core.hooksPath .githooks     # once per clone
+```
+
+Integration tests are grouped **one binary per subject**, as
+`crates/<crate>/tests/<subject>/main.rs` plus the test files beside it. Cargo
+compiles and links one binary per file directly in `tests/`, and that is not
+free: 82 such files were 82 links against the whole crate, so `cargo test
+--workspace` spent 95 % of its 45 minutes in the linker and about 3 % running
+the 387 tests. So put a new test in the file it belongs in, or add a file to the
+right subject directory and one `mod` line to its `main.rs`. A name filter works
+exactly as before, and `--test <subject>` narrows to one group:
+
+```bash
+cargo test --test native mzm            # one subject, one name
+cargo test -p fairchild-core            # one crate
 ```
 
 The pre-commit hook runs the same `cargo fmt --check` and

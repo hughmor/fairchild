@@ -25,7 +25,7 @@ use fairchild_core::{
 use fairchild_osdi::OsdiLibrary;
 use fairchild_parser::parse_spice;
 
-mod common;
+use crate::common;
 
 /// `rc_shunt.va`'s defaults.
 const MODEL_GD: f64 = 1e-3;

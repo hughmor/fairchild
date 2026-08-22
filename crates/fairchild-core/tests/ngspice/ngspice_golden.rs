@@ -146,7 +146,7 @@ macro_rules! golden_test {
         #[test]
         fn $name() {
             let netlist_str =
-                include_str!(concat!("../../../tests/golden/", $netlist_file));
+                include_str!(concat!("../../../../tests/golden/", $netlist_file));
 
             let fc = fairchild_op(netlist_str);
 

@@ -19,7 +19,7 @@ use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_osdi::{load_libraries, VaOptions};
 use fairchild_parser::{parse_spice_with_arity, PermissiveArity};
 
-mod common;
+use crate::common;
 
 /// 10 mW at 3 dB/cm and 40 mW at 12 dB/cm, through 1000 µm.
 const P0_MW: f64 = 10.0;

@@ -25,7 +25,7 @@ use std::path::Path;
 use fairchild_osdi::ffi::{FnPnjlim, OsdiLimFunction};
 use fairchild_osdi::OsdiLibrary;
 
-mod common;
+use crate::common;
 
 /// Read the table out of the library we just loaded. `dlopen` of an
 /// already-loaded library returns the same handle and the same table, so this
