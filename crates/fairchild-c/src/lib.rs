@@ -51,7 +51,10 @@ use fairchild_core::{
     dc_op_nr_with_registry_opts, tran_nr_with_registry_opts, tran_nr_with_registry_var_opts,
     DeviceRegistry, NrResult, SimError, SimOptions, TranResult, TranStepper,
 };
-use fairchild_parser::{parse_spice, parse_spice_file, Netlist};
+use fairchild_parser::{
+    parse_spice_file_with_arity, parse_spice_with_arity, ArityOracle, Netlist, PermissiveArity,
+    StaticArity,
+};
 
 // ---------------------------------------------------------------------------
 // Status codes — keep in sync with include/fairchild.h
@@ -173,12 +176,18 @@ fn build_registry(netlist: &Netlist, dir: Option<&PathBuf>) -> Result<DeviceRegi
 
     #[cfg(feature = "osdi")]
     {
-        fairchild_osdi::load_libraries(
+        // `_with_widths`, like the CLI and Python: a bundle-dialect `.va` source
+        // is compiled per channel count, and the counts come from the deck's
+        // `.optical_port` widths. Calling the widthless entry point registered
+        // nothing for a bundle model, so one was unreachable from here.
+        fairchild_osdi::load_libraries_with_widths(
             &netlist.osdi_paths,
             &netlist.va_sources,
             dir.map(|p| p.as_path()),
             &fairchild_osdi::VaOptions::from_env(),
             &mut registry,
+            &fairchild_parser::instantiated_widths(netlist),
+            fairchild_parser::wires_per_channel(netlist),
         )
         .map_err(|e| ApiError {
             code: FC_ERR_PARSE,
@@ -205,6 +214,36 @@ fn build_registry(netlist: &Netlist, dir: Option<&PathBuf>) -> Result<DeviceRegi
     }
 
     Ok(registry)
+}
+
+/// Parse twice, so the registry decides WDM dispatch (#52).
+///
+/// Pass one is permissive and only its `.model` cards and model-file paths are
+/// used — neither depends on how bundles expand. The registry built from those
+/// then places every instance by what its name really resolves to, which for a
+/// card-named device the parser can never work out on its own.
+///
+/// Without this the C ABI was the one front end left on the parser's static
+/// name list, so it refused every deck that list cannot describe: a card-named
+/// photonic device on a bundle, `fc_awgr` in table mode, the `LEVEL` idiom,
+/// `fc_phase_shifter_expr`, and any user-defined model. The CLI and the Python
+/// binding have done this since the oracle landed; this one was missed because
+/// nothing loaded a bundle deck through the C entry points.
+fn two_pass(
+    dir: Option<&PathBuf>,
+    parse: impl Fn(&dyn ArityOracle) -> Result<Netlist, ApiError>,
+) -> Result<Netlist, ApiError> {
+    // Pass one's warnings are pass two's; emitting both would double every one.
+    let was_quiet = fairchild_parser::warn::quiet();
+    fairchild_parser::warn::set_quiet(true);
+    let probe = parse(&PermissiveArity).and_then(|n| build_registry(&n, dir));
+    fairchild_parser::warn::set_quiet(was_quiet);
+    match probe {
+        Ok(reg) => parse(&reg),
+        // Pass one failed: let the honest oracle produce the error the user
+        // sees, rather than reporting a permissive parse's confusion.
+        Err(_) => parse(&StaticArity),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,11 +348,13 @@ pub unsafe extern "C" fn fc_error(sim: *const FcSim) -> *const c_char {
 pub unsafe extern "C" fn fc_load_file(sim: *mut FcSim, path: *const c_char) -> c_int {
     entry(sim, |s| {
         let path = std::path::Path::new(cstr(path)?);
-        let netlist = parse_spice_file(path).map_err(|e| ApiError {
-            code: FC_ERR_PARSE,
-            msg: e.to_string(),
-        })?;
         let dir = path.parent().map(|p| p.to_path_buf());
+        let netlist = two_pass(dir.as_ref(), |oracle| {
+            parse_spice_file_with_arity(path, oracle).map_err(|e| ApiError {
+                code: FC_ERR_PARSE,
+                msg: e.to_string(),
+            })
+        })?;
         s.loaded(netlist, dir);
         Ok(())
     })
@@ -323,9 +364,12 @@ pub unsafe extern "C" fn fc_load_file(sim: *mut FcSim, path: *const c_char) -> c
 #[no_mangle]
 pub unsafe extern "C" fn fc_load_string(sim: *mut FcSim, text: *const c_char) -> c_int {
     entry(sim, |s| {
-        let netlist = parse_spice(cstr(text)?).map_err(|e| ApiError {
-            code: FC_ERR_PARSE,
-            msg: e.to_string(),
+        let text = cstr(text)?;
+        let netlist = two_pass(None, |oracle| {
+            parse_spice_with_arity(text, oracle).map_err(|e| ApiError {
+                code: FC_ERR_PARSE,
+                msg: e.to_string(),
+            })
         })?;
         s.loaded(netlist, None);
         Ok(())
