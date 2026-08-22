@@ -486,6 +486,41 @@ fn parse_int(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// `solver=klu` without the `klu` feature is **refused**, not quietly served
+    /// by faer-sparse — a caller who asked for a specific factorisation and got
+    /// another one has no way to tell.
+    ///
+    /// This is the only behaviour that exists in the default build and not in the
+    /// `--features klu` one, and it was untested, which is what made CI's second
+    /// full test run pure duplication: `SolverKind::Auto` never selects KLU, so
+    /// every other test exercises the same backends either way. Now the cheap
+    /// default-features run has something to check.
+    #[test]
+    #[cfg(not(feature = "klu"))]
+    fn solver_klu_is_refused_when_it_is_not_compiled_in() {
+        let mut o = SimOptions::default();
+        assert!(
+            !o.set("solver", "klu"),
+            "`solver=klu` must be refused without the feature, not fall back"
+        );
+        assert!(!o.set("solver", "suitesparse"));
+        assert_eq!(o.solver, SolverKind::Auto, "the option must not have moved");
+        // The other names still work, so the refusal is about KLU and not about
+        // `solver` having stopped parsing.
+        assert!(o.set("solver", "sparse"));
+        assert_eq!(o.solver, SolverKind::Sparse);
+    }
+
+    /// The other half, so the pair cannot both be satisfied by refusing
+    /// everything: with the feature, the same string is accepted.
+    #[test]
+    #[cfg(feature = "klu")]
+    fn solver_klu_is_accepted_when_it_is_compiled_in() {
+        let mut o = SimOptions::default();
+        assert!(o.set("solver", "klu"));
+        assert_eq!(o.solver, SolverKind::Klu);
+    }
+
     #[test]
     fn defaults_match_legacy_constants() {
         let o = SimOptions::default();

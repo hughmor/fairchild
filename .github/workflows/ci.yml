@@ -132,13 +132,25 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test (default features)
-        run: cargo test --workspace
+      # The full suite runs ONCE, with `klu`, because that feature is purely
+      # additive: `SolverKind::Auto` picks dense or faer-sparse and never KLU
+      # either way, so all 764 tests exercise the same backends in both
+      # configurations — `--features klu` adds `solver_klu` on top. Running both
+      # cost 8 minutes to test 4 minutes' worth of code twice.
+      #
+      # What the klu build genuinely cannot reach is the *refusal* of
+      # `.options solver=klu` when the feature is absent. That is one runtime
+      # `cfg!`, it lives in `fairchild-core`'s lib tests, and it is the reason
+      # for the cheap default-features run below rather than a second full one.
+      # (It was also untested until #68 — so the second full run had been
+      # verifying nothing the first did not.)
+      - name: Test (default features — the paths a klu build cannot reach)
+        run: cargo test -p fairchild-core --lib
 
       - name: Clippy (with klu)
         run: cargo clippy --workspace --all-targets --features klu -- -D warnings
 
-      - name: Test (with klu)
+      - name: Test (with klu — the whole workspace)
         run: cargo test --workspace --features klu
 
       - name: Check benchmarks compile
