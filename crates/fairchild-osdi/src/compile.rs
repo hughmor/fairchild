@@ -42,6 +42,7 @@ use fairchild_core::warn_user;
 
 use crate::error::OsdiError;
 use crate::loader::OsdiLibrary;
+use crate::portability;
 
 /// Binaries tried, in order, when no compiler is named explicitly.
 ///
@@ -251,7 +252,26 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
         }
     }
 
-    let key = cache_key(compiler, src, opts)?;
+    // Some platforms cannot compile some of the language. Where that is true,
+    // the source is transformed before it is hashed or compiled — see
+    // `crate::portability` for what and why. The expansion is scanned rather
+    // than the file, so a construct inside an `include` cannot slip past.
+    let expanded = expansion(compiler, src, opts)?;
+    let (clean, removed) = if portability::keep_as_written() {
+        (expanded.clone(), Vec::new())
+    } else {
+        portability::sanitize(&expanded, std::env::consts::OS, std::env::consts::ARCH)
+    };
+
+    let key = cache_key(
+        compiler,
+        if removed.is_empty() {
+            &expanded
+        } else {
+            &clean
+        },
+        opts,
+    );
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -259,6 +279,10 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
     let dir = opts.cache_dir();
     let out = dir.join(format!("{stem}-{key:016x}.osdi"));
     if out.is_file() {
+        // Report even on a cache hit: the transform is a property of this run's
+        // platform, not of the artefact, and a warning that appears only the
+        // first time is a warning nobody sees.
+        portability::report(src, &removed);
         return Ok(out);
     }
     std::fs::create_dir_all(&dir).map_err(|e| OsdiError::CacheDir {
@@ -281,10 +305,26 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
         ".{stem}-{key:016x}.{}.{seq}.tmp",
         std::process::id()
     ));
+    // What actually gets compiled: the file the user wrote, unless something had
+    // to come out of it. Compiling the *expansion* costs diagnostics that point
+    // into a generated file, so it is done only when it is the difference
+    // between running and crashing — and the warning says where to look.
+    let source = if removed.is_empty() {
+        src.to_path_buf()
+    } else {
+        portability::report(src, &removed);
+        let path = sanitised_path(src, key, opts)?;
+        std::fs::write(&path, &clean).map_err(|e| OsdiError::CompileFailed {
+            path: path.clone(),
+            stderr: format!("cannot write the transformed source: {e}"),
+        })?;
+        path
+    };
+
     // OpenVAF's `--output` parser requires the parent to exist but not the
     // file; it also refuses to overwrite anything that is not a plain file.
     let status = compiler
-        .command(opts, src)
+        .command(opts, &source)
         .arg("-o")
         .arg(&tmp)
         .output()
@@ -315,22 +355,7 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
 }
 
 /// Hash of everything that can change what the compile produces.
-fn cache_key(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<u64, OsdiError> {
-    let expanded = compiler
-        .command(opts, src)
-        .arg("--print-expansion")
-        .output()
-        .map_err(|e| OsdiError::CompilerFailed {
-            path: compiler.path.clone(),
-            detail: e.to_string(),
-        })?;
-    if !expanded.status.success() {
-        return Err(OsdiError::CompileFailed {
-            path: src.to_path_buf(),
-            stderr: String::from_utf8_lossy(&expanded.stderr).trim().to_string(),
-        });
-    }
-
+fn cache_key(compiler: &VaCompiler, expansion: &str, opts: &VaOptions) -> u64 {
     // SipHash, via the std default. Not stable across Rust releases — which
     // costs a recompile after a toolchain bump and can never serve a stale
     // artefact, the only direction that matters here.
@@ -341,8 +366,34 @@ fn cache_key(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<u64,
     for dir in &opts.include_dirs {
         dir.hash(&mut h);
     }
-    expanded.stdout.hash(&mut h);
-    Ok(h.finish())
+    expansion.hash(&mut h);
+    h.finish()
+}
+
+/// The source with every `include` spliced and every macro expanded, as the
+/// compiler itself sees it.
+///
+/// Two things read this. It is the cache key's material — the whole include
+/// closure, so editing an included file misses the cache — and it is what
+/// `crate::portability` scans, which is the reason it is *this* text rather than
+/// the file: a `$strobe` inside a PDK's own header would otherwise slip past the
+/// transform and take the process down exactly as before.
+fn expansion(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<String, OsdiError> {
+    let out = compiler
+        .command(opts, src)
+        .arg("--print-expansion")
+        .output()
+        .map_err(|e| OsdiError::CompilerFailed {
+            path: compiler.path.clone(),
+            detail: e.to_string(),
+        })?;
+    if !out.status.success() {
+        return Err(OsdiError::CompileFailed {
+            path: src.to_path_buf(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Everything a deck asked to be loaded: `.va` sources compiled first, then
@@ -530,6 +581,24 @@ fn warn_if_older_than_source(osdi: &Path) {
     );
 }
 
+/// Where a transformed source lands: beside the generated per-N sources, named
+/// for the cache key so two variants of one model cannot overwrite each other.
+///
+/// Kept rather than written to a temporary, and for the same reason: whoever
+/// reads the warning needs to be able to read what was actually compiled.
+fn sanitised_path(src: &Path, key: u64, opts: &VaOptions) -> Result<PathBuf, OsdiError> {
+    let dir = opts.generated_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| OsdiError::CacheDir {
+        path: dir.clone(),
+        detail: e.to_string(),
+    })?;
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".into());
+    Ok(dir.join(format!("{stem}-{key:016x}.portable.va")))
+}
+
 /// Where a generated per-N source lands: beside the cache, named for its width,
 /// and kept rather than written to a temporary. An author debugging a model that
 /// works at N=1 and misbehaves at N=8 needs to be able to read what was actually
@@ -654,9 +723,10 @@ mod tests {
         };
         let compiler = VaCompiler::find(&opts).expect("stub answers --version");
 
-        let before = cache_key(&compiler, &top, &opts).unwrap();
+        let key = |c: &VaCompiler| cache_key(c, &expansion(c, &top, &opts).unwrap(), &opts);
+        let before = key(&compiler);
         write(&inc, "// version two, materially different\n");
-        let after = cache_key(&compiler, &top, &opts).unwrap();
+        let after = key(&compiler);
 
         assert_ne!(
             before, after,
@@ -679,9 +749,10 @@ mod tests {
             ..Default::default()
         };
         let mut compiler = VaCompiler::find(&opts).unwrap();
-        let before = cache_key(&compiler, &top, &opts).unwrap();
+        let expanded = expansion(&compiler, &top, &opts).unwrap();
+        let before = cache_key(&compiler, &expanded, &opts);
         compiler.version = "some later build".into();
-        let after = cache_key(&compiler, &top, &opts).unwrap();
+        let after = cache_key(&compiler, &expanded, &opts);
         assert_ne!(before, after);
     }
 
