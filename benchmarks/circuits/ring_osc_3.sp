@@ -19,4 +19,3 @@ C3   n3 0  100f
 .ic V(n1)=1.6 V(n2)=0.1 V(n3)=1.6
 .options method=gear
 .tran 50p 10n UIC
-.end

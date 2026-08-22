@@ -8,4 +8,3 @@ R3 a 0 1k
 R4 b 0 1k
 
 .op
-.end

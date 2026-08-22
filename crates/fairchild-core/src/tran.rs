@@ -761,7 +761,7 @@ mod tests {
         // R-D series, constant V=5V, no reactive elements.
         // tran_nr result at t=1µs must match dc_op_nr within 0.1%.
         let netlist_str = "* Diode DC via transient\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n";
         let netlist = parse_spice(netlist_str).unwrap();
 
         let dc = crate::newton::dc_op_nr(&netlist).unwrap();
@@ -782,7 +782,7 @@ mod tests {
     fn rc_step_response_shape() {
         // R=1k C=1µF τ=1ms, step to 1V at t=0. V(out) should be ~0.632 at t=τ.
         let netlist = parse_spice(
-            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n.end\n"
+            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n"
         ).unwrap();
 
         let result = tran_be(&netlist, 1e-6, 5e-3);
@@ -803,7 +803,7 @@ mod tests {
         // R=1k L=1H τ=1ms, 1V step. I_L ramps up; V(R) = R*I_L(t).
         // V(out) = V_R = 1 * (1 - e^{-t/τ}). Same shape as RC.
         let netlist = parse_spice(
-            "* RL step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nL1 out 0 1\n.tran 1u 5m\n.end\n"
+            "* RL step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nL1 out 0 1\n.tran 1u 5m\n"
         ).unwrap();
 
         let result = tran_be(&netlist, 1e-6, 5e-3);
@@ -830,7 +830,7 @@ mod tests {
         // before the transient, and a plain `DC 1` would charge the cap through
         // its open circuit at t=0, leaving nothing to integrate.
         let netlist = parse_spice(
-            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n.end\n",
+            "* RC step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 200u 5m\n",
         )
         .unwrap();
         let h = 200e-6; // 5 steps per τ — large enough to show BE error
@@ -860,7 +860,7 @@ mod tests {
         // With a large hint step the variable-step solver should take fewer steps
         // but still hit V(τ) ≈ 0.6321 within 1%.
         let netlist = parse_spice(
-            "* RC var-step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 500u 5m\n.end\n"
+            "* RC var-step\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 500u 5m\n"
         ).unwrap();
         let result = tran_nr_var(&netlist, 500e-6, 5e-3).unwrap();
 
@@ -881,8 +881,9 @@ mod tests {
     fn tran_nr_var_matches_fixed_step() {
         // Variable-step result should agree with fixed-step BE within 0.1% at t=1ms.
         let netlist = parse_spice(
-            "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n.end\n"
-        ).unwrap();
+            "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 2m\n",
+        )
+        .unwrap();
         let r_fixed = tran_nr(&netlist, 1e-6, 2e-3).unwrap();
         let r_var = tran_nr_var(&netlist, 1e-6, 2e-3).unwrap();
 
@@ -914,7 +915,7 @@ mod tests {
              c_j0=10p v_bi=0.917\n\
              VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\n\
              RS src a 10k\n\
-             .tran 5n 400n\n.end\n";
+             .tran 5n 400n\n";
         let netlist = parse_spice(src).unwrap();
         let mut registry = DeviceRegistry::new();
         registry.register_builtin_models(&netlist.models);
@@ -974,14 +975,14 @@ mod tests {
             "* device-internal C_j\n.optical_port lam\n.optical_port psout\n\
              Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
              Xps lam psout a 0 fc_pn_ps_cap {common} c_j0={C} v_bi=0.917 m_j=0\n\
-             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\n.tran 5n 300n\n.end\n"
+             VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\n.tran 5n 300n\n"
         );
         let refr = format!(
             "* explicit C\n.optical_port lam\n.optical_port psout\n\
              Xlaser lam fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
              Xps lam psout a 0 fc_pn_ps {common}\n\
              VS src 0 PULSE(0 -1 20n 100p 100p 2u 4u)\nRS src a 10k\nC1 a 0 {C}\n\
-             .tran 5n 300n\n.end\n"
+             .tran 5n 300n\n"
         );
         let (nd, nr) = (parse_spice(&dev).unwrap(), parse_spice(&refr).unwrap());
 
@@ -1053,13 +1054,13 @@ mod tests {
                     "* device-internal Cj\n\
                      .model dm D (IS=1e-14 N=1 CJO={C} VJ=0.917 M=0)\n\
                      V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\nD1 a 0 dm\n\
-                     .tran 5n 300n\n.end\n"
+                     .tran 5n 300n\n"
                 ),
                 &format!(
                     "* explicit C\n\
                      .model dm D (IS=1e-14 N=1)\n\
                      V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\nD1 a 0 dm\n\
-                     C1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                     C1 a 0 {C}\n.tran 5n 300n\n"
                 ),
             ),
             (
@@ -1070,13 +1071,13 @@ mod tests {
                  .model nm NMOS (VTO=0.7 KP=100u CGSO=1e-6)\n\
                  VDD dd 0 2\nRD dd d 1k\n\
                  V1 src 0 PULSE(0 2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
-                 M1 d a 0 0 nm w=10u l=1u\n.tran 5n 300n\n.end\n",
+                 M1 d a 0 0 nm w=10u l=1u\n.tran 5n 300n\n",
                 &format!(
                     "* explicit C\n\
                      .model nm NMOS (VTO=0.7 KP=100u)\n\
                      VDD dd 0 2\nRD dd d 1k\n\
                      V1 src 0 PULSE(0 2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
-                     M1 d a 0 0 nm w=10u l=1u\nC1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                     M1 d a 0 0 nm w=10u l=1u\nC1 a 0 {C}\n.tran 5n 300n\n"
                 ),
             ),
             (
@@ -1088,13 +1089,13 @@ mod tests {
                  .model qm NPN (IS=1e-16 BF=100 CJE=10p VJE=0.75 MJE=0)\n\
                  VCC cc 0 5\nRC cc c 1k\n\
                  V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
-                 Q1 c a 0 qm\n.tran 5n 300n\n.end\n",
+                 Q1 c a 0 qm\n.tran 5n 300n\n",
                 &format!(
                     "* explicit C\n\
                      .model qm NPN (IS=1e-16 BF=100)\n\
                      VCC cc 0 5\nRC cc c 1k\n\
                      V1 src 0 PULSE(0 -2 20n 100p 100p 2u 4u)\nR1 src a 10k\n\
-                     Q1 c a 0 qm\nC1 a 0 {C}\n.tran 5n 300n\n.end\n"
+                     Q1 c a 0 qm\nC1 a 0 {C}\n.tran 5n 300n\n"
                 ),
             ),
         ];
@@ -1165,7 +1166,7 @@ mod tests {
             parse_spice(&format!(
                 "* transformer\nV1 a1 0 PULSE(0 1 0 1n 1n 1 2)\n\
                  R1 a1 b1 100\nL1 b1 0 1m\nR2 a2 b2 100\nL2 b2 0 1m\n\
-                 K1 L1 L2 {k}\n.options method=be\n.tran 1u 200u\n.end\n"
+                 K1 L1 L2 {k}\n.options method=be\n.tran 1u 200u\n"
             ))
             .unwrap()
         };
@@ -1206,7 +1207,7 @@ mod tests {
     fn tran_nr_var_diode_steady_state() {
         // R-D series at DC: var-step should converge to the same OP as fixed-step.
         let netlist_str = "* Diode DC\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n.end\n";
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 10u\n";
         let netlist = parse_spice(netlist_str).unwrap();
 
         let dc = crate::newton::dc_op_nr(&netlist).unwrap();
@@ -1226,7 +1227,7 @@ mod tests {
         // Both methods are run with the same LTE tolerance; GEAR-2 is second-
         // order so it should be at least as accurate as BE at the matched τ.
         let src = "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\n\
-                   R1 in out 1k\nC1 out 0 1u\n.tran 200u 4m\n.end\n";
+                   R1 in out 1k\nC1 out 0 1u\n.tran 200u 4m\n";
         let net = parse_spice(src).unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
         registry.register_builtin_models(&net.models);
@@ -1263,7 +1264,7 @@ mod tests {
         //
         // Circuit: V1 → R1 → out (no reactive element so V(out) = V1 instantly).
         let netlist = parse_spice(
-            "* breakpoint test\nV1 in 0 PULSE(0 5 1u 100n 100n 5u 10u)\nR1 in out 1\n.tran 5u 20u\n.end\n"
+            "* breakpoint test\nV1 in 0 PULSE(0 5 1u 100n 100n 5u 10u)\nR1 in out 1\n.tran 5u 20u\n"
         ).unwrap();
         let result = tran_nr_var(&netlist, 5e-6, 20e-6).unwrap();
 
@@ -1287,7 +1288,7 @@ mod tests {
              R1 in out 1k\nC1 out 0 1u\n\
              .ic V(out)=0.5\n\
              .options uic=1\n\
-             .tran 10u 100u\n.end\n",
+             .tran 10u 100u\n",
         )
         .unwrap();
         let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
@@ -1305,7 +1306,7 @@ mod tests {
             "* no uic\nV1 in 0 PULSE(0 1 1m 1n 1n 100m 200m)\n\
              R1 in out 1k\nC1 out 0 1u\n\
              .ic V(out)=0.5\n\
-             .tran 10u 100u\n.end\n",
+             .tran 10u 100u\n",
         )
         .unwrap();
         let r = tran_nr_var(&net, 10e-6, 100e-6).unwrap();
@@ -1325,7 +1326,7 @@ mod tests {
         use crate::options::SimOptions;
         let netlist = parse_spice(
             "* non-converge test\nVdd a 0 DC 5\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.tran 1u 2u\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.tran 1u 2u\n",
         )
         .unwrap();
         let registry = {
@@ -1350,8 +1351,7 @@ mod tests {
     #[test]
     fn write_nutmeg_tran() {
         let netlist =
-            parse_spice("* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n.end\n")
-                .unwrap();
+            parse_spice("* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 10u\n").unwrap();
         let result = tran_be(&netlist, 1e-6, 10e-6);
         let mut buf = Vec::new();
         result.write_nutmeg(&mut buf, "test").unwrap();

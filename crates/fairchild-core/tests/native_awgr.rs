@@ -60,7 +60,7 @@ fn ideal_router_equals_the_equivalent_demux_mux_permutation() {
     // (a) the device.
     let mut deck = format!("* ideal AWGR\n{}", sources(n, &lam));
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr\n.op\n.end\n",
+        "Xr{}{} fc_awgr\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -91,7 +91,7 @@ fn ideal_router_equals_the_equivalent_demux_mux_permutation() {
         }
         deck.push_str(" fc_mux\n");
     }
-    deck.push_str(".op\n.end\n");
+    deck.push_str(".op\n");
     let refr = solve(&deck);
 
     for j in 0..n {
@@ -115,7 +115,7 @@ fn cyclic_routing_sends_input_i_channel_k_to_output_i_plus_k() {
     let lam = grid_nm(n);
     let mut deck = format!("* cyclic routing\n{}", sources(n, &lam));
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr\n.op\n.end\n",
+        "Xr{}{} fc_awgr\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -159,7 +159,7 @@ fn gauss_mode_applies_insertion_loss_and_crosstalk_floors() {
     let lam = grid_nm(n);
     let mut deck = format!("* AWGR with a real passband\n{}", sources(n, &lam));
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30 xt_bg_db=-40\n.op\n.end\n",
+        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 il_db=3 xt_adj_db=-30 xt_bg_db=-40\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -222,7 +222,7 @@ fn detuning_a_laser_costs_it_the_passband_skirt() {
         deck.push_str(&format!("V0_{k}w in0_{k}_wl 0 DC {:e}\n", l * 1e-9));
     }
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 il_db=0 xt_adj_db=-300 xt_bg_db=-300\n.op\n.end\n",
+        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 il_db=0 xt_adj_db=-300 xt_bg_db=-300\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -247,7 +247,7 @@ fn output_wavelength_tags_follow_the_input_comb() {
     let lam = vec![1549.0, 1551.0];
     let mut deck = format!("* λ tags\n{}", sources(n, &lam));
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr\n.op\n.end\n",
+        "Xr{}{} fc_awgr\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -279,7 +279,7 @@ fn one_input_lit_behaves_as_a_demux_with_crosstalk() {
         deck.push_str(&format!("V0_{k}w in0_{k}_wl 0 DC {:e}\n", l * 1e-9));
     }
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 xt_adj_db=-25 xt_bg_db=-40\n.op\n.end\n",
+        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40 xt_adj_db=-25 xt_bg_db=-40\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -328,7 +328,7 @@ fn an_eight_by_eight_router_is_exact_on_default_tolerances() {
         wires("in", n),
         wires("out", n)
     ));
-    deck.push_str(".op\n.end\n");
+    deck.push_str(".op\n");
     let r = solve(&deck);
     let il = 10f64.powf(-3.0 / 20.0);
     for i in 0..n {
@@ -360,7 +360,7 @@ fn light_far_outside_the_band_is_dark_rather_than_aliased() {
     let lam = vec![1450.0, grid_nm(n)[1]];
     let mut deck = format!("* out of band\n{}", sources(n, &lam));
     deck.push_str(&format!(
-        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40\n.op\n.end\n",
+        "Xr{}{} fc_awgr df_ghz=100 fwhm_ghz=40\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -391,7 +391,7 @@ fn a_terminal_count_that_is_not_two_wpc_n_squared_is_rejected() {
     for t in 0..30 {
         deck.push_str(&format!(" n{t}"));
     }
-    deck.push_str(" fc_awgr\n.op\n.end\n");
+    deck.push_str(" fc_awgr\n.op\n");
 
     let net = parse_spice(&deck).expect("parse");
     let mut reg = DeviceRegistry::new();
@@ -433,7 +433,7 @@ fn a_measured_table_overrides_the_analytic_response() {
         csv.to_str().unwrap()
     ));
     deck.push_str(&format!(
-        "Xr{}{} awg2\n.op\n.end\n",
+        "Xr{}{} awg2\n.op\n",
         wires("in", n),
         wires("out", n)
     ));
@@ -485,7 +485,7 @@ fn a_transient_stays_inside_the_declared_sparsity_footprint() {
         wires("in", n),
         wires("out", n)
     ));
-    deck.push_str(".options vntol=1e-14 reltol=1e-12\n.tran 1n 40n\n.end\n");
+    deck.push_str(".options vntol=1e-14 reltol=1e-12\n.tran 1n 40n\n");
     let net = parse_spice(&deck).expect("parse");
     let mut reg = DeviceRegistry::new();
     reg.register_builtin_models(&net.models);

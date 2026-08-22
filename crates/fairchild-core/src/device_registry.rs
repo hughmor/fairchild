@@ -916,7 +916,7 @@ mod tests {
              V_wl in_wl 0 DC 1.55e-6\n\
              X1 in_re in_im in_wl out_re out_im out_wl pdk_widget_wg \
                 wg_len_um=100 mode_index=4.2 prop_loss_dB_cm=2.0\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let mut registry = DeviceRegistry::new();

@@ -30,7 +30,6 @@ const AWGR_TABLE: &str = "\
 .model awg2 fc_awgr fwhm_ghz=40
 Xr i0 i1 o0 o1 awg2
 .op
-.end
 ";
 
 const LEVEL4_ON_A_BUS: &str = "\
@@ -46,7 +45,6 @@ Xpn bus out a 0 hp 0 myfull
 Vb a 0 DC -1.0
 Vh hp 0 DC 0
 .op
-.end
 ";
 
 const EXPR_ON_A_BUS: &str = "\
@@ -56,7 +54,6 @@ const EXPR_ON_A_BUS: &str = "\
 Xp a b c 0 myexpr
 Vb c 0 DC 1
 .op
-.end
 ";
 
 const CARD_WAVEGUIDE: &str = "\
@@ -65,7 +62,6 @@ const CARD_WAVEGUIDE: &str = "\
 .model mywg fc_waveguide L_um=100
 Xw a b mywg
 .op
-.end
 ";
 
 /// A card inherits its kind's dispatch. Each of these is refused outright by
@@ -109,7 +105,6 @@ fn a_scalar_device_is_still_refused_on_a_wide_bundle() {
 .optical_port bus 4
 Xl bus fc_cw_laser power_mW=1 wavelength_nm=1550
 .op
-.end
 ";
     let err = two_pass(src).expect_err("one laser cannot serve 4 channels");
     let msg = format!("{err}");

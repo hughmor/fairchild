@@ -7,4 +7,3 @@ L1 out 0 1
 .meas tran v_1tau FIND v(out) AT=1e-3
 .meas tran v_2tau FIND v(out) AT=2e-3
 .meas tran v_5tau FIND v(out) AT=5e-3
-.end

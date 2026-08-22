@@ -32,7 +32,7 @@ const STALLS: &str = "* current source into a photodetector shunt\n\
      .optical_port a\n\
      XPD a p n fc_photodetector r_shunt=1T\n\
      I1 0 p DC 1m\n\
-     Rn n 0 1\n.op\n.end\n";
+     Rn n 0 1\n.op\n";
 
 /// What `STALLS` would settle at if it ever did: 1 mA × 1 TΩ.
 const STALLS_ANSWER: f64 = 1e9;
@@ -45,7 +45,7 @@ const REFERENCE: &str = "* same, plus an explicit parallel resistor\n\
      XPD a p n fc_photodetector r_shunt=20k\n\
      Rx p n 20k\n\
      I1 0 p DC 1m\n\
-     Rn n 0 1\n.op\n.end\n";
+     Rn n 0 1\n.op\n";
 
 fn solve(deck: &str, itl1: usize) -> Result<f64, SimError> {
     let net = parse_spice(deck)?;

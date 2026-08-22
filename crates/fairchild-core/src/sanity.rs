@@ -396,38 +396,38 @@ mod tests {
 
     #[test]
     fn r_zero_warns() {
-        let n = count_warnings("* r0\nV1 a 0 DC 1\nR1 a b 0.0\nR2 b 0 1k\n.op\n.end\n");
+        let n = count_warnings("* r0\nV1 a 0 DC 1\nR1 a b 0.0\nR2 b 0 1k\n.op\n");
         assert!(n >= 1, "R=0 should be flagged");
     }
 
     #[test]
     fn r_negative_warns() {
-        let n = count_warnings("* rneg\nV1 a 0 DC 1\nR1 a 0 -1k\n.op\n.end\n");
+        let n = count_warnings("* rneg\nV1 a 0 DC 1\nR1 a 0 -1k\n.op\n");
         assert!(n >= 1);
     }
 
     #[test]
     fn healthy_circuit_quiet() {
-        let n = count_warnings("* clean\nV1 a 0 DC 1\nR1 a out 1k\nR2 out 0 1k\n.op\n.end\n");
+        let n = count_warnings("* clean\nV1 a 0 DC 1\nR1 a out 1k\nR2 out 0 1k\n.op\n");
         assert_eq!(n, 0, "clean circuit should produce no warnings");
     }
 
     #[test]
     fn duplicate_refdes_warns() {
-        let n = count_warnings("* dup\nV1 a 0 DC 1\nR1 a b 1k\nR1 b 0 2k\n.op\n.end\n");
+        let n = count_warnings("* dup\nV1 a 0 DC 1\nR1 a b 1k\nR1 b 0 2k\n.op\n");
         assert!(n >= 1);
     }
 
     #[test]
     fn self_short_warns() {
-        let n = count_warnings("* self\nV1 a 0 DC 1\nR1 a a 1k\nR2 a 0 1k\n.op\n.end\n");
+        let n = count_warnings("* self\nV1 a 0 DC 1\nR1 a a 1k\nR2 a 0 1k\n.op\n");
         assert!(n >= 1);
     }
 
     #[test]
     fn zero_amp_v_source_self_short_silent() {
         // V1 a a DC 0 is the canonical ammeter idiom — must not warn.
-        let n = count_warnings("* ammeter\nV1 a a DC 0\nR1 a 0 1k\nVdd a 0 DC 1\n.op\n.end\n");
+        let n = count_warnings("* ammeter\nV1 a a DC 0\nR1 a 0 1k\nVdd a 0 DC 1\n.op\n");
         assert_eq!(n, 0);
     }
 
@@ -438,7 +438,7 @@ mod tests {
              .optical_port ch0\n.optical_port out0\n\
              Xl ch0 fc_cw_laser power_mW=1\n\
              Xt ch0 out0 hp 0 fc_thermal_ps r_heater=0 p_pi=10m\n\
-             V1 hp 0 DC 1\n.op\n.end\n",
+             V1 hp 0 DC 1\n.op\n",
         );
         assert!(n >= 1, "r_heater=0 on fc_thermal_ps must warn");
     }

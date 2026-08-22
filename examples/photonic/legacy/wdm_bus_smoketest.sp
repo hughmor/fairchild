@@ -25,4 +25,3 @@ Xpd1     ch_re_1 ch_im_1 ch_wl_1  ph_a_1 0  photodetector  responsivity=1.0
 Rload1   ph_a_1 0  1k
 
 .op
-.end

@@ -38,7 +38,6 @@ fn deck() -> String {
 Xl a fc_cw_laser power_mW=1.0 wavelength_nm={LAMBDA_NM}
 Xw a b fc_waveguide L_um={L_UM} n_eff={N_EFF} n_g={N_G} alpha_dB_cm=0
 .op
-.end
 "
     )
 }

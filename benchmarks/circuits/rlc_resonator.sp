@@ -6,4 +6,3 @@ L1   n1  n2  1m
 C1   n2  0   1u
 .ic V(n2)=0
 .tran 5u 1m
-.end

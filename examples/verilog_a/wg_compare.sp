@@ -36,4 +36,3 @@ Xnatpd  nat_out native_i 0 fc_photodetector responsivity=0.8 i_dark_a=0 r_shunt=
 Rnat    native_i 0 1k
 
 .op
-.end

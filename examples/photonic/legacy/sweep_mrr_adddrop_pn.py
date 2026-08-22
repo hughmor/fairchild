@@ -104,7 +104,6 @@ Rdp     ph_dp 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl th_re th_im dp_re dp_im ad_re ad_im
 .op
-.end
 """
 
 def netlist_l1():
@@ -136,7 +135,6 @@ Rdp     ph_dp 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl th_re th_im dp_re dp_im ad_re ad_im
 .op
-.end
 """
 
 # ── Sweep ──────────────────────────────────────────────────────────────────────

@@ -42,4 +42,3 @@ Vmod vmod 0 PULSE(0 3 500p 20p 20p 5n 10n)
 * Variable-step gear integration resolves the sub-100 ps dynamics.
 .options method=gear variable_step=1
 .tran 5p 1.5n
-.end

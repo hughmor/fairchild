@@ -29,10 +29,7 @@ fn v(deck: &str, node: &str) -> f64 {
 #[test]
 fn a_voltage_source_drives_through_an_inductor() {
     // The choke passes DC, so the whole 1 V lands on the load.
-    let got = v(
-        "* choke\nV1 a 0 DC 1\nL1 a b 1n\nR1 b 0 1k\n.op\n.end\n",
-        "b",
-    );
+    let got = v("* choke\nV1 a 0 DC 1\nL1 a b 1n\nR1 b 0 1k\n.op\n", "b");
     assert!(
         (got - 1.0).abs() < 1e-6,
         "expected 1 V across the load through a DC short, got {got}"
@@ -43,10 +40,7 @@ fn a_voltage_source_drives_through_an_inductor() {
 fn a_current_source_drives_through_an_inductor() {
     // This is the case that used to leave the node on gmin alone: 1 mA into
     // 1e-12 S is 1e9 V, which then wrecked the trust region for every unknown.
-    let got = v(
-        "* bondwire\nI1 0 a DC 1m\nL1 a b 1n\nR1 b 0 1k\n.op\n.end\n",
-        "a",
-    );
+    let got = v("* bondwire\nI1 0 a DC 1m\nL1 a b 1n\nR1 b 0 1k\n.op\n", "a");
     assert!(
         (got - 1.0).abs() < 1e-4,
         "expected 1 mA × 1 kΩ = 1 V, got {got}"
@@ -56,7 +50,7 @@ fn a_current_source_drives_through_an_inductor() {
 #[test]
 fn inductors_in_series_all_pass_dc() {
     let got = v(
-        "* two chokes\nV1 a 0 DC 2\nL1 a b 1n\nL2 b c 2n\nR1 c 0 1k\n.op\n.end\n",
+        "* two chokes\nV1 a 0 DC 2\nL1 a b 1n\nL2 b c 2n\nR1 c 0 1k\n.op\n",
         "c",
     );
     assert!((got - 2.0).abs() < 1e-6, "expected 2 V, got {got}");
@@ -67,7 +61,7 @@ fn an_inductor_to_ground_pulls_its_node_to_ground() {
     // The dual check: a short to ground must actually short, so the divider
     // collapses instead of holding half the supply.
     let got = v(
-        "* L to ground\nV1 a 0 DC 1\nR1 a b 1k\nL1 b 0 1n\n.op\n.end\n",
+        "* L to ground\nV1 a 0 DC 1\nR1 a b 1k\nL1 b 0 1n\n.op\n",
         "b",
     );
     assert!(
@@ -88,7 +82,7 @@ fn the_heater_chain_that_broke_giona_now_biases_correctly() {
          L1 w11 h11 1n\n\
          Rh1 h11 mid 100\n\
          Rh2 mid g1 100\n\
-         L2 g1 0 1n\n.op\n.end\n",
+         L2 g1 0 1n\n.op\n",
         "w11",
     );
     assert!(

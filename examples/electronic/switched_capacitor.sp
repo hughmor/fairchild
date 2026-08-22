@@ -28,4 +28,3 @@ S1   in  out clk 0 swmod OFF
 C1   out 0   1n
 
 .tran 0.2u 100u
-.end

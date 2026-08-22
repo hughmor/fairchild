@@ -17,7 +17,6 @@ fn default_optical_port_emits_3_wires() {
 .optical_port ch0
 .optical_port bus 4
 .op
-.end
 ",
     )
     .unwrap();
@@ -49,7 +48,6 @@ fn enable_bidirectional_emits_5_wires() {
 .optical_port ch0
 .optical_port bus 2
 .op
-.end
 ",
     )
     .unwrap();
@@ -89,7 +87,7 @@ fn enable_bidirectional_aliases() {
         "bidirectional",
         "bidirectional_propagation",
     ] {
-        let src = format!(".options {keyword}=1\n.optical_port ch0\n.op\n.end\n");
+        let src = format!(".options {keyword}=1\n.optical_port ch0\n.op\n");
         let net = parse_spice(&src).unwrap();
         let ch0 = net.bundle_ports.iter().find(|p| p.name == "ch0").unwrap();
         assert_eq!(
@@ -110,7 +108,6 @@ fn enable_bidirectional_zero_stays_off() {
 .options enable_bidirectional=0
 .optical_port ch0
 .op
-.end
 ",
     )
     .unwrap();

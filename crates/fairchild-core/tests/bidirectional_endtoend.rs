@@ -21,7 +21,6 @@ Xpd wg_out pd_a 0 fc_photodetector responsivity=0.8 i_dark_a=1e-12 r_shunt=1Meg
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let bidir = "\
 .options enable_bidirectional=1
@@ -33,7 +32,6 @@ Xpd wg_out pd_a 0 fc_photodetector responsivity=0.8 i_dark_a=1e-12 r_shunt=1Meg
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let r_uni = dc_op_nr_with_registry(&parse_spice(unidir).unwrap(), &DeviceRegistry::new())
         .expect("DC OP (unidir)");
@@ -57,7 +55,6 @@ fn bidir_laser_zeroes_backward_wires() {
 .optical_port src
 Xl src fc_cw_laser power_mW=1.0 wavelength_nm=1550
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -94,7 +91,6 @@ Vout_fw_im wg_out_im_fw_0 0 DC 0
 Vout_wl    wg_out_wl_0    0 DC 1.55e-6
 Xwg src wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

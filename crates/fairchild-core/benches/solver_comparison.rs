@@ -68,7 +68,7 @@ fn build_resistor_mesh(n: usize) -> String {
 
     // Load resistor grounds the far corner so the circuit has a unique solution.
     s.push_str(&format!("Rload v_{n1}_{n1} 0 1k\n", n1 = n - 1));
-    s.push_str(".op\n.end\n");
+    s.push_str(".op\n");
     s
 }
 
@@ -86,7 +86,7 @@ fn build_diode_ladder(n: usize) -> String {
         s.push_str(&format!("R{i} n{i} n{} 10k\n", i + 1));
         s.push_str(&format!("D{i} n{} 0 d1\n", i + 1));
     }
-    s.push_str(".op\n.end\n");
+    s.push_str(".op\n");
     s
 }
 

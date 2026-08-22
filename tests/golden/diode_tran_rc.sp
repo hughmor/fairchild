@@ -8,4 +8,3 @@ D1 a cap myd
 C1 cap 0 100n
 .model myd D (Is=1e-14 N=1)
 .tran 10n 600u
-.end

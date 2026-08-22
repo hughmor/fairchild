@@ -606,7 +606,8 @@ mod tests {
     /// not approximately.  This is the guard on the tran.rs refactor.
     #[test]
     fn stepper_matches_batch_bit_for_bit() {
-        let src = "* rc\nV1 in 0 PULSE(0 1 0 1n 1n 50n 100n)\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n.end\n";
+        let src =
+            "* rc\nV1 in 0 PULSE(0 1 0 1n 1n 50n 100n)\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n";
         let netlist = parse_spice(src).unwrap();
         let registry = registry_for(&netlist);
         let opts = SimOptions::from_netlist(&netlist);
@@ -642,7 +643,7 @@ mod tests {
     /// what to write next.
     #[test]
     fn set_source_drives_the_circuit() {
-        let src = "* rc\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n.end\n";
+        let src = "* rc\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n";
         let netlist = parse_spice(src).unwrap();
         let registry = registry_for(&netlist);
         let opts = SimOptions::from_netlist(&netlist);
@@ -676,7 +677,7 @@ mod tests {
 
     #[test]
     fn advance_to_lands_on_the_grid_and_never_walks_backwards() {
-        let src = "* rc\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n.end\n";
+        let src = "* rc\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n";
         let netlist = parse_spice(src).unwrap();
         let registry = registry_for(&netlist);
         let opts = SimOptions::from_netlist(&netlist);
@@ -691,7 +692,7 @@ mod tests {
 
     #[test]
     fn set_source_rejects_unknown_names() {
-        let src = "* rc\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n.end\n";
+        let src = "* rc\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n";
         let netlist = parse_spice(src).unwrap();
         let registry = registry_for(&netlist);
         let opts = SimOptions::from_netlist(&netlist);

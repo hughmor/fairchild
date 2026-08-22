@@ -850,7 +850,10 @@ impl Circuit {
     ///
     /// Everything else — solver options, integration method — is the same
     /// kwargs as `run()`.  The step is fixed: the adjoint drives the fixed-step
-    /// integrator, so `variable_step` does not apply.
+    /// integrator, so `variable_step=True` (from a kwarg or from the deck's
+    /// `.options`) is an error rather than a silent downgrade — the co-state
+    /// recursion replays the forward step sequence, and an adaptive controller
+    /// would re-decide that sequence under a perturbed parameter.
     #[pyo3(signature = (probes, **kwargs))]
     pub fn tran_adjoint(
         &self,

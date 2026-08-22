@@ -316,7 +316,7 @@ mod tests {
         // for R2=1k that pins V(out) = −I·R = −1V.
         let net = parse_spice(
             "* b\nV1 in 0 DC 1\nR1 in nin 1\n\
-             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n.end\n",
+             B1 out 0 I=V(in)*1m\nR2 out 0 1k\n.op\n",
         )
         .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
@@ -329,7 +329,7 @@ mod tests {
         // B1 V = V(in) * 2.  V(in) = 1, so V(out) = 2.
         let net = parse_spice(
             "* bv\nV1 in 0 DC 1\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n.end\n",
+             B1 out 0 V=V(in)*2\nR2 out 0 1k\n.op\n",
         )
         .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
@@ -342,7 +342,7 @@ mod tests {
         // B1 V = V(in) ^ 2.  V(in) = 0.7, so V(out) should converge to 0.49.
         let net = parse_spice(
             "* bv\nV1 in 0 DC 0.7\nR1 in 0 1k\n\
-             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n.end\n",
+             B1 out 0 V=V(in)^2\nR2 out 0 1k\n.op\n",
         )
         .unwrap();
         let r = crate::newton::dc_op_nr(&net).unwrap();
