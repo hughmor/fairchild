@@ -28,10 +28,18 @@ cargo test --test native mzm            # one subject, one name
 cargo test -p fairchild-core            # one crate
 ```
 
-The pre-commit hook runs the same `cargo fmt --check` and
-`cargo clippy -D warnings` that CI fails on. It checks the whole working tree,
-not just what you staged — so a partially staged commit still has to be clean
-overall.
+Two hooks come with `core.hooksPath`:
+
+- **pre-commit** — `cargo fmt --check` and `cargo clippy -D warnings`, the same
+  two CI fails on. It checks the whole working tree, not just what you staged, so
+  a partially staged commit still has to be clean overall. Skipped entirely when
+  nothing Rust-shaped is staged.
+- **pre-push** — `cargo test --workspace`, once, before anything leaves the
+  machine. ~90 s, which is less than the round trip of pushing, waiting for CI,
+  reading a failure and pushing again. This hook could not have existed while the
+  suite took 45 minutes; a hook people disable is worse than none.
+
+`git commit --no-verify` / `git push --no-verify` bypass them.
 
 The Rust toolchain is pinned by `rust-toolchain.toml` and rustup installs it on
 the first `cargo` call. Don't pin a version anywhere else; two sources of truth
