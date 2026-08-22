@@ -506,6 +506,7 @@ impl SparseRow {
         self.vals.fill(0.0);
     }
 
+    #[inline(always)]
     fn slot(&self, j: usize) -> Result<usize, usize> {
         self.cols.binary_search(&(j as u32))
     }
@@ -551,6 +552,7 @@ pub(crate) fn union_rows(a: &SparseRow, b: &SparseRow, mut f: impl FnMut(usize, 
 
 impl std::ops::Index<usize> for SparseRow {
     type Output = f64;
+    #[inline(always)]
     fn index(&self, j: usize) -> &f64 {
         match self.slot(j) {
             Ok(k) => &self.vals[k],
@@ -560,17 +562,27 @@ impl std::ops::Index<usize> for SparseRow {
 }
 
 impl std::ops::IndexMut<usize> for SparseRow {
+    #[inline(always)]
     fn index_mut(&mut self, j: usize) -> &mut f64 {
         match self.slot(j) {
             Ok(k) => &mut self.vals[k],
-            Err(k) => {
-                // Only reachable on a patternless matrix; with a pattern every
-                // stampable cell is pre-allocated.
-                self.cols.insert(k, j as u32);
-                self.vals.insert(k, 0.0);
-                &mut self.vals[k]
-            }
+            Err(k) => self.insert_at(k, j),
         }
+    }
+}
+
+impl SparseRow {
+    /// The cold half of [`IndexMut`]: a write to a structurally absent cell.
+    ///
+    /// Only reachable on a patternless matrix; with a pattern every stampable
+    /// cell is pre-allocated. Kept out of line so the hot path is a search and
+    /// an offset, small enough for the stampers to inline.
+    #[cold]
+    #[inline(never)]
+    fn insert_at(&mut self, k: usize, j: usize) -> &mut f64 {
+        self.cols.insert(k, j as u32);
+        self.vals.insert(k, 0.0);
+        &mut self.vals[k]
     }
 }
 
