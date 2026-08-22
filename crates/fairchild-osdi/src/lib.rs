@@ -57,6 +57,7 @@ pub mod dialect;
 pub mod error;
 pub mod ffi;
 mod loader;
+pub mod portability;
 
 pub use compile::{load_libraries, load_libraries_with_widths, VaCompiler, VaOptions};
 pub use device::OsdiDevice;
