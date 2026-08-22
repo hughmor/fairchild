@@ -20,4 +20,3 @@ RC   cc  c   3.3k
 Q1   c b 0 0 npn1
 
 .tran 1n 200n
-.end

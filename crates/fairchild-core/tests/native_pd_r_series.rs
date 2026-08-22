@@ -28,7 +28,6 @@ Xpd in_re in_im in_wl pd_a 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_da
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let with_rs = "\
 V_re in_re 0 DC 1.0
@@ -38,7 +37,6 @@ Xpd in_re in_im in_wl pd_a 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_da
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let n1 = parse_spice(no_rs).unwrap();
     let n2 = parse_spice(with_rs).unwrap();
@@ -69,7 +67,6 @@ Xpd in_re in_im in_wl pd_a 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_da
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -90,7 +87,6 @@ Xpd in_re in_im in_wl pd_a 0 fc_photodetector responsivity=0.8 c_par=100f
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let _r = dc_op_nr_with_registry(&net, &DeviceRegistry::new())

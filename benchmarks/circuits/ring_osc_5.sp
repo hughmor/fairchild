@@ -26,4 +26,3 @@ C5   n5 0  100f
 .ic V(n1)=1.6 V(n2)=0.1 V(n3)=1.6 V(n4)=0.1 V(n5)=1.6
 .options method=gear
 .tran 50p 30n UIC
-.end

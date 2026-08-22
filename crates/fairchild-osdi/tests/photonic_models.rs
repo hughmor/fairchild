@@ -162,7 +162,7 @@ fn cw_laser_dc_op_default_params() {
         "* CW laser stand-alone DC OP\n\
          Xlaser out_re out_im wl cw_laser\n\
          .optical out_re out_im wl\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -216,7 +216,7 @@ fn laser_photodetector_chain_dc_op() {
          Xpd     laser_re laser_im wl  ph_a 0      photodetector\n\
          Rload   ph_a 0  1k\n\
          .optical laser_re laser_im wl\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -270,7 +270,7 @@ fn laser_waveguide_photodetector_chain_dc_op() {
          Xpd     wg_out_re wg_out_im wl  ph_a 0                   photodetector\n\
          Rload   ph_a 0  1k\n\
          .optical laser_re laser_im wg_out_re wg_out_im wl\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -326,7 +326,7 @@ fn pn_phase_shifter_l1_dc_op_zero_bias() {
          Rload   ph_a 0  1k\n\
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl ore oim\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -382,7 +382,7 @@ fn mrr_modulator_l1_resonance_dip() {
          Rload   ph_a 0  1k\n\
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl ore oim\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -444,7 +444,7 @@ fn mrr_modulator_l1_off_resonance_energy_conservation() {
          Rload   ph_a 0  1k\n\
          Vbias   vbias 0  DC {vbias_v}\n\
          .optical  lre lim wl ore oim\n\
-         .op\n.end\n"
+         .op\n"
         )
     };
 
@@ -496,7 +496,7 @@ fn mzi_pn_l1_v0_cross_full() {
          Rcross  ph_cross 0  1k\n\
          Vbias   vbias 0  DC 0.0\n\
          .optical  lre lim wl bre bim cre cim\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
 
@@ -561,7 +561,7 @@ fn mzi_pn_l1_switching_cycle() {
          Rcross  ph_cross 0  1k\n\
          Vbias   vbias 0  DC {vbias_v}\n\
          .optical  lre lim wl bre bim cre cim\n\
-         .op\n.end\n"
+         .op\n"
         )
     };
 

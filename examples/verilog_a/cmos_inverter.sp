@@ -37,4 +37,3 @@ Cload out 0 50f
 
 .options method=gear
 .tran 20p 20n
-.end

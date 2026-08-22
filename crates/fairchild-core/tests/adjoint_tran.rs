@@ -111,7 +111,7 @@ const RC: &str = "* rc step\n\
                   V1 in 0 PULSE(0 1 0 1p 1p 1 2)\n\
                   R1 in out 1k\n\
                   C1 out 0 1n\n\
-                  .tran 1u 5u\n.end\n";
+                  .tran 1u 5u\n";
 
 /// Backward Euler: the simplest history coupling there is — `∂G_k/∂x_{k-1}`
 /// is one term, and getting its sign or its `α` wrong shows up immediately.
@@ -233,7 +233,7 @@ fn a_nonlinear_transient_matches_a_full_resolve() {
                        R1 in mid 1k\n\
                        D1 mid 0 dmod\n\
                        C1 mid 0 10p\n\
-                       .tran 1n 20n\n.end\n";
+                       .tran 1n 20n\n";
     let (adj, fd) = adjoint_vs_resolve(
         SRC,
         "tr",
@@ -274,7 +274,7 @@ fn an_electro_optic_link_has_a_live_transient_gradient() {
                        Rl pout 0 1k\n\
                        Cl pout 0 100f\n\
                        Vsig vsig 0 PULSE(0 1.5 0 1n 1n 1 2)\n\
-                       .tran 100p 4n\n.end\n";
+                       .tran 100p 4n\n";
     let (step, stop) = (1e-10, 3e-9);
     let r = run(SRC, "tr", step, stop);
     let n = r.adj.time().len();
@@ -327,7 +327,7 @@ fn optical_power_is_a_transient_objective_too() {
                        Rd vsig drv 500\n\
                        Cd vsig 0 200f\n\
                        Vsig drv 0 PULSE(0 1.5 0 1n 1n 1 2)\n\
-                       .tran 100p 4n\n.end\n";
+                       .tran 100p 4n\n";
     let (step, stop) = (1e-10, 3e-9);
     let r = run(SRC, "tr", step, stop);
     let n = r.adj.time().len();
@@ -394,7 +394,7 @@ fn uic_drops_the_initial_condition_from_the_constraint_set() {
                        R1 in out 1k\n\
                        C1 out 0 1n\n\
                        .ic v(out)=0.25\n\
-                       .tran 1u 5u UIC\n.end\n";
+                       .tran 1u 5u UIC\n";
     let (step, stop) = (2e-7, 4e-6);
     let mut o = opts("be");
     o.uic = true;
@@ -428,7 +428,7 @@ fn uic_drops_the_initial_condition_from_the_constraint_set() {
 #[test]
 fn inductance_is_rejected_rather_than_mis_differentiated() {
     const SRC: &str = "* rl\nV1 in 0 PULSE(0 1 0 1n 1n 1 2)\n\
-                       R1 in out 50\nL1 out 0 1u\n.tran 1n 20n\n.end\n";
+                       R1 in out 50\nL1 out 0 1u\n.tran 1n 20n\n";
     let net = parse_spice(SRC).unwrap();
     let reg = registry_for(&net);
     let msg = match TranAdjoint::run(&net, &reg, &opts("tr"), 1e-9, 2e-8) {
@@ -516,7 +516,7 @@ fn a_device_declared_capacitance_gradient_matches_a_full_resolve() {
                        Xc2 b1 b2 out0 ou fc_dcoupler kappa_L=0.7853981634\n\
                        Rd drv nd 25\n\
                        Vsig nd 0 PULSE(-3 -1 0 40p 40p 1 2)\n\
-                       .tran 4p 200p\n.end\n";
+                       .tran 4p 200p\n";
     // Sample while the edge is still moving: once the drive has settled, the
     // capacitance has no influence left on the final value and the reference
     // difference quotient is pure noise.
@@ -571,7 +571,7 @@ const LINEAR_RC: &str = "* linear RC\n\
                          V1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\n\
                          R1 in out 1k\n\
                          C1 out 0 1u\n\
-                         .tran 100u 2m\n.end\n";
+                         .tran 100u 2m\n";
 
 fn linear_rc() -> (fairchild_parser::Netlist, DeviceRegistry, SimOptions) {
     let net = fairchild_parser::parse_spice(LINEAR_RC).unwrap();
@@ -613,7 +613,7 @@ fn charge_lag_reports_a_device_charge_branch_and_finds_no_lag_at_a_static_bias()
                Xl a fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
                Xps a b vm 0 fc_pn_ps_cap L_um=500 V_pi_L=2e-3 g_pn=1e-3\n\
                Vm vm 0 PULSE(0 2 0 1n 1n 50n 100n)\n\
-               .tran 1n 20n\n.end\n";
+               .tran 1n 20n\n";
     let net = fairchild_parser::parse_spice(src).unwrap();
     let mut reg = DeviceRegistry::new();
     reg.register_builtin_models(&net.models);

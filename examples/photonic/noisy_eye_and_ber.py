@@ -272,7 +272,6 @@ Xc2 b1 b2 obar ocross fc_dcoupler kappa_L={KL_3DB}
 Xpd obar det 0 fc_photodetector responsivity={RESPONSIVITY} r_shunt=1Meg i_dark_a=0
 Rl det 0 {R_LOAD}
 Cl det 0 {c_pd}
-.end
 """
     c = fairchild.Circuit()
     c.load_str(deck)

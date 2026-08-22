@@ -40,7 +40,6 @@ Vsup vdd 0 1.8
 Vgnd vss 0 0
 Xtop in out chain
 .op
-.end
 ");
     let mid = r.node_voltage("xtop.m").expect("no node `xtop.m`");
     let out = r.node_voltage("out").expect("no node `out`");
@@ -73,7 +72,6 @@ Vsup vdd 0 1.8
 Vgnd vss 0 0
 Xtop in out chain
 .op
-.end
 ";
     let nl = parse_spice(deck).unwrap();
     let mut reg = DeviceRegistry::new();

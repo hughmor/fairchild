@@ -42,7 +42,7 @@ fn osdi_jacobian_value_at_zero_voltage() {
     }
 
     // Manually run one NR step for the 1-node circuit Ib=1mA → b → D1 → GND.
-    let netlist = parse_spice("* diag\nIb 0 b 1m\nD1 b 0 diode_shockley\n.op\n.end\n").unwrap();
+    let netlist = parse_spice("* diag\nIb 0 b 1m\nD1 b 0 diode_shockley\n.op\n").unwrap();
 
     let ctx = SimContext::default();
     let mut registry = DeviceRegistry::new();

@@ -18,4 +18,3 @@ CPL14 Net-_CPL14-a1_ Net-_CPL14-a2_ Net-_CPL14-b1_ Net-_CPL14-b2_ type=X model=f
 WG27 Net-_CPL14-b1_ THRU_OPT type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
 PS_PN_TH14 Net-_CPL14-b2_ Net-_CPL13-a1_ GND /Vmod /Vheat Net-_PS_PN_TH13-heat_p_ type=X model=fc_pn_th_ps n_g=4.2 l_m=25.1327412287e-6 R_heater=200 V_pi_L=0.02  alpha_dB_cm=10
 WG28 ADD_OPT Net-_CPL13-a2_ type=X model=fc_waveguide l_m=304.5e-6 n_g=4.2 alpha_dB_cm=1.0
-.end

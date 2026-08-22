@@ -89,7 +89,7 @@ expression source as a `B` element instead.
 | | ngspice meaning | fairchild | fail mode |
 |---|---|---|---|
 | `.title` | title line | ✅ (first line, implicit) | — |
-| `.end` | end of deck | ✅ | — |
+| `.end` | end of deck | ✅ optional — EOF ends a deck | anything after it (or on the same line) is an error, not dropped input |
 | `.subckt` / `.ends` | subcircuit definition | ✅ nested instantiation, `{}` arithmetic | — |
 | `.include` | include a file | ✅ 16-deep | — |
 | `.lib` / `.endl` | library section | ✅ | — |

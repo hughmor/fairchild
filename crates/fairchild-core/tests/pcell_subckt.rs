@@ -50,7 +50,7 @@ fn mrm_deck(radius_m: f64, n_eff: f64, lambda_nm: f64, v_pn: f64, i_heat: f64) -
          Xl pin fc_cw_laser power_mW=1.0 wavelength_nm={lambda_nm}\n\
          Var pad_re 0 DC 0\nVai pad_im 0 DC 0\nVaw pad_wl 0 DC {:e}\n\
          Xr pin pth pad pdr vpn 0 hc 0 mrm radius={radius_m:e} n_eff={n_eff}\n\
-         Vpn vpn 0 DC {v_pn}\nIhc 0 hc DC {i_heat:e}\n.op\n.end\n",
+         Vpn vpn 0 DC {v_pn}\nIhc 0 hc DC {i_heat:e}\n.op\n",
         pcell("mrm.sp"),
         lambda_nm * 1e-9,
     )
@@ -105,7 +105,7 @@ fn mrm_pcell_instances_carry_independent_models() {
          Xra ain ath aad adr va 0 ha 0 mrm n_eff=2.2872 dn_di=3.99\n\
          Xrb bin bth bad bdr vb 0 hb 0 mrm n_eff=2.2872 dn_di=0\n\
          Vva va 0 DC 0.9\nVvb vb 0 DC 0.9\n\
-         Iha 0 ha DC 0\nIhb 0 hb DC 0\n.op\n.end\n",
+         Iha 0 ha DC 0\nIhb 0 hb DC 0\n.op\n",
         pcell("mrm.sp"),
     );
     let r = solve(&deck);
@@ -132,7 +132,7 @@ fn source_bank_pcell_drives_eight_channels() {
     for (k, v) in [0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0].iter().enumerate() {
         deck.push_str(&format!("Vd{} d{} 0 DC {v}\n", k + 1, k + 1));
     }
-    deck.push_str(".op\n.end\n");
+    deck.push_str(".op\n");
     let r = solve(&deck);
 
     let p: Vec<f64> = (0..8).map(|k| power(&r, "src", k) / 1e-3).collect();
@@ -165,7 +165,7 @@ fn subckt_bundle_width_mismatch_names_the_required_width() {
          .ends\n\
          .optical_port bus 4\n\
          X1 bus two_wires\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap_err();
     let msg = format!("{err}");
@@ -188,7 +188,7 @@ fn single_channel_subckt_on_a_wide_bundle_is_refused() {
          .ends\n\
          .optical_port bus 4\n\
          X1 bus a k cell\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap_err();
     let msg = format!("{err}");
@@ -210,7 +210,7 @@ fn single_channel_subckt_on_a_one_channel_bundle_still_expands() {
          X1 bus a k cell\n\
          V1 a 0 DC 1\n\
          R2 k 0 1k\n\
-         .op\n.end\n",
+         .op\n",
     )
     .expect("1-channel bundle should expand");
     // The cell's 1k in series with the external 1k across 1 V.

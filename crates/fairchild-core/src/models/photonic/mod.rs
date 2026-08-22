@@ -144,7 +144,7 @@ mod tests {
              V_wl in_wl 0 DC 1.55e-6\n\
              X1 in_re in_im in_wl out_re out_im out_wl fc_waveguide \
                 L_um=100 n_g=4.2 alpha_db_cm=2.0\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let registry = DeviceRegistry::new();
@@ -172,7 +172,7 @@ mod tests {
              V_im a_im 0 DC 0.0\n\
              V_wl a_wl 0 DC 1.55e-6\n\
              X1 a_re a_im a_wl c_re c_im c_wl d_re d_im d_wl fc_splitter\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())
@@ -198,7 +198,7 @@ mod tests {
             "* laser test\n\
              X1 out_re out_im out_wl fc_cw_laser \
                 power_mW=4.0 phi_0_deg=0.0 wavelength_nm=1550\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
@@ -227,7 +227,7 @@ mod tests {
              R_load anode bias 1k\n\
              X1 in_re in_im in_wl anode 0 fc_photodetector \
                 responsivity=0.8 i_dark_a=1e-12 r_shunt=1e6\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())
@@ -256,7 +256,7 @@ mod tests {
              V_heat heat 0 DC 0.0\n\
              X1 in_re in_im in_wl out_re out_im out_wl heat 0 fc_thermal_ps \
                 r_heater=1k p_pi=10m\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
@@ -281,7 +281,7 @@ mod tests {
              V_heat heat 0 DC {v_pi}\n\
              X1 in_re in_im in_wl out_re out_im out_wl heat 0 fc_thermal_ps \
                 r_heater=1k p_pi=10m\n\
-             .op\n.end\n"
+             .op\n"
         ))
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
@@ -306,7 +306,7 @@ mod tests {
              V_bias bias 0 DC 0.0\n\
              X1 in_re in_im in_wl out_re out_im out_wl bias 0 fc_pn_ps \
                 L_um=1000 V_pi_L=2e-3 pin_at_ref=1 alpha_dB_cm=0\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
@@ -331,7 +331,7 @@ mod tests {
              V_bwl b_wl 0 DC 1.55e-6\n\
              X1 a_re a_im a_wl b_re b_im b_wl \
                 c_re c_im c_wl d_re d_im d_wl fc_dcoupler kappa_L=0.7853981633974483\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new())

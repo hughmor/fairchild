@@ -112,7 +112,6 @@ Rdp     ph_dp 0  1k
 Vheat   hp hn  DC 0.0
 .optical l_re l_im l_wl th_re th_im dp_re dp_im ad_re ad_im
 .op
-.end
 """
 
 def netlist_l2():
@@ -134,7 +133,6 @@ Rdp     ph_dp 0  1k
 Vheat   hp hn  DC 0.0
 .optical l_re l_im l_wl th_re th_im dp_re dp_im ad_re ad_im
 .op
-.end
 """
 
 # ── Sweep ──────────────────────────────────────────────────────────────────────

@@ -54,4 +54,3 @@ Vbias2  va2 0  DC 0.0
 .optical  lre lim wl  bar_re bar_im  cross_re cross_im
 
 .op
-.end

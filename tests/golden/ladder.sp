@@ -9,4 +9,3 @@ R5 n2 n3 1k
 R6 n3 0 1k
 
 .op
-.end

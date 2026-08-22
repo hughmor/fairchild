@@ -28,7 +28,6 @@ run
 plot v(out)
 .endc
 .tran 1e-8 2e-6
-.end
 ";
 
 fn deck_path() -> PathBuf {

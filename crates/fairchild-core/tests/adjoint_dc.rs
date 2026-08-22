@@ -88,7 +88,6 @@ V1 in 0 DC 1
 R1 in out 1k
 R2 out 0 2k
 .op
-.end
 ";
 
 #[test]
@@ -172,7 +171,6 @@ V1 in 0 DC 2
 R1 in mid 1k
 D1 mid 0 dmod
 .op
-.end
 ";
 
 #[test]
@@ -264,7 +262,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1000
 Vsig vsig 0 DC 1.5
 .op
-.end
 ";
 
 #[test]
@@ -323,7 +320,6 @@ fn waveguide_length_sensitivity_is_the_loss_slope() {
 Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xwg in0 out0 fc_waveguide L_um=250 n_g=4.2 alpha_dB_cm=2.0
 .op
-.end
 ";
     let net = parse_spice(src).unwrap();
     let outputs = [Output::OpticalPower {
@@ -355,7 +351,7 @@ fn a_voltage_controlled_weight_has_an_exact_gradient() {
     let src = ".optical_port bus\n.optical_port dark\n.optical_port thru\n.optical_port drop\n\
          Xl1 bus fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
          Xwb bus dark thru drop wctl 0 fc_optical_2x2 w=0 dw_dv_0=0.5\n\
-         Vw wctl 0 DC 0.4\n.op\n.end\n";
+         Vw wctl 0 DC 0.4\n.op\n";
     let net = parse_spice(src).unwrap();
     let outputs = [Output::OpticalPower {
         net: "drop".into(),

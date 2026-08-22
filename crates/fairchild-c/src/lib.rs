@@ -732,7 +732,7 @@ pub unsafe extern "C" fn fc_node_name(
 mod tests {
     use super::*;
 
-    const RC: &str = "* rc\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n.end\n";
+    const RC: &str = "* rc\nV1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.tran 1n 100n\n";
 
     /// Drive every call through the real C entry points, as a C caller would.
     unsafe fn load(text: &str) -> *mut FcSim {

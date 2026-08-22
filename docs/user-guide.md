@@ -61,6 +61,11 @@ A fairchild netlist follows standard SPICE conventions:
 - SI suffixes: `k`=1e3, `meg`=1e6, `g`=1e9, `t`=1e12, `m`=1e-3, `u`=1e-6,
   `n`=1e-9, `p`=1e-12, `f`=1e-15.
 - Node `0` (also `gnd`, `GND`) is ground.
+- `.end` is optional — end-of-file ends a deck. It is accepted for
+  compatibility, but nothing may follow it: a trailing line is an error rather
+  than input read off the end of the file and dropped. That is what makes
+  "append a line to a working deck and re-run" a workflow you can trust. An
+  `.include`d file's own `.end` ends *that file*, not the deck including it.
 
 ```spice
 * My circuit title
@@ -68,7 +73,6 @@ V1  in 0  DC 5
 R1  in out 1k
 C1  out 0  1u
 .tran 10u 5m
-.end
 ```
 
 ---
@@ -1631,7 +1635,7 @@ fn my_device_dc_op_matches_closed_form() {
          V1 in 0 DC 1.0\n\
          X1 in out my_device my_param=2.0\n\
          R1 out 0 1k\n\
-         .op\n.end\n"
+         .op\n"
     ).unwrap();
     let r = dc_op_nr_with_registry(&netlist, &DeviceRegistry::new()).unwrap();
     let v = r.node_voltage("out").unwrap();

@@ -256,7 +256,6 @@ Xpd pd_in pd_anode 0 fc_photodetector responsivity=0.8
 Vbias bias 0 DC 1.0
 Rload pd_anode bias 1k
 Vmod vmod 0 PULSE(0 4 100n 100n 100n 800n 2u)
-.end
 ```
 
 That file alone is **not yet runnable** — the optical bundle nets need to be

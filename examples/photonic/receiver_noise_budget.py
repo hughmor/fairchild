@@ -49,7 +49,6 @@ Xlas opt fc_cw_laser power_mw={power_mw}{rin_param}
 Xpd  opt det bias fc_photodetector responsivity={RESPONSIVITY} r_shunt={R_SHUNT} i_dark_a=0
 Rl   det bias {R_LOAD}
 Vb   bias 0 DC 0
-.end
 """
 
 

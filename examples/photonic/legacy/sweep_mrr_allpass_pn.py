@@ -78,7 +78,6 @@ Rload   ph_out 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl o_re o_im
 .op
-.end
 """
 
 def netlist_l2():
@@ -94,7 +93,6 @@ Rload   ph_out 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl o_re o_im
 .op
-.end
 """
 
 def netlist_l3():
@@ -111,7 +109,6 @@ Rload   ph_out 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl o_re o_im
 .op
-.end
 """
 
 # ── Sweep ──────────────────────────────────────────────────────────────────────

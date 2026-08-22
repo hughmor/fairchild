@@ -55,7 +55,6 @@ Xdc2 arc1_out add_in ring_c drop_out fc_dcoupler kappa_L=0.336
 Xarc2 ring_c ring_ret fc_waveguide L_um={ARC_UM} n_eff={n_eff} n_g={n_eff} alpha_dB_cm=1.0
 
 .op
-.end
 "
     )
 }

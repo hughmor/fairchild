@@ -1810,8 +1810,8 @@ mod tests {
 
     #[test]
     fn linear_circuit_converges() {
-        let net = parse_spice("* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         assert!(
             r.iters <= 5,
@@ -1829,7 +1829,7 @@ mod tests {
         // ON (default) this must converge in well under ITL1=150 iters.
         let net = parse_spice(
             "* stiff diode\nVdd a 0 DC 20\nR1 a b 100\nD1 b 0 myd\n\
-             .model myd D (Is=1e-15 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-15 N=1)\n.op\n",
         )
         .unwrap();
         let r = dc_op_nr(&net).unwrap();
@@ -1846,10 +1846,9 @@ mod tests {
 
     #[test]
     fn current_source_biased_diode() {
-        let net = parse_spice(
-            "* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n",
-        )
-        .unwrap();
+        let net =
+            parse_spice("* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n")
+                .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let vb = r.node_voltage("b").unwrap();
         let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
@@ -1866,7 +1865,7 @@ mod tests {
     fn series_rd_circuit() {
         let net = parse_spice(
             "* R-D series\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.op\n",
         )
         .unwrap();
         let r = dc_op_nr(&net).unwrap();
@@ -1880,8 +1879,8 @@ mod tests {
 
     #[test]
     fn write_csv_dc_op() {
-        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_csv(&mut buf).unwrap();
@@ -1897,8 +1896,8 @@ mod tests {
 
     #[test]
     fn write_nutmeg_dc_op() {
-        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_nutmeg(&mut buf, "divider test").unwrap();
@@ -1915,7 +1914,7 @@ mod tests {
         // converge but use more iterations than at the default 1e-3.
         let net = parse_spice(
             "* R-D\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.op\n",
         )
         .unwrap();
         let opts = SimOptions {

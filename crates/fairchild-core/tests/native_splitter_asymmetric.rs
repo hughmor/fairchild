@@ -13,7 +13,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -32,7 +31,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter r=0.9
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -59,7 +57,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter alpha_dB=3.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -86,7 +83,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl a_re a_im a_wl b_re b_im b_wl fc_splitter alpha=0.8 r=0.6
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

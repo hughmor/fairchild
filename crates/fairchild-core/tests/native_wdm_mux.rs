@@ -39,7 +39,6 @@ Vbias bias 0 DC 1.0
 Rl1 v_pd1 bias 1k
 Rl2 v_pd2 bias 1k
 .op
-.end
 "
     )
 }
@@ -105,7 +104,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 vmod 0 fc_pn_ps L_um=100 g_pn=1e-3 pin_at_ref=1 alpha_dB_cm=0
 Vmod vmod 0 DC 1.0
 .op
-.end
 ";
     let two_channel = "\
 .optical_port ch0
@@ -121,7 +119,6 @@ Xpn bus out_bus vmod 0 fc_pn_ps L_um=100 g_pn=1e-3 pin_at_ref=1 alpha_dB_cm=0
 Xdemux out_bus out0 out1 fc_demux
 Vmod vmod 0 DC 1.0
 .op
-.end
 ";
     let one = parse_spice(single_channel).unwrap();
     let two = parse_spice(two_channel).unwrap();
@@ -159,7 +156,6 @@ Xpd bus pd_a 0 fc_photodetector responsivity=1.0 i_dark_a=1e-9 r_shunt=1e12
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let net = parse_spice(netlist_str).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).unwrap();
@@ -189,7 +185,6 @@ Vmod vmod 0 DC 0.0
 Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
-.end
 ";
     let net = parse_spice(netlist_str).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).unwrap();
@@ -235,7 +230,6 @@ R1 v1 bias 1k
 R2 v2 bias 1k
 R3 v3 bias 1k
 .op
-.end
 ";
     let net = parse_spice(netlist_str).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -275,7 +269,7 @@ V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC 1.55e-6\n\
 V1r c1_re 0 DC 2.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC 1.5492e-6\n\
 Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
       c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux il_db=3\n\
-.op\n.end\n";
+.op\n";
     let net = fairchild_parser::parse_spice(netlist).unwrap();
     let r = fairchild_core::newton::dc_op_nr_with_registry(
         &net,
@@ -304,7 +298,7 @@ V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC {on:e}\n\
 V1r c1_re 0 DC 1.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC {off:e}\n\
 Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
       c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux fwhm_ghz=40 df_ghz=100\n\
-.op\n.end\n"
+.op\n"
     );
     let net = fairchild_parser::parse_spice(&netlist).unwrap();
     let r = fairchild_core::newton::dc_op_nr_with_registry(
@@ -330,7 +324,7 @@ V0r b0_re 0 DC 1.0\nV0i b0_im 0 DC 0.0\nV0w b0_wl 0 DC 1.55e-6\n\
 V1r b1_re 0 DC 1.0\nV1i b1_im 0 DC 0.0\nV1w b1_wl 0 DC 1.5492e-6\n\
 Xdm b0_re b0_im b0_wl b1_re b1_im b1_wl \
      d0_re d0_im d0_wl d1_re d1_im d1_wl fc_demux il_db=6\n\
-.op\n.end\n";
+.op\n";
     let net = fairchild_parser::parse_spice(netlist).unwrap();
     let r = fairchild_core::newton::dc_op_nr_with_registry(
         &net,
@@ -353,7 +347,7 @@ V0r c0_re 0 DC 1.0\nV0i c0_im 0 DC 0.0\nV0w c0_wl 0 DC 1.55e-6\n\
 V1r c1_re 0 DC 1.0\nV1i c1_im 0 DC 0.0\nV1w c1_wl 0 DC 1.5492e-6\n\
 Xmux b0_re b0_im b0_wl b1_re b1_im b1_wl \
       c0_re c0_im c0_wl c1_re c1_im c1_wl fc_mux il_db=0 fwhm_ghz=0\n\
-.op\n.end\n";
+.op\n";
     let net = fairchild_parser::parse_spice(netlist).unwrap();
     let r = fairchild_core::newton::dc_op_nr_with_registry(
         &net,

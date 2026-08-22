@@ -7,4 +7,3 @@ R1   out 0   1k
 C1   out 0   10n
 .ic V(out)=0
 .tran 3n 3u
-.end

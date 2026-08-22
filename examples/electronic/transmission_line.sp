@@ -24,4 +24,3 @@ T1 a 0 b 0 Z0=50 TD=1n
 RL b 0 1e9
 
 .tran 20p 4n
-.end

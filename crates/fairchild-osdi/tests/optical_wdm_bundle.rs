@@ -41,7 +41,6 @@ Xmux bus c0 c1 fc_mux
 Xw bus dout wg_wdm2 l_um={L_UM} alpha_dB_cm_0={A0_DB_CM} alpha_dB_cm_1={A1_DB_CM}
 + wl_0_nm=1550 wl_1_nm=1551
 .op
-.end
 "
     )
 }
@@ -129,7 +128,6 @@ fn a_bundle_width_the_model_cannot_serve_is_refused() {
 .optical_port dout 3
 Xw bus dout wg_wdm2
 .op
-.end
 ";
     let err =
         parse_spice_with_arity(src, &reg).expect_err("a 12-terminal model cannot serve 3 channels");

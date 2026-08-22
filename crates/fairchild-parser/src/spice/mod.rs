@@ -418,6 +418,61 @@ fn rebase_model_path(trimmed: &str, base_dir: Option<&Path>) -> Option<String> {
     })
 }
 
+/// Split a deck at its `.end` marker, refusing anything that follows it.
+///
+/// `.end` used to be a `break` in each parsing pass, so everything after it was
+/// read off the end of the file and dropped without a word.  The natural way to
+/// try an option — open a working deck, append a line, re-run — therefore did
+/// nothing, and the run still *succeeded* with the old behaviour.  For an option
+/// that changes physics rather than performance (`waveguide_delay`, `gmin`) that
+/// is a silent wrong answer, so trailing content is a hard error naming the line.
+///
+/// Runs per **file**, from [`resolve_includes`]: an included library's own `.end`
+/// ends that file, not its includer's deck, which is how a PDK file gets to keep
+/// its historical marker.  This is the one place that interprets `.end` — the
+/// marker line is dropped here, and EOF is what ends a deck downstream.
+fn split_at_end(input: &str) -> Result<&str, ParseError> {
+    let mut offset = 0usize;
+    let mut cut: Option<usize> = None;
+    for (i, piece) in input.split_inclusive('\n').enumerate() {
+        let text = strip_inline_comment(piece).trim();
+        let lineno = i + 1;
+        if cut.is_some() {
+            // Blank lines and comments after `.end` are harmless; anything the
+            // parser would have had an opinion about is not.
+            if !text.is_empty() && !text.starts_with('*') && !text.starts_with(';') {
+                return Err(ParseError::Syntax {
+                    line: lineno,
+                    msg: format!(
+                        "'{text}' comes after .end, where it would be dropped without \
+                         a word — move it above the .end line, or delete the .end \
+                         (end-of-file ends a deck)"
+                    ),
+                });
+            }
+        } else {
+            let mut toks = text.split_whitespace();
+            if toks.next().map(str::to_ascii_lowercase).as_deref() == Some(".end") {
+                if let Some(extra) = toks.next() {
+                    return Err(ParseError::Syntax {
+                        line: lineno,
+                        msg: format!(
+                            "'{extra}' follows .end on the same line, where it would be \
+                             dropped without a word — put it on its own line above .end"
+                        ),
+                    });
+                }
+                cut = Some(offset);
+            }
+        }
+        offset += piece.len();
+    }
+    Ok(match cut {
+        Some(at) => &input[..at],
+        None => input,
+    })
+}
+
 /// Recursively expand `.include "file"` and `.lib 'file' section` lines.
 ///
 /// `.include` splices the entire file inline.  `.lib 'file' SECTION` reads the
@@ -438,6 +493,8 @@ fn resolve_includes(
             msg: ".include nesting depth > 16 (circular include?)".into(),
         });
     }
+
+    let input = split_at_end(input)?;
 
     let mut out = String::with_capacity(input.len());
     let lines: Vec<&str> = input.lines().collect();
@@ -732,7 +789,7 @@ mod tests {
 
     #[test]
     fn parse_voltage_divider() {
-        let input = "* Voltage divider\nV1 in 0 DC 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n";
+        let input = "* Voltage divider\nV1 in 0 DC 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         assert_eq!(netlist.analyses.len(), 1);
@@ -740,7 +797,8 @@ mod tests {
 
     #[test]
     fn parse_rc_tran() {
-        let input = "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n.end\n";
+        let input =
+            "* RC\nV1 in 0 PULSE(0 1 0 1n 1n 10m 20m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 5m\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3);
         match &netlist.analyses[0] {
@@ -757,7 +815,7 @@ mod tests {
 
     #[test]
     fn parse_pulse_waveform() {
-        let input = "* Pulse\nV1 a 0 PULSE(0 1 0 1n 1n 10m 20m)\n.op\n.end\n";
+        let input = "* Pulse\nV1 a 0 PULSE(0 1 0 1n 1n 10m 20m)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         if let Element::VoltageSource {
             waveform: Waveform::Pulse { v0, v1, tr, .. },
@@ -791,7 +849,7 @@ mod tests {
 
     #[test]
     fn parse_diode_element() {
-        let input = "* Diode\nD1 anode cathode myd\n.op\n.end\n";
+        let input = "* Diode\nD1 anode cathode myd\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 1);
         if let Element::Diode {
@@ -858,8 +916,8 @@ mod tests {
     #[test]
     fn model_card_accepts_no_space_before_paren() {
         for text in [
-            "* m\n.model xx D (IS=1e-16 N=1.5)\n.op\n.end\n",
-            "* m\n.model xx D(IS=1e-16 N=1.5)\n.op\n.end\n",
+            "* m\n.model xx D (IS=1e-16 N=1.5)\n.op\n",
+            "* m\n.model xx D(IS=1e-16 N=1.5)\n.op\n",
         ] {
             let nl = parse_spice(text).unwrap();
             let card = &nl.models[0];
@@ -891,7 +949,7 @@ mod tests {
             (".tran 1n 20n UIC 5n", 5e-9, None, true),
         ];
         for (line, want_tstart, want_tmax, want_uic) in cases {
-            let nl = parse_spice(&format!("* t\nV1 a 0 DC 1\n{line}\n.end\n")).unwrap();
+            let nl = parse_spice(&format!("* t\nV1 a 0 DC 1\n{line}\n")).unwrap();
             let Analysis::Tran {
                 tstart,
                 tmax,
@@ -933,7 +991,7 @@ mod tests {
         ];
         for (line, want_kind, voltage_controlled) in cases {
             let nl = parse_spice(&format!(
-                "* cs\nVin in 0 DC 1\nVs a 0 DC 1\n{line}\nRl out 0 1k\n.op\n.end\n"
+                "* cs\nVin in 0 DC 1\nVs a 0 DC 1\n{line}\nRl out 0 1k\n.op\n"
             ))
             .unwrap();
             let el = nl
@@ -981,10 +1039,9 @@ mod tests {
     /// node called `POLY(1)`.
     #[test]
     fn controlled_source_poly_form_is_refused() {
-        let err = parse_spice(
-            "* poly\nVin in 0 DC 1\nE1 out 0 POLY(1) in 0 0 2\nRl out 0 1k\n.op\n.end\n",
-        )
-        .unwrap_err();
+        let err =
+            parse_spice("* poly\nVin in 0 DC 1\nE1 out 0 POLY(1) in 0 0 2\nRl out 0 1k\n.op\n")
+                .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("POLY") && msg.contains("B-element"),
@@ -994,7 +1051,7 @@ mod tests {
 
     #[test]
     fn parse_diode_instance_params() {
-        let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n.end\n";
+        let input = "* Diode\nD1 a b myd Is=1e-12 Rs=0.5\n.op\n";
         let netlist = parse_spice(input).unwrap();
         let Element::Diode { params, .. } = &netlist.elements[0] else {
             panic!("expected Diode element");
@@ -1007,7 +1064,7 @@ mod tests {
 
     #[test]
     fn parse_model_card() {
-        let input = "* test\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n";
+        let input = "* test\n.model myd D (Is=1e-14 N=1)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.models.len(), 1);
         let m = &netlist.models[0];
@@ -1031,7 +1088,7 @@ mod tests {
 
     #[test]
     fn parse_model_card_no_parens() {
-        let input = "* test\n.model myd D Is=2.52e-9 N=1.752\n.op\n.end\n";
+        let input = "* test\n.model myd D Is=2.52e-9 N=1.752\n.op\n";
         let netlist = parse_spice(input).unwrap();
         let m = &netlist.models[0];
         assert_eq!(m.kind, "d");
@@ -1056,7 +1113,7 @@ mod tests {
 
     #[test]
     fn parse_pwl_waveform() {
-        let input = "* PWL\nV1 a 0 PWL(0 0 1u 5 2u 5 3u 0)\n.op\n.end\n";
+        let input = "* PWL\nV1 a 0 PWL(0 0 1u 5 2u 5 3u 0)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         if let Element::VoltageSource {
             waveform: Waveform::Pwl { points },
@@ -1085,7 +1142,7 @@ mod tests {
 
     #[test]
     fn parse_ac_directive() {
-        let input = "* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 20 1 100k\n.end\n";
+        let input = "* RC\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 20 1 100k\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
             Analysis::Ac {
@@ -1105,7 +1162,7 @@ mod tests {
 
     #[test]
     fn parse_ac_lin() {
-        let input = "* test\nV1 in 0 DC 1\n.ac lin 100 1k 10k\n.end\n";
+        let input = "* test\nV1 in 0 DC 1\n.ac lin 100 1k 10k\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
             Analysis::Ac {
@@ -1210,7 +1267,7 @@ mod tests {
     fn parse_xosdi_element() {
         let input = "* photonic test\n\
                      Xlaser laser_re laser_im cw_laser power_mW=1.0\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 1);
         if let Element::XOsdi {
@@ -1233,7 +1290,7 @@ mod tests {
 
     #[test]
     fn parse_sin_waveform() {
-        let input = "* sin\nV1 a 0 SIN(0 1 1k 0 0 0)\n.op\n.end\n";
+        let input = "* sin\nV1 a 0 SIN(0 1 1k 0 0 0)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
             Element::VoltageSource {
@@ -1250,7 +1307,7 @@ mod tests {
 
     #[test]
     fn parse_exp_waveform() {
-        let input = "* exp\nV1 a 0 EXP(0 1 1u 1u 5u 1u)\n.op\n.end\n";
+        let input = "* exp\nV1 a 0 EXP(0 1 1u 1u 5u 1u)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
             Element::VoltageSource {
@@ -1278,7 +1335,7 @@ mod tests {
 
     #[test]
     fn parse_sffm_waveform() {
-        let input = "* sffm\nV1 a 0 SFFM(0 1 1k 5 100)\n.op\n.end\n";
+        let input = "* sffm\nV1 a 0 SFFM(0 1 1k 5 100)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
             Element::VoltageSource {
@@ -1304,7 +1361,7 @@ mod tests {
 
     #[test]
     fn parse_am_waveform() {
-        let input = "* am\nV1 a 0 AM(1 0 100 1k 0)\n.op\n.end\n";
+        let input = "* am\nV1 a 0 AM(1 0 100 1k 0)\n.op\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.elements[0] {
             Element::VoltageSource {
@@ -1374,7 +1431,7 @@ mod tests {
         let net = parse_spice(
             ".optical_port portA\n\
              .optical_port portB\n\
-             Xwg portA portB some_model\n.end\n",
+             Xwg portA portB some_model\n",
         )
         .unwrap();
         assert_eq!(net.title, "", "no title comment present");
@@ -1387,7 +1444,7 @@ mod tests {
         let net = parse_spice(
             "* Real title\n\
              V1 in 0 DC 1\n\
-             R1 in 0 1k\n.op\n.end\n",
+             R1 in 0 1k\n.op\n",
         )
         .unwrap();
         assert_eq!(net.title, "* Real title");
@@ -1401,7 +1458,7 @@ mod tests {
             "* port test\n\
              .optical_port portin\n\
              .optical_port portout\n\
-             Xwg portin portout some_model\n.end\n",
+             Xwg portin portout some_model\n",
         )
         .unwrap();
         assert_eq!(net.bundle_ports.len(), 2);
@@ -1454,7 +1511,7 @@ mod tests {
             "* WDM port test\n\
              .optical_port bus_in 4\n\
              .optical_port bus_out 4\n\
-             Xwg bus_in bus_out some_model L_um=100\n.end\n",
+             Xwg bus_in bus_out some_model L_um=100\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -1474,7 +1531,7 @@ mod tests {
             "* single channel\n\
              .optical_port bus_in\n\
              .optical_port bus_out\n\
-             Xwg bus_in bus_out some_model L_um=100\n.end\n",
+             Xwg bus_in bus_out some_model L_um=100\n",
         )
         .unwrap();
         assert_eq!(net.elements.len(), 1);
@@ -1507,7 +1564,7 @@ mod tests {
              .optical_port bus 3\n\
              .optical_port out 3\n\
              .electrical_port wctl 3\n\
-             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n.end\n",
+             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n",
         )
         .unwrap();
         let ctl = net
@@ -1543,7 +1600,7 @@ mod tests {
              .optical_port bus 4\n\
              .optical_port out 4\n\
              .electrical_port wctl 2\n\
-             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n.end\n",
+             Xwb bus out wctl 0 fc_dcoupler kappa_L=0.1\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -1562,7 +1619,7 @@ mod tests {
              .optical_port out 4\n\
              .electrical_port wide 8\n\
              Xwg bus out fc_waveguide L_um=100\n\
-             R1 wide_0 wide_7 1k\n.end\n",
+             R1 wide_0 wide_7 1k\n",
         )
         .unwrap();
         assert_eq!(net.bundle_ports.len(), 3);
@@ -1575,7 +1632,7 @@ mod tests {
             "* bad\n\
              .optical_port a 2\n\
              .optical_port b 4\n\
-             Xwg a b model\n.end\n",
+             Xwg a b model\n",
         );
         assert!(
             res.is_err(),
@@ -1619,7 +1676,7 @@ mod tests {
 
     #[test]
     fn parse_dc_sweep_single() {
-        let input = "* dc\nV1 in 0 DC 0\nR1 in 0 1k\n.dc V1 0 5 0.1\n.end\n";
+        let input = "* dc\nV1 in 0 DC 0\nR1 in 0 1k\n.dc V1 0 5 0.1\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
             Analysis::Dc {
@@ -1641,7 +1698,7 @@ mod tests {
 
     #[test]
     fn parse_dc_sweep_nested() {
-        let input = "* dc 2d\nV1 in 0 DC 0\nV2 g 0 DC 0\n.dc V1 0 5 0.5 V2 0 2 0.5\n.end\n";
+        let input = "* dc 2d\nV1 in 0 DC 0\nV2 g 0 DC 0\n.dc V1 0 5 0.5 V2 0 2 0.5\n";
         let netlist = parse_spice(input).unwrap();
         match &netlist.analyses[0] {
             Analysis::Dc { src, nested, .. } => {
@@ -1657,7 +1714,7 @@ mod tests {
     #[test]
     fn parse_options_directive_stores_pairs() {
         let input = "* opts\nV1 in 0 DC 1\nR1 in out 1k\n\
-                     .options reltol=1e-5 gmin=1p method=be\n.op\n.end\n";
+                     .options reltol=1e-5 gmin=1p method=be\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.options.len(), 3);
         assert_eq!(netlist.options[0], ("reltol".into(), "1e-5".into()));
@@ -1668,14 +1725,14 @@ mod tests {
     #[test]
     fn parse_options_accumulates_across_lines() {
         let input = "* opts\nV1 in 0 DC 1\n\
-                     .options reltol=1e-5\n.options vntol=1e-9 itl1=300\n.op\n.end\n";
+                     .options reltol=1e-5\n.options vntol=1e-9 itl1=300\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.options.len(), 3);
     }
 
     #[test]
     fn parse_options_bare_flag_is_true() {
-        let input = "* opts\nV1 in 0 DC 1\n.options uic\n.op\n.end\n";
+        let input = "* opts\nV1 in 0 DC 1\n.options uic\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.options, vec![("uic".into(), "1".into())]);
     }
@@ -1684,7 +1741,7 @@ mod tests {
     fn parse_optical_directive() {
         let input = "* photonic test\n\
                      .optical laser_re laser_im wg_out_re wg_out_im\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(
             netlist.optical_nets,
@@ -1697,7 +1754,7 @@ mod tests {
         // .optical with bus vector notation
         let input = "* WDM test\n\
                      .optical opt_re[0..2] opt_im[0..2] opt_wl[0..2]\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(
             netlist.optical_nets,
@@ -1713,7 +1770,7 @@ mod tests {
         // .optical_bus N re_base im_base wl_base
         let input = "* WDM test\n\
                      .optical_bus 3 ch_re ch_im ch_wl\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(
             netlist.optical_nets,
@@ -1730,7 +1787,7 @@ mod tests {
         let input = "* WDM xosdi test\n\
                      .optical ch_re[0..1] ch_im[0..1] ch_wl[0..1]\n\
                      Xmux ch_re[0..1] ch_im[0..1] ch_wl[0..1] out_re out_im out_wl wdm_mux2\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         if let Element::XOsdi {
             nets, model_name, ..
@@ -1756,7 +1813,7 @@ mod tests {
                      .optical laser_re laser_im\n\
                      Xlaser laser_re laser_im cw_laser\n\
                      R1 vdd 0 1k\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert!(check_disciplines(&netlist).is_ok());
     }
@@ -1767,7 +1824,7 @@ mod tests {
         let input = "* BAD: resistor connected to optical net\n\
                      .optical laser_re laser_im\n\
                      R1 laser_re laser_im 50\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         let err = check_disciplines(&netlist).unwrap_err();
         assert!(matches!(err, DisciplineError { .. }));
@@ -1781,7 +1838,7 @@ mod tests {
                      .optical opt_re opt_im\n\
                      Xpd opt_re opt_im ph_a ph_k photodetector\n\
                      R1 ph_a 0 1k\n\
-                     .op\n.end\n";
+                     .op\n";
         let netlist = parse_spice(input).unwrap();
         assert!(check_disciplines(&netlist).is_ok());
     }
@@ -1800,7 +1857,6 @@ R2 out gnd_node 1k
 V1 vdd 0 DC 5
 Xdiv1 vdd mid 0 rdiv
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         // V1 + R1 (from Xdiv1) + R2 (from Xdiv1) = 3 elements
@@ -1847,7 +1903,6 @@ V1 vdd 0 DC 1
 Xinv1 vdd n1 inv
 Xinv2 vdd n2 inv
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3); // V1 + 2 × R1
@@ -1882,7 +1937,6 @@ V1 vdd 0 DC 1
 Xdef  vdd 0 rvar
 Xover vdd 0 rvar R=2k
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         let resistors: Vec<_> = netlist
@@ -1930,7 +1984,6 @@ R1 a b {Rval}
 V1 in 0 DC 1
 Xbuf in out rbuf
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         let res = netlist
@@ -1961,7 +2014,6 @@ Xin a b inner
 V1 vdd 0 DC 1
 Xout vdd 0 outer
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         // Flat: V1, xout.r2, xout.xin.r1
@@ -2006,7 +2058,6 @@ Xself a b cyc
 V1 vdd 0 DC 1
 Xcyc vdd 0 cyc
 .op
-.end
 ";
         let err = parse_spice(input).unwrap_err();
         assert!(
@@ -2025,7 +2076,6 @@ R1 a b 1k
 V1 vdd 0 DC 1
 Xbad vdd mid out extra twoport
 .op
-.end
 ";
         let err = parse_spice(input).unwrap_err();
         assert!(
@@ -2053,7 +2103,6 @@ Xfwd vdd 0 fwdmod
 .subckt fwdmod a b
 R1 a b 1k
 .ends fwdmod
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         let res = netlist
@@ -2076,7 +2125,7 @@ R1 a b 1k
              * electro-optic\n\
              + dn_dv=-3.6e-5\n\
              V1 a 0 DC 1\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let card = &net.models[0];
@@ -2110,7 +2159,7 @@ R1 a b 1k
              R1 a b {2*pi*radius*n}\n\
              .ends\n\
              X1 p q ring radius=1e-5 n=3\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let Element::Resistor { resistance, .. } = &net.elements[0] else {
@@ -2148,7 +2197,7 @@ R1 a b 1k
              .ends\n\
              V1 in 0 DC 1\n\
              X1 in 0 rdiv n=2\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let resistance = sole_resistance(&net);
@@ -2169,7 +2218,7 @@ R1 a b 1k
              .ends\n\
              V1 in 0 DC 1\n\
              X1 in 0 rdiv n=3\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let resistance = sole_resistance(&net);
@@ -2191,7 +2240,7 @@ R1 a b 1k
              V1 in 0 DC 1\n\
              Xa in 0 rdiv n=2\n\
              Xb in 0 rdiv n=5\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let mut got: Vec<f64> = net
@@ -2221,7 +2270,7 @@ R1 a b 1k
              .ends\n\
              V1 in 0 DC 1\n\
              X1 in 0 rc m=4\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = net
@@ -2256,7 +2305,7 @@ R1 a b 1k
              .ends\n\
              V1 in 0 DC 1\n\
              X1 in 0 rr m=2\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = net
@@ -2285,7 +2334,7 @@ R1 a b 1k
              .model dmod D IS=1e-14\n\
              V1 in 0 DC 1\n\
              X1 in 0 d1 m=2\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2301,7 +2350,7 @@ R1 a b 1k
              V1 in 0 DC 1\n\
              R1 in 0 1k m=4\n\
              C1 in 0 1n m=3\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let r = net
@@ -2330,8 +2379,8 @@ R1 a b 1k
     #[test]
     fn an_unknown_parameter_on_a_passive_line_is_refused() {
         for deck in [
-            "* tempco\nV1 in 0 DC 1\nR1 in 0 1k tc1=0.001\n.op\n.end\n",
-            "* unreadable value\nV1 in 0 DC 1\nC1 in 0 1n esr=notanumber\n.op\n.end\n",
+            "* tempco\nV1 in 0 DC 1\nR1 in 0 1k tc1=0.001\n.op\n",
+            "* unreadable value\nV1 in 0 DC 1\nC1 in 0 1n esr=notanumber\n.op\n",
         ] {
             let err = parse_spice(deck).unwrap_err();
             let msg = format!("{err}");
@@ -2358,7 +2407,7 @@ R1 a b 1k
              V1 in 0 DC 1\n\
              Xa in 0 rsel mode=1\n\
              Xb in 0 rsel mode=0\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let mut got: Vec<f64> = net
@@ -2390,7 +2439,7 @@ R1 a b 1k
              .ends\n\
              V1 in 0 DC 1\n\
              X1 in 0 rsel\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         let names: Vec<&str> = net
@@ -2414,7 +2463,7 @@ R1 a b 1k
              R1 a b {1000*n}\n\
              .ends\n\
              X1 p q rdiv nn=2\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2434,7 +2483,7 @@ R1 a b 1k
              R1 a b {rtot}\n\
              .ends\n\
              X1 p q rdiv rtot=5k\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2455,7 +2504,7 @@ R1 a b 1k
              R1 a b {1000*n}\n\
              .ends\n\
              X1 p q rdiv n=2*3\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2473,7 +2522,7 @@ R1 a b 1k
              R1 a b {2*nope}\n\
              .ends\n\
              X1 p q s\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2499,7 +2548,7 @@ R1 a b 1k
              .ends\n\
              X1 i1 o1 v1 0 ps alpha=7\n\
              X2 i2 o2 v2 0 ps alpha=21\n\
-             .op\n.end\n",
+             .op\n",
         )
         .unwrap();
         // Two independent cards, one per instance.
@@ -2549,9 +2598,9 @@ R1 a b 1k
         let dir = std::env::temp_dir().join(format!("fc_include_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let inc = dir.join("pcell_r.sp");
-        std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n").unwrap();
+        std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n.end\n").unwrap();
         let src = format!(
-            "* including deck\n.include {}\nX1 p q twice r=50\n.op\n.end\n",
+            "* including deck\n.include {}\nX1 p q twice r=50\n.op\n",
             inc.display()
         );
         let net = parse_spice(&src).unwrap();
@@ -2562,12 +2611,67 @@ R1 a b 1k
         std::fs::remove_file(&inc).ok();
     }
 
+    /// Everything after `.end` used to be parsed off the end of the file and
+    /// dropped in silence.  Both halves matter: the trailing line errors, *and*
+    /// the same line above `.end` changes the answer — which is what proves it
+    /// was genuinely inert rather than equal by coincidence.
+    #[test]
+    fn nothing_may_follow_dot_end() {
+        let after = "* deck\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n.options gmin=1e-3\n";
+        let err = parse_spice(after).unwrap_err().to_string();
+        assert!(err.contains("after .end"), "unhelpful refusal: {err}");
+        assert!(err.contains("gmin"), "should quote the dropped line: {err}");
+
+        // An element line is the same failure with a bigger blast radius.
+        let elem = "* deck\nV1 a 0 DC 1\n.op\n.end\nR9 a 0 1k\n";
+        assert!(parse_spice(elem).is_err());
+
+        // Trailing tokens on the marker line itself are dropped just as quietly.
+        assert!(parse_spice("* deck\nV1 a 0 DC 1\n.op\n.end .options gmin=1\n").is_err());
+
+        // Comments and blank lines after `.end` are not content.
+        let ok = "* deck\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n\n* trailing note\n";
+        let net = parse_spice(ok).unwrap();
+        assert_eq!(net.elements.len(), 2);
+
+        // The option is honoured when it is above the marker — and when there is
+        // no marker at all, which is the workflow `.end` was getting in the way of.
+        for src in [
+            "* deck\nV1 a 0 DC 1\nR1 a 0 1k\n.options gmin=1e-3\n.op\n.end\n",
+            "* deck\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.options gmin=1e-3\n",
+        ] {
+            let net = parse_spice(src).unwrap();
+            assert!(
+                net.options.iter().any(|(k, v)| k == "gmin" && v == "1e-3"),
+                "gmin never reached the netlist: {:?}",
+                net.options
+            );
+        }
+    }
+
+    /// An `.include`d library file's `.end` ends *that file*, not its includer's
+    /// deck.  Before, it truncated everything the deck said after the include.
+    #[test]
+    fn an_included_files_dot_end_does_not_end_the_deck() {
+        let dir = std::env::temp_dir().join(format!("fc_end_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let inc = dir.join("lib_with_end.sp");
+        std::fs::write(&inc, ".subckt twice a b r=1\nR1 a b {2*r}\n.ends\n").unwrap();
+        let src = format!(
+            "* including deck\n.include {}\nX1 p q twice r=50\n.op\n",
+            inc.display()
+        );
+        let net = parse_spice(&src).unwrap();
+        assert_eq!(net.elements.len(), 1, "the include truncated the deck");
+        std::fs::remove_file(&inc).ok();
+    }
+
     #[test]
     fn unsupported_directive_errors() {
         // `.func` used to live here; it is implemented now. `.lib` without a
         // section argument stays an error because it names a file to include and
         // the include machinery reports its own failure.
-        let cases = ["* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n.end\n"];
+        let cases = ["* test\nV1 a 0 DC 1\n.lib mylib.lib\n.op\n"];
         for netlist_str in &cases {
             let result = parse_spice(netlist_str);
             assert!(
@@ -2649,7 +2753,7 @@ R1 a b 1k
 
     #[test]
     fn parse_b_element_current() {
-        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 I=V(in)*1m\n.op\n.end\n";
+        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 I=V(in)*1m\n.op\n";
         let netlist = parse_spice(input).unwrap();
         let beh = netlist
             .elements
@@ -2673,7 +2777,7 @@ R1 a b 1k
 
     #[test]
     fn parse_b_element_voltage_with_spaces() {
-        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 V = V(in) * 2\n.op\n.end\n";
+        let input = "* b\nV1 in 0 DC 1\nR1 in out 1k\nB1 out 0 V = V(in) * 2\n.op\n";
         let netlist = parse_spice(input).unwrap();
         let beh = netlist
             .elements
@@ -2688,7 +2792,7 @@ R1 a b 1k
     #[test]
     fn parse_ic_directive() {
         let input = "* ic\nV1 a 0 DC 1\nR1 a out 1k\nC1 out 0 1u\n\
-                     .ic V(out)=0.5 V(a)=1.0\n.op\n.end\n";
+                     .ic V(out)=0.5 V(a)=1.0\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.ic.len(), 2);
         // Lookup map by name.
@@ -2700,7 +2804,7 @@ R1 a b 1k
     #[test]
     fn parse_nodeset_directive() {
         let input = "* nodeset\nV1 a 0 DC 1\nR1 a out 1k\n\
-                     .nodeset V(out)=0.7\n.op\n.end\n";
+                     .nodeset V(out)=0.7\n.op\n";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.nodeset.len(), 1);
         assert_eq!(netlist.nodeset[0].0, "out");
@@ -2718,7 +2822,6 @@ R1 a 0 1k
 .meas tran vmax MAX V(a)
 .options reltol=1e-4
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 2);
@@ -2752,7 +2855,6 @@ Rdown y vss 1k
 Vsup vdd 0 1.8
 Xi in out inv
 .op
-.end
 ";
 
     #[test]
@@ -2791,7 +2893,6 @@ Xi in out inv
 Vsup vdd 0 1.8
 .global vdd vss
 .op
-.end
 ";
         let names = node_names(deck);
         assert!(names.contains(&"vdd".to_string()), "{names:?}");
@@ -2813,7 +2914,6 @@ X2 m o inv
 Vsup vdd 0 1.8
 Xtop in out chain
 .op
-.end
 ";
         let names = node_names(deck);
         assert!(names.contains(&"vdd".to_string()), "{names:?}");
@@ -2829,7 +2929,7 @@ Xtop in out chain
         // global net for every reference inside. Picking one silently is wrong for
         // the deck that meant the other.
         let err = parse_spice(
-            "* clash\n.global vdd\n.subckt inv a y vdd\nRpull vdd y 1k\n.ends\n             Vsup vdd 0 1.8\nXi in out vdd inv\n.op\n.end\n",
+            "* clash\n.global vdd\n.subckt inv a y vdd\nRpull vdd y 1k\n.ends\n             Vsup vdd 0 1.8\nXi in out vdd inv\n.op\n",
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -2842,7 +2942,7 @@ Xtop in out chain
         // Warns rather than errors: ground already is global, so the declaration is
         // redundant, not wrong.
         let names = node_names(
-            "* global gnd\n.global 0\n.subckt r1s a\nRx a 0 1k\n.ends\n             Vs n1 0 DC 1\nXi n1 r1s\n.op\n.end\n",
+            "* global gnd\n.global 0\n.subckt r1s a\nRx a 0 1k\n.ends\n             Vs n1 0 DC 1\nXi n1 r1s\n.op\n",
         );
         assert!(names.contains(&"0".to_string()), "{names:?}");
     }
@@ -2855,7 +2955,7 @@ Xtop in out chain
         // the element's own terminals were remapped, so the solver looked up a node
         // that does not exist and read it as zero.
         let netlist = parse_spice(
-            "* b in subckt\n.subckt amp inp outp\nR1 inp mid 1k\nR2 mid 0 1k\n             B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n.end\n",
+            "* b in subckt\n.subckt amp inp outp\nR1 inp mid 1k\nR2 mid 0 1k\n             B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n",
         )
         .unwrap();
         let expr = netlist
@@ -2878,7 +2978,7 @@ Xtop in out chain
         // zero inside a subcircuit. F/H reference a source by name, which is
         // renamed by the same prefix as any other element.
         let netlist = parse_spice(
-            "* f in subckt\n.subckt mirror inp outp\nVsense inp mid DC 0\nR1 mid 0 1k\n             F1 0 outp Vsense 2\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n.end\n",
+            "* f in subckt\n.subckt mirror inp outp\nVsense inp mid DC 0\nR1 mid 0 1k\n             F1 0 outp Vsense 2\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n",
         )
         .unwrap();
         let expr = netlist
@@ -2900,7 +3000,7 @@ Xtop in out chain
         // A control node that *is* a port must land on the caller's net, not on a
         // prefixed local name that nothing drives.
         let netlist = parse_spice(
-            "* e in subckt\n.subckt buf inp outp\nE1 outp 0 inp 0 1\n.ends\n             V1 a 0 DC 1\nX1 a y buf\nR1 y 0 1k\n.op\n.end\n",
+            "* e in subckt\n.subckt buf inp outp\nE1 outp 0 inp 0 1\n.ends\n             V1 a 0 DC 1\nX1 a y buf\nR1 y 0 1k\n.op\n",
         )
         .unwrap();
         let expr = netlist
@@ -2924,7 +3024,7 @@ Xtop in out chain
     fn if_selects_one_branch() {
         for (corner, want) in [(1.0, 1e3), (2.0, 2e3), (3.0, 5e3)] {
             let deck = format!(
-                "* corners\n.param corner={corner}\n                 .if (corner==1)\nR1 in 0 1k\n                 .elseif (corner==2)\nR1 in 0 2k\n                 .else\nR1 in 0 5k\n.endif\n                 V1 in 0 DC 1\n.op\n.end\n"
+                "* corners\n.param corner={corner}\n                 .if (corner==1)\nR1 in 0 1k\n                 .elseif (corner==2)\nR1 in 0 2k\n                 .else\nR1 in 0 5k\n.endif\n                 V1 in 0 DC 1\n.op\n"
             );
             let r = resistance_of(&deck, "r1");
             assert!((r - want).abs() < 1e-9, "corner {corner}: got {r}");
@@ -2937,7 +3037,7 @@ Xtop in out chain
         // carry two elements of the same name, which is how a conditional that
         // does not really conditionalise shows up.
         let netlist = parse_spice(
-            "* one only\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n.else\nR1 in 0 2k\nR2 in 0 3k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "* one only\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n.else\nR1 in 0 2k\nR2 in 0 3k\n.endif\n             V1 in 0 DC 1\n.op\n",
         )
         .unwrap();
         assert_eq!(netlist.elements.len(), 2, "{:?}", netlist.elements);
@@ -2948,7 +3048,7 @@ Xtop in out chain
         // A `.param`, a `.model` and a `.subckt` in an untaken branch must not
         // exist afterwards — including for later conditions to read.
         let netlist = parse_spice(
-            "* dead\n.param c=0\n             .if (c==1)\n.param extra=5\n.model dead_d D(IS=1e-14)\n             .subckt deadsub a b\nR9 a b 1\n.ends\n.endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+            "* dead\n.param c=0\n             .if (c==1)\n.param extra=5\n.model dead_d D(IS=1e-14)\n             .subckt deadsub a b\nR9 a b 1\n.ends\n.endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n",
         )
         .unwrap();
         assert!(netlist.models.is_empty(), "{:?}", netlist.models);
@@ -2961,7 +3061,7 @@ Xtop in out chain
         // taken, so it must not be evaluated — otherwise a deck that works in
         // HSPICE fails here on a name that never mattered.
         let netlist = parse_spice(
-            "* unevaluated\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n             .elseif (never_defined==1)\nR1 in 0 2k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "* unevaluated\n.param c=1\n             .if (c==1)\nR1 in 0 1k\n             .elseif (never_defined==1)\nR1 in 0 2k\n.endif\n             V1 in 0 DC 1\n.op\n",
         )
         .unwrap();
         assert_eq!(netlist.elements.len(), 2);
@@ -2971,12 +3071,12 @@ Xtop in out chain
     fn nested_ifs_gate_on_the_outer_branch() {
         // The inner `.if` is true, but its parent is false: nothing inside runs.
         let netlist = parse_spice(
-            "* nested\n.param outer=0\n.param inner=1\n             .if (outer==1)\n             .if (inner==1)\nR9 in 0 9k\n.endif\n             .endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+            "* nested\n.param outer=0\n.param inner=1\n             .if (outer==1)\n             .if (inner==1)\nR9 in 0 9k\n.endif\n             .endif\n             R1 in 0 1k\nV1 in 0 DC 1\n.op\n",
         )
         .unwrap();
         assert_eq!(netlist.elements.len(), 2, "{:?}", netlist.elements);
         let r = resistance_of(
-            "* nested live\n.param outer=1\n.param inner=2\n             .if (outer==1)\n             .if (inner==1)\nR1 in 0 1k\n.else\nR1 in 0 7k\n.endif\n             .endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "* nested live\n.param outer=1\n.param inner=2\n             .if (outer==1)\n             .if (inner==1)\nR1 in 0 1k\n.else\nR1 in 0 7k\n.endif\n             .endif\n             V1 in 0 DC 1\n.op\n",
             "r1",
         );
         assert!((r - 7e3).abs() < 1e-9, "got {r}");
@@ -2985,7 +3085,7 @@ Xtop in out chain
     #[test]
     fn condition_may_call_a_func() {
         let r = resistance_of(
-            "* fcond\n.func big(x)=x>2\n.param w=3\n             .if (big(w))\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "* fcond\n.func big(x)=x>2\n.param w=3\n             .if (big(w))\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n",
             "r1",
         );
         assert!((r - 1e3).abs() < 1e-9, "got {r}");
@@ -2996,7 +3096,7 @@ Xtop in out chain
         // Conditions read the deck in file order, so this is the one ordering rule
         // `.if` has: define before you test.
         let r = resistance_of(
-            "* order\n.param a=2\n.param b={a*2}\n             .if (b==4)\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n.end\n",
+            "* order\n.param a=2\n.param b={a*2}\n             .if (b==4)\nR1 in 0 1k\n.else\nR1 in 0 9k\n.endif\n             V1 in 0 DC 1\n.op\n",
             "r1",
         );
         assert!((r - 1e3).abs() < 1e-9, "got {r}");
@@ -3006,37 +3106,37 @@ Xtop in out chain
     fn conditional_faults_are_refused() {
         for (deck, want) in [
             (
-                "* unterminated\n.param c=1\n.if (c==1)\nR1 in 0 1k\nV1 in 0 DC 1\n.op\n.end\n",
+                "* unterminated\n.param c=1\n.if (c==1)\nR1 in 0 1k\nV1 in 0 DC 1\n.op\n",
                 "unterminated",
             ),
             (
-                "* stray else\nR1 in 0 1k\n.else\nV1 in 0 DC 1\n.op\n.end\n",
+                "* stray else\nR1 in 0 1k\n.else\nV1 in 0 DC 1\n.op\n",
                 "without a matching .if",
             ),
             (
-                "* stray endif\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "* stray endif\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n",
                 "without a matching .if",
             ),
             (
-                "* empty cond\n.if\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "* empty cond\n.if\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n",
                 "no condition",
             ),
             (
                 // A comparison against an undefined name is the dangerous one: it
                 // evaluates to a valid `false` and would silently pick the other
                 // branch — the wrong corner, simulated without complaint.
-                "* undefined\n.if (nope==1)\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n.end\n",
+                "* undefined\n.if (nope==1)\nR1 in 0 1k\n.endif\nV1 in 0 DC 1\n.op\n",
                 "undefined parameter",
             ),
             (
                 // Inside a `.subckt` the same faults are caught at expansion,
                 // where the condition is evaluated. An unterminated one would
                 // otherwise drop the rest of the definition.
-                "* unterminated in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "* unterminated in subckt\n.subckt s a b w=1\n.if (w>2)\nR1 a b 1k\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n",
                 "unterminated",
             ),
             (
-                "* stray endif in subckt\n.subckt s a b\nR1 a b 1k\n.endif\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n.end\n",
+                "* stray endif in subckt\n.subckt s a b\nR1 a b 1k\n.endif\n.ends\nX1 p q s\nV1 p 0 DC 1\n.op\n",
                 "without a matching .if",
             ),
         ] {
@@ -3053,10 +3153,7 @@ Xtop in out chain
         let dir = std::env::temp_dir();
         let inc = dir.join(format!("fc_if_include_{}.sp", std::process::id()));
         std::fs::write(&inc, "R1 in 0 4k\n").unwrap();
-        let deck = format!(
-            "* inc\n.include {}\nV1 in 0 DC 1\n.op\n.end\n",
-            inc.display()
-        );
+        let deck = format!("* inc\n.include {}\nV1 in 0 DC 1\n.op\n", inc.display());
         let r = resistance_of(&deck, "r1");
         std::fs::remove_file(&inc).ok();
         assert!((r - 4e3).abs() < 1e-9, "got {r}");
@@ -3081,7 +3178,7 @@ Xtop in out chain
     #[test]
     fn func_is_callable_from_a_parameter_expression() {
         let r = resistance_of(
-            "* f\n.func sq(x)=x*x\n.param a=3\nR1 in 0 {sq(a)*100}\nV1 in 0 DC 1\n.op\n.end\n",
+            "* f\n.func sq(x)=x*x\n.param a=3\nR1 in 0 {sq(a)*100}\nV1 in 0 DC 1\n.op\n",
             "r1",
         );
         assert!((r - 900.0).abs() < 1e-9, "got {r}");
@@ -3093,7 +3190,7 @@ Xtop in out chain
         // evaluated, so a deck that calls before defining still works. HSPICE
         // requires definition first; being order-free is one less rule to know.
         let r = resistance_of(
-            "* f\n.param a=2\nR1 in 0 {dbl(a)*100}\n.func dbl(x)=2*x\nV1 in 0 DC 1\n.op\n.end\n",
+            "* f\n.param a=2\nR1 in 0 {dbl(a)*100}\n.func dbl(x)=2*x\nV1 in 0 DC 1\n.op\n",
             "r1",
         );
         assert!((r - 400.0).abs() < 1e-9, "got {r}");
@@ -3104,9 +3201,9 @@ Xtop in out chain
         // Each of the three spellings a real deck uses, and one that leans on a
         // parameter defined earlier on the same line.
         for deck in [
-            "* p\n.param a=3 b={a*100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
-            "* p\n.param a=3\n.param b='a*100'\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
-            "* p\n.param a=3\n.param b = {a * 100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n.end\n",
+            "* p\n.param a=3 b={a*100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n",
+            "* p\n.param a=3\n.param b='a*100'\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n",
+            "* p\n.param a=3\n.param b = {a * 100}\nR1 in 0 {b}\nV1 in 0 DC 1\n.op\n",
         ] {
             let r = resistance_of(deck, "r1");
             assert!((r - 300.0).abs() < 1e-9, "got {r} for {deck}");
@@ -3117,10 +3214,7 @@ Xtop in out chain
     fn param_suffix_is_a_value_not_an_expression() {
         // `1k` must stay a number: read as an expression, `k` is an undefined
         // parameter and the deck would fail to load.
-        let r = resistance_of(
-            "* p\n.param rr=1k\nR1 in 0 {rr}\nV1 in 0 DC 1\n.op\n.end\n",
-            "r1",
-        );
+        let r = resistance_of("* p\n.param rr=1k\nR1 in 0 {rr}\nV1 in 0 DC 1\n.op\n", "r1");
         assert!((r - 1000.0).abs() < 1e-9, "got {r}");
     }
 
@@ -3129,7 +3223,7 @@ Xtop in out chain
         // The silent one: `VTO={vt}` used to land in the card's expression params,
         // which the MOSFET path never reads, so the threshold quietly defaulted.
         let netlist = parse_spice(
-            "* m\n.param vt=0.7\n.func bump(v)=v+0.1\n             .model nm NMOS (VTO={vt} KP={bump(1e-4)})\n             M1 d g s b nm W=1u L=1u\nV1 d 0 DC 1\n.op\n.end\n",
+            "* m\n.param vt=0.7\n.func bump(v)=v+0.1\n             .model nm NMOS (VTO={vt} KP={bump(1e-4)})\n             M1 d g s b nm W=1u L=1u\nV1 d 0 DC 1\n.op\n",
         )
         .unwrap();
         let card = &netlist.models[0];
@@ -3153,7 +3247,7 @@ Xtop in out chain
         // A constitutive map is over the device's own bias, not over parameters,
         // so it must survive substitution untouched.
         let netlist = parse_spice(
-            "* m\n.optical_port ch0\n.optical_port out0\n             .model myps fc_phase_shifter_expr dneff=\"5.0e-5*V\" g_pn=1e-3\n             Xps ch0 out0 a 0 myps\nVb a 0 DC 1\n.op\n.end\n",
+            "* m\n.optical_port ch0\n.optical_port out0\n             .model myps fc_phase_shifter_expr dneff=\"5.0e-5*V\" g_pn=1e-3\n             Xps ch0 out0 a 0 myps\nVb a 0 DC 1\n.op\n",
         )
         .unwrap();
         let card = &netlist.models[0];
@@ -3173,7 +3267,7 @@ Xtop in out chain
         // A B-source is evaluated by the solver, which knows nothing about .func;
         // expansion at parse time is what makes this work at all.
         let netlist = parse_spice(
-            "* b\n.func dbl(x)=2*x\nV1 in 0 DC 1.5\nB1 out 0 V=dbl(v(in))\nR1 out 0 1k\n.op\n.end\n",
+            "* b\n.func dbl(x)=2*x\nV1 in 0 DC 1.5\nB1 out 0 V=dbl(v(in))\nR1 out 0 1k\n.op\n",
         )
         .unwrap();
         let has_no_calls = netlist.elements.iter().any(|e| match e {
@@ -3190,9 +3284,8 @@ Xtop in out chain
     #[test]
     fn unknown_function_in_a_parameter_is_an_error_naming_it() {
         // Was a 0 Ω resistor.
-        let err =
-            parse_spice("* typo\n.param a=2\nR1 in 0 {frobnicate(a)}\nV1 in 0 DC 1\n.op\n.end\n")
-                .unwrap_err();
+        let err = parse_spice("* typo\n.param a=2\nR1 in 0 {frobnicate(a)}\nV1 in 0 DC 1\n.op\n")
+            .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("frobnicate"), "{msg}");
     }
@@ -3201,23 +3294,23 @@ Xtop in out chain
     fn func_definition_faults_are_refused() {
         for (deck, want) in [
             (
-                "* shadow\n.func sin(x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "* shadow\n.func sin(x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n",
                 "shadow",
             ),
             (
-                "* dup\n.func f(x,x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "* dup\n.func f(x,x)=x\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n",
                 "repeats",
             ),
             (
-                "* recurse\n.func f(x)=f(x)+1\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "* recurse\n.func f(x)=f(x)+1\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n",
                 "recursive",
             ),
             (
-                "* arity\n.func f(x,y)=x+y\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "* arity\n.func f(x,y)=x+y\n.param a={f(1)}\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n",
                 "argument",
             ),
             (
-                "* nobody\n.func f(x)\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n.end\n",
+                "* nobody\n.func f(x)\nV1 a 0 DC 1\nR1 a 0 1k\n.op\n",
                 "empty body",
             ),
         ] {
@@ -3245,7 +3338,6 @@ save v(out)
 write rc.raw v(out)
 plot v(out)
 .endc
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         assert_eq!(netlist.elements.len(), 3, "control lines became elements");
@@ -3258,7 +3350,7 @@ plot v(out)
         // Guessing where the block ended would silently discard the rest of the
         // deck — the failure mode where a circuit loses half its elements and
         // still runs.
-        let input = "* unterminated\nV1 in 0 DC 1\nR1 in 0 1k\n.control\nrun\n.end\n";
+        let input = "* unterminated\nV1 in 0 DC 1\nR1 in 0 1k\n.control\nrun\n";
         let err = parse_spice(input).unwrap_err();
         assert!(
             matches!(&err, ParseError::Syntax { msg, .. } if msg.contains(".endc")),
@@ -3268,7 +3360,7 @@ plot v(out)
 
     #[test]
     fn stray_endc_is_an_error() {
-        let input = "* stray\nV1 in 0 DC 1\nR1 in 0 1k\n.endc\n.op\n.end\n";
+        let input = "* stray\nV1 in 0 DC 1\nR1 in 0 1k\n.endc\n.op\n";
         let err = parse_spice(input).unwrap_err();
         assert!(
             matches!(&err, ParseError::Syntax { msg, .. } if msg.contains(".control")),
@@ -3294,7 +3386,6 @@ run
 plot v(out)
 .endc
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         // X1 flattens to R1 + C1, plus V1.
@@ -3314,7 +3405,7 @@ plot v(out)
             ".save V(a) I(V1)",
             ".width out=80",
         ] {
-            let input = format!("* select\nV1 a 0 DC 1\nR1 a 0 1k\n{d}\n.op\n.end\n");
+            let input = format!("* select\nV1 a 0 DC 1\nR1 a 0 1k\n{d}\n.op\n");
             let netlist = parse_spice(&input).unwrap_or_else(|e| panic!("{d} failed to load: {e}"));
             assert_eq!(netlist.elements.len(), 2, "{d} changed the circuit");
             assert_eq!(netlist.analyses.len(), 1, "{d} changed the analyses");
@@ -3339,7 +3430,7 @@ plot v(out)
     fn ends_does_not_terminate_toplevel() {
         // Prior bug: `.ends` was treated the same as `.end` at the top level.
         // With collect_defs, `.ends` at top level is a hard error.
-        let input = "* test\nV1 a 0 DC 1\n.ends orphan\n.end\n";
+        let input = "* test\nV1 a 0 DC 1\n.ends orphan\n";
         let err = parse_spice(input).unwrap_err();
         assert!(
             matches!(err, ParseError::Syntax { .. }),
@@ -3359,7 +3450,6 @@ R1 a b 50
 Xbuf ina inb mybuf
 Xlaser l_re l_im cw_laser power_mW=1.0
 .op
-.end
 ";
         let netlist = parse_spice(input).unwrap();
         // Xbuf expands to R1; Xlaser stays as XOsdi
@@ -3381,7 +3471,7 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 
     #[test]
     fn inductor_rser_expands_to_two_elements() {
-        let input = "V1 in 0 DC 1\nL1 in out 1m rser=10\n.op\n.end\n";
+        let input = "V1 in 0 DC 1\nL1 in out 1m rser=10\n.op\n";
         let net = parse_spice(input).unwrap();
         // L1 expands into: Inductor(in → __l1_rn) + Resistor(__l1_rn → out)
         let inductors: Vec<_> = net
@@ -3415,7 +3505,7 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 
     #[test]
     fn inductor_rser_cpar_expands_to_three_elements() {
-        let input = "V1 in 0 DC 1\nL1 in out 1m rser=5 cpar=1p\n.op\n.end\n";
+        let input = "V1 in 0 DC 1\nL1 in out 1m rser=5 cpar=1p\n.op\n";
         let net = parse_spice(input).unwrap();
         let n_l = net
             .elements
@@ -3456,7 +3546,7 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 
     #[test]
     fn capacitor_esr_esl_expands_to_three_elements() {
-        let input = "V1 in 0 DC 1\nC1 in 0 100n esr=0.1 esl=2n\n.op\n.end\n";
+        let input = "V1 in 0 DC 1\nC1 in 0 100n esr=0.1 esl=2n\n.op\n";
         let net = parse_spice(input).unwrap();
         let n_l = net
             .elements
@@ -3490,7 +3580,7 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 
     #[test]
     fn capacitor_rpar_adds_parallel_resistor() {
-        let input = "V1 in 0 DC 1\nC1 in 0 100n rpar=1G\n.op\n.end\n";
+        let input = "V1 in 0 DC 1\nC1 in 0 100n rpar=1G\n.op\n";
         let net = parse_spice(input).unwrap();
         let n_r = net
             .elements
@@ -3518,7 +3608,7 @@ Xlaser l_re l_im cw_laser power_mW=1.0
 
     #[test]
     fn resistor_cpar_adds_parallel_cap() {
-        let input = "V1 in 0 DC 1\nR1 in 0 1k cpar=1p\n.op\n.end\n";
+        let input = "V1 in 0 DC 1\nR1 in 0 1k cpar=1p\n.op\n";
         let net = parse_spice(input).unwrap();
         let n_c = net
             .elements
@@ -3557,7 +3647,7 @@ mod inline_comment_tests {
             "* mode flag\n\
              .param sw_mode = 0 $ 0 = off, 1 = on\n\
              R1 a 0 {sw_mode + 1k}\n\
-             .op\n.end\n",
+             .op\n",
         )
         .expect("a comment is not a parameter list");
         // The value is the one before the `$`, not something the comment set.
@@ -3571,7 +3661,7 @@ mod inline_comment_tests {
     /// number ''" rather than anything naming a comment.
     #[test]
     fn an_element_line_takes_a_dollar_comment() {
-        let net = parse_spice("* t\nR1 a 0 1k $ load = 1k\n.op\n.end\n").expect("parses");
+        let net = parse_spice("* t\nR1 a 0 1k $ load = 1k\n.op\n").expect("parses");
         let Element::Resistor { resistance, .. } = &net.elements[0] else {
             panic!("expected a resistor");
         };
@@ -3603,7 +3693,7 @@ mod inline_comment_tests {
              .model d1 d is=1e-14 $ saturation = fitted\n\
              + n=1.8\n\
              D1 a 0 d1\n\
-             .op\n.end\n",
+             .op\n",
         )
         .expect("parses");
         let card = net

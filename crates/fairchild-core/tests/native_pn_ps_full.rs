@@ -17,7 +17,6 @@ Xl0 ch0 fc_cw_laser power_mW={power_mw} wavelength_nm=1550
 Xpn ch0 out0 a 0 {class} L_um=500 pin_at_ref=1 {extra}
 Vb a 0 DC {vbias}
 .op
-.end
 "
     );
     let net = parse_spice(&netlist).unwrap();
@@ -84,7 +83,6 @@ Xpn ch0 out0 a 0 hp 0 fc_pn_th_ps_full L_um=500 pin_at_ref=1
 Vb a 0 DC -1.0
 Vh hp 0 DC {vh}
 .op
-.end
 ";
     let phase = |vh: f64| {
         let net = parse_spice(&base.replace("{vh}", &format!("{vh}"))).unwrap();
@@ -132,7 +130,6 @@ Xmux bus c0 c1 c2 c3 fc_mux
 Xpn bus out a 0 fc_pn_ps_full L_um=500 alpha_dB_cm=2.0 dn_dt=1e-4 r_th=5000 beta_tpa=0
 Vb a 0 DC 0
 .op
-.end
 ",
         p[0], p[1], p[2], p[3]
     );
@@ -266,7 +263,6 @@ Xmux bus c0 c1 fc_mux
 Xpn bus out a 0 fc_pn_ps_full L_um=500 alpha_dB_cm=0 beta_tpa={BETA} a_eff_m2={A_EFF}
 Vb a 0 DC 0
 .op
-.end
 ",
         p0 = P0 * 1e3,
         p1 = P1 * 1e3

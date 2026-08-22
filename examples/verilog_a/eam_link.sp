@@ -54,4 +54,3 @@ Cpar  eam_a 0     1p
 * honours whichever method you pick.
 .options method=be
 .tran 5p 4n
-.end

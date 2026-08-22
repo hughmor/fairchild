@@ -41,7 +41,7 @@ fn weight_bank_netlist(n: usize, params: &str, v_ctl: &[f64]) -> String {
         ));
     }
     s.push_str(&format!(
-        "Xwb bus dark thru drop wctl 0 fc_optical_2x2 {params}\n.op\n.end\n"
+        "Xwb bus dark thru drop wctl 0 fc_optical_2x2 {params}\n.op\n"
     ));
     s
 }
@@ -150,7 +150,7 @@ fn control_bus_width_mismatch_is_a_parse_error() {
                    .optical_port drop 4\n\
                    .electrical_port wctl 2\n\
                    Xwb bus dark thru drop wctl 0 fc_optical_2x2 w=0\n\
-                   .op\n.end\n";
+                   .op\n";
     let msg = format!("{}", parse_spice(netlist).unwrap_err());
     assert!(msg.contains("same channel count"), "{msg}");
     assert!(msg.contains("bus(optical, 4 ch)"), "{msg}");
@@ -195,7 +195,7 @@ fn bidirectional_mode_is_rejected() {
                    .electrical_port wctl 1\n\
                    Vc0 wctl_0 0 DC 0\n\
                    Xwb bus dark thru drop wctl 0 fc_optical_2x2 w=0\n\
-                   .op\n.end\n";
+                   .op\n";
     solve(netlist);
 }
 
@@ -227,7 +227,7 @@ fn latency_delays_the_output() {
              Vdw0 dark_wl_0 0 DC 1.55e-6\n\
              Vc0 wctl_0 0 DC 0\n\
              Xwb bus dark thru drop wctl 0 fc_optical_2x2 w=0 tau_s={tau_s}\n\
-             .tran 50p 8n\n.end\n"
+             .tran 50p 8n\n"
         );
         let net = parse_spice(&netlist).unwrap();
         let opts = SimOptions::from_netlist(&net);

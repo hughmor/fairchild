@@ -149,7 +149,7 @@ def ngspice_sample(netlist_path: Path, node: str, t_sample: float, ng_bin: str) 
     # Strip .end, inject .meas and .control
     lines = [l for l in netlist.splitlines() if l.strip().lower() not in (".end",)]
     meas = f".meas tran vsample FIND V({node}) AT={t_sample:.6e}"
-    ctrl = f".control\nrun\nprint vsample\n.endc\n.end"
+    ctrl = f".control\nrun\nprint vsample\n.endc"
     full = "\n".join(lines) + f"\n{meas}\n{ctrl}\n"
 
     with tempfile.NamedTemporaryFile(suffix=".sp", mode="w", delete=False) as f:
@@ -173,7 +173,7 @@ def _ngspice_tmp_with_control(circuit: Path, node: str) -> str:
     """Return path to a temp .sp file with a .control block so ngspice runs in batch mode."""
     src = circuit.read_text()
     lines = [l for l in src.splitlines() if l.strip().lower() != ".end"]
-    ctrl = f".control\nrun\nprint {node}\n.endc\n.end\n"
+    ctrl = f".control\nrun\nprint {node}\n.endc\n"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
         f.write("\n".join(lines) + "\n" + ctrl)
         return f.name

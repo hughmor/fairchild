@@ -9,7 +9,6 @@ const NETLIST: &str = "\
 V1 in 0 DC 1 AC 1
 R1 in out 1k
 C1 out 0 1u
-.end
 ";
 
 fn find_ngspice() -> Option<std::path::PathBuf> {
@@ -52,7 +51,6 @@ echo \"on_10hz = $&on_0\"
 echo \"on_100hz = $&on_3\"
 echo \"on_1khz = $&on_6\"
 .endc
-.end
 ";
 
     let mut tmp = tempfile::NamedTempFile::new().ok()?;

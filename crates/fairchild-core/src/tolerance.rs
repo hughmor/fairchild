@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn each_row_class_gets_its_own_tolerance() {
-        let net = parse_spice("* two classes\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n").unwrap();
+        let net = parse_spice("* two classes\nV1 a 0 1\nR1 a 0 1k\n.op\n").unwrap();
         let topo = CircuitTopology::build(&net);
         let opts = SimOptions::default();
         let tol = Tolerances::build(&topo, &opts);
@@ -154,7 +154,7 @@ mod tests {
         let net = parse_spice(
             "* one optical port\n\
              .optical_port p\n\
-             Xl p fc_cw_laser power_mW=1.0 wavelength_nm=1550\n.op\n.end\n",
+             Xl p fc_cw_laser power_mW=1.0 wavelength_nm=1550\n.op\n",
         )
         .unwrap();
         let reg = crate::device_registry::DeviceRegistry::new();
