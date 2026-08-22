@@ -1,11 +1,26 @@
 name: CI
 
 on:
-  # All branches, not just master. Work here lands as worktree branches merged
-  # locally, so a master-only trigger means nothing is ever checked until after
-  # the merge — too late to be a gate.
+  # `push:` on every branch ran the whole matrix TWICE for every pull request —
+  # once for the push, once for the PR, on the same commit. Work is reviewed
+  # through PRs now, so the PR trigger is the gate and `push` covers what has no
+  # PR: master itself, and a tag.
+  #
+  # The cost is that a branch merged locally without ever opening a PR is first
+  # checked on master, after the merge. That was the reason for the old
+  # all-branches trigger; if it starts to bite, the answer is a PR, not a second
+  # run of everything.
   push:
+    branches: [master]
+    tags: ["v*"]
   pull_request:
+
+# A second push supersedes the first: cancel the run it obsoleted rather than
+# paying for an answer about a commit nobody will look at. Never cancels on
+# master, where every commit's result is a fact worth having.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,8 +56,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # `Cargo.lock` is deliberately not committed (this tree publishes a
+          # crate), so `hashFiles('**/Cargo.lock')` used to find nothing and the
+          # key collapsed to a constant — which is worse than no key at all:
+          # `actions/cache` does not save on a hit, so the very first `target/`
+          # ever stored was the one every later run restored, and everything that
+          # had changed since was recompiled every time. Keyed on the manifests
+          # and the toolchain instead, with the run id making every key unique so
+          # each run saves a fresh copy and `restore-keys` picks up the newest.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'rust-toolchain.toml') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Install SuiteSparse + ngspice (Linux)
         if: runner.os == 'Linux'
@@ -132,13 +157,25 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test (default features)
-        run: cargo test --workspace
+      # The full suite runs ONCE, with `klu`, because that feature is purely
+      # additive: `SolverKind::Auto` picks dense or faer-sparse and never KLU
+      # either way, so all 764 tests exercise the same backends in both
+      # configurations — `--features klu` adds `solver_klu` on top. Running both
+      # cost 8 minutes to test 4 minutes' worth of code twice.
+      #
+      # What the klu build genuinely cannot reach is the *refusal* of
+      # `.options solver=klu` when the feature is absent. That is one runtime
+      # `cfg!`, it lives in `fairchild-core`'s lib tests, and it is the reason
+      # for the cheap default-features run below rather than a second full one.
+      # (It was also untested until #68 — so the second full run had been
+      # verifying nothing the first did not.)
+      - name: Test (default features — the paths a klu build cannot reach)
+        run: cargo test -p fairchild-core --lib
 
       - name: Clippy (with klu)
         run: cargo clippy --workspace --all-targets --features klu -- -D warnings
 
-      - name: Test (with klu)
+      - name: Test (with klu — the whole workspace)
         run: cargo test --workspace --features klu
 
       - name: Check benchmarks compile

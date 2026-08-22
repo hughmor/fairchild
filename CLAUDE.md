@@ -23,8 +23,9 @@ it). Add a test to the file it belongs in, or add a file and one `mod` line —
 That is what made the suite take 45 minutes to run 3 minutes of tests. Filters
 read the same as ever: `cargo test --test native mzm`.
 
-Enable the pre-commit hook once per clone — it runs the same `fmt` and `clippy`
-gates CI fails on, over the whole working tree rather than the index:
+Enable the hooks once per clone — `pre-commit` runs the same `fmt` and `clippy`
+gates CI fails on, over the whole working tree rather than the index, and
+`pre-push` runs `cargo test --workspace`:
 
 ```bash
 git config core.hooksPath .githooks

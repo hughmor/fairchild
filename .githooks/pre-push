@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# Enable once per clone (worktrees inherit it):  git config core.hooksPath .githooks
+# Bypass for one push:                          git push --no-verify
+#
+# The tests, once, before anything leaves the machine.
+#
+# This did not exist while the suite took 45 minutes — nobody would have kept it,
+# and a hook people disable is worse than none. It takes ~90 seconds now (one
+# test binary per subject rather than one per file), which is less than the round
+# trip of pushing, waiting for CI, reading a failure and pushing again.
+#
+# Commit stays free: `pre-commit` runs fmt and clippy only. This is the seam
+# where a wrong answer would otherwise become somebody else's problem.
+set -e
+
+# Nothing to run if nothing in the tree can change an answer. Docs, notes, decks
+# and the workflow itself are checked by CI, not by this.
+range="origin/master..HEAD"
+git rev-parse --verify --quiet origin/master >/dev/null || range="HEAD"
+if ! git diff --name-only "$range" 2>/dev/null |
+    grep -qE '\.rs$|\.va(ms)?$|(^|/)(Cargo|rust-toolchain|clippy)\.toml$'; then
+    exit 0
+fi
+
+# Default features: `--features klu` needs SuiteSparse, which not every machine
+# has, and CI covers it. The ngspice goldens and the OSDI suites skip themselves
+# when their tool is absent — say so, because a green run that compared nothing
+# is the one failure mode this hook cannot see.
+for tool in ngspice openvaf-r; do
+    command -v "$tool" >/dev/null ||
+        echo "  note: no $tool on PATH — the suites needing it will skip themselves"
+done
+
+echo "→ cargo test --workspace"
+cargo test --workspace
