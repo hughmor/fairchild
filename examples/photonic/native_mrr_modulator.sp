@@ -66,4 +66,3 @@ Vmod vmod 0 PULSE(0 4 100n 100n 100n 800n 2u)
 
 .options method=gear
 .tran 5n 2u
-.end

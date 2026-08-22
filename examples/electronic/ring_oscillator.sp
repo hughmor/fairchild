@@ -40,4 +40,3 @@ C5  n5 0 100f
 
 .options method=gear
 .tran 50p 50n UIC
-.end

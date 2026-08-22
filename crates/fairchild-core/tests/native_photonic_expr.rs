@@ -32,7 +32,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 myps pin_at_ref=1
 Vb a 0 DC -1.5
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -43,7 +42,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 fc_pn_ps dn_dv=5.0e-5 g_pn=1e-3 alpha_db_cm=20 pin_at_ref=1
 Vb a 0 DC -1.5
 .op
-.end
 ",
     );
     assert!(
@@ -67,7 +65,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 myps pin_at_ref=1
 Vb a 0 DC 2.0
 .op
-.end
 "
         )
     };

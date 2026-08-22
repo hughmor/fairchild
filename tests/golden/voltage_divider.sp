@@ -4,4 +4,3 @@ R1 in mid 1k
 R2 mid 0 1k
 
 .op
-.end

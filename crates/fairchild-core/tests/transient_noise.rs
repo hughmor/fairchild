@@ -174,7 +174,7 @@ fn transient_noise_agrees_with_the_noise_analysis() {
 /// golden in the tree depends on this.
 #[test]
 fn noise_is_off_by_default_and_off_is_exactly_reproducible() {
-    let quiet = "* rc\nV1 in 0 PULSE(0 1 0 1n 1n 1u 2u)\nR1 in out 1k\nC1 out 0 1n\n.end\n";
+    let quiet = "* rc\nV1 in 0 PULSE(0 1 0 1n 1n 1u 2u)\nR1 in out 1k\nC1 out 0 1n\n";
     let a = run(quiet, 1e-8, 2e-6);
     let b = run(quiet, 1e-8, 2e-6);
     assert_eq!(a.node_voltages["out"], b.node_voltages["out"]);
@@ -182,7 +182,7 @@ fn noise_is_off_by_default_and_off_is_exactly_reproducible() {
     // And turning it on actually changes something — otherwise the assertion
     // above would pass just as well on a no-op implementation.
     let noisy = "* rc\n.options trannoise=1\nV1 in 0 PULSE(0 1 0 1n 1n 1u 2u)\n\
-                 R1 in out 1k\nC1 out 0 1n\n.end\n";
+                 R1 in out 1k\nC1 out 0 1n\n";
     let n = run(noisy, 1e-8, 2e-6);
     assert_ne!(a.node_voltages["out"], n.node_voltages["out"]);
 }
@@ -194,7 +194,7 @@ fn the_seed_selects_the_realisation() {
     let deck = |seed: u32| {
         format!(
             "* rc\n.options trannoise=1 noiseseed={seed}\n\
-             V1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.end\n"
+             V1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n"
         )
     };
     let a = run(&deck(1), 2e-11, 2e-8);
@@ -212,7 +212,7 @@ fn noisescale_is_an_amplitude_not_a_power() {
     let deck = |scale: f64| {
         format!(
             "* kT/C\n.options trannoise=1 noiseseed=5 noisescale={scale}\n\
-             V1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n.end\n"
+             V1 in 0 DC 0\nR1 in out 1k\nC1 out 0 1p\n"
         )
     };
     let (_, v1) = stats(&run(&deck(1.0), 2e-11, 4e-6), "out", 500);
@@ -226,7 +226,7 @@ fn noisescale_is_an_amplitude_not_a_power() {
 #[test]
 fn variable_step_is_refused_rather_than_approximated() {
     let src = "* rc\n.options trannoise=1 variable_step=1\n\
-               V1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n";
+               V1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1n\n";
     let net = parse_spice(src).unwrap();
     let opts = SimOptions::from_netlist(&net);
     let Err(err) = fairchild_core::tran_nr_with_registry_var_opts(

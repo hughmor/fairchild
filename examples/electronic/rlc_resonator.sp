@@ -6,4 +6,3 @@ R1  in  n1  10
 L1  n1  n2  1m
 C1  n2  0   1u
 .tran 10u 1m
-.end

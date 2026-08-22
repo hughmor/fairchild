@@ -44,7 +44,6 @@ M4 out  mid1 vdd vdd pm w=10u l=1u
 M5 tail vbias 0 0 nm w=10u l=1u
 
 .op
-.end
 ";
 
 #[test]

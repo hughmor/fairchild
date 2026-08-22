@@ -81,7 +81,7 @@ fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
     let mut tmp = tempfile::NamedTempFile::new().ok()?;
     let stripped = strip_control_and_end(netlist);
     let print_vars = queries.join(" ");
-    let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n.end\n");
+    let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n");
     write!(tmp, "{stripped}\n{control_block}").ok()?;
     let output = Command::new(&ngspice_bin)
         .arg("-b")

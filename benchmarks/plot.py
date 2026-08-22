@@ -154,7 +154,7 @@ def run_ngspice(ng_bin: str, netlist: Path, node: str) -> tuple[tuple[np.ndarray
     src = netlist.read_text()
     lines = [l for l in src.splitlines() if l.strip().lower() != ".end"]
     body = "\n".join(lines)
-    control = f".control\nrun\nprint {node}\n.endc\n.end\n"
+    control = f".control\nrun\nprint {node}\n.endc\n"
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
@@ -401,7 +401,7 @@ def plot_scaling(fc_bin: str, ng_bin: str | None) -> Path:
             src = netlist.read_text()
             lines = [l for l in src.splitlines() if l.strip().lower() != ".end"]
             body = "\n".join(lines)
-            control = ".control\nrun\nprint v(n1)\n.endc\n.end\n"
+            control = ".control\nrun\nprint v(n1)\n.endc\n"
             with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
                 f.write(body + "\n" + control)
                 tmp_ng = f.name

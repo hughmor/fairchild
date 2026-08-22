@@ -17,7 +17,6 @@ Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k
 Vmod vmod 0 DC 0.0
 Vh vh 0 DC 0.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -55,7 +54,6 @@ Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k
 Vmod vmod 0 DC {v_pn_for_pi_over_2}
 Vh vh 0 DC {v_h_for_pi_over_2}
 .op
-.end
 ");
     let net = parse_spice(&netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -85,7 +83,6 @@ Xpnth ch0 out0 vmod 0 vh 0 fc_pn_th_ps L_um=100 dn_dv=1e-4 g_pn=1e-3 r_heater=1k
 Vmod vmod 0 DC 1.0
 Vh vh 0 DC 0.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

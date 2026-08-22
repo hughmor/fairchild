@@ -6,4 +6,3 @@ VG  g   0 DC 2.5
 R1  vdd d 10k
 M1  d g 0 0 nm1 W=10u L=1u
 .op
-.end

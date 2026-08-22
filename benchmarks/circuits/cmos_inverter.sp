@@ -10,4 +10,3 @@ MP   out in  vdd vdd pm  W=10u L=1u AS=50p AD=50p PS=20u PD=20u
 * to the approximate Meyer gate-charge model), not a DC/level error — see
 * docs/benchmarks.md.
 .tran 0.2n 120n
-.end

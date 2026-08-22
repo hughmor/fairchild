@@ -8,4 +8,3 @@ R1 a b 2k
 I1 a 0 DC 1m
 
 .op
-.end

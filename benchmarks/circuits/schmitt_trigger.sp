@@ -25,4 +25,3 @@ MN1  out  in   nint 0   nm  W=10u L=1u AS=20p AD=20p PS=14u PD=14u
 MN2  nint out  0    0   nm  W=5u  L=1u AS=10p AD=10p PS=9u  PD=9u
 
 .tran 5n 2800n
-.end

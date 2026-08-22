@@ -50,7 +50,7 @@ fn deck(model: &str, powers: &[f64]) -> String {
     s += &format!(
         "Xdut bus dut {model} l_um={L_UM} n_g={N_G} alpha_dB_cm={ALPHA}\n\
          Xref bus ref fc_waveguide L_um={L_UM} n_g={N_G} alpha_dB_cm={ALPHA} wavelength_nm={WL_NM}\n\
-         .op\n.end\n"
+         .op\n"
     );
     s
 }
@@ -168,11 +168,11 @@ fn a_label_reaches_the_native_device_downstream_of_a_generated_one() {
 
     let mut src = deck("wg_bundle", &[7.0]);
     src = src.replace(
-        ".op\n.end\n",
+        ".op\n",
         &format!(
             ".optical_port tail\n\
              Xtail dut tail fc_waveguide L_um={TAIL_UM} n_eff={N_EFF} n_g={N_G} alpha_dB_cm=0\n\
-             .op\n.end\n"
+             .op\n"
         ),
     );
     let (reg, net) = registry_for(&src);

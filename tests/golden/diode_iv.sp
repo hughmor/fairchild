@@ -4,4 +4,3 @@ Ib 0 b 1m
 D1 b 0 myd
 .model myd D (Is=1e-14 N=1)
 .op
-.end

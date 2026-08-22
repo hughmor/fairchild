@@ -15,8 +15,7 @@ use fairchild_parser::parse_spice;
 #[test]
 fn klu_solves_resistor_divider() {
     // V1 1V → 1k → out → 1k → 0   ⇒  V(out) = 0.5 V
-    let net =
-        parse_spice("* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n").unwrap();
+    let net = parse_spice("* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
     let reg = DeviceRegistry::new();
     let mut opts = SimOptions::from_netlist(&net);
     opts.solver = SolverKind::Klu;
@@ -33,7 +32,7 @@ fn klu_options_directive_selects_klu_backend() {
     // Parser routes `.options solver=klu` into `SimOptions.solver`.
     let net = parse_spice(
         "* divider with directive\nV1 in 0 DC 2\nR1 in out 1k\nR2 out 0 1k\n\
-         .options solver=klu\n.op\n.end\n",
+         .options solver=klu\n.op\n",
     )
     .unwrap();
     let opts = SimOptions::from_netlist(&net);
@@ -60,7 +59,7 @@ fn klu_transient_diode_rc_matches_dense() {
         "* RC + diode rectifier\n\
          Vin in 0 PULSE(0 1 0 1n 1n 10n 20n)\n\
          R1 in n1 1k\nD1 n1 out myd\nR2 out 0 10k\nC1 out 0 1n\n\
-         .model myd D (Is=1e-14 N=1)\n.tran 0.5n 30n\n.end\n",
+         .model myd D (Is=1e-14 N=1)\n.tran 0.5n 30n\n",
     )
     .unwrap();
     let mut reg = DeviceRegistry::new();
@@ -99,7 +98,7 @@ fn klu_matches_dense_on_nonlinear_diode_circuit() {
     // Forward-biased diode through 1 kΩ — KLU and Dense must agree.
     let net = parse_spice(
         "* diode\nV1 in 0 DC 1.0\nR1 in n1 1k\nD1 n1 0 myd\n\
-         .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+         .model myd D (Is=1e-14 N=1)\n.op\n",
     )
     .unwrap();
     let mut reg = DeviceRegistry::new();
@@ -165,7 +164,7 @@ fn klu_matches_sparse_on_a_nonlinear_dc_solve() {
                .model dm D (IS=1e-14 N=1)\n\
                V1 in 0 DC 3\n\
                R1 in a 1k\nD1 a b dm\nR2 b c 1k\nD2 c d dm\nR3 d 0 1k\n\
-               .op\n.end\n";
+               .op\n";
     let (sp, kl) = both_backends(src, |n, r, o| {
         let res = dc_op_nr_with_registry_opts(n, r, o).expect("DC OP");
         ["a", "b", "c", "d"]
@@ -201,7 +200,7 @@ fn klu_matches_sparse_when_the_active_pattern_grows() {
                R1 in a 1k\n\
                B1 a 0 I=V(c)*V(a)*1m\n\
                R2 a 0 10k\n\
-               .op\n.end\n";
+               .op\n";
     let (sp, kl) = both_backends(src, |n, r, o| {
         let res = dc_op_nr_with_registry_opts(n, r, o).expect("DC OP");
         res.node_voltage("a").unwrap()
@@ -217,7 +216,7 @@ fn klu_matches_sparse_across_a_transient() {
                .model dm D (IS=1e-14 N=1)\n\
                V1 in 0 PULSE(0 2 1n 1n 1n 20n 40n)\n\
                R1 in out 1k\nC1 out 0 1n\nD1 out 0 dm\n\
-               .tran 1n 60n\n.end\n";
+               .tran 1n 60n\n";
     let (sp, kl) = both_backends(src, |n, r, o| {
         let res = tran_nr_with_registry_opts(n, 1e-9, 60e-9, r, o).expect("transient");
         [10e-9, 25e-9, 45e-9]
@@ -235,7 +234,7 @@ fn klu_matches_sparse_across_a_transient() {
 /// transpose, so this pins that the two agree.
 #[test]
 fn klu_matches_sparse_through_the_transpose_solve() {
-    let src = "* rc thermal noise\nV1 in 0 DC 0\nR1 in out 10k\nC1 out 0 1n\n.end\n";
+    let src = "* rc thermal noise\nV1 in 0 DC 0\nR1 in out 10k\nC1 out 0 1n\n";
     let freqs = [1e3, 1e4, 1e5];
     let (sp, kl) = both_backends(src, |n, r, o| {
         let res = noise_analysis(n, &freqs, "out", "0", "v1", r, o).expect("noise");

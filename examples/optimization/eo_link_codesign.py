@@ -73,7 +73,6 @@ Xpd out0 pout 0 fc_photodetector responsivity=0.8
 Rl pout 0 900
 Cl pout 0 30f
 .tran 2p 400p
-.end
 """
 
 # Modulator scaling: both of these follow from one length, which is exactly why

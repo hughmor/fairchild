@@ -6,4 +6,3 @@ R1 a b 10k
 D1 b 0 myd
 .model myd D (Is=1e-14 N=1)
 .op
-.end

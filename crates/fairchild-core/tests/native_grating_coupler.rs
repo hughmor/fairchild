@@ -14,7 +14,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl out_re out_im out_wl fc_grating_coupler alpha_dB=3.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -43,7 +42,6 @@ V_im in_im 0 DC 0.0
 V_wl in_wl 0 DC 1.55e-6
 X1 in_re in_im in_wl out_re out_im out_wl fc_grating_coupler alpha=0.5
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -75,7 +73,6 @@ Xmux  bus_in ch0 ch1 fc_mux
 Xgc   bus_in bus_out fc_grating_coupler alpha_dB=6.02
 Xdmx  bus_out o0 o1 fc_demux
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

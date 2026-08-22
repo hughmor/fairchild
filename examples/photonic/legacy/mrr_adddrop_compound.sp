@@ -44,4 +44,3 @@ Vbias vbias 0 DC 0.0
 .optical lre lim wl thru_re thru_im drop_re drop_im add_re add_im
 
 .op
-.end

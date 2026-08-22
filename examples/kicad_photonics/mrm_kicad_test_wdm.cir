@@ -20,4 +20,3 @@ PS_PN2 Net-_CPL2-b1_ Net-_CPL1-a2_ GND /Vmod type=X model=fc_pn_ps L_m=25e-6 n_g
 WG3 Net-_CPL2-b2_ DROP_OPT type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
 PS_PN1 Net-_CPL1-b2_ Net-_CPL2-a1_ GND /Vmod type=X model=fc_pn_ps L_m=25e-6 n_g=4.2 alpha_dB_cm=1.0 V_pi_L=1.0
 WG2 Net-_CPL1-b1_ THRU_OPT type=X model=fc_waveguide l_um=100 n_g=4.2 alpha_dB_cm=1.0
-.end

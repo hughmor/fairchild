@@ -60,7 +60,6 @@ Xpd det_in pa 0 fc_photodetector responsivity={RESPONSIVITY} r_shunt=1Meg i_dark
 Rl  pa 0 {R_LOAD}
 Cl  pa 0 {C_PD}
 .tran {STEP_S} {N_BITS * BIT_S}
-.end
 """
 
 
@@ -76,7 +75,6 @@ V_re s_re_fw 0 DC {A_IN}
 V_im s_im_fw 0 DC 0
 V_wl s_wl 0 DC 1.55e-6
 .op
-.end
 """
 
 

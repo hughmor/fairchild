@@ -23,7 +23,7 @@ fn run(drives: &str) -> fairchild_core::newton::NrResult {
          .optical_port p1\n.optical_port p2\n.optical_port p3\n\
          Xcirc p1 p2 p3 fc_circulator\n\
          Vwl p1_wl_0 0 DC 1.55e-6\n\
-         {drives}.op\n.end\n"
+         {drives}.op\n"
     );
     let net = parse_spice(&src).expect("netlist should parse");
     dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP should converge")
@@ -102,7 +102,6 @@ fn circulator_requires_bidir() {
 .optical_port p2
 Xcirc p0 p1 p2 fc_circulator
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let Err(err) = dc_op_nr_with_registry(&net, &DeviceRegistry::new()) else {

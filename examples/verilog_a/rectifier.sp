@@ -31,4 +31,3 @@ Rload out 0   10k
 
 .options method=gear
 .tran 5u 5m
-.end

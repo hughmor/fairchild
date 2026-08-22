@@ -16,7 +16,7 @@ fn parse_ok(s: &str) -> fairchild_parser::Netlist {
 
 #[test]
 fn resistor_parses() {
-    let nl = parse_ok("R1 a b 1k\n.op\n.end\n");
+    let nl = parse_ok("R1 a b 1k\n.op\n");
     assert_eq!(nl.elements.len(), 1);
     if let Element::Resistor {
         name,
@@ -36,7 +36,7 @@ fn resistor_parses() {
 
 #[test]
 fn capacitor_parses() {
-    let nl = parse_ok("C1 a b 1u\n.op\n.end\n");
+    let nl = parse_ok("C1 a b 1u\n.op\n");
     if let Element::Capacitor {
         name, capacitance, ..
     } = &nl.elements[0]
@@ -50,7 +50,7 @@ fn capacitor_parses() {
 
 #[test]
 fn inductor_parses() {
-    let nl = parse_ok("L1 a b 1m\n.op\n.end\n");
+    let nl = parse_ok("L1 a b 1m\n.op\n");
     if let Element::Inductor {
         name, inductance, ..
     } = &nl.elements[0]
@@ -64,7 +64,7 @@ fn inductor_parses() {
 
 #[test]
 fn voltage_source_dc_parses() {
-    let nl = parse_ok("V1 a 0 DC 5\n.op\n.end\n");
+    let nl = parse_ok("V1 a 0 DC 5\n.op\n");
     if let Element::VoltageSource {
         name,
         pos,
@@ -84,7 +84,7 @@ fn voltage_source_dc_parses() {
 
 #[test]
 fn current_source_dc_parses() {
-    let nl = parse_ok("I1 a 0 DC 1m\n.op\n.end\n");
+    let nl = parse_ok("I1 a 0 DC 1m\n.op\n");
     if let Element::CurrentSource {
         name,
         waveform: Waveform::Dc(i),
@@ -100,7 +100,7 @@ fn current_source_dc_parses() {
 
 #[test]
 fn diode_parses() {
-    let nl = parse_ok("D1 a b myD\n.model myD D\n.op\n.end\n");
+    let nl = parse_ok("D1 a b myD\n.model myD D\n.op\n");
     if let Element::Diode {
         name,
         anode,
@@ -120,7 +120,7 @@ fn diode_parses() {
 
 #[test]
 fn nmos_parses() {
-    let nl = parse_ok("M1 d g s b nmos\n.model nmos NMOS\n.op\n.end\n");
+    let nl = parse_ok("M1 d g s b nmos\n.model nmos NMOS\n.op\n");
     if let Element::Mosfet {
         name,
         drain,
@@ -142,7 +142,7 @@ fn nmos_parses() {
 
 #[test]
 fn npn_bjt_parses() {
-    let nl = parse_ok("Q1 c b e npn1\n.model npn1 NPN\n.op\n.end\n");
+    let nl = parse_ok("Q1 c b e npn1\n.model npn1 NPN\n.op\n");
     if let Element::Bjt {
         name,
         collector,
@@ -164,7 +164,7 @@ fn npn_bjt_parses() {
 
 #[test]
 fn coupled_inductor_parses() {
-    let nl = parse_ok("L1 a b 1m\nL2 c d 1m\nK1 L1 L2 0.9\n.op\n.end\n");
+    let nl = parse_ok("L1 a b 1m\nL2 c d 1m\nK1 L1 L2 0.9\n.op\n");
     let k = nl
         .elements
         .iter()
@@ -186,7 +186,7 @@ fn coupled_inductor_parses() {
 
 #[test]
 fn behavioral_source_parses() {
-    let nl = parse_ok("V1 in 0 DC 1\nR1 in out 1k\nB1 a 0 V=V(in)*2\n.op\n.end\n");
+    let nl = parse_ok("V1 in 0 DC 1\nR1 in out 1k\nB1 a 0 V=V(in)*2\n.op\n");
     assert!(nl
         .elements
         .iter()
@@ -196,7 +196,7 @@ fn behavioral_source_parses() {
 #[test]
 fn xosdi_element_parses() {
     // X elements without a matching .subckt definition parse to XOsdi
-    let nl = parse_ok("X1 in out mymod\n.op\n.end\n");
+    let nl = parse_ok("X1 in out mymod\n.op\n");
     assert!(nl
         .elements
         .iter()
@@ -223,7 +223,7 @@ fn suffix_k_meg_m_u_n_p_f() {
         ("1f", 1e-15),
         ("1F", 1e-15),
     ] {
-        let nl = parse_ok(&format!("R1 a b {s}\n.op\n.end\n"));
+        let nl = parse_ok(&format!("R1 a b {s}\n.op\n"));
         if let Element::Resistor { resistance, .. } = &nl.elements[0] {
             assert!(
                 (resistance - expected).abs() / expected < 1e-9,
@@ -237,13 +237,13 @@ fn suffix_k_meg_m_u_n_p_f() {
 
 #[test]
 fn op_analysis() {
-    let nl = parse_ok("R1 a 0 1k\n.op\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.op\n");
     assert!(nl.analyses.iter().any(|a| matches!(a, Analysis::Op)));
 }
 
 #[test]
 fn tran_analysis() {
-    let nl = parse_ok("R1 a 0 1k\n.tran 1n 10u\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.tran 1n 10u\n");
     if let Some(Analysis::Tran {
         step, stop, uic, ..
     }) = nl.analyses.first()
@@ -258,7 +258,7 @@ fn tran_analysis() {
 
 #[test]
 fn dc_analysis() {
-    let nl = parse_ok("V1 a 0 DC 0\n.dc V1 0 5 0.1\n.end\n");
+    let nl = parse_ok("V1 a 0 DC 0\n.dc V1 0 5 0.1\n");
     if let Some(Analysis::Dc {
         src,
         start,
@@ -278,7 +278,7 @@ fn dc_analysis() {
 
 #[test]
 fn ac_analysis_dec() {
-    let nl = parse_ok("R1 a 0 1k\n.ac DEC 10 1k 1G\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.ac DEC 10 1k 1G\n");
     if let Some(Analysis::Ac {
         variation,
         points,
@@ -297,7 +297,7 @@ fn ac_analysis_dec() {
 
 #[test]
 fn noise_analysis() {
-    let nl = parse_ok("R1 a 0 1k\n.noise V(a) V1 DEC 10 1 1G\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.noise V(a) V1 DEC 10 1 1G\n");
     assert!(nl
         .analyses
         .iter()
@@ -308,7 +308,7 @@ fn noise_analysis() {
 
 #[test]
 fn pulse_waveform() {
-    let nl = parse_ok("V1 a 0 PULSE(0 1 10n 1n 1n 50n 100n)\n.op\n.end\n");
+    let nl = parse_ok("V1 a 0 PULSE(0 1 10n 1n 1n 50n 100n)\n.op\n");
     if let Element::VoltageSource {
         waveform:
             Waveform::Pulse {
@@ -337,7 +337,7 @@ fn pulse_waveform() {
 
 #[test]
 fn sin_waveform() {
-    let nl = parse_ok("V1 a 0 SIN(0 1 1k)\n.op\n.end\n");
+    let nl = parse_ok("V1 a 0 SIN(0 1 1k)\n.op\n");
     if let Element::VoltageSource {
         waveform: Waveform::Sin { vo, va, freq, .. },
         ..
@@ -353,7 +353,7 @@ fn sin_waveform() {
 
 #[test]
 fn exp_waveform() {
-    let nl = parse_ok("V1 a 0 EXP(0 1 0 1u 1u 2u)\n.op\n.end\n");
+    let nl = parse_ok("V1 a 0 EXP(0 1 0 1u 1u 2u)\n.op\n");
     assert!(matches!(
         &nl.elements[0],
         Element::VoltageSource {
@@ -365,7 +365,7 @@ fn exp_waveform() {
 
 #[test]
 fn pwl_waveform() {
-    let nl = parse_ok("V1 a 0 PWL(0 0 1u 1 2u 0)\n.op\n.end\n");
+    let nl = parse_ok("V1 a 0 PWL(0 0 1u 1 2u 0)\n.op\n");
     if let Element::VoltageSource {
         waveform: Waveform::Pwl { points },
         ..
@@ -389,7 +389,7 @@ fn subckt_expands_correctly() {
          M2 out in 0   0   nmos W=1u L=0.35u\n\
          .ends\n\
          X1 a b vcc inv\n\
-         .op\n.end\n",
+         .op\n",
     );
     // Two MOSFETs expanded from subcircuit
     let mosfets: Vec<_> = nl
@@ -412,7 +412,7 @@ fn param_substitution_in_subckt() {
          R1 in out {RVAL}\n\
          .ends\n\
          X1 a b rpad\n\
-         .op\n.end\n",
+         .op\n",
     );
     let r = nl
         .elements
@@ -431,7 +431,7 @@ fn global_param_resolves_in_element() {
     let nl = parse_ok(
         ".param RVAL=2.2k\n\
          R1 a b {RVAL}\n\
-         .op\n.end\n",
+         .op\n",
     );
     if let Element::Resistor { resistance, .. } = &nl.elements[0] {
         assert!((resistance - 2200.0).abs() < 1e-9);
@@ -444,7 +444,7 @@ fn global_param_resolves_in_element() {
 
 #[test]
 fn options_parses_key_value_pairs() {
-    let nl = parse_ok("R1 a 0 1k\n.options reltol=1e-4 abstol=1e-12\n.op\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.options reltol=1e-4 abstol=1e-12\n.op\n");
     assert!(!nl.options.is_empty(), "options map should be non-empty");
     let reltol = nl.options.iter().find(|(k, _)| k == "reltol");
     assert!(reltol.is_some());
@@ -454,7 +454,7 @@ fn options_parses_key_value_pairs() {
 
 #[test]
 fn ic_directive_parses() {
-    let nl = parse_ok("C1 a 0 1u\n.ic V(a)=3.3\n.tran 1n 10n\n.end\n");
+    let nl = parse_ok("C1 a 0 1u\n.ic V(a)=3.3\n.tran 1n 10n\n");
     assert!(!nl.ic.is_empty(), ".ic should set initial conditions");
 }
 
@@ -462,7 +462,7 @@ fn ic_directive_parses() {
 
 #[test]
 fn measure_find_parses() {
-    let nl = parse_ok("R1 a 0 1k\n.tran 1n 10n\n.meas tran vmax FIND V(a) AT=5n\n.end\n");
+    let nl = parse_ok("R1 a 0 1k\n.tran 1n 10n\n.meas tran vmax FIND V(a) AT=5n\n");
     assert!(
         !nl.measurements.is_empty(),
         ".meas should add a measurement"
@@ -473,14 +473,14 @@ fn measure_find_parses() {
 
 #[test]
 fn star_comment_ignored() {
-    let nl = parse_ok("* this whole line is a comment\nR1 a b 1k\n.op\n.end\n");
+    let nl = parse_ok("* this whole line is a comment\nR1 a b 1k\n.op\n");
     assert_eq!(nl.elements.len(), 1);
 }
 
 #[test]
 fn plus_continuation_line_joins() {
     // R1 split across two lines via '+'
-    let nl = parse_ok("R1 a b\n+ 100\n.op\n.end\n");
+    let nl = parse_ok("R1 a b\n+ 100\n.op\n");
     assert_eq!(nl.elements.len(), 1);
     if let Element::Resistor { resistance, .. } = &nl.elements[0] {
         assert!((resistance - 100.0).abs() < 1e-9);
@@ -493,7 +493,7 @@ fn plus_continuation_line_joins() {
 
 #[test]
 fn node_names_case_insensitive() {
-    let nl = parse_ok("R1 IN OUT 1k\nR2 in out 2k\n.op\n.end\n");
+    let nl = parse_ok("R1 IN OUT 1k\nR2 in out 2k\n.op\n");
     // Both should reference the same nodes
     assert_eq!(nl.elements.len(), 2);
     if let (Element::Resistor { pos: p1, .. }, Element::Resistor { pos: p2, .. }) =
@@ -507,7 +507,7 @@ fn node_names_case_insensitive() {
 
 #[test]
 fn inductor_rser_expands_to_two_elements() {
-    let nl = parse_ok("L1 a b 1m rser=10\n.op\n.end\n");
+    let nl = parse_ok("L1 a b 1m rser=10\n.op\n");
     // Should expand to L + R → 2 elements
     assert_eq!(nl.elements.len(), 2);
     assert!(nl
@@ -522,7 +522,7 @@ fn inductor_rser_expands_to_two_elements() {
 
 #[test]
 fn capacitor_esr_expands_to_two_elements() {
-    let nl = parse_ok("C1 a b 1u esr=5\n.op\n.end\n");
+    let nl = parse_ok("C1 a b 1u esr=5\n.op\n");
     assert_eq!(nl.elements.len(), 2);
     assert!(nl
         .elements
@@ -536,7 +536,7 @@ fn capacitor_esr_expands_to_two_elements() {
 
 #[test]
 fn resistor_cpar_expands_to_two_elements() {
-    let nl = parse_ok("R1 a b 1k cpar=1p\n.op\n.end\n");
+    let nl = parse_ok("R1 a b 1k cpar=1p\n.op\n");
     assert_eq!(nl.elements.len(), 2);
     assert!(nl
         .elements
@@ -552,7 +552,7 @@ fn resistor_cpar_expands_to_two_elements() {
 
 #[test]
 fn model_card_nmos_parses() {
-    let nl = parse_ok(".model nch NMOS VTO=0.5 KP=100u LAMBDA=0.01\n.op\n.end\n");
+    let nl = parse_ok(".model nch NMOS VTO=0.5 KP=100u LAMBDA=0.01\n.op\n");
     assert_eq!(nl.models.len(), 1);
     let m = &nl.models[0];
     assert_eq!(m.kind, "nmos");
@@ -567,7 +567,7 @@ fn model_card_nmos_parses() {
 
 #[test]
 fn model_card_pnp_parses() {
-    let nl = parse_ok(".model pnp1 PNP IS=1e-15 BF=100\n.op\n.end\n");
+    let nl = parse_ok(".model pnp1 PNP IS=1e-15 BF=100\n.op\n");
     assert_eq!(nl.models.len(), 1);
     assert_eq!(nl.models[0].kind, "pnp");
 }
@@ -577,7 +577,7 @@ fn model_card_pnp_parses() {
 #[test]
 fn gnd_aliases_normalised() {
     for alias in ["gnd", "GND", "0"] {
-        let nl = parse_ok(&format!("R1 a {alias} 1k\n.op\n.end\n"));
+        let nl = parse_ok(&format!("R1 a {alias} 1k\n.op\n"));
         if let Element::Resistor { neg, .. } = &nl.elements[0] {
             assert_eq!(neg, "0", "alias '{alias}' should normalise to '0'");
         }
@@ -588,7 +588,7 @@ fn gnd_aliases_normalised() {
 
 #[test]
 fn parses_transmission_line_z0_td() {
-    let nl = parse_ok("T1 in 0 out 0 Z0=50 TD=2n\n.op\n.end\n");
+    let nl = parse_ok("T1 in 0 out 0 Z0=50 TD=2n\n.op\n");
     if let Element::TransmissionLine {
         name,
         a_pos,
@@ -614,7 +614,7 @@ fn parses_transmission_line_z0_td() {
 #[test]
 fn transmission_line_delay_from_freq_and_nl() {
     // TD = NL / F = 0.25 / 1e9 = 250 ps (default NL is a quarter wavelength).
-    let nl = parse_ok("T1 a 0 b 0 Z0=75 F=1g\n.op\n.end\n");
+    let nl = parse_ok("T1 a 0 b 0 Z0=75 F=1g\n.op\n");
     if let Element::TransmissionLine { z0, td, .. } = &nl.elements[0] {
         assert!((z0 - 75.0).abs() < 1e-9);
         assert!((td - 0.25e-9).abs() < 1e-18, "td={td}");
@@ -636,7 +636,7 @@ fn a_model_file_is_sorted_by_extension_not_keyword() {
          .va build/prebuilt.osdi\n\
          .osdi other/thermal.vams\n\
          .osdi build/bsim.osdi\n\
-         .op\n.end\n",
+         .op\n",
     );
     assert_eq!(
         nl.va_sources,
@@ -653,13 +653,13 @@ fn a_model_file_is_sorted_by_extension_not_keyword() {
 /// or deduplicate.
 #[test]
 fn va_source_order_follows_the_deck() {
-    let nl = parse_ok(".va c.va\n.va a.va\n.va b.va\n.va a.va\n.op\n.end\n");
+    let nl = parse_ok(".va c.va\n.va a.va\n.va b.va\n.va a.va\n.op\n");
     assert_eq!(nl.va_sources, vec!["c.va", "a.va", "b.va", "a.va"]);
 }
 
 #[test]
 fn a_quoted_model_path_keeps_no_quotes() {
-    let nl = parse_ok(".osdi \"build/prebuilt.osdi\"\n.va 'm.va'\n.op\n.end\n");
+    let nl = parse_ok(".osdi \"build/prebuilt.osdi\"\n.va 'm.va'\n.op\n");
     assert_eq!(nl.osdi_paths, vec!["build/prebuilt.osdi"]);
     assert_eq!(nl.va_sources, vec!["m.va"]);
 }
@@ -668,15 +668,15 @@ fn a_quoted_model_path_keeps_no_quotes() {
 /// turned a typo into an "unknown model" page later — or a missing device.
 #[test]
 fn a_model_directive_with_no_path_is_an_error() {
-    let err = parse_spice(".va\n.op\n.end\n").expect_err("no path is not loadable");
+    let err = parse_spice(".va\n.op\n").expect_err("no path is not loadable");
     assert!(err.to_string().contains(".va"), "{err}");
-    assert!(parse_spice(".osdi\n.op\n.end\n").is_err());
+    assert!(parse_spice(".osdi\n.op\n").is_err());
 }
 
 /// `.va` must not swallow a directive that merely starts with those letters.
 #[test]
 fn va_does_not_claim_a_longer_directive() {
-    assert!(parse_spice(".vary r1 dev=1\n.op\n.end\n").is_err());
+    assert!(parse_spice(".vary r1 dev=1\n.op\n").is_err());
 }
 
 /// The PDK case: a library in a subdirectory names its Verilog-A sources
@@ -700,7 +700,7 @@ fn a_model_path_inside_an_include_resolves_against_that_file() {
     std::fs::write(
         &deck,
         format!(
-            "* deck\n.include {}\nR1 a 0 1k\n.op\n.end\n",
+            "* deck\n.include {}\nR1 a 0 1k\n.op\n",
             pdk.join("lib.scs").display()
         ),
     )

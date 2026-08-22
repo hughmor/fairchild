@@ -64,7 +64,6 @@ Xl a fc_cw_laser power_mW=2 wavelength_nm=1531.5
 Xw1 a b fc_waveguide L_um=100 n_g=4.2
 Xw2 b c fc_waveguide L_um=250 n_g=4.2
 .op
-.end
 ",
     );
     assert!(n >= 3, "expected a λ per port, compared {n}");
@@ -86,7 +85,6 @@ Xps a b d 0 fc_pn_ps L_um=200
 Vb d 0 DC -1.0
 Xw b c fc_waveguide L_um=50 n_g=4.2
 .op
-.end
 ",
     );
 }
@@ -106,7 +104,6 @@ Xl2 a2 fc_cw_laser power_mW=1 wavelength_nm=1610.0
 Xw1 a1 b1 fc_waveguide L_um=100 n_g=4.2
 Xw2 a2 b2 fc_waveguide L_um=100 n_g=4.2
 .op
-.end
 ",
     );
 }
@@ -141,7 +138,6 @@ Xmux bus c0 c1 c2 fc_mux
 Xwg bus mid fc_waveguide L_um=500 n_g=4.2
 Xdemux mid d0 d1 d2 fc_demux
 .op
-.end
 ",
     );
 }
@@ -170,7 +166,6 @@ Xl1 a1 fc_cw_laser power_mW=1 wavelength_nm=1550.00
 Xmux i0 a0 a1 fc_mux
 Xr i0 i1 o0 o1 fc_awgr
 .op
-.end
 ",
     );
 }
@@ -195,7 +190,7 @@ fn an_eight_channel_bus_through_a_ring_resolves_every_label() {
     for k in 0..8 {
         deck += &format!(" c{k}");
     }
-    deck += " fc_mux\nXpn bus out a 0 fc_pn_ps_full L_um=50\nVb a 0 DC 0\n.op\n.end\n";
+    deck += " fc_mux\nXpn bus out a 0 fc_pn_ps_full L_um=50\nVb a 0 DC 0\n.op\n";
     assert_resolution_matches_the_solve("giona-shaped bus", &deck);
 }
 
@@ -248,7 +243,6 @@ Xl a fc_cw_laser power_mW=1 wavelength_nm=1543.0
 Xw a b fc_waveguide L_um=100 n_g=4.2
 Xw2 lonely b fc_waveguide L_um=100 n_g=4.2
 .op
-.end
 ",
     );
     // `lonely` is an input nothing drives — legitimately dark, and reported as
@@ -276,7 +270,6 @@ Vre a_re_0 0 DC 0.03162
 Vwl a_wl_0 0 DC 1.551e-6
 Xw a b fc_waveguide L_um=100 n_g=4.2
 .op
-.end
 ";
     let net = parse_spice(deck).expect("deck parses");
     let reg = DeviceRegistry::new();

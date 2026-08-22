@@ -543,10 +543,9 @@ mod tests {
     fn temp_directive_seeds_temp_k() {
         // .temp 75 should set temp_k to 75 + 273.15 K, threaded through the
         // SimContext so device evals see the right thermal voltage.
-        let net = fairchild_parser::parse_spice(
-            "* tempd\nV1 in 0 DC 0.7\nR1 in out 1k\n.temp 75\n.op\n.end\n",
-        )
-        .unwrap();
+        let net =
+            fairchild_parser::parse_spice("* tempd\nV1 in 0 DC 0.7\nR1 in out 1k\n.temp 75\n.op\n")
+                .unwrap();
         assert_eq!(net.temps.len(), 1);
         assert!((net.temps[0] - 348.15).abs() < 1e-9);
         let opts = SimOptions::from_netlist(&net);
@@ -556,10 +555,9 @@ mod tests {
 
     #[test]
     fn temp_list_parsed_for_sweep() {
-        let net = fairchild_parser::parse_spice(
-            "* tempd\nV1 in 0 DC 1\n.temp -40 27 85 125\n.op\n.end\n",
-        )
-        .unwrap();
+        let net =
+            fairchild_parser::parse_spice("* tempd\nV1 in 0 DC 1\n.temp -40 27 85 125\n.op\n")
+                .unwrap();
         assert_eq!(net.temps.len(), 4);
         assert!((net.temps[0] - 233.15).abs() < 1e-9);
         assert!((net.temps[3] - 398.15).abs() < 1e-9);
@@ -591,7 +589,7 @@ mod tests {
     fn from_netlist_picks_up_options_directive() {
         let net = fairchild_parser::parse_spice(
             "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
-             .options reltol=1e-5 gmin=1p method=be itl1=300\n.op\n.end\n",
+             .options reltol=1e-5 gmin=1p method=be itl1=300\n.op\n",
         )
         .unwrap();
         let o = SimOptions::from_netlist(&net);
@@ -605,7 +603,7 @@ mod tests {
     fn from_netlist_later_overrides_earlier() {
         let net = fairchild_parser::parse_spice(
             "* opts test\nV1 in 0 DC 1\nR1 in out 1k\n\
-             .options reltol=1e-3\n.options reltol=1e-7\n.op\n.end\n",
+             .options reltol=1e-3\n.options reltol=1e-7\n.op\n",
         )
         .unwrap();
         let o = SimOptions::from_netlist(&net);
@@ -629,7 +627,6 @@ V1 in 0 PULSE(0 1 0 1n 1n 1u 2u)
 R1 in out 1k
              C1 out 0 1n
 .tran 1p 5n 2n 0.1p
-.end
 ",
         )
         .unwrap();
@@ -650,7 +647,6 @@ V1 in 0 DC 1
 R1 in out 1k
 C1 out 0 1n
              .tran 1p 5n 2n 0.1p UIC
-.end
 ",
         )
         .unwrap();
@@ -679,7 +675,6 @@ R1 in out 1k
 C1 out 0 1n
              .tran 1n 100n 0 2n
 .tran 1p 5n 0 0.1p
-.end
 ",
         )
         .unwrap();
@@ -709,7 +704,6 @@ V1 in 0 DC 1
 R1 in out 1k
              .options maxstep=1e-13
 .tran 1p 5n 0 1p
-.end
 ",
         )
         .unwrap();

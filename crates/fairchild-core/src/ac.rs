@@ -554,9 +554,8 @@ mod tests {
     /// with no diagnostic. Values below are ngspice 46 on the same decks.
     #[test]
     fn ac_spec_on_a_source_sets_magnitude_and_phase() {
-        let deck = |spec: &str| {
-            format!("* ac spec\nV1 in 0 {spec}\nR1 in out 1k\nC1 out 0 159.15n\n.end\n")
-        };
+        let deck =
+            |spec: &str| format!("* ac spec\nV1 in 0 {spec}\nR1 in out 1k\nC1 out 0 159.15n\n");
         let run = |spec: &str| {
             let nl = parse_spice(&deck(spec)).unwrap();
             let reg = DeviceRegistry::new();
@@ -624,7 +623,7 @@ mod tests {
     #[test]
     fn rc_lowpass_cutoff() {
         let net = parse_spice(
-            "* RC low-pass\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.ac DEC 10 1k 10Meg\n.end\n",
+            "* RC low-pass\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.ac DEC 10 1k 10Meg\n",
         )
         .unwrap();
         let registry = DeviceRegistry::new();
@@ -703,8 +702,7 @@ mod tests {
 
     #[test]
     fn write_csv_ac() {
-        let net =
-            parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
+        let net = parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();
@@ -717,8 +715,7 @@ mod tests {
 
     #[test]
     fn write_nutmeg_ac() {
-        let net =
-            parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n.end\n").unwrap();
+        let net = parse_spice("* RC\nVin in 0 DC 1 AC 1\nR1 in out 1k\nC1 out 0 1n\n").unwrap();
         let registry = DeviceRegistry::new();
         let freqs = freq_decade(1e3, 1e6, 5);
         let result = ac_analysis(&net, &freqs, Some("Vin"), &registry).unwrap();

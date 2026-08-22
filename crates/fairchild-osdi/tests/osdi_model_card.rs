@@ -28,8 +28,7 @@ fn v_at(diode_lines: &str) -> Option<f64> {
         return None;
     }
 
-    let netlist =
-        parse_spice(&format!("* card test\nIb 0 b 1m\n{diode_lines}.op\n.end\n")).unwrap();
+    let netlist = parse_spice(&format!("* card test\nIb 0 b 1m\n{diode_lines}.op\n")).unwrap();
     let lib = Arc::new(unsafe { OsdiLibrary::open(&path) }.expect("dlopen failed"));
     let mut registry = DeviceRegistry::new();
     registry.register_builtin_models(&netlist.models);

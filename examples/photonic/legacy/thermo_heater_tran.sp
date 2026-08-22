@@ -42,4 +42,3 @@ Vheater heat_p 0  PULSE(0 2 10m 1u 1u 1 1)
 
 * Simulate for 200 ms; step = 1 ms
 .tran 1m 200m
-.end

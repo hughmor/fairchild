@@ -69,7 +69,6 @@ C5  n5 0 100f
 
 .options method=gear
 .tran 50p 100n UIC
-.end
 ";
 
 /// DC-OP convergence test.  The metastable equilibrium V_M ≈ VDD/2 is what

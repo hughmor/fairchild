@@ -27,7 +27,7 @@ fn deck(step_s: &str, stop_s: &str) -> String {
          Rd nd n 25\n\
          Xps a b n 0 fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f \
            v_bi=0.917 m_j=0.5 alpha_dB_cm=2.0\n\
-         .tran {step_s} {stop_s}\n.end\n"
+         .tran {step_s} {stop_s}\n"
     )
 }
 
@@ -96,7 +96,7 @@ fn an_undriven_transient_stays_at_the_operating_point() {
          Rd nd n 25\n\
          Xps a b n 0 fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0=750f \
            v_bi=0.917 m_j=0.5 alpha_dB_cm=2.0\n\
-         .tran 1p 40p\n.end\n";
+         .tran 1p 40p\n";
     let net = parse_spice(src).unwrap();
     let r = tran_nr_with_registry(&net, 1e-12, 40e-12, &DeviceRegistry::new())
         .expect("transient should run");

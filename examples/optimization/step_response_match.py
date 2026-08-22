@@ -63,7 +63,6 @@ C1 mid 0 100p
 R2 mid out 1k
 C2 out 0 220p
 .tran 1n 1u
-.end
 """
 
 # The values the target waveform is made from, and which the optimiser must find.

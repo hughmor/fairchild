@@ -56,7 +56,6 @@ Xref  a2 b2       fc_waveguide l_um={ARM_UM + MISMATCH_UM} alpha_dB_cm=0
 Xc2  b1 b2 bar cross fc_dcoupler kappa_L={math.pi / 4}
 Vh   htp 0 DC 0
 .op
-.end
 """
 
 

@@ -200,7 +200,7 @@ mod tests {
     use fairchild_parser::parse_spice;
 
     fn nl() -> Netlist {
-        parse_spice("* t\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.op\n.end\n").unwrap()
+        parse_spice("* t\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.op\n").unwrap()
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod tests {
     fn mosfet_and_osdi_instance_params_are_reachable() {
         let mut n = parse_spice(
             "* m-line\n.model nch NMOS (VTO=0.7 KP=100u)\n\
-             M1 d g 0 0 nch W=10u L=1u\nVg g 0 1\nVd d 0 2\n.op\n.end\n",
+             M1 d g 0 0 nch W=10u L=1u\nVg g 0 1\nVd d 0 2\n.op\n",
         )
         .unwrap();
         assert!(set_element_param(&mut n, "M1", "W", 40e-6));
