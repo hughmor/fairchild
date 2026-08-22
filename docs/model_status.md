@@ -279,6 +279,29 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 
 ---
 
+## 9a. Verilog-A disciplines
+
+What a `.va` model may declare a node to be, and what fairchild does with it.
+
+| Discipline | Implemented | Validated |
+|---|---|---|
+| `electrical` | ✅ potential in V, flow in A; `vntol`/`abstol` | ✅ throughout |
+| `thermal` | ✅ potential in K (a rise above `$temperature`), flow in W; the row is found from the OSDI descriptor's `units` and bounded by `temptol`, for a port and an internal node alike | ✅ `thermal_discipline.rs` — a self-heated resistor's fixed point against its closed form, and the row's tolerance read off the topology (the answer alone cannot show it: `vntol` on kelvin is *tighter* than needed, so a misclassified row still converges) |
+| optical (`optical_bundle`, the bundle-port dialect) | ✅ `E_RE`/`E_IM` per channel on real MNA rows; λ is a label resolved before the solve, not a row | ✅ `bundle_dialect_e2e.rs`, `mrm_wdm_example.rs` |
+
+A thermal network is written with ordinary `R`/`C`/`I`/`V` — on a thermal node
+`R` is K/W, `C` is J/K, `I` is watts. There is deliberately no discipline check
+refusing them, unlike on optical wires: the electrical primitives *are* the
+thermal primitives, and refusing them would ban device-to-device thermal
+crosstalk.
+
+Gap: no native (Rust) device exposes a thermal port yet, so a thermal network
+can only be entered through a Verilog-A model or the deck's own R/C. `fc_pn_ps`
+and friends keep `r_th` as a parameter and their temperature is internal to the
+device rather than a shared unknown.
+
+---
+
 ## 10. Analyses
 
 | Analysis | Implemented | Validated |

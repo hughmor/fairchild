@@ -965,6 +965,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `reltol` | 1e-3 | NR relative tolerance |
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
+| `temptol` | 1e-3 | NR temperature absolute tolerance (K), on thermal rows |
 | `vmax` | 0.5 | Per-iteration |ΔV| clamp |
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
@@ -1239,11 +1240,64 @@ Convergence criteria:
 
 - `|ΔV| < vntol + reltol · |V|` for all node voltages.
 - `|ΔI| < abstol + reltol · |I|` for all branch currents.
+- `|ΔT| < temptol + reltol · |T|` for thermal rows (see below).
   The tolerance is per *quantity*, not one number for the whole solution
   vector — see `crates/fairchild-core/src/tolerance.rs`. There used to be a
   third class, `lambdatol`, for optical wavelength wires; λ is now resolved
   before the solve rather than solved for, so there is no λ row to converge and
   `.options lambdatol=…` warns that it no longer applies.
+
+### Thermal nodes
+
+A Verilog-A model that declares a node `thermal` gets an unknown whose potential
+is a **temperature rise above ambient in kelvin** and whose flow is a **power in
+watts**:
+
+```verilog
+`include "disciplines.vams"
+
+module self_heated_r(p, n, h);
+    inout p, n;  electrical p, n;
+    inout h;     thermal h;
+    parameter real r0 = 1000.0, alpha_r = 4.0e-3;
+    real r_now;
+    analog begin
+        r_now = r0 * (1.0 + alpha_r * Temp(h));
+        I(p, n) <+ V(p, n) / r_now;
+        Pwr(h)  <+ -V(p, n) * V(p, n) / r_now;   // watts out of the device
+    end
+endmodule
+```
+
+Nothing is declared in the deck. OSDI carries the discipline's units through to
+the descriptor, so fairchild reads which rows are thermal off the model itself
+and bounds them with `temptol` (1 mK) instead of `vntol` (1 µV) — a microvolt is
+a nonsense convergence bound on a temperature. This works for a thermal port and
+for a purely internal self-heating node alike.
+
+**The thermal network is written in ordinary SPICE primitives**, because on a
+thermal node they already mean the right thing:
+
+```
+X1  p 0 h  self_heated_r
+Rth h 0 500      ; 500 K/W to ambient — R stamps ΔT/R watts
+Cth h 0 1u       ; 1 J/K of heat capacity
+```
+
+`R` is a thermal resistance in K/W, `C` a heat capacity in J/K, `I` a heat
+source in watts, and `V` a clamped temperature. Two devices sharing one thermal
+net are thermally coupled; an `R` between two thermal nets is crosstalk. There is
+deliberately **no** discipline check refusing electrical elements here, unlike on
+optical wires — the electrical primitives *are* the thermal primitives.
+
+`Temp` is a rise, not an absolute temperature. Ambient comes from `$temperature`
+(set by `.options temp=`, in °C), so absolute temperature is
+`$temperature + Temp(h)`. Keeping them apart is what lets a deck sweep ambient
+while self-heating stays solved on top.
+
+`examples/verilog_a/models/mrm_wdm.va` is a worked example: a microring whose
+resonance moves with a solved temperature, with `th` exposed so a deck can wire
+ring-to-ring thermal crosstalk.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal

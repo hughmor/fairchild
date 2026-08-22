@@ -28,6 +28,13 @@ pub struct SimOptions {
     pub abstol: f64,
     /// Absolute node-voltage tolerance (V); convergence floor for voltage NR.
     pub vntol: f64,
+    /// Absolute temperature tolerance (K) for thermal rows.
+    ///
+    /// A thermal node's potential is kelvin, so `vntol` — a microvolt — is not a
+    /// convergence bound on it at all, it is a demand for eight digits nobody
+    /// asked for. 1 mK is tight against any self-heating worth modelling and
+    /// loose enough that Newton stops.
+    pub temptol: f64,
     /// Maximum allowed |Δv| per NR iteration before damping (V).
     pub vmax: f64,
     /// Minimum conductance added to every diagonal entry (S).
@@ -181,6 +188,7 @@ impl Default for SimOptions {
             reltol: 1e-3,
             abstol: 1e-12,
             vntol: 1e-6,
+            temptol: 1e-3,
             vmax: 0.5,
             gmin: 1e-12,
             itl1: 150,
@@ -302,6 +310,7 @@ impl SimOptions {
             "reltol" => self.reltol = parse_num(value).unwrap_or(self.reltol),
             "abstol" => self.abstol = parse_num(value).unwrap_or(self.abstol),
             "vntol" => self.vntol = parse_num(value).unwrap_or(self.vntol),
+            "temptol" => self.temptol = parse_num(value).unwrap_or(self.temptol),
             "lambdatol" => {
                 // Retired rather than dropped: `.options lambdatol=…` in an old
                 // deck must say why it no longer applies instead of falling

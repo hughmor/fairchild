@@ -43,12 +43,55 @@ fn parse_err(e: fairchild_parser::ParseError) -> PyErr {
 // apply_overrides: patch a cloned Netlist with parameter overrides
 // ---------------------------------------------------------------------------
 
-fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) {
+/// Apply `"element.param" -> value` overrides, refusing any that matched nothing.
+///
+/// Both halves of that refusal used to be silent: a key with no dot was
+/// `continue`d, and `set_element_param`'s `bool` was discarded, so a typo in
+/// either half returned the un-overridden answer and reported success. That is
+/// the shape of bug this codebase exists to not ship — an optimiser driving a
+/// no-op sees a flat objective, converges instantly, and hands back its own
+/// starting values as a fit (fairchild issue #56).
+///
+/// The key is deliberately an *element* parameter and not a `.param` name. A
+/// `.param` is substituted textually during parse, before model cards and
+/// element values exist, so there is nothing left to reach by the time a
+/// netlist is in hand; overriding one means re-parsing, which is a different
+/// operation with a different cost. The error says so rather than guessing.
+fn apply_overrides(netlist: &mut Netlist, overrides: &HashMap<String, f64>) -> PyResult<()> {
     for (key, &value) in overrides {
-        // Keys arrive as "element.param" from `Circuit.set_param`.
-        let Some(dot) = key.find('.') else { continue };
-        fairchild_core::set_element_param(netlist, &key[..dot], &key[dot + 1..], value);
+        let hit = match key.find('.') {
+            Some(dot) => {
+                fairchild_core::set_element_param(netlist, &key[..dot], &key[dot + 1..], value)
+            }
+            None => false,
+        };
+        if !hit {
+            return Err(PyRuntimeError::new_err(format!(
+                "no element parameter '{key}' to override. Expected 'element.param', \
+                 e.g. 'R1.value' or 'Xmzm.v_pi', naming an element that exists in the \
+                 loaded netlist. If '{key}' is a `.param` in the deck, it cannot be \
+                 overridden here — a `.param` is substituted at parse time, so change \
+                 the deck text and re-load instead."
+            )));
+        }
     }
+    Ok(())
+}
+
+/// The `params=` kwarg: `"element.param"` overrides for this call only.
+///
+/// Shared by every entry point that takes it, so one of them cannot quietly
+/// gain or lose the behaviour — which is exactly how `run()` came to accept the
+/// kwarg and drop it.
+fn apply_param_kwarg(netlist: &mut Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let Some(kw) = kwargs else { return Ok(()) };
+    let Some(p) = kw.get_item("params")? else {
+        return Ok(());
+    };
+    // Not lowercased: `set_element_param` folds case on both halves itself, and
+    // the key as written is what belongs in the error when it matches nothing.
+    let per_run: HashMap<String, f64> = p.extract()?;
+    apply_overrides(netlist, &per_run)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +527,14 @@ impl Circuit {
     }
 
     /// Override a parameter on an element before the next `run()`.
+    ///
+    /// The name is not checked here — it is checked at the next `run()`, which
+    /// raises if it matches no element in the loaded netlist. A typo used to be
+    /// discarded, so the run returned the un-overridden answer and reported
+    /// success (fairchild issue #56).
+    ///
+    /// For a one-call override that does not persist, pass
+    /// `run(..., params={"element.param": value})` instead.
     pub fn set_param(&mut self, element: &str, param: &str, value: f64) {
         let key = format!("{}.{}", element.to_lowercase(), param.to_lowercase());
         self.overrides.insert(key, value);
@@ -635,6 +686,13 @@ impl Circuit {
     ///   `lambda_center_nm`, `enable_bidirectional`, `sanity_check`, and more.
     ///   These overlay any `.options` directives from the netlist.
     ///   Unrecognised kwargs raise `RuntimeError` immediately.
+    ///
+    ///   `params={"element.param": value}` overrides element parameters for
+    ///   this call only, leaving `set_param` and the deck untouched — the inner
+    ///   loop of a sweep or a fit. A name that matches no element raises, so a
+    ///   typo cannot quietly return the un-overridden answer. A deck `.param`
+    ///   is *not* addressable this way: it is substituted at parse time, so
+    ///   change the deck text and re-load.
     #[pyo3(signature = (analysis, **kwargs))]
     #[allow(clippy::useless_conversion)]
     pub fn run(
@@ -649,8 +707,13 @@ impl Circuit {
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
         let mut nl = netlist.clone();
-        apply_overrides(&mut nl, &self.overrides);
+        apply_overrides(&mut nl, &self.overrides)?;
         apply_source_overrides(&mut nl, &self.source_overrides);
+        // `params=` means here what it means on `tran_adjoint`: per-call
+        // `element.param` overrides that leave `set_param` and the deck alone.
+        // It used to be accepted and dropped, which made a fitting loop return
+        // its initial guess and call it converged (fairchild issue #56).
+        apply_param_kwarg(&mut nl, kwargs)?;
 
         // Apply a `.alter` block if the user requested one via `alter=...`.
         if let Some(kw) = kwargs {
@@ -800,18 +863,9 @@ impl Circuit {
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
         let mut nl = netlist.clone();
-        apply_overrides(&mut nl, &self.overrides);
+        apply_overrides(&mut nl, &self.overrides)?;
         apply_source_overrides(&mut nl, &self.source_overrides);
-        if let Some(kw) = kwargs {
-            if let Some(p) = kw.get_item("params")? {
-                let per_run: HashMap<String, f64> = p.extract()?;
-                let lowered = per_run
-                    .into_iter()
-                    .map(|(k, v)| (k.to_lowercase(), v))
-                    .collect();
-                apply_overrides(&mut nl, &lowered);
-            }
-        }
+        apply_param_kwarg(&mut nl, kwargs)?;
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let mut opts = build_sim_options(&nl, kwargs)?;
@@ -868,18 +922,9 @@ impl Circuit {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
         let mut nl = netlist.clone();
-        apply_overrides(&mut nl, &self.overrides);
+        apply_overrides(&mut nl, &self.overrides)?;
         apply_source_overrides(&mut nl, &self.source_overrides);
-        if let Some(kw) = kwargs {
-            if let Some(p) = kw.get_item("params")? {
-                let per_run: HashMap<String, f64> = p.extract()?;
-                let lowered = per_run
-                    .into_iter()
-                    .map(|(k, v)| (k.to_lowercase(), v))
-                    .collect();
-                apply_overrides(&mut nl, &lowered);
-            }
-        }
+        apply_param_kwarg(&mut nl, kwargs)?;
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let opts = build_sim_options(&nl, kwargs)?;
 
@@ -968,18 +1013,9 @@ impl Circuit {
             .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
 
         let mut nl = netlist.clone();
-        apply_overrides(&mut nl, &self.overrides);
+        apply_overrides(&mut nl, &self.overrides)?;
         apply_source_overrides(&mut nl, &self.source_overrides);
-        if let Some(kw) = kwargs {
-            if let Some(p) = kw.get_item("params")? {
-                let per_run: HashMap<String, f64> = p.extract()?;
-                let lowered = per_run
-                    .into_iter()
-                    .map(|(k, v)| (k.to_lowercase(), v))
-                    .collect();
-                apply_overrides(&mut nl, &lowered);
-            }
-        }
+        apply_param_kwarg(&mut nl, kwargs)?;
 
         let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
         let opts = build_sim_options(&nl, kwargs)?;
@@ -1029,11 +1065,11 @@ impl Circuit {
 
         for val in values {
             let mut nl = netlist.clone();
-            apply_overrides(&mut nl, &self.overrides);
+            apply_overrides(&mut nl, &self.overrides)?;
             apply_source_overrides(&mut nl, &self.source_overrides);
             let sweep_override: HashMap<String, f64> =
                 [(param.to_lowercase(), val)].into_iter().collect();
-            apply_overrides(&mut nl, &sweep_override);
+            apply_overrides(&mut nl, &sweep_override)?;
 
             let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
             let mut opts = build_sim_options(&nl, kwargs)?;

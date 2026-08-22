@@ -82,7 +82,7 @@ fn deck_with(n: usize, v_bias: f64, v_htr: f64, extra: &str) -> String {
     }
     s += " fc_mux\n";
     s += &format!(
-        "Xr bus out a 0 hp 0 mrm_wdm {extra}\n\
+        "Xr bus out a 0 hp 0 tr mrm_wdm {extra}\n\
          Vb a 0 DC {v_bias}\n\
          Vh hp 0 DC {v_htr}\n\
          .op\n.end\n"

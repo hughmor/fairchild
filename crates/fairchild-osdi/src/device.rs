@@ -579,6 +579,26 @@ impl Device for OsdiDevice {
         }
     }
 
+    /// Nodes the model declared `thermal`, read straight off the descriptor.
+    ///
+    /// OSDI carries a node's discipline through as its `units` string, so a
+    /// model that writes `thermal h;` arrives here as `units == "K"` with no
+    /// help from the deck and nothing to keep in sync. Both halves of the node
+    /// list are covered by the same loop: a thermal *port* other devices share,
+    /// and the self-heating internal node most electro-thermal models keep to
+    /// themselves.
+    fn thermal_nodes(&self) -> Vec<usize> {
+        let desc = self.desc();
+        (0..desc.num_nodes as usize)
+            .filter(|&i| {
+                let node = unsafe { &*desc.nodes.add(i) };
+                !node.is_flow
+                    && !node.units.is_null()
+                    && unsafe { CStr::from_ptr(node.units) }.to_bytes() == b"K"
+            })
+            .collect()
+    }
+
     fn num_extra_nodes(&self) -> usize {
         let desc = self.desc();
         (desc.num_nodes as usize).saturating_sub(desc.num_terminals as usize)

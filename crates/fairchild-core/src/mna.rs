@@ -42,6 +42,17 @@ pub struct CircuitTopology {
     /// as ordinary nodes — correct for a deck with no photonics, and harmless
     /// (redundant rows, right answers) for one with.
     pub lambda: LambdaMap,
+    /// Rows whose unknown is a temperature in kelvin, not a voltage.
+    ///
+    /// Filled by `push_device` from each device's
+    /// [`Device::thermal_nodes`](crate::device::Device::thermal_nodes) as it is
+    /// registered, so it covers a shared thermal port and a self-heating
+    /// internal node with the same list. Read by [`crate::tolerance`], which is
+    /// the one place that decides what unit a row carries.
+    ///
+    /// Empty until `build_devices` runs — a topology alone cannot know, because
+    /// only the model declares which of its nodes is thermal.
+    pub thermal_rows: Vec<usize>,
 }
 
 /// How the assembler should treat an inductor that has no companion state.
@@ -92,6 +103,7 @@ impl CircuitTopology {
             vsrc_index,
             size,
             lambda,
+            thermal_rows: Vec::new(),
         }
     }
 

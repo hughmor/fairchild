@@ -34,26 +34,33 @@
 // physics may use it freely. You do not pass a wavelength tag along; nothing
 // downstream needs you to.
 //
-// **Temperature is an internal node here, carrying kelvin.** Verilog-A internal
-// nodes get real MNA rows, so `V(th)` is a genuine solved unknown and the
-// self-heating below is a real fixed point, not an estimate. The caveat is that
-// it is an *electrical* node holding a temperature, so the solver's voltage
-// tolerance governs it — a proper thermal discipline with its own tolerances is
-// fairchild issue #43. Until then this is the honest way to do it, and it is the
-// same trick several vendor models use.
+// **Temperature is a thermal PORT, and `Temp(th)` is a rise above ambient.**
+// The `thermal` discipline puts kelvin on the potential and watts on the flow,
+// so `Temp(th)` is a genuine solved unknown bounded by `temptol` rather than by
+// a microvolt, and the self-heating below is a real fixed point. Absolute
+// temperature is `$temperature + Temp(th)`; keeping the two apart is what lets a
+// deck sweep ambient with `.options temp` while the rise stays solved on top.
+//
+// It is a port rather than an internal node so that heat can leave the model.
+// `r_th`/`c_th` are still here, so a deck that ignores `th` gets this ring's own
+// path to ambient and nothing more to write — but two rings sharing a `th`, or
+// tied through a plain `R`, are thermally coupled, because on a thermal node a
+// SPICE resistor stamps ΔT/R watts and its value IS a thermal resistance in K/W.
+// That is how the crosstalk disclaimed below gets modelled when you want it.
 //
 // ── What it does NOT model ───────────────────────────────────────────────────
 //
 // Bidirectional propagation (the backward wires are not read), the ring's
 // photon lifetime (the cavity is treated as instantaneous — valid well below the
-// ~9 ps photon lifetime), and thermal crosstalk to neighbouring rings. Coupling
-// is a fixed `t`; a real device's coupler is wavelength-dependent.
+// ~9 ps photon lifetime), and thermal crosstalk to neighbouring rings — the
+// model exposes `th` so a deck can wire that up, but nothing here assumes it.
+// Coupling is a fixed `t`; a real device's coupler is wavelength-dependent.
 
 `include "constants.vams"
 `include "disciplines.vams"
 `include "optical.vams"
 
-module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n);
+module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n, th);
 
     // Width bound at elaboration from the deck's `.optical_port bus N`.
     optical_bundle bus_in, bus_out;
@@ -61,10 +68,12 @@ module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n);
     // wires it generates, not the ones you wrote.
     inout anode, cathode, htr_p, htr_n;
     electrical anode, cathode, htr_p, htr_n;
+    // Temperature rise above ambient, in kelvin. A port, so heat can leave.
+    inout th;
+    thermal th;
 
-    // Internal state. Both get real MNA rows.
+    // Internal state, with a real MNA row.
     electrical nc;   // carrier density, m^-3, as a potential
-    electrical th;   // temperature rise above ambient, K, as a potential
 
     // ── geometry and coupling ────────────────────────────────────────────────
     parameter real radius_um   = 8.0    from (0:inf);  // ring radius
@@ -108,7 +117,7 @@ module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n);
         i_d = i_sat * (limexp(v_j / (n_ideal * vt)) - 1.0);
         I(anode, cathode) <+ i_d;
 
-        dT   = V(th);
+        dT   = Temp(th);
         ncar = V(nc);
 
         // ── per-channel optics, pass one: how much light is absorbed ─────────
@@ -142,10 +151,11 @@ module mrm_wdm(bus_in, bus_out, anode, cathode, htr_p, htr_n);
         p_htr = V(htr_p, htr_n) * V(htr_p, htr_n) / r_htr;
 
         // ── temperature: one node, every heat source ─────────────────────────
-        // C·dT/dt + T/R = P_heater + P_absorbed + P_junction. Solved, so the
-        // heater's resistance and the rise it causes agree with each other.
-        I(th) <+ c_th * ddt(V(th)) + V(th) / r_th
-               - p_htr - p_abs - v_j * i_d;
+        // C·dT/dt + T/R = P_heater + P_absorbed + P_junction, in watts, because
+        // the flow into a thermal node is a power. Solved, so the heater's
+        // resistance and the rise it causes agree with each other.
+        Pwr(th) <+ c_th * ddt(Temp(th)) + Temp(th) / r_th
+                 - p_htr - p_abs - v_j * i_d;
 
         // ── per-channel optics, pass two: the ring transfer ──────────────────
         // All-pass ring, field form:  E_out/E_in = (t − A·e^{jφ}) / (1 − t·A·e^{jφ})

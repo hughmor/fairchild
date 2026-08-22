@@ -190,6 +190,28 @@ jobs:
           except RuntimeError as e:
               assert "step=" in str(e) and ".tran card" in str(e), e
           print(f"ok: {len(v)} points, vmax={v.max():.4f}, card-adopted {len(whole.time())}")
+
+          # issue #56: run(params=...) was accepted and dropped, so a fitting
+          # loop returned its initial guess and reported success. Checked by
+          # DIFFERENCING two runs — reading the value back is the check that
+          # passes against this bug.
+          ov = fairchild.Circuit()
+          ov.load_str("* p\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n")
+          lo = ov.run("op", params={"R1.value": 1e3})["i(v1)"][0]
+          hi = ov.run("op", params={"R1.value": 5e2})["i(v1)"][0]
+          assert abs(lo - hi) > 1e-6, f"params= is a no-op: {lo} == {hi}"
+          assert abs(ov.run("op")["i(v1)"][0] - lo) < 1e-15, "override leaked to the next run"
+          try:
+              ov.run("op", params={"R9.value": 1.0})
+              raise AssertionError("an override that matched nothing was accepted")
+          except RuntimeError as e:
+              assert "element.param" in str(e), e
+
+          # issue #57: an '=' inside a $ comment parsed as another assignment.
+          cm = fairchild.Circuit()
+          cm.load_str("* c\n.param sw = 0 $ 0 = off, 1 = on\nV1 a 0 1\nR1 a 0 1k $ load = 1k\n.op\n.end\n")
+          assert abs(cm.run("op")["i(v1)"][0] + 1e-3) < 1e-12, cm.run("op")["i(v1)"]
+          print("ok: params= overrides bite, and $ comments with '=' parse")
           PY
 
       # The C header is hand-written, so nothing in the Rust tests catches it

@@ -623,6 +623,44 @@ fn read_included(path: &Path, lineno: usize, what: &str) -> Result<String, Parse
     }
 }
 
+/// Cut a line at its inline `$` comment.
+///
+/// `$` is the standard SPICE end-of-line comment and nothing stripped it, so it
+/// survived into tokenisation and worked only by accident: a `.param` line
+/// ignored the leftover words because they had no `=`, and the moment a comment
+/// contained one — `$ 0 = off, 1 = on`, which is exactly how people annotate a
+/// mode flag — it parsed as another assignment and the error blamed the comment
+/// for being an undefined parameter (fairchild issue #57). An element line was
+/// worse: `R1 x 0 1k $ load = 1k` never got as far as a diagnostic that named
+/// the real problem.
+///
+/// Two things a naive cut at the first `$` gets wrong:
+///
+/// * **Quotes.** `sfile="a$b.csv"` is a legal path and `.param x='1+2'` is a
+///   legal ngspice expression, so a `$` inside either is data.
+/// * **Position.** A comment `$` follows whitespace or opens the line. This is
+///   ngspice's own rule, and it keeps an unquoted `a$b` intact.
+///
+/// Applied in [`logical_lines`], which is the one place a raw line becomes a
+/// logical one — and applied *before* `+` continuations are joined, so a comment
+/// at the end of a continued line cannot swallow the lines below it. That is the
+/// same ordering the `*`-inside-a-continuation fix needed.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev_ws = true; // start of line counts as a boundary
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '$' && prev_ws => return &line[..i],
+            None => {}
+        }
+        prev_ws = c.is_whitespace();
+    }
+    line
+}
+
 fn logical_lines(input: &str) -> Vec<(usize, String)> {
     let mut result: Vec<(usize, String)> = Vec::new();
     // Index of the last entry a `+` may continue: a real line, not a comment.
@@ -632,8 +670,16 @@ fn logical_lines(input: &str) -> Vec<(usize, String)> {
     // sections were separated by comments); annotating a long parameter list is
     // too natural to punish.
     let mut last_real: Option<usize> = None;
-    for (i, raw) in input.lines().enumerate() {
+    for (i, full) in input.lines().enumerate() {
         let lineno = i + 1;
+        // `*` / `;` lines are kept verbatim — the title may be one, and their
+        // text is never tokenised — so only real lines are stripped.
+        let lead = full.trim_start();
+        let raw = if lead.starts_with('*') || lead.starts_with(';') {
+            full
+        } else {
+            strip_inline_comment(full)
+        };
         let trimmed = raw.trim_start();
 
         if trimmed.starts_with('+') {
@@ -3496,5 +3542,80 @@ Xlaser l_re l_im cw_laser power_mW=1.0
             assert_eq!(neg, "0");
             assert!((capacitance - 1e-12).abs() < 1e-24);
         }
+    }
+}
+
+#[cfg(test)]
+mod inline_comment_tests {
+    use super::*;
+
+    /// The regression from issue #57: an `=` inside a `$` comment used to parse
+    /// as another assignment, and the error blamed the comment.
+    #[test]
+    fn an_equals_inside_a_dollar_comment_is_not_an_assignment() {
+        let net = parse_spice(
+            "* mode flag\n\
+             .param sw_mode = 0 $ 0 = off, 1 = on\n\
+             R1 a 0 {sw_mode + 1k}\n\
+             .op\n.end\n",
+        )
+        .expect("a comment is not a parameter list");
+        // The value is the one before the `$`, not something the comment set.
+        let Element::Resistor { resistance, .. } = &net.elements[0] else {
+            panic!("expected a resistor");
+        };
+        assert_eq!(*resistance, 1000.0);
+    }
+
+    /// The same on an element line, which failed even harder — with "invalid
+    /// number ''" rather than anything naming a comment.
+    #[test]
+    fn an_element_line_takes_a_dollar_comment() {
+        let net = parse_spice("* t\nR1 a 0 1k $ load = 1k\n.op\n.end\n").expect("parses");
+        let Element::Resistor { resistance, .. } = &net.elements[0] else {
+            panic!("expected a resistor");
+        };
+        assert_eq!(*resistance, 1000.0);
+    }
+
+    /// The case a naive cut at the first `$` breaks: inside quotes it is data.
+    #[test]
+    fn a_dollar_inside_quotes_survives() {
+        assert_eq!(
+            strip_inline_comment("Xm a b m sfile=\"a $b.csv\" $ the real comment"),
+            "Xm a b m sfile=\"a $b.csv\" "
+        );
+        assert_eq!(strip_inline_comment(".param x='1 $ 2'"), ".param x='1 $ 2'");
+        // Unquoted and mid-token, so not a comment either — ngspice's rule is
+        // that a comment `$` follows whitespace.
+        assert_eq!(strip_inline_comment("R1 a$b 0 1k"), "R1 a$b 0 1k");
+    }
+
+    /// A comment on a continued line must not swallow the continuation.
+    ///
+    /// The stripping has to happen before `+` lines are joined; do it after and
+    /// the comment text sits in the middle of the joined line, taking the rest
+    /// of the parameter list with it.
+    #[test]
+    fn a_dollar_comment_does_not_eat_a_continuation() {
+        let net = parse_spice(
+            "* card\n\
+             .model d1 d is=1e-14 $ saturation = fitted\n\
+             + n=1.8\n\
+             D1 a 0 d1\n\
+             .op\n.end\n",
+        )
+        .expect("parses");
+        let card = net
+            .models
+            .iter()
+            .find(|m| m.name == "d1")
+            .expect("the card is registered");
+        assert_eq!(
+            card.params.iter().find(|(k, _)| k == "n").map(|(_, v)| *v),
+            Some(1.8),
+            "the continuation after a commented line was lost: {:?}",
+            card.params
+        );
     }
 }
