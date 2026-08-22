@@ -258,34 +258,46 @@ pub fn build_devices_with_footprints(
     for (elem_idx, el) in netlist.elements.iter().enumerate() {
         match el {
             Element::Diode {
+                name,
                 anode,
                 cathode,
                 model_name,
                 params,
-                ..
             } => {
                 let factory = registry
                     .get(model_name)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                let dev = factory(&[pos, neg], &ParamSet::new(params), ctx);
+                let ps = ParamSet::new(params);
+                let dev = factory(&[pos, neg], &ps, ctx);
+                // A diode instance parameter used to reach the netlist and stop:
+                // `D1 a k dm area=2` parsed, changed nothing, and said nothing.
+                // AREA is honoured now; anything else gets named here.
+                for key in ps.unconsumed() {
+                    warn_user!(
+                        "{name} ('{model_name}'): instance parameter '{key}' is not \
+                         honoured by this model and was dropped"
+                    );
+                }
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
             Element::Mosfet {
+                name,
                 drain,
                 gate,
                 source,
                 bulk,
                 model_name,
                 params,
-                ..
             } => {
                 let d: NodeId = topo.node_index.get(drain).copied();
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
+                if let Some(dev) =
+                    registry.build_mosfet(model_name, name, params, &[d, g, s, b], ctx)
+                {
                     push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 } else {
                     let factory = registry
@@ -296,19 +308,20 @@ pub fn build_devices_with_footprints(
                 }
             }
             Element::Bjt {
+                name,
                 collector,
                 base,
                 emitter,
                 substrate,
                 model_name,
-                ..
+                params,
             } => {
                 let c: NodeId = topo.node_index.get(collector).copied();
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
                 let dev = registry
-                    .build_bjt(model_name, &[c, b, e, s], ctx)
+                    .build_bjt(model_name, name, params, &[c, b, e, s], ctx)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 // RB/RC/RE series resistances declare internal nodes (one per
                 // non-zero resistance); push_device allocates and binds them.

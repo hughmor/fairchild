@@ -125,6 +125,39 @@ pub type ModelFactory =
     dyn Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static;
 type Factory = Arc<ModelFactory>;
 
+/// Name every model-card parameter the model accepts and does not model.
+///
+/// Once per card, and it says what the parameter *would* have done: `IKF
+/// ignored: high-injection roll-off is not modelled` tells the user whether it
+/// matters to them, which `unknown parameter IKF` does not. The classification
+/// itself is [`crate::unmodelled`]'s — this only prints it.
+fn warn_unmodelled(
+    kind: &str,
+    name: &str,
+    table: crate::unmodelled::Unmodelled,
+    params: &[(String, f64)],
+) {
+    for line in crate::unmodelled::report(table, params) {
+        warn_user!("{kind} model '{name}': {line}");
+    }
+}
+
+/// Name every instance parameter a device could not honour.
+///
+/// One place, for the same reason `crate::unmodelled` is one place: a parameter
+/// that parses and changes nothing is the failure these warnings exist for, and
+/// fixing `AREA` while leaving three others silent only makes it rarer and
+/// harder to find. Per instance rather than per card — an instance parameter is
+/// written per instance, so there is nothing to collapse.
+fn warn_dropped_instance_params(element: &str, model_name: &str, unknown: Vec<String>) {
+    for key in unknown {
+        warn_user!(
+            "{element} ('{model_name}'): instance parameter '{key}' is not \
+             honoured by this model and was dropped"
+        );
+    }
+}
+
 /// Maps model names to device factory closures.
 ///
 /// Factories receive the MNA node mapping and SimContext, and return a fully
@@ -395,15 +428,17 @@ impl DeviceRegistry {
                 continue;
             }
             let params: Vec<(String, f64)> = card.params.clone();
-            // Warn once per model card about params that aren't yet implemented.
+            // Warn once per model card, however many instances it has: a netlist
+            // with 500 diodes on one card has one thing wrong with it, not 500.
             let (_, unknown) = ShockleyDiode::from_params(&params);
             if !unknown.is_empty() {
                 warn_user!(
-                    "diode model '{}' params not yet implemented (using defaults): {}",
+                    "diode model '{}': unknown parameter(s) {}",
                     card.name,
                     unknown.join(", ")
                 );
             }
+            warn_unmodelled("diode", &card.name, crate::unmodelled::DIODE, &params);
             self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                 let (mut dev, _) = ShockleyDiode::from_params(&params);
                 dev.setup_model(ctx);
@@ -411,6 +446,7 @@ impl DeviceRegistry {
                 ps.apply(&mut dev);
                 Box::new(dev)
             });
+            // `build_devices` names whatever `apply` left unconsumed.
         }
     }
 
@@ -429,7 +465,7 @@ impl DeviceRegistry {
             // Warn once per card, matching the diode/MOSFET/BJT convention.
             match crate::models::Switch::from_model_params(is_current, &card.params, false) {
                 Ok((_, unknown)) if !unknown.is_empty() => warn_user!(
-                    "switch model '{}' params not recognised (using defaults): {}",
+                    "switch model '{}': unknown parameter(s) {}",
                     card.name,
                     unknown.join(", ")
                 ),
@@ -437,6 +473,12 @@ impl DeviceRegistry {
                 // there is an error path to return it on.
                 Ok(_) | Err(_) => {}
             }
+            warn_unmodelled(
+                "switch",
+                &card.name,
+                crate::unmodelled::SWITCH,
+                &card.params,
+            );
             self.switch_cards
                 .insert(card.name.clone(), (is_current, card.params.clone()));
         }
@@ -492,11 +534,17 @@ impl DeviceRegistry {
                 .collect();
             if !unknown.is_empty() {
                 warn_user!(
-                    "MOSFET model '{}' params not yet implemented (using defaults): {}",
+                    "MOSFET model '{}': unknown parameter(s) {}",
                     card.name,
                     unknown.join(", ")
                 );
             }
+            warn_unmodelled(
+                "MOSFET",
+                &card.name,
+                crate::unmodelled::MOSFET,
+                &card.params,
+            );
             self.mosfet_cards
                 .insert(card.name.clone(), (is_pmos, card.params.clone()));
         }
@@ -524,11 +572,12 @@ impl DeviceRegistry {
             let (_, unknown) = GummelPoonBjt::from_model_params(is_pnp, &card.params);
             if !unknown.is_empty() {
                 warn_user!(
-                    "BJT model '{}' params not yet implemented (using defaults): {}",
+                    "BJT model '{}': unknown parameter(s) {}",
                     card.name,
                     unknown.join(", ")
                 );
             }
+            warn_unmodelled("BJT", &card.name, crate::unmodelled::BJT, &card.params);
             self.bjt_cards
                 .insert(card.name.clone(), (is_pnp, card.params.clone()));
         }
@@ -721,15 +770,30 @@ impl DeviceRegistry {
     }
 
     /// Build a `GummelPoonBjt` instance for a `Q` element, injecting the
-    /// stored model-card parameters. Returns `None` if the model name is unknown.
+    /// stored model-card parameters and the element's own. Returns `None` if the
+    /// model name is unknown.
+    ///
+    /// `instance_params` used not to exist here at all: `build_devices`' BJT arm
+    /// did not even destructure the element's parameter list, so `AREA` on a `Q`
+    /// line reached the netlist and stopped. Anything still unhonoured is named
+    /// on stderr rather than dropped — `element` is there to name it.
     pub(crate) fn build_bjt(
         &self,
         model_name: &str,
+        element: &str,
+        instance_params: &[(String, f64)],
         terminals: &[NodeId],
         ctx: &SimContext,
     ) -> Option<Box<dyn Device>> {
         let (is_pnp, model_params) = self.bjt_cards.get(model_name)?;
         let (mut dev, _) = GummelPoonBjt::from_model_params(*is_pnp, model_params);
+        warn_dropped_instance_params(
+            element,
+            model_name,
+            dev.set_instance_params(instance_params),
+        );
+        // After the instance params: AREA scales IS, so `vcrit` — which
+        // `setup_model` derives from it — has to see the scaled value.
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
         Some(Box::new(dev))
@@ -825,13 +889,20 @@ impl DeviceRegistry {
     pub(crate) fn build_mosfet(
         &self,
         model_name: &str,
+        element: &str,
         instance_params: &[(String, f64)],
         terminals: &[NodeId],
         ctx: &SimContext,
     ) -> Option<Box<dyn Device>> {
         let (is_pmos, model_params) = self.mosfet_cards.get(model_name)?;
         let (mut dev, _) = Mosfet1::from_model_params(*is_pmos, model_params);
-        dev.set_instance_params(instance_params);
+        // The return used to be discarded, so `M1 … banana=3` was accepted in
+        // silence on the one device family whose instance params do work.
+        warn_dropped_instance_params(
+            element,
+            model_name,
+            dev.set_instance_params(instance_params),
+        );
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
         Some(Box::new(dev))
