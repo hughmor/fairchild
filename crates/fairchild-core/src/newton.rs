@@ -1275,7 +1275,11 @@ fn nr_inner(
         // something other than volts does not get a vote on a volt-scaled trust
         // region. Its own equation still constrains it — it is excluded from
         // setting the clamp, not from being clamped.
-        let thermal: std::collections::HashSet<usize> = topo.thermal_rows.iter().copied().collect();
+        // A slice scan, not a set: `thermal_rows` holds one entry per thermal
+        // node in the circuit — empty in every non-thermal deck — and this runs
+        // inside the Newton loop, where building a hash set per iteration would
+        // cost more than the search it replaces.
+        let thermal = topo.thermal_rows.as_slice();
         let mut max_dv = 0.0f64;
         let mut max_dv_row = 0usize;
         for i in 0..n_nodes {
