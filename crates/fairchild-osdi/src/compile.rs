@@ -38,6 +38,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use fairchild_core::device_registry::DeviceRegistry;
+use fairchild_core::warn_user;
 
 use crate::error::OsdiError;
 use crate::loader::OsdiLibrary;
@@ -487,10 +488,46 @@ pub fn load_libraries_with_widths(
     }
     for path in osdi_paths {
         let path = resolve(path, base_dir);
+        warn_if_older_than_source(&path);
         load_one(&path, registry)?;
         loaded.push(path);
     }
     Ok(loaded)
+}
+
+/// Say something when a pre-compiled `.osdi` is older than the `.va` beside it.
+///
+/// A `.osdi` named on a `.osdi` line is loaded by path, and its entry points are
+/// resolved by offset — so a stale one does not fail loudly, it reads the wrong
+/// field. Nothing connects the artefact to the source it came from: it loads,
+/// and every layer above assumes it is current. That has cost a whole session
+/// once, debugging code that was not the code being run.
+///
+/// A warning rather than an error, unlike the Python extension's guard: the
+/// sibling `.va` is a guess about provenance, not proof of it (a library can
+/// legitimately be built from elsewhere, or from a `.va` that happens to share a
+/// directory). Compiling from the `.va` directly — which fairchild will do, and
+/// which caches on a key that includes the source and the compiler version —
+/// cannot go stale at all, so the warning names that as the fix.
+fn warn_if_older_than_source(osdi: &Path) {
+    let va = osdi.with_extension("va");
+    let (Ok(lib), Ok(src)) = (osdi.metadata(), va.metadata()) else {
+        return;
+    };
+    let (Ok(lib_t), Ok(src_t)) = (lib.modified(), src.modified()) else {
+        return;
+    };
+    if src_t <= lib_t {
+        return;
+    }
+    warn_user!(
+        "'{}' is older than '{}' beside it, so it was compiled from an earlier \
+         version of that source — recompile it, or point the deck at the `.va` \
+         and let fairchild compile it (that path re-compiles whenever the source \
+         or the compiler changes)",
+        osdi.display(),
+        va.display()
+    );
 }
 
 /// Where a generated per-N source lands: beside the cache, named for its width,
@@ -718,6 +755,50 @@ mod tests {
         let compiler = VaCompiler::find(&opts).unwrap();
         let err = compile(&compiler, &top, &opts).unwrap_err().to_string();
         assert!(err.contains("no-va-compile"), "{err}");
+    }
+
+    /// A pre-compiled `.osdi` whose sibling `.va` has moved on is *pointed at*,
+    /// not silently loaded. The comparison itself is what this checks — loading
+    /// needs a real library, and the thing that was missing was the comparison.
+    #[test]
+    fn a_stale_osdi_is_noticed_beside_its_source() {
+        let dir = scratch("stale");
+        let lib = dir.join("m.osdi");
+        let src = dir.join("m.va");
+        write(&lib, "not really a library\n");
+        write(&src, "module m(a); end\n");
+
+        // Source older than the library: nothing to say.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        set_mtime(&src, old);
+        assert!(!is_stale(&lib));
+
+        // Source newer: stale, and the message has to name both files.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        set_mtime(&src, future);
+        assert!(is_stale(&lib));
+
+        // No sibling source is not staleness — a library built elsewhere is the
+        // normal case and must not be nagged about.
+        std::fs::remove_file(&src).unwrap();
+        assert!(!is_stale(&lib));
+    }
+
+    /// Both halves of `warn_if_older_than_source`, minus the printing.
+    fn is_stale(osdi: &Path) -> bool {
+        let va = osdi.with_extension("va");
+        match (osdi.metadata(), va.metadata()) {
+            (Ok(lib), Ok(source)) => match (lib.modified(), source.modified()) {
+                (Ok(lib_t), Ok(src_t)) => src_t > lib_t,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
     }
 
     /// A `.va` path that is not there fails by name, before any compiler runs.
