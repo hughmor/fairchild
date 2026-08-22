@@ -96,7 +96,7 @@ fn fairchild_tran_at(
 
 #[test]
 fn diode_tran_rc_halfwave() {
-    let netlist_str = include_str!("../../../tests/golden/diode_tran_rc.sp");
+    let netlist_str = include_str!("../../../../tests/golden/diode_tran_rc.sp");
     let step = 10e-9_f64;
     let stop = 600e-6_f64;
     let at = 550e-6_f64; // near end of first positive half-cycle

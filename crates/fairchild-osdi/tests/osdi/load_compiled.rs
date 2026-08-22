@@ -9,7 +9,7 @@ use std::ffi::CStr;
 
 use fairchild_osdi::OsdiLibrary;
 
-mod common;
+use crate::common;
 
 #[test]
 fn a_compiled_library_reports_its_one_model() {

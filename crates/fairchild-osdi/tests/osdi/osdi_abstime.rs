@@ -13,7 +13,7 @@
 use fairchild_core::{tran_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
-mod common;
+use crate::common;
 
 #[test]
 fn the_simulation_clock_reaches_the_model() {

@@ -7,12 +7,21 @@ same information in the form an agent needs it.
 
 ```bash
 cargo build --release
-cargo test --workspace                 # ngspice goldens skip without ngspice; OSDI
-                                       # suites skip without openvaf-r on PATH
-                                       # (FAIRCHILD_OPENVAF=<path> also works)
+cargo test --workspace                 # ~2 min from clean; ngspice goldens skip
+                                       # without ngspice, OSDI suites without
+                                       # openvaf-r on PATH (FAIRCHILD_OPENVAF=<path>
+                                       # also works). Run the whole thing — it is
+                                       # cheaper than deciding what to skip.
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
+
+Integration tests are grouped one binary per subject
+(`crates/*/tests/<subject>/main.rs`, with the tests themselves in files beside
+it). Add a test to the file it belongs in, or add a file and one `mod` line —
+**not** a new `tests/*.rs`, which Cargo compiles and links as its own binary.
+That is what made the suite take 45 minutes to run 3 minutes of tests. Filters
+read the same as ever: `cargo test --test native mzm`.
 
 Enable the pre-commit hook once per clone — it runs the same `fmt` and `clippy`
 gates CI fails on, over the whole working tree rather than the index:

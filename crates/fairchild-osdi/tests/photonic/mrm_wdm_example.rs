@@ -17,7 +17,7 @@ use fairchild_osdi::{load_libraries_with_widths, VaOptions};
 use fairchild_parser::{instantiated_widths, parse_spice_with_arity, PermissiveArity};
 use std::collections::{BTreeMap, BTreeSet};
 
-mod common;
+use crate::common;
 
 fn model_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/verilog_a/models")

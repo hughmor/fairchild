@@ -8,7 +8,7 @@ use fairchild_core::device::{Device, EvalFlags, SimContext};
 use fairchild_core::mna::MnaMatrix;
 use fairchild_osdi::{OsdiDevice, OsdiLibrary};
 
-mod common;
+use crate::common;
 
 /// The model's own defaults: `rc_shunt.va` declares 1 mS ∥ 1 nF.
 const GD: f64 = 1e-3;

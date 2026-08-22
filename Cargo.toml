@@ -14,7 +14,7 @@ resolver = "2"
 # `version.workspace = true`, and pyproject.toml takes it from fairchild-py via
 # `dynamic = ["version"]`. Releasing is bumping this line, then tagging v<that>.
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Hugh Morison"]
@@ -38,3 +38,17 @@ libc        = "0.2"
 clap        = { version = "4", features = ["derive"] }
 pyo3        = { version = "0.22", features = ["extension-module"] }
 numpy       = "0.22"
+
+# Test binaries are linked far more often than they are debugged, and full
+# debuginfo is the bulk of what the linker moves: `cargo test --workspace` spent
+# 95 % of its wall clock linking and ~3 % running tests. `debug = 1` keeps line
+# tables — so a panic still names the file and line — and drops the rest.
+#
+# Raise it to 2 when stepping through a test in a debugger; nothing else needs it.
+[profile.test]
+debug = 1
+
+# The dev profile builds the same dependency graph the test binaries link
+# against, so leaving it at full debuginfo would undo half of the above.
+[profile.dev]
+debug = 1
