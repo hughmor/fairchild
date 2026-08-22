@@ -1,12 +1,12 @@
-//! One Verilog-A source, three channel counts, checked against native (#55).
+//! One Verilog-A source, four channel counts, checked against native (#55).
 //!
 //! `wg_bundle.va` never mentions a channel count. These runs compile it at
-//! N = 1, 2 and 4 from that one file and check each against `fc_waveguide`,
+//! N = 1, 2, 4 and 8 from that one file and check each against `fc_waveguide`,
 //! which is the independent anchor — comparing a generated model to a second
 //! generated model would share any expansion fault, and comparing it to
 //! `wg_wdm2.va` would only cover N = 2.
 //!
-//! The N = 1 vs N = 4 pair is the case that matters most. A per-channel indexing
+//! The N = 1 vs N = 8 pair is the case that matters most. A per-channel indexing
 //! error shows up as one channel carrying another channel's field, and a
 //! single-channel test cannot see it — so every channel is launched at a
 //! different power and checked against its own.
@@ -223,4 +223,23 @@ fn the_same_source_serves_four_channels_and_keeps_them_apart() {
         return;
     }
     run_at(&[9.0, 5.0, 2.0, 11.0]);
+}
+
+/// Eight, from the same file, against the same native anchor.
+///
+/// Four channels is thin for this: an off-by-one in the expansion lands on a
+/// neighbour, and with four powers a neighbour's number can be close enough to
+/// hide inside a loose tolerance. Eight gives the indices room to be wrong in a
+/// way that shows — the powers below are chosen so that no channel's value is
+/// within 1 mW of another's, and each is checked against its own launched power
+/// rather than against the set.
+///
+/// It is also the width the deck shape this dialect exists for actually uses: a
+/// giona-shaped bus is 8 channels wide.
+#[test]
+fn the_same_source_serves_eight_channels_and_keeps_them_apart() {
+    if !common::have_compiler() {
+        return;
+    }
+    run_at(&[9.0, 5.0, 2.0, 11.0, 7.0, 13.0, 3.0, 15.0]);
 }
