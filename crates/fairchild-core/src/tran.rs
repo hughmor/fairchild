@@ -410,6 +410,7 @@ pub fn tran_nr_with_registry_var_opts(
     // Structural sparsity pattern: same for every timestep and every NR
     // iteration within them, so build it once here.
     let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;

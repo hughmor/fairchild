@@ -1,5 +1,5 @@
 use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
-use crate::mna::MnaMatrix;
+use crate::mna::{Cell, MnaMatrix, Pattern};
 use crate::reactive::ChargeHistory;
 
 /// Small floor conductance for numerical stability.
@@ -66,6 +66,14 @@ pub struct Mosfet1 {
     source: NodeId,
     bulk: NodeId,
 
+    /// The eight cells `load_jacobian` writes, resolved once against a
+    /// pattern, with that pattern's id. `None` until `resolve_cells` runs, and
+    /// unused unless the id matches the matrix being stamped — see
+    /// [`Device::resolve_cells`]. A ring oscillator's supply row carries a
+    /// column per stage, so searching it eight times per transistor per Newton
+    /// iteration was the single largest line in the assembly profile.
+    jac_cells: Option<(u64, [Option<Cell>; 8])>,
+
     // ── DC Newton-Raphson state ──────────────────────────────────────────────
     gm: f64,
     gds: f64,
@@ -102,6 +110,27 @@ pub struct Mosfet1 {
 }
 
 impl Mosfet1 {
+    /// The eight `(row, col)` pairs `load_jacobian` writes, in the order its
+    /// value array uses.
+    ///
+    /// One definition, read by both the searching stamp and by
+    /// `resolve_cells`, so the resolved cells cannot address a different set
+    /// of pairs — or the same pairs in a different order — than the values
+    /// they are paired with. Two lists here would be two chances to disagree,
+    /// and the disagreement would be a plausible number in the wrong cell.
+    fn jac_pairs(d: NodeId, g: NodeId, s: NodeId, bk: NodeId) -> [(NodeId, NodeId); 8] {
+        [
+            (d, g),
+            (d, d),
+            (d, s),
+            (d, bk),
+            (s, g),
+            (s, d),
+            (s, s),
+            (s, bk),
+        ]
+    }
+
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
         let mut vto = if is_pmos { -0.7 } else { 0.7 };
@@ -186,6 +215,7 @@ impl Mosfet1 {
             gate: None,
             source: None,
             bulk: None,
+            jac_cells: None,
             gm: GMIN,
             gds: GMIN,
             gmbs: 0.0,
@@ -475,24 +505,46 @@ impl Device for Mosfet1 {
         let gds = self.gds;
         let gmbs = self.gmbs;
         let gms = gm + gds + gmbs;
+        // The eight values, in the one order `JAC_PAIRS` fixes. Both arms
+        // below consume this slice, so the fast path cannot drift from the
+        // slow one by reordering: there is only one order.
+        let vals = [gm, gds, -gms, gmbs, -gm, -gds, gms, -gmbs];
 
-        macro_rules! stamp {
-            ($ri:expr, $ci:expr, $val:expr) => {
-                if let (Some(r), Some(c)) = ($ri, $ci) {
-                    mat.a[r][c] += $val;
+        // Resolved cells, but only if they belong to *this* matrix. A
+        // patternless matrix reports id 0 and never matches, so the diagnostic
+        // passes that stamp into `MnaMatrix::zeros` fall through correctly.
+        if let Some((id, cells)) = &self.jac_cells {
+            if *id == mat.pattern_id() {
+                for (cell, v) in cells.iter().zip(vals) {
+                    if let Some(c) = cell {
+                        mat.add(*c, v);
+                    }
                 }
-            };
+                return;
+            }
         }
 
-        stamp!(d, g, gm);
-        stamp!(d, d, gds);
-        stamp!(d, s, -gms);
-        stamp!(d, bk, gmbs);
+        for (&(ri, ci), v) in Self::jac_pairs(d, g, s, bk).iter().zip(vals) {
+            if let (Some(r), Some(c)) = (ri, ci) {
+                mat.a[r][c] += v;
+            }
+        }
+    }
 
-        stamp!(s, g, -gm);
-        stamp!(s, d, -gds);
-        stamp!(s, s, gms);
-        stamp!(s, bk, -gmbs);
+    fn resolve_cells(&mut self, pattern: &Pattern) {
+        let pairs = Self::jac_pairs(self.drain, self.gate, self.source, self.bulk);
+        let mut cells = [None; 8];
+        for (cell, &(r, c)) in cells.iter_mut().zip(pairs.iter()) {
+            // `None` here means ground, or a cell outside the pattern. Either
+            // way the searching path handles it: ground is skipped, and an
+            // undeclared cell has to be *inserted*, which only `IndexMut` does.
+            *cell = pattern.cell(r, c);
+            debug_assert!(
+                cell.is_some() || r.is_none() || c.is_none(),
+                "MOSFET stamps ({r:?}, {c:?}), which its footprint did not declare"
+            );
+        }
+        self.jac_cells = Some((pattern.id(), cells));
     }
 
     fn load_residual_tran(&self, b: &mut [f64], alpha: f64) {

@@ -65,6 +65,8 @@ impl Bed {
         let (devices, foot) =
             build_devices_with_footprints(&netlist, &mut topo, &ctx, &registry).expect("devices");
         let plan = StampPlan::new(&topo, &netlist, &foot);
+        let mut devices = devices;
+        plan.resolve_device_cells(&mut devices);
         let mat = MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
         // A nonzero operating point, so device Jacobians are not all evaluated
         // at the trivial x = 0 where a stamp can be skipped as zero.

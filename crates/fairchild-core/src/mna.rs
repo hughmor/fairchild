@@ -253,6 +253,35 @@ pub struct Pattern {
     pub cols: Vec<Vec<u32>>,
     /// Total cell count — the `nnz` upper bound.
     pub nnz: usize,
+    /// Identity, so a stamper holding [`Cell`]s can prove they were resolved
+    /// against *this* pattern before writing through them. A clone keeps the
+    /// id, which is right: a clone has the same structure, so the same slots.
+    id: u64,
+}
+
+/// A matrix cell resolved to its storage offset once, instead of on every
+/// stamp.
+///
+/// Finding the cell a stamper writes is a `binary_search` over the row's
+/// column list. That is cheap in isolation and then multiplied by entries ×
+/// devices × Newton iterations × timesteps: measured at 63 % of assembly time
+/// on a 499-stage ring oscillator, where the shared supply row carries ~1000
+/// columns and every one of 499 transistors searches it four times per pass.
+/// The pattern is structural and never moves, so the answer is settled at
+/// setup and this carries it.
+///
+/// Valid only for the [`Pattern`] it was resolved against, and that is
+/// enforced rather than documented — writing into the wrong cell is a silent
+/// wrong answer, which is the one outcome this codebase will not ship. A
+/// stamper must check [`MnaMatrix::pattern_id`] against the id it resolved
+/// under before using cells at all (once per stamp pass, not per stamp), and
+/// [`MnaMatrix::add`] re-verifies in debug builds, on every stamp, that `slot`
+/// still addresses `col`.
+#[derive(Clone, Copy, Debug)]
+pub struct Cell {
+    row: u32,
+    col: u32,
+    slot: u32,
 }
 
 /// What structural footprint one device contributes to [`Pattern`].
@@ -323,6 +352,29 @@ impl Pattern {
         }
         b.finish()
     }
+
+    /// Identity of this pattern — see [`Cell`].
+    #[inline(always)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Resolve `(row, col)` to a [`Cell`], once.
+    ///
+    /// `None` when either end is ground, or when the cell is outside the
+    /// pattern. The second case is not an error: the pattern is a superset of
+    /// what stampers declared, so a cell outside it is one nobody declared,
+    /// and writing it would *insert* rather than fill. The caller falls back to
+    /// `a[row][col]`, which inserts correctly.
+    pub fn cell(&self, row: NodeId, col: NodeId) -> Option<Cell> {
+        let (r, c) = (row?, col?);
+        let slot = self.cols.get(r)?.binary_search(&(c as u32)).ok()?;
+        Some(Cell {
+            row: r as u32,
+            col: c as u32,
+            slot: slot as u32,
+        })
+    }
 }
 
 /// Accumulator for [`Pattern::build`].
@@ -360,9 +412,13 @@ impl PatternBuilder {
             row.shrink_to_fit();
             nnz += row.len();
         }
+        // Relaxed is enough: the only requirement is that two live patterns
+        // never share an id, and a fetch_add gives that on its own.
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Pattern {
             cols: self.cols,
             nnz,
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -638,6 +694,34 @@ impl MnaMatrix {
         self.pattern.as_ref()
     }
 
+    /// Identity of the attached pattern, or `0` for a patternless matrix.
+    ///
+    /// A stamper holding resolved [`Cell`]s compares this against the id it
+    /// resolved under, once per stamp pass, and falls back to `a[r][c]` if it
+    /// differs. `0` never matches a real pattern, so a patternless matrix
+    /// always takes the fallback — which is what makes it safe for the same
+    /// device to be stamped into `MnaMatrix::zeros` by a diagnostic pass.
+    #[inline(always)]
+    pub fn pattern_id(&self) -> u64 {
+        self.pattern.as_ref().map_or(0, |p| p.id)
+    }
+
+    /// `a[cell] += v`, with no search.
+    ///
+    /// The caller must already have established that `cell` was resolved
+    /// against this matrix's pattern (see [`MnaMatrix::pattern_id`]).
+    #[inline(always)]
+    pub fn add(&mut self, cell: Cell, v: f64) {
+        let row = &mut self.a[cell.row as usize];
+        debug_assert_eq!(
+            row.cols[cell.slot as usize], cell.col,
+            "a resolved Cell no longer addresses the column it was resolved \
+             for: slot {} of row {} holds column {}, not {}",
+            cell.slot, cell.row, row.cols[cell.slot as usize], cell.col
+        );
+        row.vals[cell.slot as usize] += v;
+    }
+
     /// Zero every cell of `a` and every entry of `b` in place.  Used by
     /// the hot NR / transient loops to reuse a single `MnaMatrix`
     /// allocation across iterations instead of paying N+1 heap
@@ -731,7 +815,44 @@ pub struct StampPlan {
     /// overwhelmingly common case — the stamper skips building two name-keyed
     /// maps (with `String` clones) on every pass.
     has_coupled: bool,
+    /// The four cells a 2-terminal conductance stamp writes, per element,
+    /// resolved against `pattern`. `None` for elements that are not a simple
+    /// 2-terminal stamp (voltage/current sources, coupled inductors), which
+    /// keep the searching path.
+    elem_cells: Vec<Option<ConductanceCells>>,
     pub pattern: Arc<Pattern>,
+}
+
+/// The four cells [`stamp_conductance_at`] writes — `(p,p) (p,n) (n,p) (n,n)` —
+/// resolved once. A grounded terminal drops its cells, exactly as the searching
+/// form skips them.
+#[derive(Clone, Copy, Debug)]
+pub struct ConductanceCells {
+    pp: Option<Cell>,
+    pn: Option<Cell>,
+    np: Option<Cell>,
+    nn: Option<Cell>,
+}
+
+impl ConductanceCells {
+    fn resolve(p: &Pattern, pos: NodeId, neg: NodeId) -> ConductanceCells {
+        ConductanceCells {
+            pp: p.cell(pos, pos),
+            pn: p.cell(pos, neg),
+            np: p.cell(neg, pos),
+            nn: p.cell(neg, neg),
+        }
+    }
+
+    /// True when every cell the searching form would write was resolvable.
+    /// A partial resolution is not usable — the unresolved cells would be
+    /// silently dropped instead of inserted — so the caller falls back whole.
+    fn complete(&self, pos: NodeId, neg: NodeId) -> bool {
+        self.pp.is_some() == pos.is_some()
+            && self.nn.is_some() == neg.is_some()
+            && self.pn.is_some() == (pos.is_some() && neg.is_some())
+            && self.np.is_some() == (pos.is_some() && neg.is_some())
+    }
 }
 
 impl StampPlan {
@@ -759,6 +880,22 @@ impl StampPlan {
                 _ => None,
             });
         }
+        let pattern = Pattern::build(topo, netlist, device_nodes);
+        // Resolve the passive 2-terminal stamps now. `stamp_conductance_at` is
+        // what every R, and every C and L companion, goes through, so this is
+        // the whole of the element-side stamping cost.
+        let elem_cells = netlist
+            .elements
+            .iter()
+            .zip(elem_nodes.iter())
+            .map(|(el, &(pos, neg))| match el {
+                Element::Resistor { .. } | Element::Capacitor { .. } | Element::Inductor { .. } => {
+                    let c = ConductanceCells::resolve(&pattern, pos, neg);
+                    c.complete(pos, neg).then_some(c)
+                }
+                _ => None,
+            })
+            .collect();
         StampPlan {
             elem_nodes,
             elem_vi,
@@ -766,7 +903,26 @@ impl StampPlan {
                 .elements
                 .iter()
                 .any(|e| matches!(e, Element::CoupledInductors { .. })),
-            pattern: Arc::new(Pattern::build(topo, netlist, device_nodes)),
+            elem_cells,
+            pattern: Arc::new(pattern),
+        }
+    }
+
+    /// Identity of the pattern this plan resolved its cells against — a
+    /// stamper compares it to [`MnaMatrix::pattern_id`] before using them.
+    #[inline(always)]
+    pub fn pattern_id(&self) -> u64 {
+        self.pattern.id
+    }
+
+    /// Hand every device its resolved stamp cells (see
+    /// [`Device::resolve_cells`](crate::device::Device::resolve_cells)).
+    ///
+    /// Call once, after the plan exists and before the hot loop. Forgetting it
+    /// costs speed and nothing else — the devices keep searching.
+    pub fn resolve_device_cells(&self, devices: &mut [Box<dyn crate::device::Device>]) {
+        for d in devices.iter_mut() {
+            d.resolve_cells(&self.pattern);
         }
     }
 }
@@ -933,6 +1089,12 @@ fn stamp_netlist_into(
 
     let n_nodes = topo.n_nodes();
 
+    // Are this plan's resolved cells valid for this matrix? Decided once per
+    // pass, never per stamp. A patternless matrix reports id 0 and never
+    // matches, so a diagnostic stamping into `MnaMatrix::zeros` takes the
+    // searching path and stays correct.
+    let cells = plan.filter(|p| p.pattern_id() == mat.pattern_id());
+
     // Build coupled-inductor map: inductor_name → (partner_name, coupling_k)
     // and a value map for inductance lookups.  Skipped outright when the
     // netlist has no coupled inductors: it is two allocations plus a `String`
@@ -974,7 +1136,13 @@ fn stamp_netlist_into(
                         topo.node_index.get(neg).copied(),
                     )
                 });
-                stamp_conductance_at(&mut mat.a, p, n, 1.0 / resistance);
+                stamp_conductance_resolved(
+                    mat,
+                    cells.and_then(|c| c.elem_cells[ei]),
+                    p,
+                    n,
+                    1.0 / resistance,
+                );
             }
             Element::Capacitor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = cap_state.get(name) {
@@ -984,7 +1152,13 @@ fn stamp_netlist_into(
                             topo.node_index.get(neg).copied(),
                         )
                     });
-                    stamp_conductance_at(&mut mat.a, p, n, g_eq);
+                    stamp_conductance_resolved(
+                        mat,
+                        cells.and_then(|c| c.elem_cells[ei]),
+                        p,
+                        n,
+                        g_eq,
+                    );
                     // BE companion: KCL at pos gives b[pos] += I_hist.
                     // stamp_current_source(neg, pos, v) adds v to b[pos].
                     stamp_current_source_at(&mut mat.b, n, p, i_hist);
@@ -1002,7 +1176,13 @@ fn stamp_netlist_into(
                     // For coupled inductors, skip the standalone self-conductance stamp;
                     // the CoupledInductors arm below handles the full 2×2 companion.
                     if !coupled_map.contains_key(name) {
-                        stamp_conductance_at(&mut mat.a, p, n, g_eq);
+                        stamp_conductance_resolved(
+                            mat,
+                            cells.and_then(|c| c.elem_cells[ei]),
+                            p,
+                            n,
+                            g_eq,
+                        );
                     }
                     // Always stamp history current source.
                     stamp_current_source_at(&mut mat.b, p, n, i_hist);
@@ -1133,6 +1313,40 @@ pub fn stamp_conductance(
 }
 
 /// [`stamp_conductance`] against pre-resolved row indices.  `None` = ground.
+/// A 2-terminal conductance stamp, through pre-resolved cells when the caller
+/// has them and they belong to this matrix, by search otherwise.
+///
+/// Both arms write the same four cells with the same signs; they differ only
+/// in how the cell is addressed. Keeping the fallback is not defensive
+/// clutter — it is what a patternless matrix and an unresolvable cell both
+/// need, and it is the definition the fast path is checked against.
+#[inline(always)]
+fn stamp_conductance_resolved(
+    mat: &mut MnaMatrix,
+    cells: Option<ConductanceCells>,
+    pos: NodeId,
+    neg: NodeId,
+    g: f64,
+) {
+    match cells {
+        Some(c) => {
+            if let Some(pp) = c.pp {
+                mat.add(pp, g);
+            }
+            if let Some(pn) = c.pn {
+                mat.add(pn, -g);
+            }
+            if let Some(np) = c.np {
+                mat.add(np, -g);
+            }
+            if let Some(nn) = c.nn {
+                mat.add(nn, g);
+            }
+        }
+        None => stamp_conductance_at(&mut mat.a, pos, neg, g),
+    }
+}
+
 pub fn stamp_conductance_at(a: &mut [SparseRow], pos: NodeId, neg: NodeId, g: f64) {
     if let Some(p) = pos {
         a[p][p] += g;
