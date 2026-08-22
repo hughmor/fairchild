@@ -33,9 +33,8 @@ pub struct Mosfet1 {
     cj: f64,   // zero-bias junction cap per unit area (F/m²)
     cjsw: f64, // zero-bias sidewall cap per unit perimeter (F/m)
     pb: f64,   // junction built-in potential (V)
-    mj: f64,   // junction grading coefficient
-    #[allow(dead_code)]
-    mjsw: f64, // sidewall grading coefficient (default = mj)
+    mj: f64,   // junction grading coefficient (bottom of the junction)
+    mjsw: f64, // sidewall grading coefficient (SPICE default 0.33)
     fc: f64,   // forward-bias depletion-cap linearisation boundary
 
     // ── Instance geometry ────────────────────────────────────────────────────
@@ -52,8 +51,14 @@ pub struct Mosfet1 {
     cgd_ov: f64, // CGDO * W
     cgb_ov: f64, // CGBO * L
     cox_wl: f64, // COX  * W * L
-    cbs0: f64,   // CJ * AS + CJSW * PS  (zero-bias bulk-source cap)
-    cbd0: f64,   // CJ * AD + CJSW * PD  (zero-bias bulk-drain  cap)
+    // Bottom and sidewall halves of each bulk junction, kept apart because they
+    // grade differently: the bottom with MJ, the sidewall with MJSW.  They used
+    // to be summed here, which is how MJSW came to be parsed, stored, and never
+    // read — a card setting MJ=0.5 MJSW=0.33 silently got 0.5 for both.
+    cbs_bot: f64, // CJ   * AS
+    cbs_sw: f64,  // CJSW * PS
+    cbd_bot: f64, // CJ   * AD
+    cbd_sw: f64,  // CJSW * PD
 
     // ── Terminal bindings ────────────────────────────────────────────────────
     drain: NodeId,
@@ -139,6 +144,9 @@ impl Mosfet1 {
                 "mj" => mj = *v,
                 "mjsw" => mjsw = *v,
                 "fc" => fc = *v,
+                // Accepted and NOT modelled: `crate::unmodelled` owns that list
+                // and the diagnostic that reads it.
+                k if crate::unmodelled::is_listed(crate::unmodelled::MOSFET, k) => {}
                 _ => unknown.push(k.clone()),
             }
         }
@@ -170,8 +178,10 @@ impl Mosfet1 {
             cgd_ov: 0.0,
             cgb_ov: 0.0,
             cox_wl: 0.0,
-            cbs0: 0.0,
-            cbd0: 0.0,
+            cbs_bot: 0.0,
+            cbs_sw: 0.0,
+            cbd_bot: 0.0,
+            cbd_sw: 0.0,
             drain: None,
             gate: None,
             source: None,
@@ -202,6 +212,15 @@ impl Mosfet1 {
             disc: None,
         };
         (dev, unknown)
+    }
+
+    /// The bulk-source depletion capacitance from the last `eval`.
+    ///
+    /// Exposed for the sidewall-grading test, which has to see the two graded
+    /// halves summed the way the matrix sees them: an internal-consistency check
+    /// between MJ and MJSW would pass with either coefficient used for both.
+    pub fn cbs_at_last_eval(&self) -> f64 {
+        self.cbs_eval
     }
 
     /// Apply instance parameters (W, L, AS, AD, PS, PD).
@@ -236,42 +255,55 @@ impl Mosfet1 {
         self.cgd_ov = self.cgdo * w;
         self.cgb_ov = self.cgbo * l;
         self.cox_wl = self.cox * w * l;
-        self.cbs0 = self.cj * as_ + self.cjsw * ps;
-        self.cbd0 = self.cj * ad + self.cjsw * pd;
+        self.cbs_bot = self.cj * as_;
+        self.cbs_sw = self.cjsw * ps;
+        self.cbd_bot = self.cj * ad;
+        self.cbd_sw = self.cjsw * pd;
         unknown
     }
 
     // ── Depletion cap helpers (same model as ShockleyDiode::cj_depl / q_depl) ─
 
-    fn cj_depl(&self, c0: f64, v: f64) -> f64 {
+    /// One graded junction term.  `m` is the grading coefficient — `MJ` for the
+    /// bottom of the junction, `MJSW` for its sidewall.
+    fn cj_depl_m(&self, c0: f64, v: f64, m: f64) -> f64 {
         if c0 == 0.0 {
             return 0.0;
         }
         let fc_pb = self.fc * self.pb;
         if v < fc_pb {
-            c0 * (1.0 - v / self.pb).powf(-self.mj)
+            c0 * (1.0 - v / self.pb).powf(-m)
         } else {
-            let k = (1.0 - self.fc).powf(1.0 + self.mj);
-            c0 / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.pb)
+            let k = (1.0 - self.fc).powf(1.0 + m);
+            c0 / k * (1.0 - self.fc * (1.0 + m) + m * v / self.pb)
         }
     }
 
-    fn q_depl(&self, c0: f64, v: f64) -> f64 {
+    fn q_depl_m(&self, c0: f64, v: f64, m: f64) -> f64 {
         if c0 == 0.0 {
             return 0.0;
         }
         let fc_pb = self.fc * self.pb;
         if v < fc_pb {
             let x = 1.0 - v / self.pb;
-            c0 * self.pb / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
+            c0 * self.pb / (1.0 - m) * (1.0 - x.powf(1.0 - m))
         } else {
             let x_fc = 1.0 - self.fc;
-            let q_fc = c0 * self.pb / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
-            let k = x_fc.powf(1.0 + self.mj);
-            let f2 = 1.0 - self.fc * (1.0 + self.mj);
+            let q_fc = c0 * self.pb / (1.0 - m) * (1.0 - x_fc.powf(1.0 - m));
+            let k = x_fc.powf(1.0 + m);
+            let f2 = 1.0 - self.fc * (1.0 + m);
             let dv = v - fc_pb;
-            q_fc + c0 / k * (f2 * dv + self.mj / (2.0 * self.pb) * (v * v - fc_pb * fc_pb))
+            q_fc + c0 / k * (f2 * dv + m / (2.0 * self.pb) * (v * v - fc_pb * fc_pb))
         }
+    }
+
+    /// A whole bulk junction: bottom graded with `MJ`, sidewall with `MJSW`.
+    fn cj_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
+        self.cj_depl_m(bot, v, self.mj) + self.cj_depl_m(sw, v, self.mjsw)
+    }
+
+    fn q_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
+        self.q_depl_m(bot, v, self.mj) + self.q_depl_m(sw, v, self.mjsw)
     }
 
     // ── Stamp helpers ────────────────────────────────────────────────────────
@@ -421,10 +453,10 @@ impl Device for Mosfet1 {
             let vbd_j = vb - vd;
             self.vbs_eval = vbs_j;
             self.vbd_eval = vbd_j;
-            self.cbs_eval = self.cj_depl(self.cbs0, vbs_j);
-            self.cbd_eval = self.cj_depl(self.cbd0, vbd_j);
-            self.q_bs_eval = self.q_depl(self.cbs0, vbs_j);
-            self.q_bd_eval = self.q_depl(self.cbd0, vbd_j);
+            self.cbs_eval = self.cj_depl(self.cbs_bot, self.cbs_sw, vbs_j);
+            self.cbd_eval = self.cj_depl(self.cbd_bot, self.cbd_sw, vbd_j);
+            self.q_bs_eval = self.q_depl(self.cbs_bot, self.cbs_sw, vbs_j);
+            self.q_bd_eval = self.q_depl(self.cbd_bot, self.cbd_sw, vbd_j);
         }
     }
 
@@ -483,11 +515,11 @@ impl Device for Mosfet1 {
         cap(&self.gs_hist, g, s, self.q_gs_eval, self.q_gs_eval);
         cap(&self.gd_hist, g, d, self.q_gd_eval, self.q_gd_eval);
         cap(&self.gb_hist, g, bk, self.q_gb_eval, self.q_gb_eval);
-        if self.cbs0 != 0.0 {
+        if self.cbs_bot != 0.0 || self.cbs_sw != 0.0 {
             let cv = self.cbs_eval * self.vbs_eval;
             cap(&self.bs_hist, bk, s, self.q_bs_eval, cv);
         }
-        if self.cbd0 != 0.0 {
+        if self.cbd_bot != 0.0 || self.cbd_sw != 0.0 {
             let cv = self.cbd_eval * self.vbd_eval;
             cap(&self.bd_hist, bk, d, self.q_bd_eval, cv);
         }
@@ -571,8 +603,10 @@ impl Device for Mosfet1 {
         // Junction caps (nonlinear depletion cap).
         let vbs_j = vb - vs;
         let vbd_j = vb - vd;
-        self.bs_hist.advance(disc, self.q_depl(self.cbs0, vbs_j));
-        self.bd_hist.advance(disc, self.q_depl(self.cbd0, vbd_j));
+        self.bs_hist
+            .advance(disc, self.q_depl(self.cbs_bot, self.cbs_sw, vbs_j));
+        self.bd_hist
+            .advance(disc, self.q_depl(self.cbd_bot, self.cbd_sw, vbd_j));
 
         // Update fetlim reference.
         self.vgs_eff_prev = self.polarity * (vg - vs);

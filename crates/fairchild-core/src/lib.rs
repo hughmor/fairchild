@@ -23,6 +23,7 @@ pub mod solver;
 pub mod tolerance;
 pub mod tran;
 pub mod tran_step;
+pub mod unmodelled;
 
 // The warning switch lives in the parser (the crate everything else depends on)
 // and is re-exported here so a frontend needs one import, not two, to make

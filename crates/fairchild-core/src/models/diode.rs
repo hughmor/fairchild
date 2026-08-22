@@ -12,6 +12,12 @@ const GMIN: f64 = 1e-12;
 ///
 /// All SPICE Level-1 diode parameters are accepted from `.model` cards.
 /// Unrecognised parameters (BV, IBV, EG, XTI, …) emit a warning via the registry.
+///
+/// The instance parameter `AREA` scales the junction: IS and CJO with it, RS
+/// against it. It is applied where the parameters are *used* rather than folded
+/// into them, because a diode is built before its instance params are applied
+/// (`ParamSet::apply` runs after `setup_model`), and the alias path can apply
+/// them a second time.
 pub struct ShockleyDiode {
     // Model parameters
     is: f64,    // saturation current (A)
@@ -22,6 +28,7 @@ pub struct ShockleyDiode {
     mj: f64,    // grading coefficient
     fc: f64,    // forward-bias depletion-cap coefficient
     tt: f64,    // transit time (s)
+    area: f64,  // instance AREA multiplier (1.0 = one device)
     vcrit: f64, // pnjlim critical voltage (derived from Is, Vt)
 
     // Terminal bindings
@@ -58,6 +65,7 @@ impl ShockleyDiode {
             mj: 0.5,
             fc: 0.5,
             tt: 0.0,
+            area: 1.0,
             vcrit: 0.0,
             anode: None,
             cathode: None,
@@ -96,6 +104,9 @@ impl ShockleyDiode {
                 "m" | "mj" => mj = *v,
                 "fc" => fc = *v,
                 "tt" => tt = *v,
+                // Accepted and NOT modelled: `crate::unmodelled` owns that list
+                // and the diagnostic that reads it.
+                k if crate::unmodelled::is_listed(crate::unmodelled::DIODE, k) => {}
                 _ => unknown.push(k.clone()),
             }
         }
@@ -107,6 +118,22 @@ impl ShockleyDiode {
         d.fc = fc;
         d.tt = tt;
         (d, unknown)
+    }
+
+    /// Saturation current of the whole instance: `IS·AREA`.
+    fn is_eff(&self) -> f64 {
+        self.is * self.area
+    }
+
+    /// Zero-bias junction capacitance of the whole instance: `CJO·AREA`.
+    fn cjo_eff(&self) -> f64 {
+        self.cjo * self.area
+    }
+
+    /// Series resistance of the whole instance: `RS/AREA` — N junctions in
+    /// parallel each carry their own RS.
+    fn rs_eff(&self) -> f64 {
+        self.rs / self.area
     }
 
     /// SPICE pnjlim: logarithmically compress large voltage steps.
@@ -127,35 +154,37 @@ impl ShockleyDiode {
     /// Below FC·VJ: Cj = CJO·(1 − V/VJ)^(−MJ).
     /// At and above FC·VJ: linear extrapolation to avoid singularity.
     fn cj_depl(&self, v: f64) -> f64 {
-        if self.cjo == 0.0 {
+        let cjo = self.cjo_eff();
+        if cjo == 0.0 {
             return 0.0;
         }
         let fc_vj = self.fc * self.vj;
         if v < fc_vj {
-            self.cjo * (1.0 - v / self.vj).powf(-self.mj)
+            cjo * (1.0 - v / self.vj).powf(-self.mj)
         } else {
             let k = (1.0 - self.fc).powf(1.0 + self.mj);
-            self.cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj)
+            cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj)
         }
     }
 
     /// Charge integral Q(V) = ∫₀ᵛ Cj_depl dV (depletion charge only).
     fn q_depl(&self, v: f64) -> f64 {
-        if self.cjo == 0.0 {
+        let cjo = self.cjo_eff();
+        if cjo == 0.0 {
             return 0.0;
         }
         let fc_vj = self.fc * self.vj;
         if v < fc_vj {
             let x = 1.0 - v / self.vj;
-            self.cjo * self.vj / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
+            cjo * self.vj / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
         } else {
             // Charge at the FC·VJ boundary
             let x_fc = 1.0 - self.fc;
-            let q_fc = self.cjo * self.vj / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
+            let q_fc = cjo * self.vj / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
             let k = x_fc.powf(1.0 + self.mj);
             let f2 = 1.0 - self.fc * (1.0 + self.mj);
             let dv = v - fc_vj;
-            q_fc + self.cjo / k * (f2 * dv + self.mj / (2.0 * self.vj) * (v * v - fc_vj * fc_vj))
+            q_fc + cjo / k * (f2 * dv + self.mj / (2.0 * self.vj) * (v * v - fc_vj * fc_vj))
         }
     }
 
@@ -188,6 +217,10 @@ impl Device for ShockleyDiode {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         let vt = ctx.vt();
+        // Deliberately the unit-area IS: `AREA` arrives after `setup_model`
+        // (and can arrive twice, through the alias path). `vcrit` only decides
+        // when pnjlim starts compressing steps, and AREA moves it by
+        // vt·ln(AREA) — 18 mV at AREA=2, which changes no answer.
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
     }
 
@@ -201,6 +234,20 @@ impl Device for ShockleyDiode {
         self.cathode = terminals[1];
     }
 
+    /// `AREA` — the only instance parameter this model honours. Everything else
+    /// returns `false`, which is what makes `ParamSet::unconsumed` able to name
+    /// it: a diode instance parameter used to reach the netlist and stop there,
+    /// with nothing warning.
+    fn set_real_param(&mut self, name: &str, value: f64) -> bool {
+        match name.to_lowercase().as_str() {
+            "area" if value > 0.0 => {
+                self.area = value;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let v_a = self.anode.map_or(0.0, |i| x[i]);
         let v_k = self.cathode.map_or(0.0, |i| x[i]);
@@ -209,7 +256,7 @@ impl Device for ShockleyDiode {
         let vt = ctx.vt();
 
         // Junction voltage: iterate RS drop using Id from previous NR step.
-        let vd_j_raw = vd_terminal - self.id_junction * self.rs;
+        let vd_j_raw = vd_terminal - self.id_junction * self.rs_eff();
         let vd_j = if ctx.jlim_enabled {
             self.pnjlim(vd_j_raw, self.vd_prev, vt)
         } else {
@@ -220,14 +267,15 @@ impl Device for ShockleyDiode {
 
         let nvt = self.n * vt;
         let exp_term = (vd_j / nvt).exp();
-        self.id_junction = self.is * (exp_term - 1.0);
-        self.gd_junction = self.is * exp_term / nvt + GMIN;
+        let is = self.is_eff();
+        self.id_junction = is * (exp_term - 1.0);
+        self.gd_junction = is * exp_term / nvt + GMIN;
 
         // Norton equivalent at the terminal pair, accounting for RS.
         // Derivation: linearise Id(Vd_j) and Vd_j = Vd_term - Id·RS simultaneously.
         //   gd_eff = gd_j / (1 + gd_j·RS)
         //   jeq_eff = (Id - gd_j·Vd_j) / (1 + gd_j·RS)
-        let denom = 1.0 + self.gd_junction * self.rs;
+        let denom = 1.0 + self.gd_junction * self.rs_eff();
         self.gd_eff = self.gd_junction / denom;
         self.jeq_eff = (self.id_junction - self.gd_junction * vd_j) / denom;
 
@@ -321,7 +369,7 @@ impl Device for ShockleyDiode {
         let vd_terminal = va - vk;
         // Use cached id_junction for RS correction; correct when called after eval.
         // On the first call (DC init, before any eval), id_junction=0 → vd_j ≈ vd_terminal.
-        let vd_j = vd_terminal - self.id_junction * self.rs;
+        let vd_j = vd_terminal - self.id_junction * self.rs_eff();
         // Update pnjlim reference so the next timestep's first NR iter starts unlimted.
         self.vd_prev = vd_j;
         // Recomputed analytically from the converged solution rather than reused

@@ -120,28 +120,34 @@ V2  clk 0  PULSE(0 1.8 0 1n 1n 10n 20n)
 ### Diode
 
 ```
-D<name>  <anode> <cathode>  <model_name>
+D<name>  <anode> <cathode>  <model_name>  [AREA=<n>]
 ```
 
-Requires a `.model … D (…)` card.
+Requires a `.model … D (…)` card. `AREA` scales the junction — `IS` and `CJO`
+with it, `RS` against it — so `AREA=2` is exactly two of the same diode in
+parallel. Any other instance parameter is named on stderr rather than dropped.
 
 ### BJT (Gummel-Poon Level 1, NPN / PNP)
 
 ```
-Q<name>  <collector> <base> <emitter> [<substrate>]  <model_name>
+Q<name>  <collector> <base> <emitter> [<substrate>]  <model_name>  [AREA=<n>]
 ```
 
 Substrate node is optional; if absent it is tied to ground internally.
 
-Requires a `.model … NPN (…)` or `.model … PNP (…)` card.
+Requires a `.model … NPN (…)` or `.model … PNP (…)` card. `AREA` scales the
+device: saturation and knee currents and junction capacitances with it, ohmic
+series resistances against it.
 
 ### MOSFET (Level 1, Shichman-Hodges)
 
 ```
 M<name>  <drain> <gate> <source> <bulk>  <model_name>  [W=<w>]  [L=<l>]
++        [AS=<a>] [AD=<a>] [PS=<p>] [PD=<p>]
 ```
 
-Requires a `.model … NMOS|PMOS (…)` card.
+Requires a `.model … NMOS|PMOS (…)` card. `AS`/`AD`/`PS`/`PD` are the source and
+drain junction areas and perimeters, which is what `CJ` and `CJSW` multiply.
 
 ### Behavioral source (B-element)
 
@@ -301,6 +307,15 @@ The DC operating point uses `v0` (or the value at `t = t0` for PWL).
 |-----------|-------------|---------|
 | `IS` | Saturation current (A) | 1e-14 |
 | `N`  | Ideality factor | 1.0 |
+| `RS` | Series resistance (Ω) | 0 |
+| `CJO` (`CJ0`) | Zero-bias junction capacitance (F) | 0 |
+| `VJ` | Built-in junction potential (V) | 1.0 |
+| `M` (`MJ`) | Grading coefficient | 0.5 |
+| `FC` | Forward-bias depletion cap linearisation coefficient | 0.5 |
+| `TT` | Transit time (s) — diffusion charge | 0 |
+
+Reverse breakdown (`BV`, `IBV`) is accepted so a foundry card loads, and warned
+about: a Zener or an ESD clamp simulates as an ordinary diode with no knee.
 
 ### BJT Gummel-Poon Level 1 (`NPN` / `PNP`)
 
@@ -313,6 +328,12 @@ The DC operating point uses `v0` (or the value at `t = t0` for PWL).
 | `NR` | Reverse emission coefficient | 1.0 |
 | `VAF` (`VA`) | Forward Early voltage (V); `∞` = no Early effect | ∞ |
 | `VAR` (`VB`) | Reverse Early voltage (V) | ∞ |
+| `IKF` | Forward high-injection knee current (A); 0 = no roll-off | 0 |
+| `IKR` | Reverse high-injection knee current (A) | 0 |
+| `ISE` (`C2`) | B-E leakage saturation current (A) | 0 |
+| `NE` | B-E leakage emission coefficient | 1.5 |
+| `ISC` (`C4`) | B-C leakage saturation current (A) | 0 |
+| `NC` | B-C leakage emission coefficient | 2.0 |
 | `TF` | Forward transit time (s) — B-E diffusion charge | 0 |
 | `TR` | Reverse transit time (s) — B-C diffusion charge | 0 |
 | `CJE` | Zero-bias B-E depletion capacitance (F) | 0 |
@@ -332,10 +353,15 @@ Non-zero `RB`/`RC`/`RE` add internal collector/base/emitter nodes with the
 series resistance to the external terminal (the intrinsic transistor operates on
 the internal nodes); the operating point matches ngspice to 6 significant
 figures. Only constant `RB` is modelled (no current-dependent `RBM`/`IRB`).
-Series resistances `RB`/`RC`/`RE` are accepted and **not stamped**. So are the
-high-injection and leakage parameters (`IKF`, `IKR`, `ISE`, `ISC`, `NE`, `NC`,
-…), with no warning — a foundry card carrying them loads and simulates as though
-high-injection roll-off did not exist.
+
+The base charge carries the Early effect (`VAF`/`VAR`) and the high-injection
+knee (`IKF`/`IKR`) together, as in SPICE, so beta rolls off above the knee;
+`ISE`/`NE` and `ISC`/`NC` add the non-ideal leakage that pulls beta down at low
+current. All of it is checked against ngspice over VBE = 0.4 → 0.9 V.
+
+A parameter this simulator accepts and does not model — `CJS`, `XCJC`, `RBM`,
+the transit-time bias modulation, the temperature coefficients, `KF`/`AF` —
+produces one warning per card saying what the deck loses.
 [Model status](model_status.md) §4 lists every BJT parameter with its true
 status; check it before trusting a vendor card.
 
@@ -348,8 +374,20 @@ status; check it before trusting a vendor card.
 | `LAMBDA` | Channel-length modulation (1/V) | 0 |
 | `GAMMA` | Body-effect coefficient (V^0.5) | 0 |
 | `PHI` | Surface potential (V) | 0.6 |
+| `CGSO`, `CGDO`, `CGBO` | Gate overlap caps per unit W (or L, for CGBO) | 0 |
+| `COX` / `TOX` | Oxide cap density (F/m²) / oxide thickness (m) | 0 |
+| `CJ`, `CJSW` | Bulk junction cap per unit area / perimeter | 0 |
+| `PB` | Junction potential (V) | 0.8 |
+| `MJ`, `MJSW` | Grading coefficient, bottom / sidewall | 0.5 / 0.33 |
+| `FC` | Forward-bias depletion cap linearisation coefficient | 0.5 |
 
 Instance `W` / `L` override model defaults.
+
+Only Level 1 exists; a card asking for another `LEVEL` says so and is simulated
+as Level 1. The drain and source ohmic resistances (`RD`, `RS`, `RSH`), the
+bulk diodes (`IS`, `JS`), velocity saturation (`VMAX`) and the short-channel
+corrections are accepted and **not** stamped — each warns, naming what is
+missing. For a foundry PDK the answer is the OSDI/Verilog-A path (§14).
 
 ### Switch (`SW` / `CSW`)
 
