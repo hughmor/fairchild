@@ -14,7 +14,7 @@ resolver = "2"
 # `version.workspace = true`, and pyproject.toml takes it from fairchild-py via
 # `dynamic = ["version"]`. Releasing is bumping this line, then tagging v<that>.
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Hugh Morison"]
