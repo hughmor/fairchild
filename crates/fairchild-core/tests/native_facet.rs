@@ -16,7 +16,7 @@ use fairchild_parser::parse_spice;
 const A_IN: f64 = 0.031_622_776_601_683_79;
 
 fn run(body: &str) -> fairchild_core::newton::NrResult {
-    let src = format!(".options enable_bidirectional=1\n{body}.op\n.end\n");
+    let src = format!(".options enable_bidirectional=1\n{body}.op\n");
     let net = parse_spice(&src).expect("netlist should parse");
     dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP should converge")
 }
@@ -114,7 +114,7 @@ fn a_fully_specified_budget_must_sum_to_one() {
 fn a_reflector_needs_bidirectional_propagation() {
     let net = parse_spice(
         "Xf p_re p_im p_wl fc_facet reflectance=0.5\n\
-         V_re p_re 0 DC 1\nV_im p_im 0 DC 0\nV_wl p_wl 0 DC 1.55e-6\n.op\n.end\n",
+         V_re p_re 0 DC 1\nV_im p_im 0 DC 0\nV_wl p_wl 0 DC 1.55e-6\n.op\n",
     )
     .unwrap();
     let _ = dc_op_nr_with_registry(&net, &DeviceRegistry::new());
@@ -127,7 +127,7 @@ fn a_reflector_needs_bidirectional_propagation() {
 fn a_terminator_is_legal_without_bidirectional_propagation() {
     let net = parse_spice(
         "Xf p_re p_im p_wl fc_facet\n\
-         V_re p_re 0 DC 1\nV_im p_im 0 DC 0\nV_wl p_wl 0 DC 1.55e-6\n.op\n.end\n",
+         V_re p_re 0 DC 1\nV_im p_im 0 DC 0\nV_wl p_wl 0 DC 1.55e-6\n.op\n",
     )
     .unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

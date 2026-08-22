@@ -34,7 +34,6 @@ R2 a2 b2 100
 L2 b2 0 1m
 K1 l1 l2 0.0
 .tran 1u 100u
-.end
 ";
 
     let netlist_ref = "
@@ -46,7 +45,6 @@ V2 a2 0 DC 1.0
 R2 a2 b2 100
 L2 b2 0 1m
 .tran 1u 100u
-.end
 ";
 
     let res_k0 = run_be(netlist_k0, 1e-6, 100e-6);
@@ -101,7 +99,6 @@ L2 n2 0 1m
 R2 n2 sec_out 100
 K1 l1 l2 0.999
 .tran 1u 50u
-.end
 ";
 
     let res = run_be(netlist, 1e-6, 50e-6);
@@ -212,7 +209,6 @@ L1 n1 0 1m
 L2 n1 0 1m
 C1 n1 0 1u
 .tran 0.5u 1m
-.end
 ";
 
     let netlist_coupled = "
@@ -224,7 +220,6 @@ L2 n1 0 1m
 C1 n1 0 1u
 K1 l1 l2 0.5
 .tran 0.5u 1m
-.end
 ";
 
     let res_unc = run_be(netlist_uncoupled, step, stop);

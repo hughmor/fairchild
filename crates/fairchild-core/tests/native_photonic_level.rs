@@ -36,7 +36,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 a 0 myps pin_at_ref=1
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -47,7 +46,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 a 0 fc_pn_ps_cap pin_at_ref=1
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     assert!(
@@ -68,7 +66,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 a 0 myps pin_at_ref=1
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -79,7 +76,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 a 0 fc_pn_ps pin_at_ref=1
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     assert!(
@@ -101,7 +97,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xth ch0 out0 hp 0 myth
 Vh hp 0 DC 2.0
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -112,7 +107,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xth ch0 out0 hp 0 fc_thermal_ps_rc p_pi=20m
 Vh hp 0 DC 2.0
 .op
-.end
 ",
     );
     assert!(
@@ -134,7 +128,6 @@ Xpn ch0 out0 a 0 hp 0 myfull pin_at_ref=1
 Vb a 0 DC -1.0
 Vh hp 0 DC 1.0
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -146,7 +139,6 @@ Xpn ch0 out0 a 0 hp 0 fc_pn_th_ps_full pin_at_ref=1
 Vb a 0 DC -1.0
 Vh hp 0 DC 1.0
 .op
-.end
 ",
     );
     assert!(
@@ -170,7 +162,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 myps pin_at_ref=1 dn_dv=9e-5
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     let direct = out_re_im(
@@ -181,7 +172,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 fc_pn_ps pin_at_ref=1 dn_dv=9e-5
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     assert!(
@@ -198,7 +188,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xps ch0 out0 a 0 myps pin_at_ref=1
 Vb a 0 DC -1.0
 .op
-.end
 ",
     );
     assert!(

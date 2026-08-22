@@ -1543,8 +1543,8 @@ mod tests {
 
     #[test]
     fn voltage_divider_topology_size() {
-        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1000\nR2 mid 0 1000\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1000\nR2 mid 0 1000\n.op\n").unwrap();
         let topo = CircuitTopology::build(&net);
         // 2 nodes (in, mid) + 1 vsource = 3×3
         assert_eq!(topo.size, 3);
@@ -1552,7 +1552,7 @@ mod tests {
 
     #[test]
     fn rc_circuit_topology() {
-        let net = parse_spice("* RC\nV1 in 0 1.0\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n").unwrap();
+        let net = parse_spice("* RC\nV1 in 0 1.0\nR1 in out 1k\nC1 out 0 1u\n.op\n").unwrap();
         let topo = CircuitTopology::build(&net);
         // nodes: in, out (2) + 1 vsource = 3
         assert_eq!(topo.size, 3);
@@ -1562,8 +1562,7 @@ mod tests {
     fn stamp_gmin_floors_node_and_internal_rows_but_skips_vsource() {
         // 2 nodes (in, mid) + 1 vsource (rows: [0,1]=nodes, [2]=vsrc aux) and
         // then a device-internal row appended at index 3.
-        let net =
-            parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n").unwrap();
+        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n").unwrap();
         let mut topo = CircuitTopology::build(&net);
         assert_eq!(topo.size, 3);
         let internal = topo.allocate_extra_rows(1); // index 3, a device-internal row
@@ -1601,8 +1600,7 @@ mod tests {
     /// whole signal once it is dark. See `stamp_gmin` and issue #47.
     #[test]
     fn a_row_nothing_stamped_into_is_pinned_not_floored() {
-        let net =
-            parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n.end\n").unwrap();
+        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n").unwrap();
         let mut topo = CircuitTopology::build(&net);
         let internal = topo.allocate_extra_rows(1);
         assert_eq!(internal, 3);

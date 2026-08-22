@@ -64,7 +64,6 @@ Xmux bus c0 c1 c2 fc_mux
 Xpn bus out a 0 fc_pn_ps_full L_um=400
 Vb a 0 DC -1.0
 .op
-.end
 ";
     assert_every_lambda_is_a_source_label("wdm bus", deck, &[1546.12, 1550.0, 1553.88]);
 }
@@ -90,7 +89,6 @@ Xarc1 ring_fwd arc1_out fc_waveguide L_um=25 n_eff=2.4 n_g=2.4 alpha_dB_cm=1.0
 Xdc2 arc1_out add_in ring_c drop_out fc_dcoupler kappa_L=0.336
 Xarc2 ring_c ring_ret fc_waveguide L_um=25 n_eff=2.4 n_g=2.4 alpha_dB_cm=1.0
 .op
-.end
 ";
     assert_every_lambda_is_a_source_label("add-fed ring", deck, &[1600.0]);
 }
@@ -108,7 +106,6 @@ Xl1 p1 fc_cw_laser power_mW=3 wavelength_nm=1310
 Xl2 p2 fc_cw_laser power_mW=0 wavelength_nm=1310
 Xc p1 p2 t1 t2 fc_dcoupler kappa_l=0.3
 .op
-.end
 ";
     assert_every_lambda_is_a_source_label("2x2 coupler", deck, &[1310.0]);
 }

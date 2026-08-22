@@ -11,4 +11,3 @@ Q1   c b 0 0 npn1
 * A 1 ns step on a 1 ns edge under-resolves it (fairchild fixed-step vs ngspice
 * adaptive), which inflates pointwise RMS even though DC levels match exactly.
 .tran 0.1n 200n
-.end

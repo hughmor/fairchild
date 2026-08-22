@@ -85,7 +85,7 @@ fn ngspice_op(netlist: &str, queries: &[&str]) -> Option<HashMap<String, f64>> {
     let mut tmp = tempfile::NamedTempFile::new().ok()?;
     let stripped = strip_control_and_end(netlist);
     let print_vars = queries.join(" ");
-    let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n.end\n");
+    let control_block = format!(".control\nop\nprint {print_vars}\n.endc\n");
     write!(tmp, "{stripped}\n{control_block}").ok()?;
     let output = Command::new(&ngspice_bin)
         .arg("-b")
@@ -315,4 +315,127 @@ Q1 c b 0 0 QNPN\n\
         "V(c) at 14ns: fairchild={fc_vc:.4e}  ngspice={ng_vc:.4e}  diff={:.2e}  tol={tol:.2e}",
         (fc_vc - ng_vc).abs()
     );
+}
+
+/// The Early effect, against ngspice, at four collector voltages.
+///
+/// This is the test whose absence let `VAF` be applied upside down for the
+/// model's whole life (#63): every other golden leaves `VAF` infinite, where the
+/// base-charge factor is exactly 1 and the sign cannot be seen.  The in-tree
+/// checks could not have caught it either — they assert `IC ≈ IS·exp(VBE/VT)`
+/// and `IC/IB ≈ BF`, both of which hold with the factor inverted.
+#[test]
+fn early_effect_output_conductance_matches_ngspice() {
+    // Base held by a source so IC(VCE) is the raw output characteristic.
+    let deck = |vc: f64| {
+        format!(
+            "* Early effect\n\
+             .model qm NPN (IS=1e-16 BF=100 VAF=50)\n\
+             Vb b 0 DC 0.7\n\
+             Vc c 0 DC {vc}\n\
+             Q1 c b 0 qm\n\
+             .op\n"
+        )
+    };
+
+    let mut fc_ic = Vec::new();
+    let mut ng_ic = Vec::new();
+    for vc in [1.0, 2.0, 4.0, 5.0] {
+        let src = deck(vc);
+        let fc = fairchild_op(&src);
+        fc_ic.push(fc["i(vc)"]);
+        let Some(ng) = ngspice_op(&src, &["i(vc)"]) else {
+            eprintln!("ngspice not available — skipping comparison");
+            return;
+        };
+        ng_ic.push(ng["i(vc)"]);
+        assert_close(
+            &format!("i(vc) at VC={vc}"),
+            *fc_ic.last().unwrap(),
+            ng["i(vc)"],
+        );
+    }
+
+    // The *sign* of the output conductance, stated separately: agreeing with
+    // ngspice to 0.5 % already implies it, but a reader of a failure needs to be
+    // told which way round the model went.
+    assert!(
+        fc_ic[3].abs() > fc_ic[0].abs(),
+        "|IC| must RISE with VCE — got {:.4e} at 1 V and {:.4e} at 5 V, which is \
+         negative output conductance",
+        fc_ic[0].abs(),
+        fc_ic[3].abs()
+    );
+}
+
+/// High-injection roll-off (`IKF`/`IKR`) and non-ideal junction leakage
+/// (`ISE`/`NE`, `ISC`/`NC`), over seven decades of base current.
+///
+/// These parameters were matched by the model and discarded, with nothing on
+/// stderr (#27).  Sweeping VBE from 0.4 V to 0.9 V walks through the leakage
+/// floor (where beta is low because of `ISE`), the ideal region, and the knee
+/// (where beta falls because of `IKF`), so a missing term shows up somewhere in
+/// the sweep whichever one it is.
+#[test]
+fn high_injection_and_leakage_match_ngspice() {
+    const CARD: &str = ".model qm NPN (IS=1e-16 BF=100 BR=2 VAF=50 \
+                        IKF=1e-3 IKR=1e-2 ISE=1e-13 NE=1.6 ISC=1e-13 NC=2)\n";
+    for vb in [0.4, 0.6, 0.7, 0.8, 0.9] {
+        let src = format!(
+            "* Gummel-Poon, all terms\n{CARD}\
+             Vb b 0 DC {vb}\n\
+             Vc c 0 DC 2\n\
+             Q1 c b 0 qm\n\
+             .op\n"
+        );
+        let fc = fairchild_op(&src);
+        let Some(ng) = ngspice_op(&src, &["i(vb)", "i(vc)"]) else {
+            eprintln!("ngspice not available — skipping comparison");
+            return;
+        };
+        // A floor of 100 µV/100 µA is meaningless at 1 nA, so compare these on
+        // relative error alone — the currents span 10⁻⁹ to 10⁻².
+        for key in ["i(vb)", "i(vc)"] {
+            let (a, b) = (fc[key], ng[key]);
+            let rel = (a - b).abs() / b.abs().max(1e-15);
+            assert!(
+                rel < 5e-3,
+                "{key} at VBE={vb}: fairchild={a:.6e} ngspice={b:.6e} rel={rel:.2e}"
+            );
+        }
+        // And the point of IKF: beta must fall off at the top of the sweep.
+        if vb >= 0.9 {
+            let beta = fc["i(vc)"] / fc["i(vb)"];
+            assert!(
+                beta < 20.0,
+                "beta at VBE=0.9 is {beta:.1}: the high-injection knee is not \
+                 rolling it off (BF is 100)"
+            );
+        }
+    }
+}
+
+/// `AREA` on the element line, against ngspice: two of the same transistor.
+#[test]
+fn bjt_area_scales_the_device_like_ngspice() {
+    const SRC: &str = "* AREA\n\
+                       .model qm NPN (IS=1e-16 BF=100 VAF=50)\n\
+                       Vb b 0 DC 0.7\n\
+                       Vc c 0 DC 2\n\
+                       Vc2 c2 0 DC 2\n\
+                       Q1 c b 0 qm area=2\n\
+                       Q2 c2 b 0 qm\n\
+                       .op\n";
+    let fc = fairchild_op(SRC);
+    let (i2, i1) = (fc["i(vc)"], fc["i(vc2)"]);
+    assert!(
+        ((i2 / i1) - 2.0).abs() < 1e-7,
+        "area=2 must double IC: {i2:.9e} vs {i1:.9e}"
+    );
+    let Some(ng) = ngspice_op(SRC, &["i(vc)", "i(vc2)"]) else {
+        eprintln!("ngspice not available — skipping comparison");
+        return;
+    };
+    assert_close("i(vc) area=2", i2, ng["i(vc)"]);
+    assert_close("i(vc2) area=1", i1, ng["i(vc2)"]);
 }

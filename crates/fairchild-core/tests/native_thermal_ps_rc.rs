@@ -20,7 +20,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xth ch0 out0 vh 0 fc_thermal_ps r_heater=1k p_pi=10m
 Vh vh 0 DC 1.0
 .op
-.end
 ";
     let l2 = "\
 .optical_port ch0
@@ -29,7 +28,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xth ch0 out0 vh 0 fc_thermal_ps_rc r_heater=1k p_pi=10m tau_th=10u
 Vh vh 0 DC 1.0
 .op
-.end
 ";
     let r1 = dc_op_nr_with_registry(&parse_spice(l1).unwrap(), &DeviceRegistry::new()).unwrap();
     let r2 = dc_op_nr_with_registry(&parse_spice(l2).unwrap(), &DeviceRegistry::new()).unwrap();
@@ -57,7 +55,6 @@ Xth ch0 out0 vh 0 fc_thermal_ps r_heater=1k p_pi=10m
 Vh vh 0 PULSE(0 1.0 1u 100n 100n 100u 200u)
 .tran 1u 30u
 .options method=be
-.end
 ";
     let l2 = "\
 .optical_port ch0
@@ -67,7 +64,6 @@ Xth ch0 out0 vh 0 fc_thermal_ps_rc r_heater=1k p_pi=10m tau_th=10u
 Vh vh 0 PULSE(0 1.0 1u 100n 100n 100u 200u)
 .tran 1u 30u
 .options method=be
-.end
 ";
     let opts = SimOptions::from_netlist(&parse_spice(l1).unwrap());
     let r1 = tran_nr_with_registry_opts(
@@ -117,7 +113,6 @@ Xth ch0 out0 vh 0 fc_thermal_ps r_heater=1k p_pi=10m
 Vh vh 0 DC 1.0
 .tran 5u 100u
 .options method=be
-.end
 ";
     let l2 = l1.replace(
         "fc_thermal_ps r_heater",

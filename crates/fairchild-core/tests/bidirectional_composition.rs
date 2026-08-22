@@ -20,7 +20,7 @@ use fairchild_core::{dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
 fn run(body: &str) -> fairchild_core::newton::NrResult {
-    let src = format!(".options enable_bidirectional=1\n{body}.op\n.end\n");
+    let src = format!(".options enable_bidirectional=1\n{body}.op\n");
     let net = parse_spice(&src).expect("netlist should parse");
     dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP should converge")
 }
@@ -293,7 +293,7 @@ fn two_devices_driving_one_wire_is_an_error_naming_both() {
          .optical_port a\n.optical_port b\n.optical_port c\n\
          Xw1 a b fc_waveguide L_um=100\n\
          Xw2 c b fc_waveguide L_um=100\n\
-         .op\n.end\n",
+         .op\n",
     )
     .unwrap();
     let Err(err) = dc_op_nr_with_registry(&net, &DeviceRegistry::new()) else {
@@ -321,7 +321,7 @@ Xmux bus ch0 ch1 fc_mux\n\
 Xdmx bus d0 d1 fc_demux\n\
 Xp0 d0 a0 0 fc_photodetector responsivity=1.0 i_dark_a=0 r_shunt=1e12\n\
 Xp1 d1 a1 0 fc_photodetector responsivity=1.0 i_dark_a=0 r_shunt=1e12\n\
-R0 a0 0 1k\nR1 a1 0 1k\n.op\n.end\n",
+R0 a0 0 1k\nR1 a1 0 1k\n.op\n",
     )
     .unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");

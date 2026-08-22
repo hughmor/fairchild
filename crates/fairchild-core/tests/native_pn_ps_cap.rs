@@ -25,7 +25,6 @@ Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xpn ch0 out0 vmod 0 {class} L_um=100 g_pn=1e-3 c_j0=0 da_dv=0
 Vmod vmod 0 DC 0.5
 .op
-.end
 "
         )
     };
@@ -61,7 +60,6 @@ Rsrc vmod a 1k
 Vmod vmod 0 PULSE(0 1.0 1n 100p 100p 100n 200n)
 .tran 50p 10n
 .options method=be
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let opts = SimOptions::from_netlist(&net);
@@ -126,7 +124,6 @@ Rsrc vmod a 1k
 Vmod vmod 0 PULSE({vdc} {vdc_plus:.3} 1n 50p 50p 50n 100n)
 .tran 50p 5n
 .options method=be
-.end
 ",
             vdc_plus = vdc + 0.1
         )

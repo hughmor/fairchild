@@ -1,7 +1,8 @@
 # Model status — what is parsed, what is stamped, what is validated
 
-*Audited against the source on 2026-08-18. If you find a disagreement between
-this table and the simulator, the simulator is the bug.*
+*Audited against the source on 2026-08-22. If you find a disagreement between
+this table and the simulator, the simulator is the bug — and for the
+"accepted, not modelled" rows, a test fails.*
 
 This document exists because "supported" is not a binary. A parameter can be
 accepted by the parser, silently discarded before it reaches the matrix, and
@@ -30,10 +31,15 @@ kind cannot read one now warns instead of dropping it.
 
 **The short version of what to watch out for:**
 
-- BJT high-injection and leakage parameters (`IKF`, `IKR`, `ISE`, `ISC`, …) are
-  accepted **silently** and do nothing. The diode at least warns about `BV`.
-- MOSFET `MJSW` is parsed, stored, and never read — sidewall junction caps use
-  `MJ`.
+- Every parameter is now either stamped or named. A model-card parameter this
+  simulator accepts and does not model produces one warning per card saying what
+  the deck loses (`IKF ignored: high-injection roll-off is not modelled, so the
+  forward current keeps its exponential slope past the knee`), and an instance
+  parameter a device cannot honour is named per instance. The lists live in
+  `crate::unmodelled`, and `the_unmodelled_tables_match_the_audit_document`
+  fails if they and the tables below disagree.
+- Rows below marked **⚠️ accepted, not modelled** are exactly those warnings.
+  They are the ones to read before trusting a foundry card.
 - `.noise` has no ngspice comparison. Optical noise (PD shot, laser RIN) is
   checked against the analytic receiver budget, and `.options trannoise=1`
   injects the same generators into `.tran`. Neither domain models flicker (1/f)
@@ -103,18 +109,23 @@ reveals.
 | `M` / `MJ` | ✅ | ✅ | ⚠️ transitively; `M=0` is exercised directly by the integrator equivalence test |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `TT` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
-| `BV`, `IBV` | ⚠️ warned | ❌ | — |
-| `EG`, `XTI`, `KF`, `AF`, anything else | ⚠️ warned | ❌ | — |
+| `BV`, `IBV`, `EG`, `XTI`, `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+
+Anything not on either list is an unknown parameter and is warned about as one.
 
 **Reverse breakdown is not modelled.** A Zener or an ESD clamp will simulate as
 an ordinary diode with no breakdown knee. The parameters are accepted so a
 foundry card loads, and a warning names them.
 
-⚠️ **Diode instance parameters are parsed and then dropped.** `D1 a k dm area=2`
-parses, `Element::Diode` carries the list, and nothing reads it —
-`ShockleyDiode` does not implement `Device::set_real_param`, so the default
-(`false`) applies and `ParamSet::apply` consumes nothing. `AREA` in particular
-is not modelled. Nothing warns.
+### Instance parameters
+
+| Parameter | Parsed | Stamped | Validated |
+|---|---|---|---|
+| `AREA` | ✅ | ✅ scales IS and CJO, divides RS | ✅ exact agreement with N parallel diodes, incl. with RS |
+
+Any other instance parameter is named on stderr per instance rather than
+dropped. A value that cannot be read (`area=2x`) is a parse error — it used to
+be discarded, which read as "this simulator ignores AREA".
 
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
 
@@ -127,31 +138,32 @@ Shot noise (`2q·|Id|`) is stamped for `.noise`.
 | `IS` | ✅ | ✅ | ✅ ngspice DC (3 op-point tests) |
 | `BF`, `BR` | ✅ | ✅ | ✅ ngspice DC (forward-active + saturation) |
 | `NF`, `NR` | ✅ | ✅ | ⚠️ transitively |
-| `VAF` / `VA`, `VAR` / `VB` | ✅ | ✅ | ⚠️ transitively (Early effect) |
+| `VAF` / `VA`, `VAR` / `VB` | ✅ | ✅ | ✅ ngspice IC(VCE) at four bias points — **the sign was inverted until #63, and no golden set VAF** |
+| `IKF`, `IKR` | ✅ | ✅ high-injection knee, via the base charge | ✅ ngspice, VBE 0.4→0.9 V |
+| `ISE`, `NE`, `ISC`, `NC` | ✅ | ✅ non-ideal junction leakage | ✅ ngspice, same sweep |
 | `TF`, `TR` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
 | `RB`, `RC`, `RE` | ✅ | ✅ | ✅ ngspice op-point to 6 significant figures |
 | `CJE`, `VJE`, `MJE` | ✅ | ✅ | ✅ ngspice transient (CE stage, 5 %) |
 | `CJC`, `VJC`, `MJC` | ✅ | ✅ | ✅ ngspice transient |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
-| `IKF`, `IKR` | ✅ **silently** | ❌ | — |
-| `ISE`, `ISC`, `NE`, `NC` | ✅ **silently** | ❌ | — |
-| `CJS`, `VJS`, `MJS`, `XCJC` | ✅ **silently** | ❌ | — |
-| `XTB`, `EG`, `XTI`, `PTF`, `TNOM` | ✅ **silently** | ❌ | — |
-| `KF`, `AF` (flicker noise) | ✅ **silently** | ❌ | — |
+| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `XTB`, `EG`, `XTI`, `KF`, `AF`, `TNOM` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 
-⚠️ **These are accepted with no warning at all.** Unlike the diode, the BJT
-matches its unmodelled parameters explicitly and discards them, so nothing is
-printed. A foundry card with `IKF` loads and simulates as though high-injection
-roll-off did not exist. Verified 2026-08-01: a deck with `IKF=10m ISE=1e-14
-KF=1e-15` produces no output on stderr.
+### Instance parameters
 
-⚠️ **BJT instance parameters are parsed and then dropped**, and more thoroughly
-than the diode's: `build_devices`' BJT arm does not even destructure `params`.
+| Parameter | Parsed | Stamped | Validated |
+|---|---|---|---|
+| `AREA` | ✅ | ✅ scales IS, IKF/IKR, ISE/ISC, CJE/CJC; divides RB/RC/RE | ✅ ngspice, and IC exactly doubled |
+
+Any other instance parameter is named on stderr per instance. `build_devices`'
+BJT arm did not destructure `params` at all before #26, so nothing on a `Q` line
+could reach the device.
 
 `RB` is a constant resistance. The current-dependent base resistance (`RBM`,
-`IRB`) is not modelled.
+`IRB`) is not modelled — and is warned about.
 
-Shot noise on both junctions is stamped for `.noise`.
+Shot noise on both junctions is stamped for `.noise`, from the terminal currents
+of the last `eval`. It used to read the *Norton offsets* instead, which equal
+those currents only when every terminal sits at 0 V.
 
 ---
 
@@ -169,13 +181,14 @@ Shot noise on both junctions is stamped for `.noise`.
 | `COX` | ✅ | ✅ | ⚠️ transitively (Meyer channel caps) |
 | `TOX` | ✅ | ✅ | ⚠️ converted to `COX`, transitively |
 | `CJ`, `CJSW` | ✅ | ✅ | ✅ ngspice switching-time golden |
-| `PB`, `MJ` | ✅ | ✅ | ⚠️ transitively |
+| `PB`, `MJ` | ✅ | ✅ bottom of the junction | ⚠️ transitively |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
-| `MJSW` | ✅ | ❌ **stored, never read** | — |
+| `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
+| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `KF`, `AF`, `TNOM`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 
-⚠️ **`MJSW` does nothing.** The sidewall junction capacitance is computed with
-`MJ`, not `MJSW`; the field is `#[allow(dead_code)]` in `mosfet1.rs`. Cards that
-set them differently will not get what they asked for, and nothing warns.
+Note `RD`/`RS`/`RSH` in that list: a MOSFET card's series resistances are
+**not** stamped, unlike the BJT's. A card that models its access resistance
+there gets none of it, and now says so.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
@@ -186,6 +199,10 @@ PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
 |---|---|---|---|
 | `W`, `L` | ✅ | ✅ | ✅ ngspice DC |
 | `AS`, `AD`, `PS`, `PD` | ✅ | ✅ | ✅ via `CJ`/`CJSW` golden |
+
+Any other instance parameter is named on stderr per instance. The return of
+`set_instance_params` was discarded before #26, so `M1 … banana=3` was accepted
+in silence on the one device family whose instance parameters did work.
 
 Channel thermal noise (`8kT·gm/3`) is stamped for `.noise`.
 

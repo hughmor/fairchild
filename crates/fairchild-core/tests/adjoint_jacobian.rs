@@ -61,19 +61,19 @@ fn assert_complete(tag: &str, src: &str) {
 fn electrical_devices_stamp_a_complete_jacobian() {
     assert_complete(
         "divider",
-        "* r\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 2k\n.op\n.end\n",
+        "* r\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 2k\n.op\n",
     );
     assert_complete(
         "diode",
-        "* d\n.model dmod D (IS=1e-14 N=1.0)\nV1 in 0 DC 2\nR1 in mid 1k\nD1 mid 0 dmod\n.op\n.end\n",
+        "* d\n.model dmod D (IS=1e-14 N=1.0)\nV1 in 0 DC 2\nR1 in mid 1k\nD1 mid 0 dmod\n.op\n",
     );
     assert_complete(
         "mosfet",
-        "* m\n.model nm NMOS (VTO=0.7 KP=100u)\nVdd d 0 DC 3\nVg g 0 DC 2\nRd d dr 1k\nM1 dr g 0 0 nm W=10u L=1u\n.op\n.end\n",
+        "* m\n.model nm NMOS (VTO=0.7 KP=100u)\nVdd d 0 DC 3\nVg g 0 DC 2\nRd d dr 1k\nM1 dr g 0 0 nm W=10u L=1u\n.op\n",
     );
     assert_complete(
         "bjt",
-        "* q\n.model qn NPN (IS=1e-16 BF=100)\nVcc c 0 DC 5\nVb b 0 DC 0.7\nRc c cc 1k\nQ1 cc b 0 0 qn\n.op\n.end\n",
+        "* q\n.model qn NPN (IS=1e-16 BF=100)\nVcc c 0 DC 5\nVb b 0 DC 0.7\nRc c cc 1k\nQ1 cc b 0 0 qn\n.op\n",
     );
 }
 
@@ -84,7 +84,7 @@ fn electrical_devices_stamp_a_complete_jacobian() {
 const LASER: &str = "Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550\n";
 
 fn optical(body: &str) -> String {
-    format!(".optical_port in0\n.optical_port out0\n{LASER}{body}.op\n.end\n")
+    format!(".optical_port in0\n.optical_port out0\n{LASER}{body}.op\n")
 }
 
 #[test]
@@ -98,14 +98,14 @@ fn passive_photonic_devices_stamp_a_complete_jacobian() {
         "splitter",
         &format!(
             ".optical_port in0\n.optical_port o1\n.optical_port o2\n{LASER}\
-             Xsp in0 o1 o2 fc_splitter\n.op\n.end\n"
+             Xsp in0 o1 o2 fc_splitter\n.op\n"
         ),
     );
     assert_complete(
         "dcoupler",
         &format!(
             ".optical_port in0\n.optical_port in1\n.optical_port o1\n.optical_port o2\n{LASER}\
-             Xdc in0 in1 o1 o2 fc_dcoupler kappa_L=0.336\n.op\n.end\n"
+             Xdc in0 in1 o1 o2 fc_dcoupler kappa_L=0.336\n.op\n"
         ),
     );
 }
@@ -120,7 +120,7 @@ fn electro_optic_devices_declare_what_they_freeze() {
         &format!(
             ".optical_port in0\n.optical_port out0\n{LASER}\
              Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1000\n\
-             Vsig vsig 0 DC 1.5\n.op\n.end\n"
+             Vsig vsig 0 DC 1.5\n.op\n"
         ),
     );
     // `dn_dv` is what makes these electro-optic at all.  Without it the device
@@ -131,7 +131,7 @@ fn electro_optic_devices_declare_what_they_freeze() {
         &format!(
             ".optical_port in0\n.optical_port out0\n{LASER}\
              Xpn in0 out0 vmod 0 fc_pn_ps L_um=500 dn_dv=5e-5 g_pn=1e-3 alpha_dB_cm=10 pin_at_ref=1\n\
-             Vm vmod 0 DC -1.0\n.op\n.end\n"
+             Vm vmod 0 DC -1.0\n.op\n"
         ),
     );
     assert_complete(
@@ -139,7 +139,7 @@ fn electro_optic_devices_declare_what_they_freeze() {
         &format!(
             ".optical_port in0\n.optical_port out0\n{LASER}\
              Xpn in0 out0 vmod 0 fc_pn_ps_cap L_um=100 dn_dv=5e-5 g_pn=1e-3 c_j0=100f v_bi=0.7 m_j=0.5\n\
-             Vm vmod 0 DC -1.0\n.op\n.end\n"
+             Vm vmod 0 DC -1.0\n.op\n"
         ),
     );
     assert_complete(
@@ -147,7 +147,7 @@ fn electro_optic_devices_declare_what_they_freeze() {
         &format!(
             ".optical_port in0\n.optical_port out0\n{LASER}\
              Xth in0 out0 vh 0 fc_thermal_ps L_um=200 p_pi_th=20m r_heater=500\n\
-             Vh vh 0 DC 2.0\n.op\n.end\n"
+             Vh vh 0 DC 2.0\n.op\n"
         ),
     );
     assert_complete(
@@ -155,7 +155,7 @@ fn electro_optic_devices_declare_what_they_freeze() {
         ".optical_port bus\n.optical_port dark\n.optical_port thru\n.optical_port drop\n\
          Xl1 bus fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
          Xwb bus dark thru drop wctl 0 fc_optical_2x2 w=0 dw_dv_0=0.5\n\
-         Vw wctl 0 DC 0.4\n.op\n.end\n",
+         Vw wctl 0 DC 0.4\n.op\n",
     );
 }
 
@@ -175,7 +175,7 @@ fn a_full_eo_link_stamps_a_complete_jacobian() {
                  Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1000\n\
                  Xpd out0 pout 0 fc_photodetector responsivity=0.8\n\
                  Rl pout 0 {r_load}\n\
-                 Vsig vsig 0 DC 1.5\n.op\n.end\n"
+                 Vsig vsig 0 DC 1.5\n.op\n"
             ),
         );
     }

@@ -94,14 +94,7 @@ pub(super) fn parse_element(
                     line: lineno,
                 });
             }
-            let mut params = Vec::new();
-            for tok in &tokens[4..] {
-                if let Some((k, v)) = tok.split_once('=') {
-                    if let Ok(val) = parse_value(v, lineno) {
-                        params.push((k.to_lowercase(), val));
-                    }
-                }
-            }
+            let params = instance_params("a diode", &tokens[4..], lineno)?;
             Ok(Element::Diode {
                 name,
                 anode: canon_node(tokens[1]),
@@ -264,14 +257,7 @@ pub(super) fn parse_element(
                     line: lineno,
                 });
             }
-            let mut params = Vec::new();
-            for tok in &tokens[6..] {
-                if let Some((k, v)) = tok.split_once('=') {
-                    if let Ok(val) = parse_value(v, lineno) {
-                        params.push((k.to_lowercase(), val));
-                    }
-                }
-            }
+            let params = instance_params("a MOSFET", &tokens[6..], lineno)?;
             Ok(Element::Mosfet {
                 name,
                 drain: canon_node(tokens[1]),
@@ -304,14 +290,7 @@ pub(super) fn parse_element(
                     // Four positional fields: C B E model
                     ("0".to_string(), tokens[4].to_lowercase(), 5)
                 };
-            let mut params = Vec::new();
-            for tok in &tokens[param_start..] {
-                if let Some((k, v)) = tok.split_once('=') {
-                    if let Ok(val) = parse_value(v, lineno) {
-                        params.push((k.to_lowercase(), val));
-                    }
-                }
-            }
+            let params = instance_params("a BJT", &tokens[param_start..], lineno)?;
             Ok(Element::Bjt {
                 name,
                 collector: canon_node(tokens[1]),
@@ -498,6 +477,35 @@ pub(super) fn parse_element(
             line: lineno,
         }),
     }
+}
+
+/// `key=value` pairs off the tail of an element line.
+///
+/// Every caller used to write this loop itself as
+/// `if let Ok(v) = parse_value(..) { push }`, which threw away a parameter whose
+/// value did not parse: `D1 a k dm area=2x` reached the netlist with no `area`
+/// at all and no diagnostic, so a typo in a swept parameter read as "this
+/// simulator ignores AREA". A bad value is an error naming the parameter.
+///
+/// A bare token — `OFF`, `IC=…`'s cousins, a stray node someone meant to wire —
+/// is warned about rather than dropped: it is input this simulator cannot
+/// honour, and silence there is the same failure one step earlier.
+fn instance_params(
+    element: &str,
+    toks: &[&str],
+    lineno: usize,
+) -> Result<Vec<(String, f64)>, ParseError> {
+    let mut params = Vec::new();
+    for tok in toks {
+        match tok.split_once('=') {
+            Some((k, v)) => params.push((k.to_lowercase(), parse_value(v, lineno)?)),
+            None => crate::warn_user!(
+                "line {lineno}: {element} carries '{tok}', which is not a \
+                 `param=value` pair — it is ignored"
+            ),
+        }
+    }
+    Ok(params)
 }
 
 /// Like `parse_element` but recognises parasitic key=val tokens on R, L, C lines

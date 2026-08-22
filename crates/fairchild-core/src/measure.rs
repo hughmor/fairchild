@@ -270,7 +270,7 @@ mod tests {
         let net = parse_spice(
             "* meas\nV1 in 0 PULSE(0 1 1u 1n 1n 5u 10u)\nR1 in out 1k\nC1 out 0 1u\n\
              .meas tran vmx MAX V(out)\n\
-             .tran 100n 8u\n.end\n",
+             .tran 100n 8u\n",
         )
         .unwrap();
         let r = crate::tran_nr_var(&net, 100e-9, 8e-6).unwrap();
@@ -291,7 +291,7 @@ mod tests {
         let net = parse_spice(
             "* meas\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n\
              .meas tran vat FIND V(out) AT=1m\n\
-             .tran 1u 5m\n.end\n",
+             .tran 1u 5m\n",
         )
         .unwrap();
         let r = crate::tran_nr_var(&net, 1e-6, 5e-3).unwrap();
@@ -309,7 +309,7 @@ mod tests {
             "* delay\nV1 in 0 PULSE(0 1 1u 100n 100n 5u 10u)\n\
              R1 in out 1k\nC1 out 0 1n\n\
              .meas tran tpd TRIG V(in) VAL=0.5 TARG V(out) VAL=0.5\n\
-             .tran 10n 3u\n.end\n",
+             .tran 10n 3u\n",
         )
         .unwrap();
         let r = crate::tran_nr_var(&net, 10e-9, 3e-6).unwrap();

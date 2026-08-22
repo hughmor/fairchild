@@ -101,7 +101,7 @@ fn deck(off: f64, w: f64) -> String {
              Rt{b} pt{b} 0 1k\nRd{b} pd{b} 0 1k\n"
         );
     }
-    s += ".tran 200p 40n\n.end\n";
+    s += ".tran 200p 40n\n";
     s
 }
 

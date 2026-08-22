@@ -66,13 +66,16 @@ pub fn set_element_param(netlist: &mut Netlist, element: &str, param: &str, valu
                 *waveform = Waveform::Dc(value);
                 hit = true;
             }
-            // Deliberately NOT `Diode` or `Bjt`: both carry a `params` list, but
-            // nothing consumes it — neither implements `Device::set_real_param`
-            // (the default returns false) and `build_devices`' BJT arm does not
-            // even destructure `params`. Matching them here would return `true`
-            // for an edit that changes nothing, which is worse than not
-            // matching. See `docs/model_status.md`.
-            Element::XOsdi { name, params, .. } | Element::Mosfet { name, params, .. }
+            // `Diode` and `Bjt` are here as of #26: their `params` lists used to
+            // be carried and consumed by nothing, so matching them would have
+            // returned `true` for an edit that changed nothing. Now `AREA`
+            // reaches the device and anything else is named on stderr when the
+            // device is built, which is the honest pair — a sweep over `area`
+            // works, and a sweep over a parameter no model honours says so.
+            Element::XOsdi { name, params, .. }
+            | Element::Mosfet { name, params, .. }
+            | Element::Diode { name, params, .. }
+            | Element::Bjt { name, params, .. }
                 if name.to_lowercase() == el_name =>
             {
                 match params
@@ -140,7 +143,10 @@ pub fn get_element_param(netlist: &Netlist, element: &str, param: &str) -> Optio
             {
                 return dc_level(waveform);
             }
-            Element::XOsdi { name, params, .. } | Element::Mosfet { name, params, .. }
+            Element::XOsdi { name, params, .. }
+            | Element::Mosfet { name, params, .. }
+            | Element::Diode { name, params, .. }
+            | Element::Bjt { name, params, .. }
                 if name.to_lowercase() == el_name =>
             {
                 return params
@@ -194,7 +200,7 @@ mod tests {
     use fairchild_parser::parse_spice;
 
     fn nl() -> Netlist {
-        parse_spice("* t\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.op\n.end\n").unwrap()
+        parse_spice("* t\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1p\n.op\n").unwrap()
     }
 
     #[test]
@@ -224,7 +230,7 @@ mod tests {
     fn mosfet_and_osdi_instance_params_are_reachable() {
         let mut n = parse_spice(
             "* m-line\n.model nch NMOS (VTO=0.7 KP=100u)\n\
-             M1 d g 0 0 nch W=10u L=1u\nVg g 0 1\nVd d 0 2\n.op\n.end\n",
+             M1 d g 0 0 nch W=10u L=1u\nVg g 0 1\nVd d 0 2\n.op\n",
         )
         .unwrap();
         assert!(set_element_param(&mut n, "M1", "W", 40e-6));
@@ -244,17 +250,20 @@ mod tests {
         }
     }
 
-    /// Diode and BJT instance params are parsed but consumed by nothing, so a
-    /// `true` here would be a lie. Documented in `docs/model_status.md`.
+    /// Diode and BJT instance params reach the device as of #26, so a sweep or
+    /// an optimiser can drive `AREA` — and the edit is claimed only because
+    /// something now consumes it.
     #[test]
-    fn diode_and_bjt_instance_params_are_not_claimed() {
+    fn diode_and_bjt_instance_params_are_reachable() {
         let mut n = parse_spice(
             "* d/q\n.model dm D (IS=1e-14)\n.model qm NPN (IS=1e-16)\n\
-             D1 a 0 dm\nQ1 c b 0 qm\nV1 a 0 1\nVb b 0 0.7\nVc c 0 2\n.op\n.end\n",
+             D1 a 0 dm\nQ1 c b 0 qm\nV1 a 0 1\nVb b 0 0.7\nVc c 0 2\n.op\n",
         )
         .unwrap();
-        assert!(!set_element_param(&mut n, "d1", "area", 2.0));
-        assert!(!set_element_param(&mut n, "q1", "area", 2.0));
+        assert!(set_element_param(&mut n, "d1", "area", 2.0));
+        assert!(set_element_param(&mut n, "q1", "area", 3.0));
+        assert_eq!(get_element_param(&n, "d1", "area"), Some(2.0));
+        assert_eq!(get_element_param(&n, "q1", "area"), Some(3.0));
     }
 
     /// The bare element letter, which the CLI accepted and the shared version

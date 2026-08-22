@@ -102,7 +102,6 @@ Xc1 lin dk a1 a2 fc_dcoupler kappa_L={math.pi / 4}
 Xps1 a1 b1 p 0 {arm}
 Xps2 a2 b2 n 0 {arm}
 Xc2 b1 b2 out ou fc_dcoupler kappa_L={math.pi / 4}
-.end
 """
 
 

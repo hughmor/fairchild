@@ -27,7 +27,7 @@ fn v_out(deck: &str) -> f64 {
 /// `E<n> p n nc+ nc- gain` — V(out) = gain·V(in). ngspice: 3.0 V.
 #[test]
 fn vcvs_gain_matches_ngspice() {
-    let v = v_out("* E\nVin in 0 DC 1.5\nE1 out 0 in 0 2.0\nRl out 0 1k\n.op\n.end\n");
+    let v = v_out("* E\nVin in 0 DC 1.5\nE1 out 0 in 0 2.0\nRl out 0 1k\n.op\n");
     assert!((v - 3.0).abs() < TOL, "V(out) = {v}, ngspice gives 3.0");
 }
 
@@ -38,7 +38,7 @@ fn vcvs_gain_matches_ngspice() {
 /// output. ngspice: −1.5 V.
 #[test]
 fn vccs_sign_matches_ngspice() {
-    let v = v_out("* G\nVin in 0 DC 1.5\nG1 out 0 in 0 1m\nRl out 0 1k\n.op\n.end\n");
+    let v = v_out("* G\nVin in 0 DC 1.5\nG1 out 0 in 0 1m\nRl out 0 1k\n.op\n");
     assert!((v + 1.5).abs() < TOL, "V(out) = {v}, ngspice gives -1.5");
 }
 
@@ -46,14 +46,14 @@ fn vccs_sign_matches_ngspice() {
 /// I(Vs) = 1 mA through the 1 k, gain 3, into 1 k. ngspice: 3.0 V.
 #[test]
 fn cccs_gain_matches_ngspice() {
-    let v = v_out("* F\nVs a 0 DC 1\nRs a 0 1k\nF1 out 0 Vs 3.0\nRl out 0 1k\n.op\n.end\n");
+    let v = v_out("* F\nVs a 0 DC 1\nRs a 0 1k\nF1 out 0 Vs 3.0\nRl out 0 1k\n.op\n");
     assert!((v - 3.0).abs() < TOL, "V(out) = {v}, ngspice gives 3.0");
 }
 
 /// `H<n> p n Vctrl gain` — a transresistance. ngspice: −0.5 V.
 #[test]
 fn ccvs_gain_matches_ngspice() {
-    let v = v_out("* H\nVs a 0 DC 1\nRs a 0 1k\nH1 out 0 Vs 500\nRl out 0 1k\n.op\n.end\n");
+    let v = v_out("* H\nVs a 0 DC 1\nRs a 0 1k\nH1 out 0 Vs 500\nRl out 0 1k\n.op\n");
     assert!((v + 0.5).abs() < TOL, "V(out) = {v}, ngspice gives -0.5");
 }
 
@@ -62,8 +62,8 @@ fn ccvs_gain_matches_ngspice() {
 /// if the stamp were transposed or negated, `gm = 1/R` would not reproduce `R`.
 #[test]
 fn a_vccs_across_itself_is_a_resistor() {
-    let via_g = v_out("* G as R\nVin in 0 DC 1\nR1 in out 1k\nG1 out 0 out 0 1m\n.op\n.end\n");
-    let via_r = v_out("* real R\nVin in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n");
+    let via_g = v_out("* G as R\nVin in 0 DC 1\nR1 in out 1k\nG1 out 0 out 0 1m\n.op\n");
+    let via_r = v_out("* real R\nVin in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n");
     assert!(
         (via_g - via_r).abs() < 1e-12,
         "G1 with gm=1/R gives {via_g}, a real 1k gives {via_r}"
@@ -82,7 +82,7 @@ fn vcvs_gain_carries_into_ac() {
     let run = |gain: &str| {
         let nl = parse_spice(&format!(
             "* E in ac\nVin in 0 AC 1\nE1 mid 0 in 0 {gain}\n\
-             R1 mid out 1k\nC1 out 0 1n\n.end\n"
+             R1 mid out 1k\nC1 out 0 1n\n"
         ))
         .unwrap();
         let r = ac_analysis(&nl, &[1e3], None, &DeviceRegistry::new()).expect("ac failed");
@@ -111,7 +111,7 @@ fn vcvs_gain_carries_into_ac() {
 fn b_source_reads_its_own_instances_internal_node() {
     let nl = parse_spice(
         "* b in subckt\n.subckt amp inp outp\nR1 inp mid 1k\nR2 mid 0 1k\n\
-         B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n.end\n",
+         B1 outp 0 V=v(mid)*2\n.ends\nV1 a 0 DC 1\nX1 a y amp\n.op\n",
     )
     .unwrap();
     let mut reg = DeviceRegistry::new();
@@ -127,7 +127,7 @@ fn b_source_reads_its_own_instances_internal_node() {
 fn f_source_reads_its_own_instances_branch_current() {
     let nl = parse_spice(
         "* f in subckt\n.subckt mirror inp outp\nVsense inp mid DC 0\nR1 mid 0 1k\n\
-         F1 0 outp Vsense 2\nR2 outp 0 1k\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n.end\n",
+         F1 0 outp Vsense 2\nR2 outp 0 1k\n.ends\nV1 a 0 DC 1\nX1 a y mirror\n.op\n",
     )
     .unwrap();
     let mut reg = DeviceRegistry::new();
@@ -143,7 +143,7 @@ fn f_source_reads_its_own_instances_branch_current() {
 fn e_source_control_port_resolves_to_the_call_site() {
     let nl = parse_spice(
         "* e in subckt\n.subckt buf inp outp\nE1 outp 0 inp 0 1.0\n.ends\n\
-         V1 a 0 DC 1.5\nX1 a y buf\nRl y 0 1k\n.op\n.end\n",
+         V1 a 0 DC 1.5\nX1 a y buf\nRl y 0 1k\n.op\n",
     )
     .unwrap();
     let mut reg = DeviceRegistry::new();

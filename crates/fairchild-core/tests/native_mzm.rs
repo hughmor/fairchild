@@ -14,7 +14,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1k
 Vsig vsig 0 DC 0.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -38,7 +37,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=100
 Vsig vsig 0 DC 3.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -64,7 +62,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha_dB=3.0 e_r=10k
 Vsig vsig 0 DC 0.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -87,7 +84,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r_dB=20
 Vsig vsig 0 DC 3.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
@@ -112,7 +108,6 @@ Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 f_c=10G
 Vsig vsig 0 DC 0.0
 .op
-.end
 ";
     let net = parse_spice(netlist).unwrap();
     let _r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP with f_c");

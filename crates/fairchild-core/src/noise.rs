@@ -685,7 +685,7 @@ mod tests {
         // DC value here is irrelevant for the test.
         let net = parse_spice(
             "* thermal\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n\
-             .noise V(out) V1 DEC 1 1k 1k\n.end\n",
+             .noise V(out) V1 DEC 1 1k 1k\n",
         )
         .unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
@@ -718,7 +718,7 @@ mod tests {
                    Ib   0 b  1m\n\
                    D1   b 0  myd\n\
                    .model myd D (Is=1e-14 N=1)\n\
-                   .noise V(b) Vbias DEC 1 1k 1k\n.end\n";
+                   .noise V(b) Vbias DEC 1 1k 1k\n";
         let net = parse_spice(src).unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();
         registry.register_builtin_models(&net.models);
@@ -754,7 +754,7 @@ mod tests {
     fn write_nutmeg_emits_amplitude_density_not_psd() {
         let net = parse_spice(
             "* thermal\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n\
-             .noise V(out) V1 DEC 1 1k 1k\n.end\n",
+             .noise V(out) V1 DEC 1 1k 1k\n",
         )
         .unwrap();
         let mut registry = crate::device_registry::DeviceRegistry::new();

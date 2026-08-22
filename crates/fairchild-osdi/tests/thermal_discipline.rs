@@ -54,7 +54,6 @@ V1 p 0 30
 X1 p 0 h self_heated_r
 Rth h 0 500
 .op
-.end
 ";
 
 #[test]
@@ -186,7 +185,6 @@ fn an_internal_thermal_node_is_a_thermal_row_too() {
 V1 p 0 30
 X1 p 0 self_heated_r_int
 .op
-.end
 ";
     let net = parse_spice(deck).expect("deck parses");
     let ctx = fairchild_core::device::SimContext::default();
@@ -249,7 +247,6 @@ Vq q 0 0
 X2 q 0 h2 self_heated_r
 Rth2 h2 0 500
 .op
-.end
 ";
     let net = parse_spice(deck).expect("deck parses");
     let res = dc_op_nr_with_registry(&net, &reg).expect("DC OP converges");

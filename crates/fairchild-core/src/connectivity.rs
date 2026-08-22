@@ -211,8 +211,7 @@ mod tests {
 
     #[test]
     fn connected_divider_passes() {
-        let net =
-            parse_spice("* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n").unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         check_connectivity(&net).unwrap();
     }
 
@@ -221,7 +220,7 @@ mod tests {
         // 'floater' is only on a capacitor (open at DC) → unreachable from ground.
         let net = parse_spice(
             "* float\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n\
-             C1 floater 0 1u\n.op\n.end\n",
+             C1 floater 0 1u\n.op\n",
         )
         .unwrap();
         let err = check_connectivity(&net).unwrap_err();
@@ -239,7 +238,7 @@ mod tests {
         // no DC path to ground at all.
         let net = parse_spice(
             "* split\nV1 in 0 DC 1\nR1 in 0 1k\n\
-             C1 a b 1u\nC2 b 0 1u\n.op\n.end\n",
+             C1 a b 1u\nC2 b 0 1u\n.op\n",
         )
         .unwrap();
         let err = check_connectivity(&net).unwrap_err();
@@ -259,7 +258,7 @@ mod tests {
         // D1 connects b to ground (R1 connects a to b, V1 connects a to ground).
         let net = parse_spice(
             "* rd\nV1 a 0 DC 1\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.op\n",
         )
         .unwrap();
         check_connectivity(&net).unwrap();

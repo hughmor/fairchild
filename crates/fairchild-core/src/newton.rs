@@ -258,34 +258,46 @@ pub fn build_devices_with_footprints(
     for (elem_idx, el) in netlist.elements.iter().enumerate() {
         match el {
             Element::Diode {
+                name,
                 anode,
                 cathode,
                 model_name,
                 params,
-                ..
             } => {
                 let factory = registry
                     .get(model_name)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                let dev = factory(&[pos, neg], &ParamSet::new(params), ctx);
+                let ps = ParamSet::new(params);
+                let dev = factory(&[pos, neg], &ps, ctx);
+                // A diode instance parameter used to reach the netlist and stop:
+                // `D1 a k dm area=2` parsed, changed nothing, and said nothing.
+                // AREA is honoured now; anything else gets named here.
+                for key in ps.unconsumed() {
+                    warn_user!(
+                        "{name} ('{model_name}'): instance parameter '{key}' is not \
+                         honoured by this model and was dropped"
+                    );
+                }
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
             Element::Mosfet {
+                name,
                 drain,
                 gate,
                 source,
                 bulk,
                 model_name,
                 params,
-                ..
             } => {
                 let d: NodeId = topo.node_index.get(drain).copied();
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
-                if let Some(dev) = registry.build_mosfet(model_name, params, &[d, g, s, b], ctx) {
+                if let Some(dev) =
+                    registry.build_mosfet(model_name, name, params, &[d, g, s, b], ctx)
+                {
                     push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 } else {
                     let factory = registry
@@ -296,19 +308,20 @@ pub fn build_devices_with_footprints(
                 }
             }
             Element::Bjt {
+                name,
                 collector,
                 base,
                 emitter,
                 substrate,
                 model_name,
-                ..
+                params,
             } => {
                 let c: NodeId = topo.node_index.get(collector).copied();
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
                 let dev = registry
-                    .build_bjt(model_name, &[c, b, e, s], ctx)
+                    .build_bjt(model_name, name, params, &[c, b, e, s], ctx)
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 // RB/RC/RE series resistances declare internal nodes (one per
                 // non-zero resistance); push_device allocates and binds them.
@@ -1810,8 +1823,8 @@ mod tests {
 
     #[test]
     fn linear_circuit_converges() {
-        let net = parse_spice("* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 1.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         assert!(
             r.iters <= 5,
@@ -1829,7 +1842,7 @@ mod tests {
         // ON (default) this must converge in well under ITL1=150 iters.
         let net = parse_spice(
             "* stiff diode\nVdd a 0 DC 20\nR1 a b 100\nD1 b 0 myd\n\
-             .model myd D (Is=1e-15 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-15 N=1)\n.op\n",
         )
         .unwrap();
         let r = dc_op_nr(&net).unwrap();
@@ -1846,10 +1859,9 @@ mod tests {
 
     #[test]
     fn current_source_biased_diode() {
-        let net = parse_spice(
-            "* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n.end\n",
-        )
-        .unwrap();
+        let net =
+            parse_spice("* Diode bias\nIb 0 b 1m\nD1 b 0 myd\n.model myd D (Is=1e-14 N=1)\n.op\n")
+                .unwrap();
         let r = dc_op_nr(&net).unwrap();
         let vb = r.node_voltage("b").unwrap();
         let vt = 1.380649e-23 * 300.15 / 1.602176634e-19;
@@ -1866,7 +1878,7 @@ mod tests {
     fn series_rd_circuit() {
         let net = parse_spice(
             "* R-D series\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.op\n",
         )
         .unwrap();
         let r = dc_op_nr(&net).unwrap();
@@ -1880,8 +1892,8 @@ mod tests {
 
     #[test]
     fn write_csv_dc_op() {
-        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_csv(&mut buf).unwrap();
@@ -1897,8 +1909,8 @@ mod tests {
 
     #[test]
     fn write_nutmeg_dc_op() {
-        let net = parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n.end\n")
-            .unwrap();
+        let net =
+            parse_spice("* divider\nV1 in 0 DC 2.0\nR1 in out 1k\nR2 out 0 1k\n.op\n").unwrap();
         let r = dc_op_nr(&net).unwrap();
         let mut buf = Vec::new();
         r.write_nutmeg(&mut buf, "divider test").unwrap();
@@ -1915,7 +1927,7 @@ mod tests {
         // converge but use more iterations than at the default 1e-3.
         let net = parse_spice(
             "* R-D\nVdd a 0 DC 5\nR1 a b 10k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.op\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.op\n",
         )
         .unwrap();
         let opts = SimOptions {

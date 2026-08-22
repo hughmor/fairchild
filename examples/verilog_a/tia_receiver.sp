@@ -35,4 +35,3 @@ Racs  acs sum 1meg
 
 .op
 .noise V(tout) Vac dec 10 1e6 1e11
-.end

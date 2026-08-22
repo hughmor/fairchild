@@ -371,9 +371,8 @@ mod tests {
     #[test]
     fn dc_sweep_resistor_divider_linear() {
         // V1 → 1k → out → 1k → 0.  V(out) should be V1/2 at each sweep point.
-        let net =
-            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.dc V1 0 5 1\n.end\n")
-                .unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.dc V1 0 5 1\n")
+            .unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 5.0, 1.0, None, &reg).unwrap();
         assert_eq!(r.outer.values.len(), 6); // 0,1,2,3,4,5
@@ -390,10 +389,9 @@ mod tests {
         // anchor is absolute, not an agreement between two code paths — the
         // request is impossible to satisfy, so the only correct answer is a
         // refusal, and any table of numbers is wrong.
-        let net = parse_spice(
-            "* typo\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.dc VNOPE 0 1 0.1\n.end\n",
-        )
-        .unwrap();
+        let net =
+            parse_spice("* typo\nV1 in 0 DC 1\nR1 in out 1k\nR2 out 0 1k\n.dc VNOPE 0 1 0.1\n")
+                .unwrap();
         let reg = DeviceRegistry::new();
         let Err(err) = dc_sweep_with_registry(&net, "vnope", 0.0, 1.0, 0.1, None, &reg) else {
             panic!("sweeping a source that does not exist must fail, not return a table");
@@ -415,7 +413,7 @@ mod tests {
         // The inner axis goes through the same override and had the same hole.
         let net = parse_spice(
             "* nested typo\nV1 in 0 DC 0\nVB b 0 DC 0\nR1 in out 1k\nR2 out b 1k\n\
-             .dc V1 0 1 0.5 VNOPE 0 1 0.5\n.end\n",
+             .dc V1 0 1 0.5 VNOPE 0 1 0.5\n",
         )
         .unwrap();
         let reg = DeviceRegistry::new();
@@ -438,8 +436,7 @@ mod tests {
         // `.dc` sweeps I sources too, and SPICE names are case-insensitive —
         // a validation that only knew about V, or only about lowercase, would
         // reject decks that used to work.
-        let net =
-            parse_spice("* isweep\nI1 0 a DC 0\nR1 a 0 1k\n.dc I1 0 1m 0.5m\n.end\n").unwrap();
+        let net = parse_spice("* isweep\nI1 0 a DC 0\nR1 a 0 1k\n.dc I1 0 1m 0.5m\n").unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "I1", 0.0, 1e-3, 5e-4, None, &reg)
             .expect("sweeping a current source by an upper-case name must work");
@@ -458,7 +455,7 @@ mod tests {
         // Diode I-V curve: V(b) > 0 and monotonic in V1.
         let net = parse_spice(
             "* diode IV\nV1 a 0 DC 0\nR1 a b 1k\nD1 b 0 myd\n\
-             .model myd D (Is=1e-14 N=1)\n.dc V1 0 1 0.1\n.end\n",
+             .model myd D (Is=1e-14 N=1)\n.dc V1 0 1 0.1\n",
         )
         .unwrap();
         let reg = {
@@ -480,8 +477,7 @@ mod tests {
 
     #[test]
     fn dc_sweep_csv_header_and_rows() {
-        let net =
-            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.end\n").unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n").unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "v1", 0.0, 1.0, 0.5, None, &reg).unwrap();
         let mut buf = Vec::new();
@@ -500,8 +496,7 @@ mod tests {
     /// purpose: that is the case the name has to disambiguate.
     #[test]
     fn write_nutmeg_uses_conventional_plotname() {
-        let net =
-            parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n.end\n").unwrap();
+        let net = parse_spice("* divider\nV1 in 0 DC 0\nR1 in out 1k\nR2 out 0 1k\n").unwrap();
         let reg = DeviceRegistry::new();
         let r = dc_sweep_with_registry(&net, "v1", 1.0, 1.0, 1.0, None, &reg).unwrap();
         let mut buf = Vec::new();

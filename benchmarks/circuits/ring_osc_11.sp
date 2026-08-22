@@ -52,4 +52,3 @@ C11  n11 0   100f
 .ic V(n6)=0.1 V(n7)=1.6 V(n8)=0.1 V(n9)=1.6 V(n10)=0.1 V(n11)=1.6
 .options method=gear
 .tran 50p 25n UIC
-.end

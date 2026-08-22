@@ -86,7 +86,6 @@ Rcross  ph_cross 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl bar_re bar_im cross_re cross_im
 .op
-.end
 """
 
 def netlist_l2():
@@ -106,7 +105,6 @@ Rcross  ph_cross 0  1k
 Vbias   vbias 0  DC 0.0
 .optical l_re l_im l_wl bar_re bar_im cross_re cross_im
 .op
-.end
 """
 
 # ── Sweep ──────────────────────────────────────────────────────────────────────

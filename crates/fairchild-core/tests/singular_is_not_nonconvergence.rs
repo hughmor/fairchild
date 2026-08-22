@@ -21,7 +21,7 @@ fn op(deck: &str) -> Result<(), SimError> {
 #[test]
 fn parallel_voltage_sources_that_disagree_report_singular() {
     // V1 and V2 both fix node `a`, to different values: no solution exists.
-    let err = op("* conflict\nV1 a 0 DC 1\nV2 a 0 DC 2\nR1 a 0 1k\n.op\n.end\n")
+    let err = op("* conflict\nV1 a 0 DC 1\nV2 a 0 DC 2\nR1 a 0 1k\n.op\n")
         .expect_err("two sources fixing one node to different values has no solution");
     assert!(
         matches!(err, SimError::SingularMatrix),
@@ -33,14 +33,14 @@ fn parallel_voltage_sources_that_disagree_report_singular() {
 #[test]
 fn a_loop_of_voltage_sources_reports_singular() {
     // V1 + V2 fix V(b) at 2, V3 fixes it at 3: the loop is over-determined.
-    let err = op("* loop\nV1 a 0 DC 1\nV2 b a DC 1\nV3 b 0 DC 3\nR1 a 0 1k\n.op\n.end\n")
+    let err = op("* loop\nV1 a 0 DC 1\nV2 b a DC 1\nV3 b 0 DC 3\nR1 a 0 1k\n.op\n")
         .expect_err("an over-determined voltage-source loop has no solution");
     assert!(matches!(err, SimError::SingularMatrix), "got {err:?}");
 }
 
 #[test]
 fn a_solvable_circuit_is_unaffected() {
-    op("* divider\nV1 a 0 DC 1\nR1 a m 1k\nR2 m 0 1k\n.op\n.end\n")
+    op("* divider\nV1 a 0 DC 1\nR1 a m 1k\nR2 m 0 1k\n.op\n")
         .expect("a plain divider must still solve");
 }
 
@@ -54,7 +54,7 @@ fn a_genuinely_hard_nonlinear_circuit_still_reports_nonconvergence() {
          .optical_port a\n\
          XL1 a fc_cw_laser power_mW=0.1 wavelength_nm=1550\n\
          XPD1 a p 0 fc_photodetector responsivity=0.7 r_shunt=20k\n\
-         Rl p 0 2k\n.op\n.end\n",
+         Rl p 0 2k\n.op\n",
     )
     .unwrap();
     let registry = DeviceRegistry::new();

@@ -6,4 +6,3 @@ R1 a 0 2k
 R2 a 0 3k
 
 .op
-.end

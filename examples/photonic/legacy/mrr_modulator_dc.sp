@@ -42,4 +42,3 @@ Vbias   vbias 0  DC 0.0
 .optical  lre lim wl ore oim
 
 .op
-.end

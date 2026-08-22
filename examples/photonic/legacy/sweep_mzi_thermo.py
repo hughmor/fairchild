@@ -88,7 +88,6 @@ Rcross  ph_cross 0  1k
 Vheat   hp hn  DC 0.0
 .optical l_re l_im l_wl bar_re bar_im cross_re cross_im
 .op
-.end
 """
 
 def netlist_l2():
@@ -112,7 +111,6 @@ Vheat   hp1 hn1  DC 0.0
 Vheat2  hp2 hn2  DC 0.0
 .optical l_re l_im l_wl bar_re bar_im cross_re cross_im
 .op
-.end
 """
 
 # ── Sweep ──────────────────────────────────────────────────────────────────────

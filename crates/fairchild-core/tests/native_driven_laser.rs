@@ -20,7 +20,7 @@ fn deck(drive: &str, extra: &str) -> String {
 
 /// Optical power at the laser's port for a fixed drive voltage.
 fn power_at(v: f64) -> f64 {
-    let net = parse_spice(&deck(&format!("Vd drv 0 DC {v}"), ".op\n.end\n")).unwrap();
+    let net = parse_spice(&deck(&format!("Vd drv 0 DC {v}"), ".op\n")).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
     let re = r.node_voltage("o_re").unwrap();
     let im = r.node_voltage("o_im").unwrap();
@@ -133,7 +133,7 @@ fn an_optoelectronic_loop_converges_because_the_derivative_is_stamped() {
            responsivity={RESPONSIVITY} r_shunt=1e12 i_dark_a=0\n\
          Rl   drv 0 {R_LOAD}\n\
          Iseed 0 drv {I_SEED}\n\
-         .op\n.end\n"
+         .op\n"
     );
     let net = parse_spice(&src).unwrap();
     let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new())
@@ -155,7 +155,7 @@ fn a_pulsed_drive_produces_a_modulated_optical_waveform() {
         "Vd drv 0 PULSE(0 2 0 10p 10p 490p 1n)",
         "Xpd o_re o_im o_wl pa 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_dark_a=0\n\
          Rl pa 0 1k\n\
-         .tran 5p 3n\n.end\n",
+         .tran 5p 3n\n",
     );
     let net = parse_spice(&src).unwrap();
     let r = tran_nr_with_registry(&net, 5e-12, 3e-9, &DeviceRegistry::new())
@@ -200,7 +200,7 @@ fn modulating_through_threshold_converges_with_no_reactive_element() {
         "Vd drv 0 PULSE(0 2 0 30p 30p 70p 200p)",
         "Xpd o_re o_im o_wl pa 0 fc_photodetector responsivity=0.8 r_shunt=1Meg i_dark_a=0\n\
          Rl pa 0 1k\n\
-         .tran 1p 400p\n.end\n",
+         .tran 1p 400p\n",
     );
     let net = parse_spice(&src).unwrap();
     let r = tran_nr_with_registry(&net, 1e-12, 400e-12, &DeviceRegistry::new())
@@ -235,7 +235,7 @@ fn the_threshold_knee_does_not_move_the_curve_above_threshold() {
             "Vd drv 0 DC {v}\n\
              Xlas o_re o_im o_wl drv 0 fc_driven_laser \
                slope_w_v={SLOPE} v_th={V_TH} p_floor_w={P_FLOOR} r_in=1e12 {knee}\n\
-             .op\n.end\n"
+             .op\n"
         );
         let net = parse_spice(&src).unwrap();
         let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("op");

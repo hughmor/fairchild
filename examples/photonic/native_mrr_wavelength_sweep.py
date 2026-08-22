@@ -60,7 +60,6 @@ Vbias bias 0 DC 1.0
 Rload pd_anode bias 1k
 Vmod vmod 0 DC {v_pn}
 .op
-.end
 """
 
 
