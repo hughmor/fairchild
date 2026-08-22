@@ -439,6 +439,25 @@ fn inductance_is_rejected_rather_than_mis_differentiated() {
     assert!(msg.contains("l1"), "should name the offender: {msg}");
 }
 
+/// An adaptive schedule is a function of the parameters, so the fixed-step
+/// recursion would differentiate a different run than the one the caller
+/// believes it asked for.  Refused, not silently downgraded.
+#[test]
+fn variable_step_is_rejected_rather_than_silently_dropped() {
+    let net = parse_spice(RC).unwrap();
+    let reg = registry_for(&net);
+    let mut o = opts("tr");
+    o.variable_step = true;
+    let msg = match TranAdjoint::run(&net, &reg, &o, 2e-7, 4e-6) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("variable_step=1 was accepted and dropped"),
+    };
+    assert!(
+        msg.contains("variable_step"),
+        "the refusal has to name the option: {msg}"
+    );
+}
+
 /// The capture pass re-stamps and probes between the solve and the history
 /// advance.  If any of that leaked into the integrator state, the trajectory
 /// would drift away from a plain `.tran` — so hold it to being identical.

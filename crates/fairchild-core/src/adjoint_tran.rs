@@ -81,7 +81,8 @@
 //!   rejected loudly rather than silently mis-differentiated.
 //! * **Variable step.**  This drives the fixed-step integrator
 //!   ([`TranStepper`]), so `gear2_h_prev` is always absent and BDF-2 demotes to
-//!   BE exactly as it does for a plain `.tran`.
+//!   BE exactly as it does for a plain `.tran`.  `variable_step=1` is refused
+//!   rather than dropped — see [`TranAdjoint::run`].
 
 use fairchild_parser::Netlist;
 
@@ -170,6 +171,24 @@ impl TranAdjoint {
         step: f64,
         stop: f64,
     ) -> Result<Self, SimError> {
+        // The co-state recursion runs backward over the same step sequence the
+        // forward pass took.  An LTE controller makes that sequence a function
+        // of the parameters, so a perturbation moves the timepoints themselves
+        // and the objective's dependence on *where* they landed is nowhere in
+        // the recursion.  Driving the fixed-step integrator anyway — which is
+        // what this does — answers a question the caller did not ask, and the
+        // disagreement against a finite difference taken from an adaptive
+        // `run("tran")` reads as "the adjoint is wrong".
+        if opts.variable_step {
+            return Err(SimError::ParameterError(
+                "the transient adjoint needs a fixed timestep; set `variable_step=0` \
+                 (the co-state recursion replays the forward step sequence, and an \
+                 LTE controller re-deciding that sequence under a perturbed \
+                 parameter would differentiate a different schedule than the one \
+                 solved)"
+                    .into(),
+            ));
+        }
         let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
         reject_inductance(netlist, &st)?;
 

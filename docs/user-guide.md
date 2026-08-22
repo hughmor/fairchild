@@ -1178,6 +1178,11 @@ Three things to know before you rely on the numbers:
   that ignores the write, comes back flagged rather than as a confident zero.
 - **Check the gradient, and not at the optimum.** The gradient is zero there, so
   agreeing about zero proves nothing.
+- **`tran_adjoint` needs a fixed timestep.** `variable_step=1` is refused, not
+  downgraded: the co-state recursion replays the forward pass's step sequence,
+  and an adaptive controller would re-decide that sequence under a perturbed
+  parameter — differentiating a schedule nobody solved. Compare against a finite
+  difference from a fixed-step `run("tran")`, not an adaptive one.
 
 Worked examples for all three, each checking itself against a full re-solve:
 [`examples/optimization/`](../examples/optimization).
