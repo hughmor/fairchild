@@ -292,7 +292,7 @@ pub trait Device: Send + Sync {
     /// exists for OSDI/Verilog-A, where ∂q_i/∂v_j need not equal ∂q_j/∂v_i
     /// (transcapacitance) and so cannot be expressed as reciprocal branches at
     /// all.
-    fn load_reactive_jacobian(&self, _c_mat: &mut [Vec<f64>]) {}
+    fn load_reactive_jacobian(&self, _c_mat: &mut [crate::mna::SparseRow]) {}
 
     /// Set a named real-valued parameter on this device instance.
     ///

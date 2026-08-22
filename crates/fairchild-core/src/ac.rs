@@ -25,6 +25,7 @@ use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
     stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, RowFloor,
+    SparseRow,
 };
 use crate::newton::build_devices;
 use crate::options::SimOptions;
@@ -150,36 +151,99 @@ pub fn freq_oct(start_hz: f64, stop_hz: f64, points_per_octave: usize) -> Vec<f6
 /// gradient of anything, and two copies of this would drift.
 pub(crate) struct AcSystem {
     pub topo: CircuitTopology,
-    pub g_mat: Vec<crate::mna::SparseRow>,
-    pub c_mat: Vec<Vec<f64>>,
-    pub l_mat: Vec<Vec<f64>>,
+    pub g_mat: Vec<SparseRow>,
+    pub c_mat: Vec<SparseRow>,
+    pub l_mat: Vec<SparseRow>,
     pub b_re: Vec<f64>,
     pub b_im: Vec<f64>,
-    /// The operating point the small-signal matrices were linearised about.
-    pub x0: Vec<f64>,
 }
 
 impl AcSystem {
     /// `[G −B; B G]` and `[b_re; b_im]` at one frequency.
-    pub(crate) fn at(&self, f: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
+    pub(crate) fn at(&self, f: f64) -> (Vec<SparseRow>, Vec<f64>) {
         let size = self.topo.size;
-        let omega = 2.0 * std::f64::consts::PI * f;
-        let n2 = 2 * size;
-        let mut a2 = vec![vec![0.0f64; n2]; n2];
-        let mut rhs = vec![0.0f64; n2];
-        for i in 0..size {
-            for j in 0..size {
-                let b = omega * self.c_mat[i][j] - self.l_mat[i][j] / omega;
-                a2[i][j] = self.g_mat[i][j];
-                a2[i][size + j] = -b;
-                a2[size + i][j] = b;
-                a2[size + i][size + j] = self.g_mat[i][j];
-            }
-            rhs[i] = self.b_re[i];
-            rhs[size + i] = self.b_im[i];
-        }
-        (a2, rhs)
+        let mut rhs = vec![0.0f64; 2 * size];
+        rhs[..size].copy_from_slice(&self.b_re);
+        rhs[size..].copy_from_slice(&self.b_im);
+        (
+            ac_block(&self.g_mat, &self.c_mat, &self.l_mat, omega_of(f)),
+            rhs,
+        )
     }
+}
+
+/// `2πf`, in one place so `.ac`, `.noise` and the adjoint cannot disagree.
+pub(crate) fn omega_of(f: f64) -> f64 {
+    2.0 * std::f64::consts::PI * f
+}
+
+/// The real-block form of the complex system `Y = G + jωC + L/(jω)`:
+///
+/// ```text
+///   [ G  -B ]              B = ωC − L/ω
+///   [ B   G ]
+/// ```
+///
+/// Assembled sparse and never materialised dense. Row `i` of the top half is
+/// row `i` of `G` followed by row `i` of `−B` shifted right by `size`; every
+/// `G` column is `< size` and every shifted `B` column is `≥ size`, so the two
+/// concatenate already in ascending order and the whole assembly is O(nnz)
+/// instead of the O(n²) scan a dense build pays at every frequency point.
+///
+/// Exact zeros are dropped, matching what
+/// [`CircuitTopology::sparse_from_dense`] used to do to the dense build — a
+/// structurally-present zero would change the solver's pivot order and move
+/// goldens for no reason.
+pub(crate) fn ac_block(
+    g: &[SparseRow],
+    c: &[SparseRow],
+    l: &[SparseRow],
+    omega: f64,
+) -> Vec<SparseRow> {
+    let size = g.len();
+    let mut top = Vec::with_capacity(size);
+    let mut bot = Vec::with_capacity(size);
+    let (mut b_cols, mut b_vals) = (Vec::new(), Vec::new());
+    for i in 0..size {
+        b_cols.clear();
+        b_vals.clear();
+        crate::mna::union_rows(&c[i], &l[i], |j, cv, lv| {
+            let b = omega * cv - lv / omega;
+            if b != 0.0 {
+                b_cols.push(j as u32);
+                b_vals.push(b);
+            }
+        });
+        let g_nz = || {
+            let (cols, vals) = g[i].entries();
+            cols.iter().zip(vals).filter(|(_, v)| **v != 0.0)
+        };
+        let n = g[i].entries().0.len() + b_cols.len();
+        let (mut tc, mut tv) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut bc, mut bv) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        // Top row: G (cols < size), then −B shifted right.
+        for (&j, &v) in g_nz() {
+            tc.push(j);
+            tv.push(v);
+        }
+        for (&j, &v) in b_cols.iter().zip(&b_vals) {
+            tc.push(j + size as u32);
+            tv.push(-v);
+        }
+        // Bottom row: +B (cols < size), then G shifted right.
+        for (&j, &v) in b_cols.iter().zip(&b_vals) {
+            bc.push(j);
+            bv.push(v);
+        }
+        for (&j, &v) in g_nz() {
+            bc.push(j + size as u32);
+            bv.push(v);
+        }
+        top.push(SparseRow::from_parts(tc, tv));
+        bot.push(SparseRow::from_parts(bc, bv));
+    }
+    top.append(&mut bot);
+    top
 }
 
 /// Assemble [`AcSystem`] for `netlist` — the shared half of `.ac` and the AC
@@ -235,14 +299,8 @@ pub(crate) fn assemble_ac(
     // GMIN — node rows and device-internal rows (skips vsource aux rows).
     topo.stamp_gmin(&mut g_mat, opts.gmin, RowFloor::GminOnly);
 
-    // ponytail: `.ac` assembles G/C/L and the 2n×2n system densely — O(n²)
-    // memory and O(n²) work per frequency point. The DC/transient matrix went
-    // sparse in a929041 and this did not, because it is not on that hot path.
-    // Upgrade path: emit `SparseRow`s directly (the stamp primitives and
-    // `CircuitTopology::to_csc` already take them); do it when AC on a large
-    // photonic circuit starts hurting. Tracked as task #12.
     // --- Capacitance matrix C (purely imaginary part of Y) ---
-    let mut c_mat = vec![vec![0.0f64; size]; size];
+    let mut c_mat = vec![SparseRow::default(); size];
     for el in &netlist.elements {
         if let Element::Capacitor {
             pos,
@@ -258,7 +316,7 @@ pub(crate) fn assemble_ac(
     // --- Inductance matrix L_inv (contribution = -1/ωL to imaginary part) ---
     // For inductors in DC OP they appear as short circuits; their AC stamp is 1/(jωL).
     // We track "L" values and handle 1/ω at solve time.
-    let mut l_mat = vec![vec![0.0f64; size]; size];
+    let mut l_mat = vec![SparseRow::default(); size];
     for el in &netlist.elements {
         if let Element::Inductor {
             pos,
@@ -307,7 +365,6 @@ pub(crate) fn assemble_ac(
         l_mat,
         b_re: b_ac_re,
         b_im: b_ac_im,
-        x0,
     })
 }
 /// Run a small-signal AC sweep.
@@ -339,60 +396,28 @@ pub fn ac_analysis_opts(
     opts: &SimOptions,
 ) -> Result<AcResult, SimError> {
     let sys = assemble_ac(netlist, ac_source, registry, opts)?;
-    let AcSystem {
-        topo,
-        g_mat,
-        c_mat,
-        l_mat,
-        b_re: b_ac_re,
-        b_im: b_ac_im,
-        x0,
-    } = sys;
+    let topo = &sys.topo;
     let size = topo.size;
     let ac_solver = opts.linear_solver(2 * size);
-    let _ = &x0;
 
     // --- Sweep (parallel across frequencies) ---
     //
-    // Each frequency builds its own 2N×2N block system and solves it.  The
-    // assembled G / C / L matrices, the RHS vectors, and the linear solver
-    // are all read-only inside the loop, so rayon can fan out one frequency
-    // per worker.  Results are collected in input order via `par_iter().map()
-    // .collect::<Vec<_>>()` and then written into the result IndexMap by
-    // index — same observable output as the sequential path.
+    // Each frequency assembles its own `[G −B; B G]` and solves it.  The
+    // assembled system and the linear solver are read-only inside the loop, so
+    // rayon fans out one frequency per worker.  Results are collected in input
+    // order via `par_iter().map().collect::<Vec<_>>()` and then written into
+    // the result IndexMap by index — same observable output as the sequential
+    // path.
+    //
+    // Each worker used to allocate a dense 2n×2n `a2` plus a dense n×n `b_mat`
+    // — 410 MB per worker at n = 3200, which is where the 6.9 GB of issue #23
+    // went: one such pair per rayon thread, live at the same time.
     let solver_ref: &dyn LinearSolver = &*ac_solver;
     let per_freq: Vec<Result<Vec<(f64, f64)>, SimError>> = freqs
         .par_iter()
         .map(|&f| {
-            let omega = 2.0 * std::f64::consts::PI * f;
-
-            // B matrix = ωC − L/ω  (susceptance)
-            let mut b_mat = vec![vec![0.0f64; size]; size];
-            for i in 0..size {
-                for j in 0..size {
-                    b_mat[i][j] = omega * c_mat[i][j] - l_mat[i][j] / omega;
-                }
-            }
-
-            // Build 2N×2N block system:
-            //   [ G  -B ] [V_re]   [I_re]
-            //   [ B   G ] [V_im] = [I_im]
-            let n2 = 2 * size;
-            let mut a2 = vec![vec![0.0f64; n2]; n2];
-            let mut rhs = vec![0.0f64; n2];
-
-            for i in 0..size {
-                for j in 0..size {
-                    a2[i][j] = g_mat[i][j];
-                    a2[i][size + j] = -b_mat[i][j];
-                    a2[size + i][j] = b_mat[i][j];
-                    a2[size + i][size + j] = g_mat[i][j];
-                }
-                rhs[i] = b_ac_re[i];
-                rhs[size + i] = b_ac_im[i];
-            }
-
-            let x = solver_ref.solve(&CircuitTopology::sparse_from_dense(&a2), &rhs)?;
+            let (a2, rhs) = sys.at(f);
+            let x = solver_ref.solve(&a2, &rhs)?;
             let row: Vec<(f64, f64)> = topo
                 .node_index
                 .values()

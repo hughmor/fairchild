@@ -142,7 +142,7 @@ impl AcAdjoint {
         let mut v = Vec::with_capacity(freqs.len());
         for &f in freqs {
             let (a2, rhs) = sys.at(f);
-            v.push(solver.solve(&CircuitTopology::sparse_from_dense(&a2), &rhs)?);
+            v.push(solver.solve(&a2, &rhs)?);
         }
         Ok(Self {
             netlist: netlist.clone(),
@@ -217,13 +217,8 @@ impl AcAdjoint {
         let mut lambdas = Vec::with_capacity(self.freqs.len());
         for (k, &f) in self.freqs.iter().enumerate() {
             let (a2, _) = self.sys.at(f);
-            let mut at = vec![vec![0.0f64; 2 * size]; 2 * size];
-            for (i, row) in a2.iter().enumerate() {
-                for (j, val) in row.iter().enumerate() {
-                    at[j][i] = *val;
-                }
-            }
-            lambdas.push(solver.solve(&CircuitTopology::sparse_from_dense(&at), &seeds[k])?);
+            let at = crate::solver::transpose_sparse(&a2, 2 * size);
+            lambdas.push(solver.solve(&at, &seeds[k])?);
         }
 
         let names = device_element_names(&self.netlist);
@@ -312,7 +307,7 @@ impl AcAdjoint {
             let (a2, rhs) = sys.at(f);
             let v = &self.v[k];
             for (i, row) in a2.iter().enumerate() {
-                let r: f64 = row.iter().zip(v.iter()).map(|(a, x)| a * x).sum::<f64>() - rhs[i];
+                let r: f64 = row.iter().map(|(j, a)| a * v[j]).sum::<f64>() - rhs[i];
                 if r != 0.0 {
                     moved = true;
                 }

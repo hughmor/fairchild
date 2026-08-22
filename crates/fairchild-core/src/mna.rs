@@ -165,14 +165,10 @@ impl CircuitTopology {
 
     /// Wrap dense rows as sparse ones, dropping exact zeros.
     ///
-    /// ponytail: exists only to bridge the still-dense `.ac`/`.noise` assembly
-    /// to the sparse solver interface. Delete it when those assemble sparse
-    /// rows directly (task #12) — nothing else should need it.
-    ///
-    /// For the `.ac` / `.noise` assemblies, which still build their real
-    /// 2n×2n complex-as-real system densely. They allocate three dense n×n
-    /// matrices already, so this conversion changes nothing asymptotically —
-    /// sparsifying those assemblies is its own piece of work.
+    /// No analysis path builds a dense matrix any more — `.ac` and `.noise`
+    /// were the last two and now assemble sparse (issue #23). What is left is
+    /// tests and fixtures, where a 2×2 written as a dense literal is the
+    /// readable form and the conversion cost is nothing.
     pub fn sparse_from_dense(a: &[Vec<f64>]) -> Vec<SparseRow> {
         a.iter()
             .map(|row| {
@@ -467,6 +463,16 @@ impl SparseRow {
         }
     }
 
+    /// Build from parallel column/value slices that are **already ascending by
+    /// column**. Debug builds check it; release builds trust it, which is the
+    /// point — the `.ac` block assembly emits rows in order by construction and
+    /// should not pay a sort to prove it.
+    pub fn from_parts(cols: Vec<u32>, vals: Vec<f64>) -> Self {
+        debug_assert_eq!(cols.len(), vals.len());
+        debug_assert!(cols.windows(2).all(|w| w[0] < w[1]), "cols not ascending");
+        SparseRow { cols, vals }
+    }
+
     /// Build from `(column, value)` cells. Sorts, so callers may emit in any
     /// order; used by the sparse transpose in `crate::solver`.
     pub fn from_sorted_cells(mut cells: Vec<(u32, f64)>) -> Self {
@@ -502,6 +508,44 @@ impl SparseRow {
 
     fn slot(&self, j: usize) -> Result<usize, usize> {
         self.cols.binary_search(&(j as u32))
+    }
+}
+
+/// Walk the union of two sparse rows in ascending column order, yielding
+/// `(col, a_val, b_val)` with `0.0` standing in where a row has no entry.
+///
+/// `.ac` and `.noise` form `B = ωC − L/ω` at every frequency point from a `C`
+/// and an `L` whose patterns differ; this is the linear merge that makes that
+/// O(nnz) rather than a scan of the dense `n × n` grid.
+pub(crate) fn union_rows(a: &SparseRow, b: &SparseRow, mut f: impl FnMut(usize, f64, f64)) {
+    let (ac, av) = a.entries();
+    let (bc, bv) = b.entries();
+    let (mut i, mut k) = (0usize, 0usize);
+    while i < ac.len() || k < bc.len() {
+        match (ac.get(i), bc.get(k)) {
+            (Some(&ca), Some(&cb)) if ca == cb => {
+                f(ca as usize, av[i], bv[k]);
+                i += 1;
+                k += 1;
+            }
+            (Some(&ca), Some(&cb)) if ca < cb => {
+                f(ca as usize, av[i], 0.0);
+                i += 1;
+            }
+            (Some(_), Some(&cb)) => {
+                f(cb as usize, 0.0, bv[k]);
+                k += 1;
+            }
+            (Some(&ca), None) => {
+                f(ca as usize, av[i], 0.0);
+                i += 1;
+            }
+            (None, Some(&cb)) => {
+                f(cb as usize, 0.0, bv[k]);
+                k += 1;
+            }
+            (None, None) => unreachable!("loop condition guarantees one side has entries"),
+        }
     }
 }
 
@@ -1501,16 +1545,20 @@ fn stamp_mutual_conductance(
 }
 
 /// Stamp a 2-terminal value (conductance, capacitance, or 1/L) between two MNA
-/// rows identified by [`crate::device::NodeId`], into a raw row-major dense
-/// matrix. Ground (`None`) terminals are skipped. This is the shared kernel for
-/// both the netlist-element AC/noise stamps and the device small-signal
-/// reactance stamps.
-pub fn stamp_2port_by_id(
-    mat: &mut [Vec<f64>],
+/// rows identified by [`crate::device::NodeId`]. Ground (`None`) terminals are
+/// skipped. This is the shared kernel for both the netlist-element AC/noise
+/// stamps and the device small-signal reactance stamps.
+///
+/// Generic over the row so `.ac` / `.noise` can stamp `C` and `L` into
+/// [`SparseRow`]s — `Vec<f64>` rows work too, and the unit tests use them.
+pub fn stamp_2port_by_id<R>(
+    mat: &mut [R],
     pos: crate::device::NodeId,
     neg: crate::device::NodeId,
     val: f64,
-) {
+) where
+    R: std::ops::IndexMut<usize, Output = f64>,
+{
     if let Some(p) = pos {
         mat[p][p] += val;
         if let Some(n) = neg {
@@ -1526,13 +1574,15 @@ pub fn stamp_2port_by_id(
 /// Stamp a 2-terminal passive value (G or C) into a raw matrix, looking node
 /// names up in `idx` (ground / unknown names resolve to `None` and are skipped).
 /// Thin wrapper over [`stamp_2port_by_id`]; shared by `ac.rs` and `noise.rs`.
-pub fn stamp_passive_2port(
-    mat: &mut [Vec<f64>],
+pub fn stamp_passive_2port<R>(
+    mat: &mut [R],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
     val: f64,
-) {
+) where
+    R: std::ops::IndexMut<usize, Output = f64>,
+{
     stamp_2port_by_id(mat, idx.get(pos).copied(), idx.get(neg).copied(), val);
 }
 

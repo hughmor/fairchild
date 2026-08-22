@@ -960,7 +960,7 @@ impl EquilibratedSolver {
 
 /// Sparse transpose. The adjoint paths are cold, so this stays a plain rebuild
 /// rather than a cached structure.
-fn transpose_sparse(a: &[SparseRow], n: usize) -> Vec<SparseRow> {
+pub(crate) fn transpose_sparse(a: &[SparseRow], n: usize) -> Vec<SparseRow> {
     let mut cells: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
     for (i, row) in a.iter().enumerate() {
         for (j, v) in row.iter() {
