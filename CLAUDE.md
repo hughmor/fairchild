@@ -21,8 +21,12 @@ gates CI fails on, over the whole working tree rather than the index:
 git config core.hooksPath .githooks
 ```
 
-Python bindings need `maturin develop --release` (maturin ≥ 1.8). The Rust
-toolchain is pinned by `rust-toolchain.toml`; do not pin a version anywhere else.
+Python bindings need `maturin develop --release` (maturin ≥ 1.8). `cargo build`
+does not rebuild them, so anything Python-facing — an example, a notebook, a fit
+script — runs whatever was last built. `import fairchild` refuses a `.so` older
+than the sources rather than answering from stale code; the fix is that same
+command. The Rust toolchain is pinned by `rust-toolchain.toml`; do not pin a
+version anywhere else.
 
 ## Where things live
 

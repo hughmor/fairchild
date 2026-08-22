@@ -59,6 +59,28 @@ release has a quirk worth knowing before you conclude it is broken:
 **Python bindings**: `maturin develop --release` (maturin ≥ 1.8 — 1.7 cannot
 parse PEP 639 metadata and fails outright).
 
+`cargo build` does **not** rebuild the extension — it builds the crate as a
+plain library and leaves `python/fairchild/fairchild*.so` alone. So after
+touching any Rust, or after switching branches, `import fairchild` refuses
+rather than running code that is not in your checkout:
+
+```
+ImportError: the compiled fairchild extension is older than the sources it was
+built from … Rebuild it:  maturin develop --release
+```
+
+That guard exists because the alternative already happened: the bindings and
+the CLI disagreed by a factor of 116 on a noise figure, and the cause was an
+extension that predated the fix — reporting confident, self-consistent, wrong
+numbers. `FAIRCHILD_ALLOW_STALE=1` skips the check if you know what you are
+doing; the check itself is `python3 python/fairchild/_freshness.py`, which
+self-tests.
+
+Note the extension is named for the interpreter's ABI
+(`fairchild.cpython-314-darwin.so`), so a checkout used from two Python versions
+has two of them, and rebuilding for one leaves the other exactly as stale as it
+was. The guard only looks at the one *your* interpreter would import.
+
 ## The two rules that matter most
 
 **A silent wrong answer is worse than a crash.** This project has shipped a

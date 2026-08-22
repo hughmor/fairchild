@@ -150,6 +150,13 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/gen_kicad_symbols.py --check
 
+      # The extension is not rebuilt by `cargo build`, so in a checkout it can be
+      # months older than the Rust it claims to be — and it imports anyway. The
+      # guard that refuses one is pure Python and self-checking; run it here
+      # rather than on a stale artefact nobody notices.
+      - name: Python extension staleness guard — self-check
+        run: python3 python/fairchild/_freshness.py
+
       # cargo test --workspace builds fairchild-py as a plain lib, which never
       # exercises the extension-module build or python/fairchild/__init__.py.
       # A renamed pyo3 export breaks `import fairchild` with every Rust test green.
@@ -212,6 +219,38 @@ jobs:
           cm.load_str("* c\n.param sw = 0 $ 0 = off, 1 = on\nV1 a 0 1\nR1 a 0 1k $ load = 1k\n.op\n.end\n")
           assert abs(cm.run("op")["i(v1)"][0] + 1e-3) < 1e-12, cm.run("op")["i(v1)"]
           print("ok: params= overrides bite, and $ comments with '=' parse")
+          PY
+
+          # The bindings and the CLI once disagreed by a factor of 116 on a noise
+          # figure, because the loaded extension predated the fix. Nothing checked
+          # that the two frontends agree, so the only reason it was ever found was
+          # somebody comparing by hand. Noise is the analysis it happened on, and
+          # the one with the most machinery between the deck and the number.
+          cat > /tmp/agree.sp <<'SP'
+          * RC thermal noise
+          V1 in 0 DC 1 AC 1
+          R1 in out 1k
+          C1 out 0 1u
+          .noise V(out) V1 dec 3 10 1k
+          SP
+          cargo run --release -q -p fairchild-cli -- -f /tmp/agree.sp > /tmp/agree.csv
+          python3 - <<'PY'
+          import fairchild, numpy as np
+          rows = [l.split(",") for l in open("/tmp/agree.csv").read().splitlines()[1:]]
+          cli_f = np.array([float(r[0]) for r in rows])
+          cli_on = np.array([float(r[1]) for r in rows])
+          c = fairchild.Circuit()
+          c.load_str(open("/tmp/agree.sp").read())
+          r = c.run("noise")
+          py_f, py_on = np.asarray(r.freq()), np.asarray(r["onoise"])
+          assert len(cli_f) == len(py_f), (len(cli_f), len(py_f))
+          # 1e-6, because the CLI's CSV prints 6 decimal places and that is the
+          # floor of this comparison — not because the two paths are expected to
+          # differ. The discrepancy this exists to catch was a factor of 116.
+          for a, b, f in zip(py_on, cli_on, cli_f):
+              rel = abs(a - b) / max(abs(b), 1e-30)
+              assert rel < 1e-6, f"onoise disagrees at {f} Hz: python={a} cli={b} rel={rel}"
+          print(f"ok: bindings and CLI agree on {len(cli_f)} noise points")
           PY
 
       # The C header is hand-written, so nothing in the Rust tests catches it
