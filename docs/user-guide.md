@@ -1623,7 +1623,11 @@ while self-heating stays solved on top.
 
 `examples/verilog_a/models/mrm_wdm.va` is a worked example: a microring whose
 resonance moves with a solved temperature, with `th` exposed so a deck can wire
-ring-to-ring thermal crosstalk.
+ring-to-ring thermal crosstalk. `mrm_addrop.va` beside it is the four-port
+version — in / thru / add / drop — and is also the worked example of *replacing*
+a native cell: its defaults are those of `examples/photonic/pcells/mrm.sp`, so
+the two are the same ring written two ways, and
+`mrm_addrop_example.rs` holds them to it.
 
 The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
 node whose operating point is far from the seed can still get there. A flat
@@ -2333,6 +2337,12 @@ the fix in the message.
 channel no source reaches. Where a source does reach it and disagrees, the
 resolved wavelength wins and says so — two answers for one wavelength is a deck
 bug, not a preference.
+
+**The module's port list must be on one line.** The scanner reads the header a
+line at a time, so a port list continued onto a second line loses everything
+after the break — and what it loses are ports, which then read as undeclared
+nets. The compiler errors, but it errors about the wrong thing (`anode: not
+found`), so the fix is not obvious from the message.
 
 The loop form is fixed at `for (k = 0; k < N(p); k = k + 1) begin … end`.
 Anything else is refused by name rather than expanded into something plausible,

@@ -15,6 +15,7 @@ mod common;
 
 mod bundle_dialect_e2e;
 mod load_optical_osdi;
+mod mrm_addrop_example;
 mod mrm_wdm_example;
 mod optical_wdm_bundle;
 mod photonic_models;
