@@ -30,49 +30,79 @@ impl NrResult {
         self.topo.vsrc_current(name, &self.x)
     }
 
+    /// Every voltage-like signal: solved node voltages, then the λ labels
+    /// (resolved before the solve, see `CircuitTopology::lambda_signals`) —
+    /// so enumeration and by-name probing name the same set (#71).
     pub fn all_voltages(&self) -> impl Iterator<Item = (&str, f64)> {
         self.topo
             .node_index
             .iter()
             .map(|(name, &i)| (name.as_str(), self.x[i]))
+            .chain(self.topo.lambda_signals())
     }
 
     /// Write the DC operating point as an ngspice-compatible Nutmeg ASCII rawfile.
+    ///
+    /// The λ labels ride along as voltage variables after the solved nodes:
+    /// ngspice would have carried these nets, and this file format is the one
+    /// with consumers outside this repo (#71). The variable count and the
+    /// `Variables:` block are two statements of one number, so both are
+    /// derived from the same three sets.
     pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
         let n_nodes = self.topo.n_nodes();
-        let n_vars = n_nodes + self.topo.vsrc_index.len();
+        let lambda = self.topo.lambda_signals();
+        let n_vars = n_nodes + lambda.len() + self.topo.vsrc_index.len();
         writeln!(w, "Title: {title}")?;
         writeln!(w, "Plotname: Operating Point")?;
         writeln!(w, "Flags: real")?;
         writeln!(w, "No. Variables: {n_vars}")?;
         writeln!(w, "No. Points: 1")?;
         writeln!(w, "Variables:")?;
-        for (idx, name) in self.topo.node_index.keys().enumerate() {
+        let mut idx = 0usize;
+        for name in self.topo.node_index.keys() {
             writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
+            idx += 1;
         }
-        for (i, name) in self.topo.vsrc_index.keys().enumerate() {
-            writeln!(w, "\t{}\ti({name})\tcurrent", n_nodes + i)?;
+        for (name, _) in &lambda {
+            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
+            idx += 1;
+        }
+        for name in self.topo.vsrc_index.keys() {
+            writeln!(w, "\t{idx}\ti({name})\tcurrent")?;
+            idx += 1;
         }
         writeln!(w, "Values:")?;
-        let mut first = true;
-        for &idx in self.topo.node_index.values() {
-            if first {
-                writeln!(w, " 0\t{:.6e}", self.x[idx])?;
-                first = false;
+        let values = self
+            .topo
+            .node_index
+            .values()
+            .map(|&idx| self.x[idx])
+            .chain(lambda.iter().map(|&(_, wl)| wl))
+            .chain(
+                self.topo
+                    .vsrc_index
+                    .values()
+                    .map(|&idx| self.x[n_nodes + idx]),
+            );
+        for (k, v) in values.enumerate() {
+            if k == 0 {
+                writeln!(w, " 0\t{v:.6e}")?;
             } else {
-                writeln!(w, "\t{:.6e}", self.x[idx])?;
+                writeln!(w, "\t{v:.6e}")?;
             }
-        }
-        for &idx in self.topo.vsrc_index.values() {
-            writeln!(w, "\t{:.6e}", self.x[n_nodes + idx])?;
         }
         Ok(())
     }
 
     /// Write DC operating point as a two-row CSV (header + one data row).
+    /// Column order: solved node voltages, λ labels, branch currents.
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
+        let lambda = self.topo.lambda_signals();
         write!(w, "analysis")?;
         for name in self.topo.node_index.keys() {
+            write!(w, ",V({name})")?;
+        }
+        for (name, _) in &lambda {
             write!(w, ",V({name})")?;
         }
         let n_nodes = self.topo.n_nodes();
@@ -83,6 +113,9 @@ impl NrResult {
         write!(w, "dc_op")?;
         for &idx in self.topo.node_index.values() {
             write!(w, ",{:.6e}", self.x[idx])?;
+        }
+        for &(_, wl) in &lambda {
+            write!(w, ",{wl:.6e}")?;
         }
         for &idx in self.topo.vsrc_index.values() {
             write!(w, ",{:.6e}", self.x[n_nodes + idx])?;

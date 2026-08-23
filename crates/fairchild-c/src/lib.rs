@@ -261,6 +261,14 @@ pub struct FcSim {
     op: Option<NrResult>,
     /// Signal names for `fc_signal_name`, rebuilt after each run.
     signals: Vec<CString>,
+    /// λ labels materialised as constant series, built lazily by `fc_signal`.
+    ///
+    /// `fc_signal` hands out borrowed pointers, and a label has no stored
+    /// series to borrow — it is one f64 on `TranResult` (#71). Cached here so
+    /// the pointer contract ("valid until the next run") holds; a `Vec`'s heap
+    /// buffer does not move when the map grows, so earlier pointers survive
+    /// later insertions. Cleared wherever `signals` is.
+    lambda_series: std::collections::HashMap<String, Vec<f64>>,
     err: Option<CString>,
 }
 
@@ -301,6 +309,7 @@ impl FcSim {
         self.tran = None;
         self.op = None;
         self.signals.clear();
+        self.lambda_series.clear();
     }
 }
 
@@ -320,6 +329,7 @@ pub extern "C" fn fc_sim_new() -> *mut FcSim {
         tran: None,
         op: None,
         signals: Vec::new(),
+        lambda_series: std::collections::HashMap::new(),
         err: None,
     }))
 }
@@ -469,6 +479,7 @@ pub unsafe extern "C" fn fc_run_op(sim: *mut FcSim) -> c_int {
         s.op = Some(r);
         s.tran = None;
         s.signals.clear();
+        s.lambda_series.clear();
         Ok(())
     })
 }
@@ -492,9 +503,11 @@ pub unsafe extern "C" fn fc_run_tran(sim: *mut FcSim, step: c_double, stop: c_do
         };
         s.signals = std::iter::once("time".to_string())
             .chain(r.node_voltages.keys().map(|n| format!("V({n})")))
+            .chain(r.lambda.keys().map(|n| format!("V({n})")))
             .chain(r.vsrc_currents.keys().map(|n| format!("I({n})")))
             .filter_map(|n| CString::new(n).ok())
             .collect();
+        s.lambda_series.clear();
         s.tran = Some(r);
         s.op = None;
         Ok(())
@@ -538,9 +551,17 @@ pub unsafe extern "C" fn fc_signal(
         let series: &[f64] = if name.eq_ignore_ascii_case("time") {
             &r.time
         } else if let Some(node) = strip_call(name, "v") {
-            r.node_voltages
-                .get(node)
-                .ok_or_else(|| ApiError::not_found(format!("unknown node '{node}'")))?
+            if let Some(series) = r.node_voltages.get(node) {
+                series
+            } else if let Some(&wl) = r.lambda.get(node) {
+                // A λ label is constant over the run; materialise it once so
+                // the borrowed-pointer contract works the same as for a node.
+                s.lambda_series
+                    .entry(node.to_string())
+                    .or_insert_with(|| vec![wl; r.time.len()])
+            } else {
+                return Err(ApiError::not_found(format!("unknown node '{node}'")));
+            }
         } else if let Some(vsrc) = strip_call(name, "i") {
             r.vsrc_currents
                 .get(vsrc)

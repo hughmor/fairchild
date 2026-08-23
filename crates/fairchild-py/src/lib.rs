@@ -260,12 +260,20 @@ impl SimResult {
                     .keys()
                     .map(|n| format!("V({n})"))
                     .collect();
+                // λ labels are probeable by name, so they are listed (#71).
+                sigs.extend(
+                    r.topo
+                        .lambda_signals()
+                        .iter()
+                        .map(|(n, _)| format!("V({n})")),
+                );
                 sigs.extend(r.topo.vsrc_index.keys().map(|n| format!("I({n})")));
                 sigs
             }
             SimResultInner::Tran(r) => {
                 let mut sigs: Vec<String> =
                     r.node_voltages.keys().map(|n| format!("V({n})")).collect();
+                sigs.extend(r.lambda.keys().map(|n| format!("V({n})")));
                 sigs.extend(r.vsrc_currents.keys().map(|n| format!("I({n})")));
                 sigs
             }
@@ -356,11 +364,15 @@ impl SimResult {
             if node == "0" || node == "gnd" {
                 return Ok(PyArray1::from_vec_bound(py, vec![0.0f64; r.time.len()]));
             }
-            let series = r
-                .node_voltages
-                .get(node)
-                .ok_or_else(|| PyRuntimeError::new_err(format!("unknown node '{node}'")))?;
-            Ok(PyArray1::from_vec_bound(py, series.clone()))
+            if let Some(series) = r.node_voltages.get(node) {
+                return Ok(PyArray1::from_vec_bound(py, series.clone()));
+            }
+            // A λ label is constant over the run; materialise it as a series so
+            // the caller's array arithmetic works the same as for any node.
+            if let Some(&wl) = r.lambda.get(node) {
+                return Ok(PyArray1::from_vec_bound(py, vec![wl; r.time.len()]));
+            }
+            Err(PyRuntimeError::new_err(format!("unknown node '{node}'")))
         } else if let Some(vsrc) = key.strip_prefix("i(").and_then(|s| s.strip_suffix(')')) {
             let series = r
                 .vsrc_currents

@@ -44,6 +44,14 @@ pub struct TranResult {
     pub node_voltages: IndexMap<String, Vec<f64>>,
     /// Voltage-source branch currents over time: source name → time series.
     pub vsrc_currents: IndexMap<String, Vec<f64>>,
+    /// λ labels: net name → wavelength (m), in `lambda_signals` order.
+    ///
+    /// Resolved before the solve and constant across the run, so stored once
+    /// rather than as a flat series per net (the giona RNN has 864 of them —
+    /// a series each would be most of the result's memory for no information).
+    /// Carried here so `.tran` answers `V(bus_wl_0)` the same way `.op` does;
+    /// without it the two analyses disagreed by name (#71).
+    pub lambda: IndexMap<String, f64>,
 }
 
 impl TranResult {
@@ -75,12 +83,19 @@ impl TranResult {
 
     /// Node voltage at a specific time, with linear interpolation.
     /// Returns None if the node is unknown or t is out of range.
+    ///
+    /// A λ net answers its resolved wavelength at any `t` — it is a label
+    /// decided before the solve, not a waveform, so there is nothing to
+    /// interpolate and no range to fall outside of. Mirrors the fallback in
+    /// `CircuitTopology::node_voltage`, so `.op` and `.tran` agree by name.
     pub fn voltage_at(&self, node: &str, t: f64) -> Option<f64> {
         if node == "0" || node == "gnd" {
             return Some(0.0);
         }
-        let v_series = self.node_voltages.get(node)?;
-        interp(&self.time, v_series, t)
+        match self.node_voltages.get(node) {
+            Some(v_series) => interp(&self.time, v_series, t),
+            None => self.lambda.get(node).copied(),
+        }
     }
 
     /// Voltage-source current at a specific time, with linear interpolation.
@@ -93,7 +108,7 @@ impl TranResult {
     ///
     /// One value per line; point index only on the first variable's line per point.
     pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_vars = 1 + self.node_voltages.len() + self.vsrc_currents.len();
+        let n_vars = 1 + self.node_voltages.len() + self.lambda.len() + self.vsrc_currents.len();
         let n_pts = self.time.len();
         writeln!(w, "Title: {title}")?;
         writeln!(w, "Plotname: Transient Analysis")?;
@@ -104,6 +119,10 @@ impl TranResult {
         writeln!(w, "\t0\ttime\ttime")?;
         let mut idx = 1usize;
         for name in self.node_voltages.keys() {
+            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
+            idx += 1;
+        }
+        for name in self.lambda.keys() {
             writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
             idx += 1;
         }
@@ -119,6 +138,10 @@ impl TranResult {
             for v in self.node_voltages.values() {
                 writeln!(w, "\t{:.6e}", v[ti])?;
             }
+            // λ is a label, constant over the run: same value at every point.
+            for wl in self.lambda.values() {
+                writeln!(w, "\t{wl:.6e}")?;
+            }
             for i in self.vsrc_currents.values() {
                 writeln!(w, "\t{:.6e}", i[ti])?;
             }
@@ -128,12 +151,16 @@ impl TranResult {
 
     /// Write all waveforms to CSV.
     ///
-    /// Columns: `time`, then `V(<node>)` for every node, then `I(<vsrc>)` for every
-    /// voltage source. Values are written in scientific notation.
+    /// Columns: `time`, then `V(<node>)` for every node, then `V(<λ net>)` for
+    /// every wavelength label (constant over the run), then `I(<vsrc>)` for
+    /// every voltage source. Values are written in scientific notation.
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
         // Header
         write!(w, "time")?;
         for name in self.node_voltages.keys() {
+            write!(w, ",V({name})")?;
+        }
+        for name in self.lambda.keys() {
             write!(w, ",V({name})")?;
         }
         for name in self.vsrc_currents.keys() {
@@ -145,6 +172,9 @@ impl TranResult {
             write!(w, "{t:.6e}")?;
             for v in self.node_voltages.values() {
                 write!(w, ",{:.6e}", v[ti])?;
+            }
+            for wl in self.lambda.values() {
+                write!(w, ",{wl:.6e}")?;
             }
             for i in self.vsrc_currents.values() {
                 write!(w, ",{:.6e}", i[ti])?;
@@ -278,6 +308,11 @@ pub fn tran_nr_with_registry_opts(
             .vsrc_index
             .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
+            .collect(),
+        lambda: topo
+            .lambda_signals()
+            .into_iter()
+            .map(|(k, wl)| (k.to_string(), wl))
             .collect(),
     };
 
@@ -463,6 +498,11 @@ pub fn tran_nr_with_registry_var_opts(
             .vsrc_index
             .keys()
             .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
+            .collect(),
+        lambda: topo
+            .lambda_signals()
+            .into_iter()
+            .map(|(k, wl)| (k.to_string(), wl))
             .collect(),
     };
     push_timepoint(&mut result, 0.0, &topo, &x);
