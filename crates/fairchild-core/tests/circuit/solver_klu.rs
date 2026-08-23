@@ -229,6 +229,51 @@ fn klu_matches_sparse_across_a_transient() {
     }
 }
 
+/// `.ac` answers come from the one-shot `solve` — since #75 a direct CSC
+/// build instead of a dense n×n round-trip. The sweep solves the 2n×2n
+/// `[G −B; B G]` embedding, and the deck carries an inductor so branch-current
+/// rows sit in the block too: the shape that catches a block placed one row
+/// off. Compared against faer-sparse at every frequency, real and imaginary
+/// parts separately — two spellings of one factorisation must agree to
+/// round-off, not to a tolerance that would hide a misplaced cell.
+#[test]
+fn klu_matches_sparse_across_an_ac_sweep() {
+    use fairchild_core::ac::ac_analysis_opts;
+    let src = "* diode-biased rlc: nonlinear op, then ac over the linearisation\n\
+               .model dm D (IS=1e-14 N=1)\n\
+               V1 in 0 DC 0.7 AC 1\n\
+               R1 in mid 1k\n\
+               D1 mid 0 dm\n\
+               L1 mid out 1m\n\
+               C1 out 0 1n\n\
+               R2 out 0 10k\n";
+    let freqs: Vec<f64> = (0..31).map(|i| 10f64.powf(1.0 + 0.2 * i as f64)).collect();
+    let (sp, kl) = both_backends(src, |n, r, o| {
+        let res = ac_analysis_opts(n, &freqs, None, r, o).expect("ac");
+        res.voltages.get("out").expect("V(out)").clone()
+    });
+    assert_eq!(sp.len(), freqs.len());
+    for (i, ((sre, sim), (kre, kim))) in sp.iter().zip(kl.iter()).enumerate() {
+        let scale = (sre * sre + sim * sim).sqrt().max(1e-30);
+        assert!(
+            (sre - kre).abs() <= 1e-9 * scale && (sim - kim).abs() <= 1e-9 * scale,
+            "freq {i}: sparse ({sre:e}, {sim:e}), klu ({kre:e}, {kim:e})"
+        );
+    }
+}
+
+/// #76: `Auto` prefers KLU when the feature is compiled in (this file only
+/// builds with it). Dense keeps the small systems; the faer-sparse fallback
+/// is pinned by the `cfg(not(feature = "klu"))` twin in `solver.rs`'s unit
+/// tests, which is what a build without SuiteSparse runs.
+#[test]
+fn auto_prefers_klu_when_it_is_compiled_in() {
+    use fairchild_core::solver::make_solver;
+    assert_eq!(make_solver(SolverKind::Auto, 100).name(), "klu");
+    assert_eq!(make_solver(SolverKind::Auto, 5).name(), "dense");
+    assert_eq!(make_solver(SolverKind::Sparse, 100).name(), "faer-sparse");
+}
+
 /// `.noise` is the only caller of the transpose solve. KLU now answers it with
 /// `klu_tsolve` on the existing factorisation instead of materialising a dense
 /// transpose, so this pins that the two agree.

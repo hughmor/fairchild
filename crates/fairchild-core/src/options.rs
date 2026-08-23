@@ -83,9 +83,10 @@ pub struct SimOptions {
     pub pnjlim: bool,
 
     // ── linear-system backend ──────────────────────────────────────────────
-    /// LU factorisation backend.  `Auto` picks dense for ≤50 nodes and
-    /// `faer-sparse` above.  Override with `.options solver=sparse|dense|auto`
-    /// or CLI `--solver`.
+    /// LU factorisation backend.  `Auto` picks dense for small systems, then
+    /// KLU when the `klu` feature is compiled in, `faer-sparse` otherwise
+    /// (see `solver::make_solver`).  Override with
+    /// `.options solver=sparse|dense|klu|auto` or CLI `--solver`.
     pub solver: SolverKind,
 
     /// Centre wavelength of the photonic band of interest (m).  Used by
@@ -490,11 +491,10 @@ mod tests {
     /// by faer-sparse — a caller who asked for a specific factorisation and got
     /// another one has no way to tell.
     ///
-    /// This is the only behaviour that exists in the default build and not in the
-    /// `--features klu` one, and it was untested, which is what made CI's second
-    /// full test run pure duplication: `SolverKind::Auto` never selects KLU, so
-    /// every other test exercises the same backends either way. Now the cheap
-    /// default-features run has something to check.
+    /// This behaviour exists only in the default build, never the
+    /// `--features klu` one. (Since #76 the two builds also differ in what
+    /// `Auto` dispatches to — KLU when compiled in — so the default-features
+    /// CI run covers the faer-sparse paths as well as this refusal.)
     #[test]
     #[cfg(not(feature = "klu"))]
     fn solver_klu_is_refused_when_it_is_not_compiled_in() {

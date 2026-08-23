@@ -124,11 +124,12 @@ struct Cli {
     no_pnjlim: bool,
 
     /// Linear-system backend.
-    ///   dense  — faer partial-pivot LU (recommended for ≤ ~50 nodes)
-    ///   sparse — faer sparse LU (pure Rust, default at larger N)
+    ///   dense  — faer partial-pivot LU (recommended for ≤ ~20 nodes)
+    ///   sparse — faer sparse LU (pure Rust, no C dependencies)
     ///   klu    — SuiteSparse KLU (requires `klu` cargo feature + system
     ///            install of suite-sparse; 2–5× faster on circuit matrices)
-    ///   auto   — pick from system size (default)
+    ///   auto   — pick from system size (default): dense below ~20 nodes,
+    ///            then klu when compiled in, sparse otherwise
     #[arg(long, value_name = "dense|sparse|klu|auto")]
     solver: Option<String>,
 
