@@ -292,6 +292,17 @@ pub fn expand(src: &str, m: &BundleModule, n: usize, wpc: usize) -> Result<Strin
 
         // The module header: rebuild the port list with bundles expanded.
         if !header_done && t.starts_with("module ") {
+            // The original header may continue over several lines. `scan` read
+            // it through the closing `)` regardless of newlines; consume the
+            // same span here, or the continuation lines leak into the body as
+            // orphaned declarations — a truncated header plus `anode, ...);`
+            // dangling two lines down (issue #73).
+            let mut close_line = line;
+            while !close_line.contains(')') {
+                close_line = lines.next().ok_or_else(|| OsdiError::Dialect {
+                    detail: format!("module `{}`'s port list is not closed", m.name),
+                })?;
+            }
             let mut ports: Vec<String> = Vec::new();
             for p in &m.header {
                 if m.bundles.contains(p) {
@@ -328,6 +339,14 @@ pub fn expand(src: &str, m: &BundleModule, n: usize, wpc: usize) -> Result<Strin
                 for k in 0..n {
                     writeln!(out, "    parameter real wl_{k} = wl_default from (0:inf);").unwrap();
                 }
+            }
+            // Anything after the `);` on the closing line is body text and
+            // goes through the normal per-line path.
+            let close = close_line.find(')').expect("loop above found it");
+            let tail = close_line[close + 1..].trim_start().trim_start_matches(';');
+            if !tail.trim().is_empty() {
+                out.push_str(&substitute(tail, m, "\u{0}", 0, n, wpc));
+                out.push('\n');
             }
             header_done = true;
             continue;
@@ -631,6 +650,44 @@ endmodule
         let msg = format!("{e}");
         assert!(msg.contains("WL("), "{msg}");
         assert!(msg.contains("LAMBDA"), "the fix must be named: {msg}");
+    }
+
+    /// A port list continued onto a second line (issue #73): the whole header
+    /// must be read, and the continuation line must not survive in the body as
+    /// an orphaned declaration — the failure mode is a device with the wrong
+    /// terminal count silently placed against a positional `X` line.
+    #[test]
+    fn a_multi_line_port_list_is_read_whole_and_leaves_no_orphan() {
+        let src = "\
+module mrm(bus_in, thru_out,
+           anode, cathode, th);
+    optical_bundle bus_in, thru_out;
+    electrical anode, cathode;
+    thermal th;
+endmodule
+";
+        let m = scan(src).unwrap().unwrap();
+        assert_eq!(m.bundles, vec!["bus_in", "thru_out"]);
+        assert_eq!(m.scalars, vec!["anode", "cathode", "th"]);
+
+        let out = expand(src, &m, 1, 3).unwrap();
+        // Every port — bundle wires and the continued scalars — in one header.
+        assert!(
+            out.contains(
+                "module mrm(bus_in_re_0, bus_in_im_0, bus_in_wl_0, \
+                 thru_out_re_0, thru_out_im_0, thru_out_wl_0, anode, cathode, th);"
+            ),
+            "rebuilt header must carry the continuation line's ports:\n{out}"
+        );
+        // The continuation line itself must be consumed, not copied into the
+        // body where it reads as a stray statement.
+        assert!(
+            !out.contains("anode, cathode, th);\n    optical_field")
+                && out.matches("anode, cathode, th)").count() == 1,
+            "orphaned continuation line in the body:\n{out}"
+        );
+        // The ordinary declarations after the header are untouched.
+        assert!(out.contains("electrical anode, cathode;"), "{out}");
     }
 
     /// λ terminal indices are positional, and a scalar port between two bundles
