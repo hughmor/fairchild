@@ -94,8 +94,9 @@ def deck(real_weights: bool) -> str:
     add("*   PDB<i>     neuron bias, so the rest point is where the driver wants it.")
     add("*   VW<i><j>   weight (ideal deck) or heater volts (ring deck).")
     add("*")
-    add("* Readouts: mc<i> is neuron i's state (the modulator cathode; the junction")
-    add("* current is what the recurrence calls y_i), plus the optical bus.")
+    add("* Readouts: I(Vsen<i>) is neuron i's state — the junction current, which")
+    add("* is what the recurrence calls y_i — with mc<i> the cathode voltage it")
+    add("* develops, plus the optical bus.")
     add("")
     add(f".include {PCELLS / 'source_bank.sp'}")
     add(f".include {NEURON}")
@@ -154,7 +155,12 @@ def deck(real_weights: bool) -> str:
         role = "neuron" if i <= N_NEURON else "INPUT passthrough — park off resonance"
         cath = f"mc{i}" if i <= N_NEURON else "0"
         add(f"* ring {i} — lambda {LAMBDAS_NM[i - 1]:.2f} nm, {role}")
-        add(f"Xr{i} bin{i} bout{i} ain{i} dout{i} 0 {cath} ht{i} 0 trm{i}"
+        # A 0 V source in series with the anode, so the junction current is a
+        # branch unknown that can be READ. Inferring it from the cathode voltage
+        # through the diode law works but needs the voltage to a part in 1e6,
+        # which is below the solver's reltol on a node sitting near a volt.
+        add(f"Vsen{i} 0 an{i} DC 0")
+        add(f"Xr{i} bin{i} bout{i} ain{i} dout{i} an{i} {cath} ht{i} 0 trm{i}"
             f" mrm_addrop radius={{radius}} kappa_l={{kappa_l}} n_eff={ne:.9f}")
         add(f"Iht{i} 0 ht{i} DC 0")
         if i < N_CH:

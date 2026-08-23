@@ -95,7 +95,47 @@ the corrected model rather than a measurement. It is worth testing against the
 chip, because it says the WTA's answer to low gain — more power — was pushing
 against a wall it could not see.
 
-### The measurement problem
+### The measurement problem — SOLVED, and the answer is not the one I wanted
+
+`validate_estimator.py` checks the gain chain factor by factor against closed
+forms, and three of the four are exact and all three pass to machine precision:
+
+| stage | closed form | result |
+|---|---|---|
+| weight block + balanced pair | `I = R*w*P_in` | 7e-16 |
+| tap + 1:8 tree | `a = 1/16` | 4e-16 |
+| node division | `eta = R_sh/(R_sh+r_d)`, R_sh = 1394 Ω | matches `rnn_math` (6); eta = 0.591 at 134 µA |
+
+Only the ring's slope is device physics. **Two fixes made it measurable:**
+
+1. **Read `I_D`, do not infer it.** The deck now carries a 0 V source in series
+   with each ring's anode. Computing `I_D` from the cathode voltage through the
+   diode law amplifies that node's ~1 mV solver resolution by
+   `(I_D+i_sat)/(n*V_T)` — 7.5 % of a 10 µA signal, and far worse near the notch
+   where the signal is small. That is what made every earlier sweep look like
+   noise with sign flips. With the current read directly, `dP_win/dI_D` against
+   heater current is a clean unimodal curve and the 2-point and 5-point-fit
+   derivatives agree to four digits.
+2. **Trim the ring HOT.** At 30 mW/channel it self-heats past its own channel
+   before the heater does anything, and the heater only reddens — so every
+   ring's notch sat at the bottom edge of the heater range with no resonance
+   inside it. `n_eff` needs pre-compensating blue by the self-heating: −60 to
+   −544 pm across the six. On a real chip that is a layout decision, not a knob,
+   which is exactly why the simulation has to say it before tapeout.
+
+**And then the answer: `G` is about 0.07 at 30 mW and 0.20 at 1 mW, against the
+1.18 the MPC weights need.** Short by roughly 6x at best, and — unlike the old
+model — `G` gets WORSE with more power, because self-heating detunes the ring
+faster than `kappa ∝ P0` builds gain.
+
+`rnn_math.md` §9 measured 1.8–3.7 at 30 mW on the *old* deck, whose
+`fc_pn_th_ps` card had `r_th = 0` and structurally could not self-heat. The gap
+between 3.7 and 0.07 is that one modelling change. Which of the two is right
+turns on the ring's real thermal resistance — already flagged in the model
+header as its largest unknown, and now the number the whole application hangs
+on.
+
+### The measurement problem, as it was
 
 Measuring the loop gain on this deck has defeated three estimators, and nothing
 downstream should be built until one of them is pinned against a known answer.
