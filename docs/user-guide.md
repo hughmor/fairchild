@@ -1943,7 +1943,8 @@ the ports for whatever the deck asks for:
 |---|---|
 | `optical_bundle p, q;` | ports whose width comes from the deck |
 | `N(p)` | that width — usable as a loop bound |
-| `E_RE(p,k)` / `E_IM(p,k)` | channel `k`'s field wires |
+| `E_RE(p,k)` / `E_IM(p,k)` | channel `k`'s forward field wires |
+| `E_RE_BW(p,k)` / `E_IM_BW(p,k)` | its backward pair — only under `enable_bidirectional` |
 | `LAMBDA(p,k)` | channel `k`'s wavelength, filled from the deck's sources |
 
 ```verilog
@@ -1987,8 +1988,16 @@ because a mis-generated model is a silently wrong device. `--emit-generated DIR`
 writes the expanded source so you can read exactly what was compiled — the first
 thing worth looking at when a model behaves at one channel and not at eight.
 
-Still native-only: bidirectional propagation, `DelayLine` group delay, and
-`PhotonicActiveModel` composition. See [Photonic models](photonic-models.md).
+Still native-only: `DelayLine` group delay and `PhotonicActiveModel`
+composition. See [Photonic models](photonic-models.md).
+
+Bidirectional is a middle case, and worth stating precisely rather than leaving
+to be discovered. Under `enable_bidirectional` a bundle port expands to `5·N`
+wires and `E_RE_BW` / `E_IM_BW` resolve to the backward pair, so a generated
+model *can* address light travelling the other way. What does not exist is any
+end-to-end deck exercising one: the expansion is unit-tested, the physics is
+not. Treat it as unproven rather than unsupported, and anchor a new
+bidirectional model on a hand-computed budget rather than on a native device.
 
 ### 14.4 Instantiating
 

@@ -45,6 +45,15 @@ use std::path::{Path, PathBuf};
 /// directory**, since a string has no source path. Prefer
 /// [`parse_spice_file`] when the deck lives on disk — it resolves includes
 /// relative to the deck, which is what a library of `.subckt` files wants.
+///
+/// **A front end loading a user's deck wants [`parse_spice_with_arity`], not
+/// this.** WDM dispatch here comes from [`StaticArity`], a hand-maintained list
+/// of model names that cannot describe a `.model`-card-named instance or a
+/// user-defined model — so those are refused on a multi-channel bundle. Only a
+/// registry knows what a name resolves to; see [`ArityOracle`]. This entry point
+/// is for callers with no registry to offer, and for the honest error when
+/// building one has already failed. The C ABI shipped on it by accident (#52),
+/// which is what this paragraph exists to prevent a second time.
 pub fn parse_spice(input: &str) -> Result<Netlist, ParseError> {
     parse_spice_with_arity(input, &StaticArity)
 }
@@ -636,6 +645,10 @@ fn extract_lib_section(content: &str, section: &str) -> Option<String> {
 
 /// Parse a SPICE netlist file, resolving `.include` directives relative to
 /// the file's parent directory.
+///
+/// Carries the same caveat as [`parse_spice`]: WDM dispatch comes from the
+/// static name list, so a front end loading a user's deck wants
+/// [`parse_spice_file_with_arity`].
 pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
     parse_spice_file_with_arity(path, &StaticArity)
 }
