@@ -93,3 +93,84 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
 fn quiet_silences_them_like_every_other_warning() {
     assert!(run(&["--quiet"]).is_empty());
 }
+
+// ── --probe: an unmatched signal name is refused, not dropped (issue #72) ──
+//
+// Same class as the parameter diagnostics above: the user asked for something
+// by name, and the run must either honour it or say so. A silently-missing CSV
+// column fails a long way downstream (a KeyError, a plot with one fewer trace)
+// instead of at the typo that caused it.
+
+const PROBE_DECK: &str = "\
+* probe refusal
+V1 in 0 DC 1
+R1 in out 1k
+R2 out 0 1k
+.op
+";
+
+fn run_probe(deck: &str, tag: &str, args: &[&str]) -> std::process::Output {
+    let mut path = std::env::temp_dir();
+    path.push(format!("fairchild_probe_{tag}_{}.sp", std::process::id()));
+    std::fs::write(&path, deck).expect("write deck");
+    let mut argv = vec!["-f", path.to_str().unwrap()];
+    argv.extend_from_slice(args);
+    Command::new(env!("CARGO_BIN_EXE_fairchild"))
+        .args(&argv)
+        .output()
+        .expect("run fairchild")
+}
+
+#[test]
+fn an_unmatched_probe_is_a_named_error_not_a_missing_column() {
+    let out = run_probe(
+        PROBE_DECK,
+        "unmatched",
+        &["--probe", "V(out),V(total_nonsense)"],
+    );
+    assert!(
+        !out.status.success(),
+        "a probe that matches nothing must fail the run, got {:?}",
+        out.status
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("V(total_nonsense)"),
+        "the unmatched name must be spelled out:\n{err}"
+    );
+    assert!(
+        !err.contains("V(out)'"),
+        "the probe that DID match must not be blamed:\n{err}"
+    );
+}
+
+#[test]
+fn matching_probes_still_filter_and_succeed() {
+    let out = run_probe(PROBE_DECK, "matched", &["--probe", "V(out)"]);
+    assert!(out.status.success(), "{:?}", out.status);
+    let csv = String::from_utf8_lossy(&out.stdout);
+    let header = csv.lines().next().unwrap_or_default();
+    assert_eq!(header, "analysis,V(out)", "filtered header:\n{csv}");
+}
+
+/// An AC sweep spells the columns `mag_V(x)` / `phase_deg_V(x)`; probing
+/// `V(x)` selects that pair rather than silently matching nothing — which was
+/// this same bug wearing its frequency-domain hat.
+#[test]
+fn an_ac_probe_selects_the_mag_phase_pair() {
+    let deck = "\
+* probe over ac
+V1 in 0 DC 0 AC 1
+R1 in out 1k
+C1 out 0 1n
+.ac dec 2 1 100
+";
+    let out = run_probe(deck, "ac", &["--probe", "V(out)"]);
+    assert!(out.status.success(), "{:?}", out.status);
+    let csv = String::from_utf8_lossy(&out.stdout);
+    let header = csv.lines().next().unwrap_or_default();
+    assert_eq!(
+        header, "freq_hz,mag_V(out),phase_deg_V(out)",
+        "filtered AC header:\n{csv}"
+    );
+}

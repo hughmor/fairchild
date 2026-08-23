@@ -1068,7 +1068,7 @@ fairchild [OPTIONS] --file <FILE>
 | `-f, --file <FILE>` | Input SPICE netlist |
 | `--format csv\|nutmeg` | Output format (default csv) |
 | `-o, --output <FILE>` | Output destination (default stdout) |
-| `--probe <SIG,…>` | Comma-separated CSV signal filter |
+| `--probe <SIG,…>` | Comma-separated CSV signal filter. An unmatched name is an error; `V(node)` selects an AC sweep's `mag_`/`phase_deg_` pair |
 | `--param ELEM.PARAM=VAL` | Override a circuit parameter (repeatable) |
 | `--opt KEY=VAL` | Override a SimOptions field (repeatable) |
 | `--reltol`, `--gmin`, `--method`, `--maxstep`, `--solver` | Convenience flags |
@@ -1088,8 +1088,10 @@ fairchild -f netlist.sp \
    --opt method=gear --opt reltol=1e-5 --solver sparse \
    --format nutmeg -o out.raw
 
-# AC sweep specified entirely via netlist; CSV-filter on two probes
-fairchild -f rlc.sp --probe "V(out),I(V1)"
+# AC sweep specified entirely via netlist; CSV-filter on one probe
+# (selects mag_V(out) and phase_deg_V(out); an AC CSV carries no currents,
+# so probing I(V1) here would be refused by name)
+fairchild -f rlc.sp --probe "V(out)"
 
 # Photonic transient with parameter override
 fairchild -f examples/photonic/native_mrr_modulator.sp \
@@ -1237,7 +1239,9 @@ Worked examples for all three, each checking itself against a full re-solve:
 
 Default. One row per timepoint (transient), frequency (AC/noise), or sweep
 point (DC sweep). Header row is comma-separated signal names. `--probe`
-filters the column set.
+filters the column set; a probe that matches no column of an analysis's
+output is an error naming it, never a silently thinner CSV. For an AC sweep,
+`V(node)` selects that node's `mag_`/`phase_deg_` column pair.
 
 ### Nutmeg rawfile
 

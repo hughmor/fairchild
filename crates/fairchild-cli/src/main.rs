@@ -51,6 +51,8 @@ struct Cli {
     /// Comma-separated list of signals to include in output.
     /// Example: --probe "V(out),V(in),I(V1)"
     /// Applies to CSV output only; nutmeg always outputs all signals.
+    /// A name that matches no column of an analysis's output is an error.
+    /// For an AC sweep, V(node) selects the mag_/phase_deg_ column pair.
     #[arg(long, value_name = "SIGNAL,...")]
     probe: Option<String>,
 
@@ -224,22 +226,43 @@ fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
 
 // ── Probe / column filtering ───────────────────────────────────────────────
 
-/// Parse a comma-separated probe string into normalised signal names.
+/// Parse a comma-separated probe string into signal names, spelled as the user
+/// wrote them (matching is case-insensitive; the original spelling is kept so
+/// an unmatched name can be reported back in the user's own text).
 fn parse_probe(s: &str) -> Vec<String> {
     s.split(',')
-        .map(|t| t.trim().to_lowercase())
+        .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect()
 }
 
+/// Case-insensitive probe-to-column match. `V(out)` also selects the AC
+/// sweep's `mag_V(out)` / `phase_deg_V(out)` pair, since those are the columns
+/// that signal produces there.
+fn probe_matches(probe_lc: &str, header_lc: &str) -> bool {
+    header_lc == probe_lc
+        || header_lc
+            .strip_prefix("mag_")
+            .is_some_and(|h| h == probe_lc)
+        || header_lc
+            .strip_prefix("phase_deg_")
+            .is_some_and(|h| h == probe_lc)
+}
+
 /// Filter a CSV string to keep only the header columns that match `probes`.
 ///
-/// Column names are lowercased before matching.  The first column (analysis /
-/// time) is always kept.  Returns the full CSV if `probes` is empty.
-fn filter_csv(csv: &str, probes: &[String]) -> String {
+/// Matching is case-insensitive.  The first column (analysis / time) is always
+/// kept.  Returns the full CSV if `probes` is empty.
+///
+/// A probe that matches no column is an error carrying the unmatched names
+/// (issue #72): silently dropping it produced a CSV that looked complete and
+/// was not, which downstream is a `KeyError` a long way from the cause.
+fn filter_csv(csv: &str, probes: &[String]) -> Result<String, Vec<String>> {
     if probes.is_empty() {
-        return csv.to_string();
+        return Ok(csv.to_string());
     }
+    let probes_lc: Vec<String> = probes.iter().map(|p| p.to_lowercase()).collect();
+    let mut matched = vec![false; probes.len()];
     let mut out = String::new();
     let mut keep_cols: Option<Vec<usize>> = None;
 
@@ -255,12 +278,20 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
         } else {
             // Header row — determine which columns to keep
             let headers: Vec<&str> = line.split(',').collect();
-            let cols: Vec<usize> = headers
-                .iter()
-                .enumerate()
-                .filter(|(i, h)| *i == 0 || probes.iter().any(|p| p == &h.to_lowercase()))
-                .map(|(i, _)| i)
-                .collect();
+            let mut cols: Vec<usize> = Vec::new();
+            for (i, h) in headers.iter().enumerate() {
+                let h_lc = h.to_lowercase();
+                let mut keep = i == 0;
+                for (pi, p) in probes_lc.iter().enumerate() {
+                    if probe_matches(p, &h_lc) {
+                        matched[pi] = true;
+                        keep = true;
+                    }
+                }
+                if keep {
+                    cols.push(i);
+                }
+            }
             // Emit filtered header
             let header_out: Vec<&str> = cols.iter().map(|&i| headers[i]).collect();
             out.push_str(&header_out.join(","));
@@ -268,7 +299,37 @@ fn filter_csv(csv: &str, probes: &[String]) -> String {
             keep_cols = Some(cols);
         }
     }
-    out
+    let missing: Vec<String> = probes
+        .iter()
+        .zip(&matched)
+        .filter(|(_, &m)| !m)
+        .map(|(p, _)| p.clone())
+        .collect();
+    if missing.is_empty() {
+        Ok(out)
+    } else {
+        Err(missing)
+    }
+}
+
+/// Apply the probe filter, or exit naming every probe that matched nothing —
+/// the same contract `--param` overrides have (#64): a request is honoured or
+/// it is named, never silently dropped.
+fn filter_csv_or_exit(csv: &str, probes: &[String], analysis: &str) -> String {
+    filter_csv(csv, probes).unwrap_or_else(|missing| {
+        let list = missing
+            .iter()
+            .map(|m| format!("'{m}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "error: --probe {list} matched no column of the {analysis} output. \
+             Signals are spelled as the CSV header spells them (run without \
+             --probe to see it; --list-nodes prints the deck's nets); for an \
+             AC sweep, V(node) selects the mag_/phase_deg_ column pair."
+        );
+        std::process::exit(1);
+    })
 }
 
 // ── SimOptions builder: netlist .options + CLI flags ───────────────────────
@@ -954,7 +1015,7 @@ fn run_corner_analyses_ctx(
                             .write_csv(&mut buf)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, probe_list);
+                        let filtered = filter_csv_or_exit(&csv, probe_list, "DC operating-point");
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
@@ -1012,7 +1073,7 @@ fn run_corner_analyses_ctx(
                             .write_csv(&mut buf)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, probe_list);
+                        let filtered = filter_csv_or_exit(&csv, probe_list, "transient");
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
@@ -1072,7 +1133,7 @@ fn run_corner_analyses_ctx(
                             .write_csv(&mut buf)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, probe_list);
+                        let filtered = filter_csv_or_exit(&csv, probe_list, "DC sweep");
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
@@ -1121,7 +1182,7 @@ fn run_corner_analyses_ctx(
                             .write_csv(&mut buf)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                         let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv(&csv, probe_list);
+                        let filtered = filter_csv_or_exit(&csv, probe_list, "AC");
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
