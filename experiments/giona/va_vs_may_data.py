@@ -668,8 +668,9 @@ def plot(wl, wl_all, jv, hc, h_sel, meas_jv, vs_jv, meas_hc, vs_hc, iv, hc_res,
     ax[1][2].legend(fontsize=8)
     ax[1][2].grid(alpha=0.25)
 
-    fig.suptitle("mrm_addrop.va vs the May giona capture — card defaults, n_eff trimmed, "
-                 "nothing else fitted", fontsize=12)
+    fig.suptitle("mrm_addrop.va vs the May giona capture\n"
+                 "n_eff and r_th trimmed per ring (both are per-device); vol_dep and "
+                 "vol_inj derived, not fitted", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     p = RESULTS / "va_vs_may_data.png"
     fig.savefig(p, dpi=130)

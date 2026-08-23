@@ -2,35 +2,44 @@
 """build_frontend.py — generate the giona front-end netlist and the 8-channel
 ring cell it needs.
 
-Writes two files into `netlists/` (gitignored — they are generated):
+Writes one file into `netlists/` (gitignored — it is generated):
 
-  mrm_wdm8.sp       8-channel add-drop micro-ring PCell. Same physics as
-                    examples/photonic/pcells/mrm.sp, but its optical ports are
-                    8 channels wide so ONE instance serves the whole WDM bus
-                    off ONE junction. Generated rather than hand-written
-                    because the port lists run to a few hundred wire names.
   giona_frontend.sp the front-end itself (see the topology diagram below).
 
-Why the single-channel cell will not do here
---------------------------------------------
-`mrm.sp` declares 12 optical port wires — one channel's worth. Hand it an
-8-channel bus and the parser replicates the whole cell 8 times (correct for a
-bank of independent rings), which duplicates the PN junction and the heater
-along with the optics: 8 junctions in parallel on one bias, so 8x the terminal
-current and 8x the heater conductance. On this chip each ring is ONE physical
-ring that all 8 wavelengths pass through, so it has to be one bundle-aware
-instance. Hence the 8-channel variant.
+It used to write two. The other was `mrm_wdm8.sp`, an 8-channel add-drop PCell
+spelled out wire by wire because a subckt body cannot declare `.optical_port`
+and one physical ring has to serve all eight wavelengths off one junction —
+several hundred port names, hence a generator. Both Verilog-A rings this file
+now instantiates are bundle-aware, so the deck says `.optical_port bus 8` and
+the model is compiled at that width. The generator for the generator is gone.
 
-A subckt body cannot declare `.optical_port` (bundle membership is the caller's
-business), so the wide ports are spelled out wire by wire — mechanical, hence a
-generator.
+Two ring models, because the chip has two kinds of ring:
+
+  mrm_addrop.va    the 8 modulators — PN junction, depletion and injection
+                   through one carrier population, calibrated against the May
+                   capture. 300 nm coupler gaps.
+  ring_nheater.va  the 64 weight rings — no junction, tuned by an N-doped
+                   resistor in the waveguide. 200 nm coupler gaps, so a
+                   stronger coupling: kappa_L 0.387 against the modulator's
+                   0.183, scaled by the FEM's gap ratio.
 
 Run:  .venv/bin/python experiments/giona/build_frontend.py
 """
 from __future__ import annotations
 
+import math
+import os
 import sys
 from pathlib import Path
+
+# Both rings are Verilog-A now, so this file needs a compiler where it used to
+# need none. Without one, `two_pass`'s first pass fails, the failure is
+# swallowed, and the deck comes back with an arity error about a bundle model
+# that never got registered — so say it here rather than debug that.
+os.environ.setdefault(
+    "FAIRCHILD_OPENVAF",
+    "/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r",
+)
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -42,95 +51,39 @@ N_CH = 8
 LAMBDAS_NM = [1546.12, 1546.92, 1547.72, 1548.51,
               1549.32, 1550.12, 1550.92, 1551.72]
 RADIUS_M = 8e-6
+N_G = 4.2
+WL_REF_NM = 1550.0
+# The two Verilog-A rings this front end is built from. Both are bundle-aware,
+# so ONE instance carries all eight channels off one junction or one heater —
+# which is why the hand-generated 8-channel subckt this file used to emit is
+# gone. A subckt body cannot declare `.optical_port`, so its wide ports had to
+# be spelled out wire by wire; a bundle model has no such problem.
+VA_MRM = REPO / "examples" / "verilog_a" / "models" / "mrm_addrop.va"
+VA_WEIGHT = REPO / "examples" / "verilog_a" / "models" / "ring_nheater.va"
 
 
-# ── the 8-channel ring cell ──────────────────────────────────────────────────
-def wires(port: str, n=N_CH) -> list[str]:
-    """The underlying wire names of an n-channel optical port, in bundle order."""
-    return [f"{port}_{w}_{k}" for k in range(n) for w in ("re", "im", "wl")]
+# ── per-ring trim ────────────────────────────────────────────────────────────
+def n_eff_for(target_nm: float, guess: float = 2.2810) -> float:
+    """The `n_eff` that puts a resonance at `target_nm`. Closed form.
 
+    This used to scan 121 candidate indices through a full ring simulation per
+    ring, because the segment adds first-order dispersion and the naive comb
+    formula misses. The dispersion is a straight line, so the comb formula does
+    not have to miss — carry it through:
 
-def wrap(tokens: list[str], first: str, per_line: int = 9) -> str:
-    """`first` then `tokens`, continued across `+` lines."""
-    out = [first]
-    for i in range(0, len(tokens), per_line):
-        out.append("+ " + " ".join(tokens[i:i + per_line]))
-    return "\n".join(out)
+        n_eff(lam)*L = m*lam,  n_eff(lam) = n0 + (lam - ref)*(n0 - n_g)/ref
+        =>  n0 = m*ref/L + n_g*(lam - ref)/lam
 
-
-def mrm_wdm_cell() -> str:
-    """8-channel add-drop MRM: two couplers, two heated PN arcs, one junction."""
-    ports = (wires("in") + wires("th") + wires("ad") + wires("dr")
-             + ["pn_a", "pn_c", "ht_p", "ht_n"])
-    params = [
-        "radius=8e-6", "n_g=4.2", "n_eff=2.2810", "alpha_db_cm=10.7",
-        "kappa_l=0.183", "wl_ref_nm=1550",
-        "r_heater=184.4", "p_pi_th=26.4e-3", "dn_dt=1.86e-4", "r_th=0",
-        "dn_dv=-3.62e-5", "da_dv=3.29e-4", "c_j0=1.375e-13", "v_bi=0.917",
-        "m_j=0.5",
-        "i_sat=5.099e-8", "n_diode=5.0", "r_series=0", "tau_carrier=10e-9",
-        "dn_di=3.99", "da_di=4.63e6", "dn_dv_inj=0", "da_dv_inj=0",
-        "beta_tpa=7.9e-12", "a_eff_m2=1.257e-13", "pin_at_ref=0",
-    ]
-    header = wrap(ports + params, f".subckt mrm_wdm{N_CH}", per_line=6)
-
-    card = (
-        ".model arc_ps fc_pn_th_ps LEVEL=4\n"
-        "+ l_m={pi*radius} n_g={n_g} n_eff={n_eff} alpha_db_cm={alpha_db_cm}\n"
-        "+ wl_ref_nm={wl_ref_nm} pin_at_ref={pin_at_ref}\n"
-        "+ r_heater={r_heater} p_pi_th={p_pi_th} dn_dt={dn_dt} r_th={r_th}\n"
-        "+ dn_dv={dn_dv} da_dv={da_dv} c_j0={c_j0} v_bi={v_bi} m_j={m_j}\n"
-        "+ i_sat={i_sat} n_diode={n_diode} r_series={r_series}\n"
-        "+ tau_carrier={tau_carrier}\n"
-        "+ dn_di={dn_di} da_di={da_di} dn_dv_inj={dn_dv_inj}\n"
-        "+ da_dv_inj={da_dv_inj}\n"
-        "+ beta_tpa={beta_tpa} a_eff_m2={a_eff_m2}"
-    )
-
-    # Bus coupler: (in, ring_a) -> (thru, ring_b).  Drop coupler:
-    # (ring_c, add) -> (ring_d, drop).  Arcs: ring_d -> ring_a, ring_b -> ring_c.
-    cplb = wrap(wires("in") + wires("ra") + wires("th") + wires("rb")
-                + ["fc_dcoupler", "kappa_L={kappa_l}"], "Xcplb")
-    cpld = wrap(wires("rc") + wires("ad") + wires("rd") + wires("dr")
-                + ["fc_dcoupler", "kappa_L={kappa_l}"], "Xcpld")
-    ps1 = wrap(wires("rd") + wires("ra")
-               + ["pn_a", "pn_c", "ht_p", "ht_mid", "arc_ps"], "Xps1")
-    ps2 = wrap(wires("rb") + wires("rc")
-               + ["pn_a", "pn_c", "ht_mid", "ht_n", "arc_ps"], "Xps2")
-
-    return "\n".join([
-        f"* mrm_wdm{N_CH}.sp — GENERATED by experiments/giona/build_frontend.py.",
-        "* Do not edit; edit the generator.",
-        "*",
-        f"* {N_CH}-channel add-drop micro-ring modulator. One instance, one PN",
-        "* junction and one heater serving every wavelength on the bus — which is",
-        "* why this exists instead of replicating the single-channel",
-        "* examples/photonic/pcells/mrm.sp (that would give one junction PER",
-        "* channel, so 8x the terminal current).",
-        "*",
-        "* Ports: in / th / add / dr, each 8 channels x (re, im, wl), then",
-        "*        pn_a pn_c ht_p ht_n.",
-        "* Two arcs of pi*radius each: r_heater and the diode are PER ARC (the",
-        "* heaters are in series, the junctions in parallel), while p_pi_th is a",
-        "* whole-ring number. See examples/photonic/pcells/mrm.sp for the full",
-        "* provenance and caveats.",
-        "",
-        header,
-        "",
-        "* Per-instance phase-shifter card, built from this instance's params.",
-        card,
-        "",
-        cplb,
-        cpld,
-        ps1,
-        ps2,
-        ".ends",
-        "",
-    ])
+    with `m` the order nearest the target. Exact, and 72 rings now cost 72
+    arithmetic expressions instead of 8 712 solves.
+    """
+    L = 2.0 * math.pi * RADIUS_M
+    m = round(guess * L / (target_nm * 1e-9))
+    return m * (WL_REF_NM * 1e-9) / L + N_G * (target_nm - WL_REF_NM) / target_nm
 
 
 # ── the front end ────────────────────────────────────────────────────────────
-def frontend(trims: list[float]) -> str:
+def frontend(trims: list[float], wtrims: list[float]) -> str:
     L: list[str] = []
     add = L.append
 
@@ -169,7 +122,8 @@ def frontend(trims: list[float]) -> str:
     add("* `waveguide_delay=1` plus a timestep below it.")
     add("")
     add(f".include {PCELLS / 'source_bank.sp'}")
-    add(f".include {OUT / f'mrm_wdm{N_CH}.sp'}")
+    add(f".va {VA_MRM}")
+    add(f".va {VA_WEIGHT}")
     add("")
     add("* ── geometry knobs ─────────────────────────────────────────────────")
     add(".param pitch=100e-6      * bus waveguide between adjacent rings (m)")
@@ -177,7 +131,8 @@ def frontend(trims: list[float]) -> str:
     add(".param wg_loss=2.0       * waveguide loss (dB/cm)")
     add(".param n_g=4.2")
     add(".param radius=8e-6")
-    add(".param kappa_l=0.183")
+    add(".param kappa_l=0.183     * modulator rings, 300 nm coupler gaps")
+    add(".param kappa_w=0.387     * weight rings, 200 nm gaps (FEM ratio 2.115)")
     add("")
 
     # ── optical buses. Every one is an 8-channel bundle. ────────────────────
@@ -189,6 +144,9 @@ def frontend(trims: list[float]) -> str:
     ports += ["l1a", "l1b", "l2a", "l2b", "l2c", "l2d"]
     for i in range(1, N_CH + 1):
         ports += [f"win{i}", f"dark{i}", f"wthru{i}", f"wdrop{i}"]
+        # Internal hops of bank i's bus and drop cascades.
+        ports += [f"wb{i}_{j}" for j in range(2, N_CH + 1)]
+        ports += [f"wd{i}_{j}" for j in range(2, N_CH + 1)]
     for p in ports:
         add(f".optical_port {p} {N_CH}")
     add("")
@@ -217,10 +175,14 @@ def frontend(trims: list[float]) -> str:
     add("* toward n_g (the generator finds it numerically).")
     for i in range(1, N_CH + 1):
         add(f"* ring {i} — channel {i - 1}, lambda = {LAMBDAS_NM[i - 1]:.2f} nm")
-        add(f"Xr{i} bin{i} bout{i} ain{i} dout{i} pn{i} 0 ht{i} 0 mrm_wdm{N_CH}"
-            f" radius={{radius}} kappa_l={{kappa_l}} n_eff={trims[i - 1]:.9f}")
+        add(f"Xr{i} bin{i} bout{i} ain{i} dout{i} pn{i} 0 ht{i} 0 trm{i}"
+            f" mrm_addrop radius={{radius}} kappa_l={{kappa_l}}"
+            f" n_eff={trims[i - 1]:.9f}")
         add(f"Vpn{i} pn{i} 0 DC 0")
         add(f"Iht{i} 0 ht{i} DC 0")
+        # Each ring's own path to ambient. Tie two `trm` nodes together, or put
+        # a resistor between them, and those two rings are thermally coupled —
+        # the model exposes `th` so a deck can say so.
         if i < N_CH:
             add(f"Xwb{i} bout{i} bin{i + 1} fc_waveguide l_m={{pitch}}"
                 f" n_g={{n_g}} alpha_dB_cm={{wg_loss}}")
@@ -256,19 +218,30 @@ def frontend(trims: list[float]) -> str:
     add("")
 
     # ── weight blocks ──────────────────────────────────────────────────────
-    add("* ── 8 programmable 2x2 weight blocks, 8 weights each = 64 ─────────")
-    add("* Terminals: in1 in2 thru drop (8-channel bundles) then 8 control")
-    add("* wires then the shared return. w=0 dw_dv=1 makes V(Wij) the weight.")
+    add("* ── 8 weight banks of 8 add-drop rings each = 64 physical rings ──")
+    add("* Each bank is a cascade on one bus, ring j trimmed onto channel j, so")
+    add("* ring (i,j) weights wavelength j in block i. They are ring_nheater:")
+    add("* no junction, tuned by an N-doped resistor in the waveguide itself.")
+    add("*")
+    add("* THE CONTROL IS A HEATER VOLTAGE, NOT A WEIGHT. The old fc_optical_2x2")
+    add("* blocks ran w=0 dw_dv=1 so V(Wij) WAS the weight, clamped to [-1,1].")
+    add("* A real ring has no such affordance: VWij drives 2.2 kOhm, tunes the")
+    add("* ring through resonance, and the weight is where that lands the")
+    add("* channel between thru and drop. Zero volts is not zero weight.")
     for i in range(1, N_CH + 1):
-        ctl = " ".join(f"W{i}{j}" for j in range(1, N_CH + 1))
-        # dark{i} — the block's unused second input — is left undriven. The
-        # zero-power laser that used to sit here relied on one scalar line
-        # replicating across 8 channels; it is also unnecessary, since the
-        # block takes its wavelength tag from the lit in1 side.
-        add(f"Xw{i} win{i} dark{i} wthru{i} wdrop{i} {ctl} 0 fc_optical_2x2"
-            f" w=0 dw_dv=1")
+        add(f"* ── bank {i} ──")
         for j in range(1, N_CH + 1):
-            add(f"VW{i}{j} W{i}{j} 0 DC 0")
+            b_in = f"win{i}" if j == 1 else f"wb{i}_{j}"
+            b_out = f"wthru{i}" if j == N_CH else f"wb{i}_{j + 1}"
+            # The drop bus runs the other way, as it does in the ring bank
+            # above: ring j's drop feeds ring j-1's add, so bank i's drop
+            # collects at ring 1 and ring N's add port is the dark end.
+            d_out = f"wdrop{i}" if j == 1 else f"wd{i}_{j}"
+            d_in = f"dark{i}" if j == N_CH else f"wd{i}_{j + 1}"
+            add(f"Xw{i}_{j} {b_in} {b_out} {d_in} {d_out} hw{i}_{j} 0 tw{i}_{j}"
+                f" ring_nheater radius={{radius}} kappa_l={{kappa_w}}"
+                f" n_eff={wtrims[j - 1]:.9f}")
+            add(f"VW{i}{j} hw{i}_{j} 0 DC 0")
     add("")
     add(".op")
     add(".end")
@@ -276,27 +249,16 @@ def frontend(trims: list[float]) -> str:
 
 
 # ── per-ring n_eff trim ──────────────────────────────────────────────────────
-def compute_trims() -> list[float]:
-    """Trim each ring onto its own channel, reusing the example's routine."""
-    sys.path.insert(0, str(REPO / "examples" / "photonic"))
-    import native_pcell_link as link  # noqa: E402
-
-    return [link.trim_n_eff(wl) for wl in LAMBDAS_NM]
-
-
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    cell = OUT / f"mrm_wdm{N_CH}.sp"
-    cell.write_text(mrm_wdm_cell())
-    print(f"wrote {cell}")
-
     print("trimming rings onto their channels …")
-    trims = compute_trims()
+    trims = [n_eff_for(wl) for wl in LAMBDAS_NM]
+    wtrims = [n_eff_for(wl) for wl in LAMBDAS_NM]
     for wl, ne in zip(LAMBDAS_NM, trims):
         print(f"  {wl:.2f} nm → n_eff = {ne:.9f}")
 
     deck = OUT / "giona_frontend.sp"
-    deck.write_text(frontend(trims))
+    deck.write_text(frontend(trims, wtrims))
     print(f"wrote {deck}")
 
     # Smoke check: it must parse, expand and converge.

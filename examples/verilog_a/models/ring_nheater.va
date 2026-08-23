@@ -1,0 +1,238 @@
+// ring_nheater — an add-drop microring tuned by an N-doped silicon heater
+// integrated into the waveguide itself. Any number of WDM channels.
+//
+// The sibling of `mrm_addrop.va`, and deliberately the same ring: same optical
+// core, same dispersion, same thermal port, same closed-form add-drop transfer.
+// What is gone is the PN junction, and what replaces it is not a metal strip
+// sitting near the ring but the ring's own silicon, doped n-type and used as a
+// resistor. On the giona chip these are the 64 weight rings; the 8 modulators
+// are the PN ones.
+//
+// ── The one loop worth writing this model for ────────────────────────────────
+//
+// Doping the waveguide to make a resistor puts free carriers in the optical
+// mode, and free carriers absorb. So the same doping that carries the tuning
+// current also decides how much of the circulating light the ring eats — and
+// what it eats becomes heat, in the same silicon whose resistance is being
+// measured:
+//
+//     N_dope --> free-carrier absorption --> absorbed power --> dT
+//     dT --> R(T) = r_heat0 (1 + alpha_r dT)  AND  dT --> dn_eff --> resonance
+//
+// Both arrows land on the same temperature node, so at a fixed heater voltage
+// the dissipation, the resistance and the resonance are one fixed point that
+// Newton solves rather than three numbers assumed in sequence.
+//
+// The observable consequence, and the reason to build it: put a laser on the
+// bus, sweep the heater voltage, and measure the CURRENT. The heater walks the
+// resonance across the laser; when it crosses, the circulating power spikes by
+// the cavity enhancement, the extra absorbed power warms the silicon further,
+// and the resistance rises. The resonance shows up in an electrical measurement
+// with no photodetector anywhere — the ring reads itself out.
+//
+// It is a small effect and the model does not pretend otherwise: the heater
+// spends milliwatts and the ring absorbs tens of microwatts, so expect a few
+// parts in ten thousand of R at 1 mW of input, growing linearly with laser
+// power. `tests/photonic/ring_nheater_example.rs` pins it.
+//
+// The same loop runs the other way and is why a heated ring can latch: more
+// light means more heat means a redder resonance, which at a fixed laser
+// wavelength can mean more light again. Sweeping the heater up and sweeping it
+// down do not have to give the same curve. Nothing here suppresses that.
+//
+// ── Numbers, and how much to trust them ──────────────────────────────────────
+//
+// `r_heat0` is 2.2 kOhm, measured on the giona weight rings. `kappa_l` is 0.387,
+// which is the giona MRM's fitted 0.183 scaled by the FEM's 200 nm / 300 nm gap
+// ratio (2.115) from `scripts/waveguide_simulations/coupler_kappa_vs_gap.csv` —
+// the weight rings use a 200 nm coupler gap where the modulators use 300 nm, and
+// the waveguide cross-section is otherwise identical. Scaling the FITTED value
+// by the FEM RATIO rather than taking the FEM value outright keeps whatever the
+// fit knows that the simulation does not; the real modulator couples 2.4x harder
+// than its nominal gap predicts, and there is no reason to think the weight
+// rings do not.
+//
+// Everything else is a plausible value for this kind of process and is NOT
+// fitted to anything, because there is no capture of these rings to fit to:
+// `alpha_db_cm` (scattering, doping loss added separately), `n_dope_cm3`,
+// `alpha_r`, `r_th`, `c_th`. Each is flagged at its declaration. Treat them as
+// placeholders with the right order of magnitude, not as a device card.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+// NB: the port list must stay on ONE line — the bundle dialect's scanner reads
+// the module header a line at a time and quietly drops the continuation (#73).
+module ring_nheater(bus_in, thru_out, add_in, drop_out, htr_p, htr_n, th);
+
+    optical_bundle bus_in, thru_out, add_in, drop_out;
+
+    inout htr_p, htr_n;
+    electrical htr_p, htr_n;
+    inout th;
+    thermal th;
+
+    // ── geometry, coupling, passive loss ─────────────────────────────────────
+    parameter real radius      = 8.0e-6 from (0:inf);  // ring radius, m
+    parameter real n_g         = 4.2    from (0:inf);  // group index at wl_ref
+    parameter real n_eff       = 2.2810 from (0:inf);  // effective index at wl_ref
+    // Scattering and sidewall loss ONLY. The doping's contribution is computed
+    // from `n_dope_cm3` below, so raising the doping raises the loss by itself
+    // rather than needing this number changed to match. PLACEHOLDER.
+    parameter real alpha_db_cm = 3.0    from [0:inf);  // POWER loss, dB/cm
+    // 200 nm coupler gap: the MRM's fitted 0.183 times the FEM's 200/300 ratio.
+    parameter real kappa_l     = 0.387  from [0:1.5];  // kappa*L, both couplers
+    parameter real wl_ref_nm   = 1550.0 from (0:inf);  // where n_eff/n_g are quoted
+
+    // ── the N doping: a resistor and an absorber, one population ─────────────
+    // Effective density AS THE MODE SEES IT, so it already carries the overlap
+    // between the doped region and the optical field — which is why it is far
+    // below the metallurgical doping a process would quote. 1.35e17 puts about
+    // 5 dB/cm of free-carrier loss on top of the scattering above, which is the
+    // usual price of a waveguide-integrated heater. PLACEHOLDER.
+    parameter real n_dope_cm3  = 1.35e17 from [0:inf);
+    // Soref & Bennett 1987 at 1550 nm, electrons only — n-type, so there are no
+    // excess holes. Densities in cm^-3, loss in cm^-1.
+    parameter real sb_da_e     = 8.5e-18;              // cm^2
+
+    // ── the heater ───────────────────────────────────────────────────────────
+    parameter real r_heat0     = 2200.0 from (0:inf);  // ohms at ambient, MEASURED
+    // Doped silicon above freeze-out is metal-like: mobility falls with
+    // temperature, so the resistance rises. This is the coefficient the
+    // resonance dip is read out through, and it is a PLACEHOLDER — typical
+    // reported values for doped-Si photonic heaters are 1e-3 to 2e-3 /K.
+    parameter real alpha_r     = 1.5e-3;               // 1/K
+
+    // ── two-photon absorption ────────────────────────────────────────────────
+    parameter real beta_tpa    = 7.9e-12 from [0:inf); // m/W
+    parameter real a_eff_m2    = 1.257e-13 from (0:inf); // effective mode area, m^2
+
+    // ── thermal ──────────────────────────────────────────────────────────────
+    // A heater inside the waveguide is far more efficient than a metal strip
+    // above it: 8290 K/W is about 10 mW per pi on this ring, against the
+    // modulator's 26-52 mW. PLACEHOLDER.
+    parameter real r_th        = 8290.0 from (0:inf);  // K/W
+    parameter real c_th        = 2.4e-10 from (0:inf); // J/K (tau_th = 2 us). PLACEHOLDER.
+    parameter real dn_dt       = 1.86e-4;              // thermo-optic, 1/K
+
+    real dT, wl_ref, l_ring, l_arc, t_c, s_c, v_h;
+    real alpha_dope, alpha_lin, alpha_tot, p_htr, r_htr, p_abs;
+    real n_lam, n_tot, lam, phi_h, a_h;
+    real ph_re, ph_im, a_re, a_im, d_re, d_im, d_sq;
+    real nt_re, nt_im, nd_re, nd_im, ht_re, ht_im, hd_re, hd_im;
+    real in_re, in_im, ad_re, ad_im, nb_re, nb_im, rb_re, rb_im;
+    real rd_re, rd_im, i_circ;
+    integer k;
+
+    analog begin
+        l_ring = 2.0 * `M_PI * radius;
+        l_arc  = 0.5 * l_ring;
+        wl_ref = wl_ref_nm * 1e-9;
+        t_c    = cos(kappa_l);
+        s_c    = sin(kappa_l);
+        dT     = Temp(th);
+
+        // ── loss: scattering plus the doping's free carriers ─────────────────
+        // The doping is fixed — every donor is ionised well below room
+        // temperature — so this does not move with dT. What moves is the
+        // resistance, below, and the resonance.
+        alpha_dope = 100.0 * sb_da_e * n_dope_cm3;     // cm^-1 -> m^-1
+        alpha_lin  = alpha_db_cm * 100.0 * `M_LN10 / 10.0 + alpha_dope;
+
+        // ── index: temperature only; there is no junction here ───────────────
+        n_tot = dn_dt * dT;
+
+        // ── circulating power, and the TPA it drives ─────────────────────────
+        // ponytail: one-shot, not a fixed point — TPA corrects the transfer but
+        // not the power that produced it. These rings are lossier and more
+        // strongly coupled than the modulators, so the enhancement is only ~7x
+        // and TPA is well under a per cent of alpha at any sane input.
+        a_h    = exp(-alpha_lin * l_arc / 2.0);
+        i_circ = 0.0;
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            lam   = LAMBDA(bus_in, k);
+            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;
+            phi_h = 2.0 * `M_PI * n_lam * l_arc / lam;
+            ph_re = a_h * cos(phi_h);
+            ph_im = a_h * sin(phi_h);
+            a_re  = ph_re * ph_re - ph_im * ph_im;
+            a_im  = 2.0 * ph_re * ph_im;
+            d_re  = 1.0 - t_c * t_c * a_re;
+            d_im  =     - t_c * t_c * a_im;
+            d_sq  = d_re * d_re + d_im * d_im;
+
+            in_re = OF(E_RE(bus_in, k));
+            in_im = OF(E_IM(bus_in, k));
+            ad_re = OF(E_RE(add_in, k));
+            ad_im = OF(E_IM(add_in, k));
+
+            // The two arcs' inputs: rb just past the bus coupler, rd just past
+            // arc 2.  rb = -j*s*(in + t*P*ad)/D,  rd = t*P*rb - j*s*ad
+            nb_re =  s_c * (in_im + t_c * (ph_re * ad_im + ph_im * ad_re));
+            nb_im = -s_c * (in_re + t_c * (ph_re * ad_re - ph_im * ad_im));
+            rb_re = (nb_re * d_re + nb_im * d_im) / d_sq;
+            rb_im = (nb_im * d_re - nb_re * d_im) / d_sq;
+            rd_re = t_c * (ph_re * rb_re - ph_im * rb_im) + s_c * ad_im;
+            rd_im = t_c * (ph_re * rb_im + ph_im * rb_re) - s_c * ad_re;
+
+            i_circ = i_circ + 0.5 * (rb_re * rb_re + rb_im * rb_im
+                                   + rd_re * rd_re + rd_im * rd_im);
+        end
+
+        alpha_tot = alpha_lin + beta_tpa * i_circ / a_eff_m2;
+        a_h       = exp(-alpha_tot * l_arc / 2.0);
+
+        // ── the heater, and the light it did not ask for ─────────────────────
+        // R depends on T, T depends on V^2/R, so this is a fixed point rather
+        // than a formula — which is the whole point, because the third term in
+        // it is the absorbed light.
+        v_h   = V(htr_p, htr_n);
+        r_htr = r_heat0 * (1.0 + alpha_r * dT);
+        I(htr_p, htr_n) <+ v_h / r_htr;
+        p_htr = v_h * v_h / r_htr;
+        p_abs = i_circ * (1.0 - exp(-alpha_tot * l_ring));
+
+        Pwr(th) <+ c_th * ddt(Temp(th)) + Temp(th) / r_th - p_htr - p_abs;
+
+        // ── the add-drop transfer, per channel ───────────────────────────────
+        //     thru = t*(1-A)/D * in  -  s^2*P/D * ad
+        //     drop = -s^2*P/D  * in  +  t*(1-A)/D * ad      D = 1 - t^2*A
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            lam   = LAMBDA(bus_in, k);
+            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;
+            phi_h = 2.0 * `M_PI * n_lam * l_arc / lam;
+            ph_re = a_h * cos(phi_h);
+            ph_im = a_h * sin(phi_h);
+            a_re  = ph_re * ph_re - ph_im * ph_im;
+            a_im  = 2.0 * ph_re * ph_im;
+            d_re  = 1.0 - t_c * t_c * a_re;
+            d_im  =     - t_c * t_c * a_im;
+            d_sq  = d_re * d_re + d_im * d_im;
+
+            nt_re =  t_c * (1.0 - a_re);
+            nt_im = -t_c * a_im;
+            nd_re = -s_c * s_c * ph_re;
+            nd_im = -s_c * s_c * ph_im;
+
+            ht_re = (nt_re * d_re + nt_im * d_im) / d_sq;
+            ht_im = (nt_im * d_re - nt_re * d_im) / d_sq;
+            hd_re = (nd_re * d_re + nd_im * d_im) / d_sq;
+            hd_im = (nd_im * d_re - nd_re * d_im) / d_sq;
+
+            in_re = OF(E_RE(bus_in, k));
+            in_im = OF(E_IM(bus_in, k));
+            ad_re = OF(E_RE(add_in, k));
+            ad_im = OF(E_IM(add_in, k));
+
+            OF(E_RE(thru_out, k)) <+ ht_re * in_re - ht_im * in_im
+                                   + hd_re * ad_re - hd_im * ad_im;
+            OF(E_IM(thru_out, k)) <+ ht_re * in_im + ht_im * in_re
+                                   + hd_re * ad_im + hd_im * ad_re;
+            OF(E_RE(drop_out, k)) <+ hd_re * in_re - hd_im * in_im
+                                   + ht_re * ad_re - ht_im * ad_im;
+            OF(E_IM(drop_out, k)) <+ hd_re * in_im + hd_im * in_re
+                                   + ht_re * ad_im + ht_im * ad_re;
+        end
+    end
+endmodule

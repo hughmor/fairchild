@@ -217,7 +217,7 @@ def report(title: str, rows) -> None:
           f"  worst depth error {max(abs(r['derr']) for r in rows):.2f} dB")
 
 
-def extrapolate(rows_card) -> None:
+def extrapolate(rows_card) -> list[tuple[float, float, float]]:
     """Card-compatible vs the new default, past where the capture can see.
 
     The May sweep spans -1 to +1 V. Over that window the card's straight line
@@ -232,10 +232,13 @@ def extrapolate(rows_card) -> None:
     print(f"{'V_pn':>6} {'card-compatible':>17} {'physical':>12} {'gap':>9}")
     zero_c = {r["v_pn"]: r for r in rows_card}
     ref = at_bias(ckt, 0.0, 0.0, R_TH_MUTED)["v_res"]
+    out = []
     for v in (-4.0, -3.0, -2.0, -1.0, 0.0):
         phys = (at_bias(ckt, v, 0.0, R_TH_MUTED)["v_res"] - ref) * 1e3
         card = zero_c[v]["v_shift"] if v in zero_c else float("nan")
         print(f"{v:6.1f} {card:14.1f} pm {phys:9.1f} pm {phys - card:6.1f} pm")
+        out.append((v, card, phys))
+    return out
 
 
 def main() -> None:
@@ -258,8 +261,7 @@ def main() -> None:
     out["muted_worst_pm"] = max(abs(r["err"]) for r in muted)
 
     # ── 2. shipping defaults ────────────────────────────────────────────────
-    if not args.no_extrapolate:
-        extrapolate(muted)
+    extra = extrapolate(muted) if not args.no_extrapolate else []
 
     print("\n2. card-compatible, thermal live — the gap IS the new physics")
     ship = grid(ckt, BIAS, R_TH_SHIP)
@@ -294,10 +296,10 @@ def main() -> None:
 
     (RESULTS / "va_mrm_match.json").write_text(json.dumps(out, indent=2) + "\n")
     print(f"\nwrote {RESULTS / 'va_mrm_match.json'}")
-    plot(ckt, muted, ship, powers, walk_d, walk_v)
+    plot(ckt, muted, ship, powers, walk_d, walk_v, extra)
 
 
-def plot(ckt, muted, ship, powers, walk_d, walk_v) -> None:
+def plot(ckt, muted, ship, powers, walk_d, walk_v, extra) -> None:
     fig = plt.figure(figsize=(15.5, 9.0))
     gs = fig.add_gridspec(2, 3, hspace=0.34, wspace=0.27)
 
@@ -336,24 +338,25 @@ def plot(ckt, muted, ship, powers, walk_d, walk_v) -> None:
     ax.legend(fontsize=8)
     ax.grid(alpha=0.25)
 
-    # (1,0) matched half.
+    # (1,0) card-compatible agreement, and where the two parametrisations part.
     ax = fig.add_subplot(gs[1, 0])
-    lab_m = [f"{r['v_pn']:+.2f}V" for r in muted]
-    ax.bar(range(len(muted)), [r["err"] for r in muted],
-           color=["#4c72b0" if r["v_pn"] <= 0 else "#c44e52" for r in muted])
-    ax.set_xticks(range(len(muted)))
-    ax.set_xticklabels(lab_m, fontsize=7, rotation=60)
-    ax.axhline(0, color="k", lw=0.8)
-    ax.set_ylim(-1, 1)
-    ax.set_ylabel("shift error, VA − cell (pm)")
-    ax.set_title("1. matched half, thermal muted\nreverse (blue) | forward (red)",
+    if extra:
+        v, card, phys = (np.array(c) for c in zip(*extra))
+        ax.plot(v, card, "o-", lw=2.4, alpha=0.6, label="card linearisation")
+        ax.plot(v, phys, "s--", label="one carrier population")
+        ax.axvspan(-1.0, 0.0, color="0.88", zorder=0, label="what the May capture spans")
+        for x, c, ph in extra:
+            if abs(ph - c) > 2:
+                ax.annotate(f"{ph - c:+.0f} pm", (x, (c + ph) / 2), fontsize=7,
+                            ha="right", va="center")
+    ax.set_xlabel("junction voltage (V)")
+    ax.set_ylabel("resonance shift (pm)")
+    ax.set_title(f"1. card-compatible mode is the cell to "
+                 f"{max(abs(r['err']) for r in muted):.2f} pm;\n"
+                 f"the DEFAULT is sqrt-shaped, and parts company outside the data",
                  fontsize=10)
-    ax.grid(alpha=0.25, axis="y")
-    ax.text(0.5, 0.5, f"max |error| = {max(abs(r['err']) for r in muted):.2f} pm\n"
-                      f"over {len(muted)} bias points\n"
-                      f"depth to {max(abs(r['derr']) for r in muted):.3f} dB",
-            transform=ax.transAxes, ha="center", va="center", fontsize=11,
-            bbox={"boxstyle": "round", "fc": "#eef4ee", "ec": "#7aa87a"})
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.25)
 
     # (1,1) shipping defaults — the same bars, with the new physics switched on.
     ax = fig.add_subplot(gs[1, 1])
@@ -384,8 +387,9 @@ def plot(ckt, muted, ship, powers, walk_d, walk_v) -> None:
     ax.legend(fontsize=8)
     ax.grid(alpha=0.25, which="both")
 
-    fig.suptitle("mrm_addrop.va vs the discrete mrm.sp cell — matched up to the "
-                 "cell's limitations, not beyond them", fontsize=12)
+    fig.suptitle("mrm_addrop.va in CARD-COMPATIBLE mode vs the discrete mrm.sp cell\n"
+                 "(the model's own defaults count carriers once — see panel 1)",
+                 fontsize=12)
     out = RESULTS / "va_mrm_compare.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     print(f"wrote {out}")

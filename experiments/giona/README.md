@@ -22,7 +22,16 @@ scripts here assume the chip's topology, PCB network, and dataset layout.
 | `fit_transient.py` | (machinery + synthetic recovery selftest) | time-domain fitting vs an AWG-drive/scope-PD capture | — |
 | `expt_forward_mismatch.py` | synthetic | model-**form** adequacy: linear vs full PN | 4.6× residual floor gap |
 | `sweep_mod_bank.py` | — | 8-ring cascade spectrum from `netlists/giona_mod_bank_full.sp` | `results/giona_mod_bank_spectrum.png` |
-| `build_frontend.py` | — | generates the chip front-end netlist (source bank → 8-ring bank → 2 mm bus → 1:8 log tree → 8 programmable 2×2 weight blocks) | `netlists/giona_frontend.sp`, `netlists/mrm_wdm8.sp` |
+| `build_frontend.py` | — | generates the chip front-end netlist (source bank → 8-ring modulator bank → 2 mm bus → 1:8 log tree → 8 banks of 8 weight rings) | `netlists/giona_frontend.sp` |
+| `compare_va_mrm.py` | — | the Verilog-A add-drop ring against the native `mrm.sp` cell it replaces | `results/va_mrm_match.json` |
+| `va_vs_may_data.py` | May sparse joint IV+spectra | the same Verilog-A ring against the capture the card was fitted to | `results/va_vs_may_data.json` |
+| `nheater_readout.py` | — | the weight ring finding its own resonance through its heater current | `results/nheater_readout.png` |
+
+The chip has two kinds of ring and now two Verilog-A models for them:
+`examples/verilog_a/models/mrm_addrop.va` for the 8 PN modulators and
+`ring_nheater.va` for the 64 N-doped-heater weight rings. `build_frontend.py`
+instantiates both; neither needs the hand-generated 8-channel subckt this
+directory used to carry, because both are bundle-aware.
 
 `ringfit.py` is also the shared library: dataset → observables
 (`load_sweep`, `extract_data`), netlist assembly, ring wavelength sweep,
