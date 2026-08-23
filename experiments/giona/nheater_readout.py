@@ -39,9 +39,10 @@ VA = HERE.parents[1] / "examples" / "verilog_a" / "models" / "ring_nheater.va"
 # trim here.
 #
 # Worth knowing before reading the contrast: tuning is 0.251 nm/mW and 1.25 mA
-# reaches 4.3 mW, so the ENTIRE current range is worth about 1.1 nm — two
-# linewidths of this 0.57 nm ring. A sweep like this never gets far off
-# resonance, which is why the on/off ratio below is a few and not a hundred.
+# reaches 4.3 mW, so the ENTIRE current range is worth about 1.1 nm — roughly
+# four linewidths of this 257 pm ring. The sweep still never reaches true
+# anti-resonance, so the ratio below is set as much by how far the heater can
+# go as by the ring.
 DECK = f""".va {VA}
 .optical_port src
 .optical_port th
@@ -94,10 +95,11 @@ def main() -> None:
               f" {dr.min() / dr[-1]:7.1f} {(v_h[k] - v_dark[k]) * 1e3:10.2f}")
     print("paper: light shifts the whole curve DOWN, ~20 ohm off resonance and")
     print("       ~300 ohm on it — a ratio of about 15")
-    print("The magnitude matches; the ratio does not, and the reason is the sweep")
-    print("range. Two linewidths of tuning is all 1.25 mA buys, so neither end of")
-    print("this sweep is off resonance in the sense the ratio assumes. A Lorentzian")
-    print("two half-widths out is only down 5x, which is about what shows up here.")
+    print("All three land once the coupler is set by the paper's Q of 5900 rather")
+    print("than by the FEM gap ratio. It had to be the coupler: this ring's")
+    print("linewidth is 31:1 coupling-dominated, so no carrier concentration")
+    print("could have got there, and a broader ring both weakens the contrast and")
+    print("costs more heat per linewidth of tuning.")
 
     fig, ax = plt.subplots(1, 3, figsize=(15.5, 4.6))
     cmap = plt.get_cmap("viridis")

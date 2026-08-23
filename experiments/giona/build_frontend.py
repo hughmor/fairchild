@@ -59,7 +59,7 @@ VA_WEIGHT = REPO / "examples" / "verilog_a" / "models" / "ring_nheater.va"
 
 
 # ── per-ring trim ────────────────────────────────────────────────────────────
-def n_eff_for(target_nm: float, guess: float = 2.2810) -> float:
+def n_eff_for(target_nm: float, guess: float = 2.2810, n_g: float = N_G) -> float:
     """The `n_eff` that puts a resonance at `target_nm`. Closed form.
 
     This used to scan 121 candidate indices through a full ring simulation per
@@ -75,7 +75,7 @@ def n_eff_for(target_nm: float, guess: float = 2.2810) -> float:
     """
     L = 2.0 * math.pi * RADIUS_M
     m = round(guess * L / (target_nm * 1e-9))
-    return m * (WL_REF_NM * 1e-9) / L + N_G * (target_nm - WL_REF_NM) / target_nm
+    return m * (WL_REF_NM * 1e-9) / L + n_g * (target_nm - WL_REF_NM) / target_nm
 
 
 # ── the front end ────────────────────────────────────────────────────────────
@@ -128,7 +128,8 @@ def frontend(trims: list[float], wtrims: list[float], real_weights: bool) -> str
     add(".param n_g=4.2")
     add(".param radius=8e-6")
     add(".param kappa_l=0.183     * modulator rings, 300 nm coupler gaps")
-    add(".param kappa_w=0.387     * weight rings, 200 nm gaps (FEM ratio 2.115)")
+    add(".param kappa_w=0.2510    * weight rings, set by their Q of 5900")
+    add(".param n_g_w=3.98        * weight rings, set by their 12.1 nm FSR")
     add("")
 
     # ── optical buses. Every one is an 8-channel bundle. ────────────────────
@@ -257,7 +258,7 @@ def frontend(trims: list[float], wtrims: list[float], real_weights: bool) -> str
             d_in = f"dark{i}" if j == N_CH else f"wd{i}_{j + 1}"
             add(f"Xw{i}_{j} {b_in} {b_out} {d_in} {d_out} hw{i}_{j} 0 tw{i}_{j}"
                 f" ring_nheater radius={{radius}} kappa_l={{kappa_w}}"
-                f" n_eff={wtrims[j - 1]:.9f}")
+                f" n_g={{n_g_w}} n_eff={wtrims[j - 1]:.9f}")
             add(f"VW{i}{j} hw{i}_{j} 0 DC 0")
     add("")
     add(".op")
@@ -270,7 +271,8 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     print("trimming rings onto their channels …")
     trims = [n_eff_for(wl) for wl in LAMBDAS_NM]
-    wtrims = [n_eff_for(wl) for wl in LAMBDAS_NM]
+    # The weight rings have their own group index, so their trim does too.
+    wtrims = [n_eff_for(wl, n_g=3.98) for wl in LAMBDAS_NM]
     for wl, ne in zip(LAMBDAS_NM, trims):
         print(f"  {wl:.2f} nm → n_eff = {ne:.9f}")
 

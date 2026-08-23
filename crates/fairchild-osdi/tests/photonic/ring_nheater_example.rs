@@ -278,3 +278,64 @@ fn current_drive_amplifies_the_readout_and_voltage_drive_suppresses_it() {
         frac_v * 100.0
     );
 }
+
+/// Q and the FSR, because between them they set two parameters.
+///
+/// `n_g` comes from the free spectral range at a fixed 8 um radius —
+/// `FSR = lambda^2/(n_g*L)` leaves nothing else to give — and `kappa_l` comes
+/// from the loaded Q, because the linewidth of this ring is 31:1
+/// coupling-dominated and the loss channels cannot reach it. Neither was fitted
+/// alongside anything else, so if either drifts, the parameter that was solved
+/// from it is wrong rather than merely stale.
+#[test]
+fn the_linewidth_and_free_spectral_range_are_the_ones_they_were_solved_from() {
+    if !common::have_compiler() {
+        return;
+    }
+    // Dark and cold: a nanowatt moves nothing, so this is the passive cavity.
+    // The wavelength belongs to the source, not the ring, so it is swept by
+    // rewriting the deck rather than through the instance-parameter string.
+    let drop = |nm: f64| {
+        let d = deck(1e-3, 1e-6, "").replace("wavelength_nm=1550", &format!("wavelength_nm={nm}"));
+        let r = solve(&d);
+        let re = r.node_voltage("dr_re_0").unwrap();
+        let im = r.node_voltage("dr_im_0").unwrap();
+        re * re + im * im
+    };
+    /// Resonance and FWHM (nm) of the strongest notch in `[lo, hi]`.
+    fn peak(f: &dyn Fn(f64) -> f64, lo: f64, hi: f64, n: usize) -> (f64, f64) {
+        let step = (hi - lo) / (n - 1) as f64;
+        let y: Vec<f64> = (0..n).map(|i| f(lo + step * i as f64)).collect();
+        let i = y
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        let half = y[i] / 2.0;
+        let mut a = i;
+        let mut b = i;
+        while a > 0 && y[a] > half {
+            a -= 1;
+        }
+        while b < n - 1 && y[b] > half {
+            b += 1;
+        }
+        (lo + step * i as f64, step * (b - a) as f64)
+    }
+
+    let (res, fwhm) = peak(&drop, 1549.2, 1550.1, 46);
+    let q = res / fwhm;
+    assert!(
+        (q - 5900.0).abs() / 5900.0 < 0.12,
+        "loaded Q should be the 5900 kappa_l was solved from; got {q:.0} \
+         (resonance {res:.3} nm, FWHM {:.0} pm)",
+        fwhm * 1e3
+    );
+    let (next, _) = peak(&drop, 1560.5, 1563.5, 31);
+    let fsr = next - res;
+    assert!(
+        (fsr - 12.1).abs() < 0.35,
+        "the FSR should be the 12.1 nm n_g was solved from; got {fsr:.2} nm"
+    );
+}
