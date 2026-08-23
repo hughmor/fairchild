@@ -1639,7 +1639,7 @@ resistance twice and with opposite signs. Absorbed photons make carriers, which
 conduct and pull R down; what everything dissipates warms silicon whose tempco
 pushes R up. The carriers win, so ramping the heater current with a laser on the
 bus finds the resonance as a *dip in resistance*, with no detector in the
-circuit (`experiments/giona/nheater_readout.py` plots it). Which way the
+circuit (`experiments/giona/va_weight_ring_model/nheater_readout.py` plots it). Which way the
 self-heating then feeds back depends on the drive — amplifying at constant
 current, opposing at constant voltage — so these are characterised in current
 mode, and the model says why in its header.

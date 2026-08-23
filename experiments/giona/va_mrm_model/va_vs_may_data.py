@@ -37,7 +37,7 @@ exactly), which is why nobody noticed, and it is why `mrm.sp`'s header says not
 to "correct" `i_sat` alone. `va_iv` corrects it with its partner: halve `i_sat`,
 halve `vol_active`, and both the spectra and the I(V) come out right.
 
-    .venv/bin/python experiments/giona/va_vs_may_data.py
+    .venv/bin/python experiments/giona/va_mrm_model/va_vs_may_data.py
 
 Needs `lightlab` for the raw capture; the extraction is cached to
 `data/may_n2_cache.npz` on the first run and read from there afterwards.
@@ -57,9 +57,9 @@ import numpy as np
 import fairchild as fc
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 RESULTS = HERE / "results"
-CACHE = HERE / "data" / "may_n2_cache.npz"
+CACHE = HERE.parent / "data" / "may_n2_cache.npz"
 VA = REPO / "examples" / "verilog_a" / "models" / "mrm_addrop.va"
 CELL = REPO / "examples" / "photonic" / "pcells" / "mrm.sp"
 
@@ -130,7 +130,7 @@ def load() -> dict[str, np.ndarray]:
         print("cache is the old 250-point extraction; rebuilding")
     import sys
 
-    sys.path.insert(0, str(HERE))
+    sys.path.insert(0, str(HERE.parent / "common"))
     import ringfit
 
     # ringfit downsamples to 250 points across 1.7 nm, which quantises a notch

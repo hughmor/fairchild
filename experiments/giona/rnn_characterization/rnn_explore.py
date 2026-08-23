@@ -20,7 +20,7 @@ Stages, each runnable on its own:
                 operating point, in the recurrent case.
   --osc         Two-neuron oscillator: W = [[1,-1],[1,1]], transient.
 
-Run:  .venv/bin/python experiments/giona/rnn_explore.py --radii --activation
+Run:  .venv/bin/python experiments/giona/rnn_characterization/rnn_explore.py --radii --activation
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ except ImportError as e:
     sys.exit(f"fairchild not installed: {e}")
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 NETLIST = HERE / "netlists" / "giona_rnn_perfectW.sp"
 MRM_CELL = REPO / "examples" / "photonic" / "pcells" / "mrm.sp"
 RESULTS = HERE / "results"

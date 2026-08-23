@@ -30,8 +30,8 @@ twice and must agree to a picometre. Section 2 runs the shipping defaults, where
 they must NOT agree, and the gap should be the size the new physics predicts.
 Section 3 is that new physics on its own axis.
 
-    .venv/bin/python experiments/giona/compare_va_mrm.py
-    .venv/bin/python experiments/giona/compare_va_mrm.py --no-extrapolate
+    .venv/bin/python experiments/giona/va_mrm_model/compare_va_mrm.py
+    .venv/bin/python experiments/giona/va_mrm_model/compare_va_mrm.py --no-extrapolate
 
 The model's DEFAULTS are no longer the cell — it counts carriers once and runs
 depletion through Soref-Bennett. So the Verilog-A ring here runs in
@@ -56,7 +56,7 @@ import numpy as np
 import fairchild as fc
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 RESULTS = HERE / "results"
 VA = REPO / "examples" / "verilog_a" / "models" / "mrm_addrop.va"
 CELL = REPO / "examples" / "photonic" / "pcells" / "mrm.sp"

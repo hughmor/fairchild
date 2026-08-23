@@ -16,9 +16,9 @@ Stages (each vs the extracted observables from the npz cache):
   3. EO      : notch λ vs junction voltage     → dn_dv (linear; the device IS linear)
 
 Cache (extracted once from the 3.6 GB pickle):
-  .venv/bin/python experiments/giona/fit_jul_neuron3.py --cache  # rebuild
+  .venv/bin/python experiments/giona/pn_modulator_fit/fit_jul_neuron3.py --cache  # rebuild
 Run:
-  .venv/bin/python experiments/giona/fit_jul_neuron3.py
+  .venv/bin/python experiments/giona/pn_modulator_fit/fit_jul_neuron3.py
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import fairchild as fc
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data" / "giona_mod_neuron3_joint_IV_spec_20260710T151201Z.pkl.gz"
-CACHE = HERE / "data" / "neuron3_cache.npz"
+CACHE = HERE.parent / "data" / "neuron3_cache.npz"
 OUT_JSON = HERE / "results" / "giona_neuron3_pn_th_ps_fit.json"
 
 # Ring identified in the data: notches at 1541.245 / 1553.438 nm respond to

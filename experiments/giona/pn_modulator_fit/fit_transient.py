@@ -39,7 +39,7 @@ from scipy.optimize import differential_evolution, least_squares
 import fairchild as fc
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 RING = REPO / "examples" / "photonic" / "native_mrr_modulator.sp"
 
 # Ring round trip → the timestep ceiling and the delay requirement.

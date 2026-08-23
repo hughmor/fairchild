@@ -15,7 +15,7 @@ enough for real data. This script asks the question that actually matters:
 The headline is the MINIMUM ACHIEVABLE RESIDUAL of each model — that comparison
 is inverse-crime-free (it measures structural adequacy, not param recovery).
 
-Run:  .venv/bin/python experiments/giona/expt_forward_mismatch.py
+Run:  .venv/bin/python experiments/giona/pn_modulator_fit/expt_forward_mismatch.py
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "common"))
 import fit_transient as ft  # noqa: E402
 
 OBS = "P(pn_in)"            # strongly-modulated circulating field (see fit_transient)

@@ -67,7 +67,7 @@ fn solve(deck: &str) -> fairchild_core::NrResult {
 /// The model's defaults are no longer the cell — it counts carriers once and
 /// runs the depletion side through Soref-Bennett, which is sqrt-shaped where the
 /// card is linear. That is a deliberate improvement and it is checked against
-/// the May capture in `experiments/giona/va_vs_may_data.py`, not here. What is
+/// the May capture in `experiments/giona/va_mrm_model/va_vs_may_data.py`, not here. What is
 /// checked here is that the improvement did not quietly break the port: with
 /// these eleven overrides the model must still be the cell, exactly, and the
 /// sabotage list in this file's header still applies through them.

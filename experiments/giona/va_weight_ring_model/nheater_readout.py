@@ -15,7 +15,7 @@ less power means cooler means R falls further, so the signal is amplified
 loop fights it. Current mode also runs away above 2.73 mA on these defaults,
 which is presumably why the published sweep stops at 1.25.
 
-    .venv/bin/python experiments/giona/nheater_readout.py
+    .venv/bin/python experiments/giona/va_weight_ring_model/nheater_readout.py
 
 Writes results/nheater_readout.png.
 """
@@ -32,7 +32,7 @@ import fairchild as fc
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
-VA = HERE.parents[1] / "examples" / "verilog_a" / "models" / "ring_nheater.va"
+VA = HERE.parents[2] / "examples" / "verilog_a" / "models" / "ring_nheater.va"
 
 # The model's own n_eff already puts the cold resonance about a third of a
 # nanometre blue of 1550, so the sweep crosses it near the middle. Nothing to

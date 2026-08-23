@@ -10,7 +10,7 @@ The decoupled workflow the dn_di parametrization enables:
      with everything else pinned from the May staged fit (alphas converted to
      post-loss-fix units: fitted-pre-fix / 2).
 
-Run:  .venv/bin/python experiments/giona/fit_may_injection.py
+Run:  .venv/bin/python experiments/giona/pn_modulator_fit/fit_may_injection.py
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "common"))
 from ringfit import (  # noqa: E402
     extract_data, load_sweep, prefit_diode_iv, wavelength_sweep, _spectrum_loss,
 )

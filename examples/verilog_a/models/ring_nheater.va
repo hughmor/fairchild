@@ -54,7 +54,7 @@
 // Put a laser on the bus, ramp the heater current, measure the voltage. The
 // heater walks the resonance across the laser line; where it crosses, the
 // circulating power spikes by the cavity enhancement, the surface states make
-// carriers out of it, and R dips. `experiments/giona/nheater_readout.py` plots
+// carriers out of it, and R dips. `experiments/giona/va_weight_ring_model/nheater_readout.py` plots
 // it against the dark curve.
 //
 // The thermal half of the loop also makes the dip asymmetric and, pushed hard
