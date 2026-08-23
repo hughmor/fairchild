@@ -185,9 +185,11 @@ impl CircuitTopology {
 
     /// Materialise sparse rows as a dense row-major matrix.
     ///
-    /// For the paths that are inherently O(n²) anyway — dense LU, the
-    /// condition-number estimate, and the one-shot `klu_solve_dense`. Never
-    /// call it from a Newton iteration.
+    /// For the paths that are inherently O(n²) anyway — dense LU and the
+    /// condition-number estimate. Never call it from a Newton iteration, and
+    /// never hand its result to a sparse backend (KLU's one-shot path did
+    /// exactly that until #75, re-densifying what the caller had built
+    /// sparse).
     ///
     /// ponytail: dense LU is O(n³) and the condition estimate is a diagnostic,
     /// so materialising for them is not a corner being cut — it is the right

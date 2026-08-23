@@ -23,11 +23,13 @@
 //!   * `klu_tsolve`   — back-substitute `Aᵀ·x = b` (for adjoint paths)
 //!   * `klu_free_symbolic` / `klu_free_numeric`
 //!
-//! [`dense_to_csc`] remains for the one-shot `klu_solve_dense` path and for
-//! callers with no structural pattern to offer. Do **not** reach for it inside
-//! an iteration loop: at n=3200 one call costs ~41 ms, because it walks a
-//! row-major matrix in column-major order. The cached path in
-//! `fairchild-core::solver` exists precisely to avoid it.
+//! [`dense_to_csc`] remains for callers with no structural pattern to offer
+//! (in-tree that is only this crate's own tests — the one-shot
+//! `klu_solve_dense` wrapper it once served is gone with its last caller,
+//! see #75). Do **not** reach for it inside an iteration loop: at n=3200 one
+//! call costs ~41 ms, because it walks a row-major matrix in column-major
+//! order. The cached path in `fairchild-core::solver` exists precisely to
+//! avoid it.
 //!
 //! The `klu_common` C struct is treated as **fully opaque** — we never
 //! dereference it from Rust.  Errors are detected via the return values
@@ -378,30 +380,11 @@ pub fn dense_to_csc(a: &[Vec<f64>], threshold: f64) -> (Vec<i32>, Vec<i32>, Vec<
     (ap, ai, ax)
 }
 
-/// One-shot Ax = b via KLU.  Allocates a fresh `KluCommon` /
-/// `KluSymbolic` / `KluNumeric` per call — fine for "DenseSolver-style"
-/// callers; the proper symbolic/numeric reuse path goes through the
-/// caching `LinearSolver` trait extension in `fairchild-core`.
-pub fn klu_solve_dense(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, KluError> {
-    let n = b.len();
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    if a.len() != n || a.iter().any(|row| row.len() != n) {
-        return Err(KluError::BadShape);
-    }
-
-    let (mut ap, mut ai, mut ax) = dense_to_csc(a, 1e-30);
-    let mut common = KluCommon::new();
-    let symbolic = KluSymbolic::analyze(n, &mut ap, &mut ai, &mut common)?;
-    let numeric = KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut common)?;
-    let mut x = b.to_vec();
-    numeric.solve(&symbolic, &mut x, &mut common)?;
-    if x.iter().any(|v| !v.is_finite()) {
-        return Err(KluError::SolveFailed);
-    }
-    Ok(x)
-}
+// `klu_solve_dense` used to live here: one-shot Ax = b taking a dense n×n.
+// Its last caller was `KluSolver::solve` in `fairchild-core`, which now builds
+// CSC straight from its sparse rows (#75) — a dense one-shot entry point is an
+// O(n²) trap with no remaining legitimate user, so it is gone rather than
+// deprecated. The analyze/factor/solve primitives it composed are all public.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -410,6 +393,22 @@ pub fn klu_solve_dense(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, KluError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One-shot analyze + factor + solve over `dense_to_csc` — the composition
+    /// `klu_solve_dense` used to package. Kept as the FFI smoke test.
+    fn solve_dense(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, KluError> {
+        let n = b.len();
+        let (mut ap, mut ai, mut ax) = dense_to_csc(a, 1e-30);
+        let mut common = KluCommon::new();
+        let symbolic = KluSymbolic::analyze(n, &mut ap, &mut ai, &mut common)?;
+        let numeric = KluNumeric::factor(&mut ap, &mut ai, &mut ax, &symbolic, &mut common)?;
+        let mut x = b.to_vec();
+        numeric.solve(&symbolic, &mut x, &mut common)?;
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(KluError::SolveFailed);
+        }
+        Ok(x)
+    }
 
     #[test]
     fn klu_diagonal_3x3() {
@@ -420,7 +419,7 @@ mod tests {
             vec![0.0, 0.0, 4.0],
         ];
         let b = vec![4.0, 9.0, 16.0];
-        let x = klu_solve_dense(&a, &b).unwrap();
+        let x = solve_dense(&a, &b).unwrap();
         assert!((x[0] - 2.0).abs() < 1e-12, "x[0]={}", x[0]);
         assert!((x[1] - 3.0).abs() < 1e-12, "x[1]={}", x[1]);
         assert!((x[2] - 4.0).abs() < 1e-12, "x[2]={}", x[2]);
@@ -439,7 +438,7 @@ mod tests {
             vec![0.0, 0.0, -1.0, 3.0],
         ];
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let x = klu_solve_dense(&a, &b).unwrap();
+        let x = solve_dense(&a, &b).unwrap();
         // Cross-check by direct multiplication.
         let mut r = [0.0; 4];
         for i in 0..4 {
@@ -460,7 +459,7 @@ mod tests {
     fn klu_singular_returns_err() {
         let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         let b = vec![1.0, 2.0];
-        let r = klu_solve_dense(&a, &b);
+        let r = solve_dense(&a, &b);
         assert!(
             matches!(r, Err(KluError::FactorFailed) | Err(KluError::SolveFailed)),
             "expected factor/solve failure, got {r:?}"

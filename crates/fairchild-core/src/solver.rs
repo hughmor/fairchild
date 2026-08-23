@@ -597,9 +597,36 @@ pub struct KluSolver;
 
 #[cfg(feature = "klu")]
 impl LinearSolver for KluSolver {
+    /// One-shot solve: the same O(nnz) CSC build the cached path uses, run
+    /// once (`rebuild` ends in a fresh `klu_factor`, so no refactor is due).
+    ///
+    /// This used to round-trip through `to_dense`, which was defensible while
+    /// `.ac` and `.noise` assembled densely anyway and pure loss after #23
+    /// removed that: the caller built O(nnz), this expanded it to O(n²), and
+    /// KLU immediately re-compressed it. Every one-shot call site is a
+    /// frequency-domain analysis or its operating point, so a 3200-node
+    /// `.ac` run allocated a dense n×n per frequency point — 5.6 GB and 29×
+    /// slower than faer-sparse on the deck that surfaced it (#75).
     fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
-        let dense = crate::mna::CircuitTopology::to_dense(a, b.len());
-        fairchild_klu::klu_solve_dense(&dense, b).map_err(|_| SimError::SingularMatrix)
+        let n = a.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let mut f = KluFactorisation::new(1e-30, n);
+        f.rebuild(a)?;
+        f.refactor_then(b, false, false)
+    }
+
+    /// Same, through `klu_tsolve` — skips the default impl's explicit
+    /// transpose build.
+    fn solve_transpose(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
+        let n = a.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let mut f = KluFactorisation::new(1e-30, n);
+        f.rebuild(a)?;
+        f.refactor_then(b, true, false)
     }
 
     /// Sparse rows carry their own structure, so this needs no `MnaMatrix` and no
