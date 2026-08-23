@@ -31,11 +31,14 @@ they must NOT agree, and the gap should be the size the new physics predicts.
 Section 3 is that new physics on its own axis.
 
     .venv/bin/python experiments/giona/compare_va_mrm.py
-    .venv/bin/python experiments/giona/compare_va_mrm.py --refit
+    .venv/bin/python experiments/giona/compare_va_mrm.py --no-extrapolate
 
-`--refit` re-derives `vol_active`/`dalpha_dnc` numerically in the muted-thermal
-configuration. It is a check on the algebra, not a fit anyone needs: if the
-analytic map is right it comes back at 1.00x.
+The model's DEFAULTS are no longer the cell — it counts carriers once and runs
+depletion through Soref-Bennett. So the Verilog-A ring here runs in
+card-compatible mode (the eleven overrides in the model header), which is what
+makes sections 1 and 2 a like-for-like check that the rewrite did not break the
+port. A fourth section prints where the two parametrisations part company,
+out past the bias range the May capture can see.
 
 Writes results/va_mrm_compare.png and results/va_mrm_match.json.
 """
@@ -70,7 +73,14 @@ P_MW = 0.126
 # Only used to isolate the matched half; it is not a value anyone should ship.
 R_TH_MUTED = 1e-6
 
-DECK = f""".include {CELL}
+# Card-compatible mode: the four linearisations on, Soref-Bennett off, and the
+# cell's terminal conventions restored. See the model header — this instance
+# line IS the cell, and section 1 holds it to that.
+LEGACY = ("dn_dv=-3.62e-5 da_dv=3.29e-4 dn_dnc=-8.8e-28 dalpha_dnc=1.0212e-21 "
+          "vol_dep=0 sb_dn_e=0 sb_dn_h=0 sb_da_e=0 sb_da_h=0 "
+          "i_sat=1.0198e-7 vol_inj=2.7531e-17 c_j0=2.75e-13 tau_sweep=1")
+
+DECK_TMPL = f""".include {CELL}
 .va {VA}
 .optical_port src
 .optical_port d_th
@@ -80,10 +90,12 @@ DECK = f""".include {CELL}
 .optical_port v_ad
 .optical_port v_dr
 XL src fc_cw_laser power_mW={P_MW} wavelength_nm=1550
-Xd src d_th d_ad d_dr pn 0 htr 0 mrm
-Xv src v_th v_ad v_dr pn 0 htr 0 tv mrm_addrop
-VPN pn 0 DC 0
-VHT htr 0 DC 0
+Xd src d_th d_ad d_dr pnd 0 htrd 0 mrm
+Xv src v_th v_ad v_dr pnv 0 htrv 0 tv mrm_addrop {{legacy}}
+VPND pnd 0 DC 0
+VHTD htrd 0 DC 0
+VPNV pnv 0 DC 0
+VHTV htrv 0 DC 0
 .op
 """
 
@@ -168,8 +180,9 @@ def spectrum(ckt, centre_nm: float, half_nm: float = 0.45, n: int = 121):
 
 
 def at_bias(ckt, v_pn: float, v_ht: float, r_th: float) -> dict:
-    ckt.set_param("VPN", "dc", v_pn)
-    ckt.set_param("VHT", "dc", v_ht)
+    for tag in ("D", "V"):
+        ckt.set_param(f"VPN{tag}", "dc", v_pn)
+        ckt.set_param(f"VHT{tag}", "dc", v_ht)
     ckt.set_param("Xv", "r_th", r_th)
     # Where the heater puts the ring, from the card itself: P/p_pi_th pi of
     # phase is that fraction of half an FSR. Guessing this by eye put the 2 V
@@ -204,45 +217,36 @@ def report(title: str, rows) -> None:
           f"  worst depth error {max(abs(r['derr']) for r in rows):.2f} dB")
 
 
-def refit(ckt) -> dict[str, float]:
-    """Re-derive vol_active / dalpha_dnc from the cell, thermal path muted.
+def extrapolate(rows_card) -> None:
+    """Card-compatible vs the new default, past where the capture can see.
 
-    Two coefficients against the forward-bias shift and depth, in the one
-    configuration where the two models are supposed to be identical. This exists
-    to catch an algebra slip in the analytic map, so it starts from that map: a
-    result that is not ~1.00x means the header is wrong.
+    The May sweep spans -1 to +1 V. Over that window the card's straight line
+    and Soref-Bennett through the junction charge agree to a few picometres, so
+    the capture cannot choose between them and the fit against it does not try.
+    Out at -4 V they are 20 % apart, and the sqrt is the one a depletion width
+    actually follows. This prints the gap rather than leaving it implied.
     """
-    from scipy.optimize import least_squares
-    start = {"vol_active": 2.7531e-17, "dalpha_dnc": 1.0212e-21}
-    ref = grid(ckt, FORWARD, R_TH_MUTED)
-
-    def res(x):
-        ckt.set_param("Xv", "vol_active", float(x[0] * start["vol_active"]))
-        ckt.set_param("Xv", "dalpha_dnc", float(x[1] * start["dalpha_dnc"]))
-        rows = grid(ckt, FORWARD, R_TH_MUTED)
-        return np.array([v for r, r0 in zip(rows, ref)
-                         for v in (r["v_shift"] - r0["d_shift"], r["derr"] * 10.0)])
-
-    sol = least_squares(res, [1.0, 1.0], bounds=([0.1, 0.1], [10.0, 10.0]),
-                        diff_step=5e-3, xtol=1e-4, max_nfev=25, verbose=2)
-    out = {k: float(v * start[k]) for k, v in zip(start, sol.x)}
-    print("\n  analytic map vs numerical re-derivation:")
-    for (k, v0), (_, v) in zip(start.items(), out.items()):
-        print(f"    {k:12s} {v0:12.5g} -> {v:12.5g}   ({v / v0:.4f}x)")
-    for k, v in start.items():          # leave the model on its shipped defaults
-        ckt.set_param("Xv", k, v)
-    return out
+    ckt = fc.Circuit()
+    ckt.load_str(DECK_TMPL.format(legacy=""))     # the model on its own defaults
+    print("\n── past the capture: card linearisation vs one carrier population ──")
+    print(f"{'V_pn':>6} {'card-compatible':>17} {'physical':>12} {'gap':>9}")
+    zero_c = {r["v_pn"]: r for r in rows_card}
+    ref = at_bias(ckt, 0.0, 0.0, R_TH_MUTED)["v_res"]
+    for v in (-4.0, -3.0, -2.0, -1.0, 0.0):
+        phys = (at_bias(ckt, v, 0.0, R_TH_MUTED)["v_res"] - ref) * 1e3
+        card = zero_c[v]["v_shift"] if v in zero_c else float("nan")
+        print(f"{v:6.1f} {card:14.1f} pm {phys:9.1f} pm {phys - card:6.1f} pm")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--refit", action="store_true")
+    ap.add_argument("--no-extrapolate", action="store_true")
     args = ap.parse_args()
     RESULTS.mkdir(exist_ok=True)
 
     ckt = fc.Circuit()
-    ckt.load_str(DECK)
-    out: dict = {"p_mW": P_MW}
+    ckt.load_str(DECK_TMPL.format(legacy=LEGACY))
+    out: dict = {"p_mW": P_MW, "mode": "card-compatible"}
 
     # ── 1. the matched half ─────────────────────────────────────────────────
     print("1. matched half — thermal path muted, so only what the cell also has")
@@ -253,11 +257,11 @@ def main() -> None:
     report(f"r_th = {R_TH_MUTED} (muted), {P_MW} mW into the ring — bias only", muted)
     out["muted_worst_pm"] = max(abs(r["err"]) for r in muted)
 
-    if args.refit:
-        out["refit"] = refit(ckt)
-
     # ── 2. shipping defaults ────────────────────────────────────────────────
-    print("\n2. shipping defaults — the gap IS the new physics, not an error")
+    if not args.no_extrapolate:
+        extrapolate(muted)
+
+    print("\n2. card-compatible, thermal live — the gap IS the new physics")
     ship = grid(ckt, BIAS, R_TH_SHIP)
     report(f"r_th = {R_TH_SHIP} K/W (== p_pi_th 26.4 mW/pi), {P_MW} mW", ship)
     out["ship_worst_pm"] = max(abs(r["err"]) for r in ship)
@@ -274,8 +278,9 @@ def main() -> None:
     print("\n3. optical self-heating: resonance vs input power")
     powers = np.geomspace(1e-3, 4.0, 11)
     walk_d, walk_v = [], []
-    ckt.set_param("VPN", "dc", 0.0)
-    ckt.set_param("VHT", "dc", 0.0)
+    for tag in ("D", "V"):
+        ckt.set_param(f"VPN{tag}", "dc", 0.0)
+        ckt.set_param(f"VHT{tag}", "dc", 0.0)
     for p in powers:
         ckt.set_param("XL", "power_mW", float(p))
         ckt.set_param("Xv", "r_th", R_TH_SHIP)
@@ -302,8 +307,9 @@ def plot(ckt, muted, ship, powers, walk_d, walk_v) -> None:
         ax = fig.add_subplot(gs[0, col])
         cmap = plt.get_cmap("viridis")
         for i, (v_pn, v_ht) in enumerate(bias):
-            ckt.set_param("VPN", "dc", v_pn)
-            ckt.set_param("VHT", "dc", v_ht)
+            for tag in ("D", "V"):
+                ckt.set_param(f"VPN{tag}", "dc", v_pn)
+                ckt.set_param(f"VHT{tag}", "dc", v_ht)
             ckt.set_param("Xv", "r_th", R_TH_SHIP)
             wl, d, v = spectrum(ckt, COLD_NM, 0.5, 81)
             c = cmap(i / max(len(bias) - 1, 1))

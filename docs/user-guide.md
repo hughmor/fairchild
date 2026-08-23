@@ -1625,9 +1625,12 @@ while self-heating stays solved on top.
 resonance moves with a solved temperature, with `th` exposed so a deck can wire
 ring-to-ring thermal crosstalk. `mrm_addrop.va` beside it is the four-port
 version — in / thru / add / drop — and is also the worked example of *replacing*
-a native cell: its defaults are those of `examples/photonic/pcells/mrm.sp`, so
-the two are the same ring written two ways, and
-`mrm_addrop_example.rs` holds them to it.
+a native cell. It was calibrated against `examples/photonic/pcells/mrm.sp` and
+carries that cell's parameter names, but its defaults are no longer the cell's:
+it counts carriers once and runs both depletion and injection through
+Soref-Bennett, where the cell carries four fitted straight lines. Its header has
+the instance line that restores the cell exactly, and `mrm_addrop_example.rs`
+holds it to that — so the compatibility path is a tested one, not a claim.
 
 The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
 node whose operating point is far from the seed can still get there. A flat

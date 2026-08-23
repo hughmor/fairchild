@@ -60,6 +60,22 @@ fn solve(deck: &str) -> fairchild_core::NrResult {
     dc_op_nr_with_registry(&net, &reg).expect("DC OP converges")
 }
 
+/// The instance line that puts the model in card-compatible mode: the four
+/// linearisations on, the Soref-Bennett path off, and the cell's terminal
+/// conventions restored.
+///
+/// The model's defaults are no longer the cell — it counts carriers once and
+/// runs the depletion side through Soref-Bennett, which is sqrt-shaped where the
+/// card is linear. That is a deliberate improvement and it is checked against
+/// the May capture in `experiments/giona/va_vs_may_data.py`, not here. What is
+/// checked here is that the improvement did not quietly break the port: with
+/// these eleven overrides the model must still be the cell, exactly, and the
+/// sabotage list in this file's header still applies through them.
+const LEGACY: &str = "dn_dv=-3.62e-5 da_dv=3.29e-4 dn_dnc=-8.8e-28 \
+                      dalpha_dnc=1.0212e-21 vol_dep=0 sb_dn_e=0 sb_dn_h=0 \
+                      sb_da_e=0 sb_da_h=0 i_sat=1.0198e-7 vol_inj=2.7531e-17 \
+                      c_j0=2.75e-13 tau_sweep=1";
+
 /// A microwatt. Low enough that the Verilog-A model's self-heating — which the
 /// cell has no way to produce — moves the resonance by under 0.1 pm, which is
 /// under 0.3 % of transmission on the steepest flank of the notch.
@@ -163,7 +179,14 @@ fn the_verilog_a_ring_reproduces_the_discrete_cell() {
         let walk = (v_htr * v_htr / 368.8) / 26.4e-3 * 11.38 / 2.0;
         for off in offsets {
             let lam = LAMBDA_RES_NM + walk + off;
-            let r = solve(&deck("in", lam, v_pn, v_htr, P_UW, extra));
+            let r = solve(&deck(
+                "in",
+                lam,
+                v_pn,
+                v_htr,
+                P_UW,
+                &format!("{LEGACY} {extra}"),
+            ));
             let at = format!("{what} at {lam:.3} nm");
             agree(
                 power_w(&r, "d_th"),
@@ -195,7 +218,7 @@ fn light_into_the_add_port_lands_where_the_cell_puts_it() {
     }
     for off in [-0.06, 0.0, 0.06] {
         let lam = LAMBDA_RES_NM + off;
-        let r = solve(&deck("ad", lam, 0.0, 0.0, P_UW, ""));
+        let r = solve(&deck("ad", lam, 0.0, 0.0, P_UW, LEGACY));
         agree(
             power_w(&r, "d_dr"),
             power_w(&r, "v_dr"),
