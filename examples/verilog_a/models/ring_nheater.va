@@ -113,8 +113,6 @@
 `include "disciplines.vams"
 `include "optical.vams"
 
-// NB: the port list must stay on ONE line — the bundle dialect's scanner reads
-// the module header a line at a time and quietly drops the continuation (#73).
 module ring_nheater(bus_in, thru_out, add_in, drop_out, htr_p, htr_n, th);
 
     optical_bundle bus_in, thru_out, add_in, drop_out;

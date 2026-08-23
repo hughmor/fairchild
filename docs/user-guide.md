@@ -2353,12 +2353,6 @@ channel no source reaches. Where a source does reach it and disagrees, the
 resolved wavelength wins and says so — two answers for one wavelength is a deck
 bug, not a preference.
 
-**The module's port list must be on one line.** The scanner reads the header a
-line at a time, so a port list continued onto a second line loses everything
-after the break — and what it loses are ports, which then read as undeclared
-nets. The compiler errors, but it errors about the wrong thing (`anode: not
-found`), so the fix is not obvious from the message.
-
 The loop form is fixed at `for (k = 0; k < N(p); k = k + 1) begin … end`.
 Anything else is refused by name rather than expanded into something plausible,
 because a mis-generated model is a silently wrong device. `--emit-generated DIR`
