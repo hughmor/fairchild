@@ -844,7 +844,7 @@ impl Device for OsdiDevice {
     /// squeezing it into reciprocal two-terminal branches would silently drop
     /// transcapacitance (∂q_d/∂v_g ≠ ∂q_g/∂v_d), which is exactly what a
     /// BSIM-class model is made of.
-    fn load_reactive_jacobian(&self, c_mat: &mut [Vec<f64>]) {
+    fn load_reactive_jacobian(&self, c_mat: &mut [fairchild_core::mna::SparseRow]) {
         self.for_each_react_entry(|r, c, v| c_mat[r][c] += v);
     }
 

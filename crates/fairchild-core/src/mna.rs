@@ -165,14 +165,10 @@ impl CircuitTopology {
 
     /// Wrap dense rows as sparse ones, dropping exact zeros.
     ///
-    /// ponytail: exists only to bridge the still-dense `.ac`/`.noise` assembly
-    /// to the sparse solver interface. Delete it when those assemble sparse
-    /// rows directly (task #12) — nothing else should need it.
-    ///
-    /// For the `.ac` / `.noise` assemblies, which still build their real
-    /// 2n×2n complex-as-real system densely. They allocate three dense n×n
-    /// matrices already, so this conversion changes nothing asymptotically —
-    /// sparsifying those assemblies is its own piece of work.
+    /// No analysis path builds a dense matrix any more — `.ac` and `.noise`
+    /// were the last two and now assemble sparse (issue #23). What is left is
+    /// tests and fixtures, where a 2×2 written as a dense literal is the
+    /// readable form and the conversion cost is nothing.
     pub fn sparse_from_dense(a: &[Vec<f64>]) -> Vec<SparseRow> {
         a.iter()
             .map(|row| {
@@ -257,6 +253,35 @@ pub struct Pattern {
     pub cols: Vec<Vec<u32>>,
     /// Total cell count — the `nnz` upper bound.
     pub nnz: usize,
+    /// Identity, so a stamper holding [`Cell`]s can prove they were resolved
+    /// against *this* pattern before writing through them. A clone keeps the
+    /// id, which is right: a clone has the same structure, so the same slots.
+    id: u64,
+}
+
+/// A matrix cell resolved to its storage offset once, instead of on every
+/// stamp.
+///
+/// Finding the cell a stamper writes is a `binary_search` over the row's
+/// column list. That is cheap in isolation and then multiplied by entries ×
+/// devices × Newton iterations × timesteps: measured at 63 % of assembly time
+/// on a 499-stage ring oscillator, where the shared supply row carries ~1000
+/// columns and every one of 499 transistors searches it four times per pass.
+/// The pattern is structural and never moves, so the answer is settled at
+/// setup and this carries it.
+///
+/// Valid only for the [`Pattern`] it was resolved against, and that is
+/// enforced rather than documented — writing into the wrong cell is a silent
+/// wrong answer, which is the one outcome this codebase will not ship. A
+/// stamper must check [`MnaMatrix::pattern_id`] against the id it resolved
+/// under before using cells at all (once per stamp pass, not per stamp), and
+/// [`MnaMatrix::add`] re-verifies in debug builds, on every stamp, that `slot`
+/// still addresses `col`.
+#[derive(Clone, Copy, Debug)]
+pub struct Cell {
+    row: u32,
+    col: u32,
+    slot: u32,
 }
 
 /// What structural footprint one device contributes to [`Pattern`].
@@ -327,6 +352,29 @@ impl Pattern {
         }
         b.finish()
     }
+
+    /// Identity of this pattern — see [`Cell`].
+    #[inline(always)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Resolve `(row, col)` to a [`Cell`], once.
+    ///
+    /// `None` when either end is ground, or when the cell is outside the
+    /// pattern. The second case is not an error: the pattern is a superset of
+    /// what stampers declared, so a cell outside it is one nobody declared,
+    /// and writing it would *insert* rather than fill. The caller falls back to
+    /// `a[row][col]`, which inserts correctly.
+    pub fn cell(&self, row: NodeId, col: NodeId) -> Option<Cell> {
+        let (r, c) = (row?, col?);
+        let slot = self.cols.get(r)?.binary_search(&(c as u32)).ok()?;
+        Some(Cell {
+            row: r as u32,
+            col: c as u32,
+            slot: slot as u32,
+        })
+    }
 }
 
 /// Accumulator for [`Pattern::build`].
@@ -364,9 +412,13 @@ impl PatternBuilder {
             row.shrink_to_fit();
             nnz += row.len();
         }
+        // Relaxed is enough: the only requirement is that two live patterns
+        // never share an id, and a fetch_add gives that on its own.
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Pattern {
             cols: self.cols,
             nnz,
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -467,6 +519,16 @@ impl SparseRow {
         }
     }
 
+    /// Build from parallel column/value slices that are **already ascending by
+    /// column**. Debug builds check it; release builds trust it, which is the
+    /// point — the `.ac` block assembly emits rows in order by construction and
+    /// should not pay a sort to prove it.
+    pub fn from_parts(cols: Vec<u32>, vals: Vec<f64>) -> Self {
+        debug_assert_eq!(cols.len(), vals.len());
+        debug_assert!(cols.windows(2).all(|w| w[0] < w[1]), "cols not ascending");
+        SparseRow { cols, vals }
+    }
+
     /// Build from `(column, value)` cells. Sorts, so callers may emit in any
     /// order; used by the sparse transpose in `crate::solver`.
     pub fn from_sorted_cells(mut cells: Vec<(u32, f64)>) -> Self {
@@ -500,13 +562,53 @@ impl SparseRow {
         self.vals.fill(0.0);
     }
 
+    #[inline(always)]
     fn slot(&self, j: usize) -> Result<usize, usize> {
         self.cols.binary_search(&(j as u32))
     }
 }
 
+/// Walk the union of two sparse rows in ascending column order, yielding
+/// `(col, a_val, b_val)` with `0.0` standing in where a row has no entry.
+///
+/// `.ac` and `.noise` form `B = ωC − L/ω` at every frequency point from a `C`
+/// and an `L` whose patterns differ; this is the linear merge that makes that
+/// O(nnz) rather than a scan of the dense `n × n` grid.
+pub(crate) fn union_rows(a: &SparseRow, b: &SparseRow, mut f: impl FnMut(usize, f64, f64)) {
+    let (ac, av) = a.entries();
+    let (bc, bv) = b.entries();
+    let (mut i, mut k) = (0usize, 0usize);
+    while i < ac.len() || k < bc.len() {
+        match (ac.get(i), bc.get(k)) {
+            (Some(&ca), Some(&cb)) if ca == cb => {
+                f(ca as usize, av[i], bv[k]);
+                i += 1;
+                k += 1;
+            }
+            (Some(&ca), Some(&cb)) if ca < cb => {
+                f(ca as usize, av[i], 0.0);
+                i += 1;
+            }
+            (Some(_), Some(&cb)) => {
+                f(cb as usize, 0.0, bv[k]);
+                k += 1;
+            }
+            (Some(&ca), None) => {
+                f(ca as usize, av[i], 0.0);
+                i += 1;
+            }
+            (None, Some(&cb)) => {
+                f(cb as usize, 0.0, bv[k]);
+                k += 1;
+            }
+            (None, None) => unreachable!("loop condition guarantees one side has entries"),
+        }
+    }
+}
+
 impl std::ops::Index<usize> for SparseRow {
     type Output = f64;
+    #[inline(always)]
     fn index(&self, j: usize) -> &f64 {
         match self.slot(j) {
             Ok(k) => &self.vals[k],
@@ -516,17 +618,27 @@ impl std::ops::Index<usize> for SparseRow {
 }
 
 impl std::ops::IndexMut<usize> for SparseRow {
+    #[inline(always)]
     fn index_mut(&mut self, j: usize) -> &mut f64 {
         match self.slot(j) {
             Ok(k) => &mut self.vals[k],
-            Err(k) => {
-                // Only reachable on a patternless matrix; with a pattern every
-                // stampable cell is pre-allocated.
-                self.cols.insert(k, j as u32);
-                self.vals.insert(k, 0.0);
-                &mut self.vals[k]
-            }
+            Err(k) => self.insert_at(k, j),
         }
+    }
+}
+
+impl SparseRow {
+    /// The cold half of [`IndexMut`]: a write to a structurally absent cell.
+    ///
+    /// Only reachable on a patternless matrix; with a pattern every stampable
+    /// cell is pre-allocated. Kept out of line so the hot path is a search and
+    /// an offset, small enough for the stampers to inline.
+    #[cold]
+    #[inline(never)]
+    fn insert_at(&mut self, k: usize, j: usize) -> &mut f64 {
+        self.cols.insert(k, j as u32);
+        self.vals.insert(k, 0.0);
+        &mut self.vals[k]
     }
 }
 
@@ -580,6 +692,34 @@ impl MnaMatrix {
 
     pub fn pattern(&self) -> Option<&Arc<Pattern>> {
         self.pattern.as_ref()
+    }
+
+    /// Identity of the attached pattern, or `0` for a patternless matrix.
+    ///
+    /// A stamper holding resolved [`Cell`]s compares this against the id it
+    /// resolved under, once per stamp pass, and falls back to `a[r][c]` if it
+    /// differs. `0` never matches a real pattern, so a patternless matrix
+    /// always takes the fallback — which is what makes it safe for the same
+    /// device to be stamped into `MnaMatrix::zeros` by a diagnostic pass.
+    #[inline(always)]
+    pub fn pattern_id(&self) -> u64 {
+        self.pattern.as_ref().map_or(0, |p| p.id)
+    }
+
+    /// `a[cell] += v`, with no search.
+    ///
+    /// The caller must already have established that `cell` was resolved
+    /// against this matrix's pattern (see [`MnaMatrix::pattern_id`]).
+    #[inline(always)]
+    pub fn add(&mut self, cell: Cell, v: f64) {
+        let row = &mut self.a[cell.row as usize];
+        debug_assert_eq!(
+            row.cols[cell.slot as usize], cell.col,
+            "a resolved Cell no longer addresses the column it was resolved \
+             for: slot {} of row {} holds column {}, not {}",
+            cell.slot, cell.row, row.cols[cell.slot as usize], cell.col
+        );
+        row.vals[cell.slot as usize] += v;
     }
 
     /// Zero every cell of `a` and every entry of `b` in place.  Used by
@@ -675,7 +815,44 @@ pub struct StampPlan {
     /// overwhelmingly common case — the stamper skips building two name-keyed
     /// maps (with `String` clones) on every pass.
     has_coupled: bool,
+    /// The four cells a 2-terminal conductance stamp writes, per element,
+    /// resolved against `pattern`. `None` for elements that are not a simple
+    /// 2-terminal stamp (voltage/current sources, coupled inductors), which
+    /// keep the searching path.
+    elem_cells: Vec<Option<ConductanceCells>>,
     pub pattern: Arc<Pattern>,
+}
+
+/// The four cells [`stamp_conductance_at`] writes — `(p,p) (p,n) (n,p) (n,n)` —
+/// resolved once. A grounded terminal drops its cells, exactly as the searching
+/// form skips them.
+#[derive(Clone, Copy, Debug)]
+pub struct ConductanceCells {
+    pp: Option<Cell>,
+    pn: Option<Cell>,
+    np: Option<Cell>,
+    nn: Option<Cell>,
+}
+
+impl ConductanceCells {
+    fn resolve(p: &Pattern, pos: NodeId, neg: NodeId) -> ConductanceCells {
+        ConductanceCells {
+            pp: p.cell(pos, pos),
+            pn: p.cell(pos, neg),
+            np: p.cell(neg, pos),
+            nn: p.cell(neg, neg),
+        }
+    }
+
+    /// True when every cell the searching form would write was resolvable.
+    /// A partial resolution is not usable — the unresolved cells would be
+    /// silently dropped instead of inserted — so the caller falls back whole.
+    fn complete(&self, pos: NodeId, neg: NodeId) -> bool {
+        self.pp.is_some() == pos.is_some()
+            && self.nn.is_some() == neg.is_some()
+            && self.pn.is_some() == (pos.is_some() && neg.is_some())
+            && self.np.is_some() == (pos.is_some() && neg.is_some())
+    }
 }
 
 impl StampPlan {
@@ -703,6 +880,22 @@ impl StampPlan {
                 _ => None,
             });
         }
+        let pattern = Pattern::build(topo, netlist, device_nodes);
+        // Resolve the passive 2-terminal stamps now. `stamp_conductance_at` is
+        // what every R, and every C and L companion, goes through, so this is
+        // the whole of the element-side stamping cost.
+        let elem_cells = netlist
+            .elements
+            .iter()
+            .zip(elem_nodes.iter())
+            .map(|(el, &(pos, neg))| match el {
+                Element::Resistor { .. } | Element::Capacitor { .. } | Element::Inductor { .. } => {
+                    let c = ConductanceCells::resolve(&pattern, pos, neg);
+                    c.complete(pos, neg).then_some(c)
+                }
+                _ => None,
+            })
+            .collect();
         StampPlan {
             elem_nodes,
             elem_vi,
@@ -710,7 +903,26 @@ impl StampPlan {
                 .elements
                 .iter()
                 .any(|e| matches!(e, Element::CoupledInductors { .. })),
-            pattern: Arc::new(Pattern::build(topo, netlist, device_nodes)),
+            elem_cells,
+            pattern: Arc::new(pattern),
+        }
+    }
+
+    /// Identity of the pattern this plan resolved its cells against — a
+    /// stamper compares it to [`MnaMatrix::pattern_id`] before using them.
+    #[inline(always)]
+    pub fn pattern_id(&self) -> u64 {
+        self.pattern.id
+    }
+
+    /// Hand every device its resolved stamp cells (see
+    /// [`Device::resolve_cells`](crate::device::Device::resolve_cells)).
+    ///
+    /// Call once, after the plan exists and before the hot loop. Forgetting it
+    /// costs speed and nothing else — the devices keep searching.
+    pub fn resolve_device_cells(&self, devices: &mut [Box<dyn crate::device::Device>]) {
+        for d in devices.iter_mut() {
+            d.resolve_cells(&self.pattern);
         }
     }
 }
@@ -877,6 +1089,12 @@ fn stamp_netlist_into(
 
     let n_nodes = topo.n_nodes();
 
+    // Are this plan's resolved cells valid for this matrix? Decided once per
+    // pass, never per stamp. A patternless matrix reports id 0 and never
+    // matches, so a diagnostic stamping into `MnaMatrix::zeros` takes the
+    // searching path and stays correct.
+    let cells = plan.filter(|p| p.pattern_id() == mat.pattern_id());
+
     // Build coupled-inductor map: inductor_name → (partner_name, coupling_k)
     // and a value map for inductance lookups.  Skipped outright when the
     // netlist has no coupled inductors: it is two allocations plus a `String`
@@ -918,7 +1136,13 @@ fn stamp_netlist_into(
                         topo.node_index.get(neg).copied(),
                     )
                 });
-                stamp_conductance_at(&mut mat.a, p, n, 1.0 / resistance);
+                stamp_conductance_resolved(
+                    mat,
+                    cells.and_then(|c| c.elem_cells[ei]),
+                    p,
+                    n,
+                    1.0 / resistance,
+                );
             }
             Element::Capacitor { name, pos, neg, .. } => {
                 if let Some(&(g_eq, i_hist)) = cap_state.get(name) {
@@ -928,7 +1152,13 @@ fn stamp_netlist_into(
                             topo.node_index.get(neg).copied(),
                         )
                     });
-                    stamp_conductance_at(&mut mat.a, p, n, g_eq);
+                    stamp_conductance_resolved(
+                        mat,
+                        cells.and_then(|c| c.elem_cells[ei]),
+                        p,
+                        n,
+                        g_eq,
+                    );
                     // BE companion: KCL at pos gives b[pos] += I_hist.
                     // stamp_current_source(neg, pos, v) adds v to b[pos].
                     stamp_current_source_at(&mut mat.b, n, p, i_hist);
@@ -946,7 +1176,13 @@ fn stamp_netlist_into(
                     // For coupled inductors, skip the standalone self-conductance stamp;
                     // the CoupledInductors arm below handles the full 2×2 companion.
                     if !coupled_map.contains_key(name) {
-                        stamp_conductance_at(&mut mat.a, p, n, g_eq);
+                        stamp_conductance_resolved(
+                            mat,
+                            cells.and_then(|c| c.elem_cells[ei]),
+                            p,
+                            n,
+                            g_eq,
+                        );
                     }
                     // Always stamp history current source.
                     stamp_current_source_at(&mut mat.b, p, n, i_hist);
@@ -1077,6 +1313,40 @@ pub fn stamp_conductance(
 }
 
 /// [`stamp_conductance`] against pre-resolved row indices.  `None` = ground.
+/// A 2-terminal conductance stamp, through pre-resolved cells when the caller
+/// has them and they belong to this matrix, by search otherwise.
+///
+/// Both arms write the same four cells with the same signs; they differ only
+/// in how the cell is addressed. Keeping the fallback is not defensive
+/// clutter — it is what a patternless matrix and an unresolvable cell both
+/// need, and it is the definition the fast path is checked against.
+#[inline(always)]
+fn stamp_conductance_resolved(
+    mat: &mut MnaMatrix,
+    cells: Option<ConductanceCells>,
+    pos: NodeId,
+    neg: NodeId,
+    g: f64,
+) {
+    match cells {
+        Some(c) => {
+            if let Some(pp) = c.pp {
+                mat.add(pp, g);
+            }
+            if let Some(pn) = c.pn {
+                mat.add(pn, -g);
+            }
+            if let Some(np) = c.np {
+                mat.add(np, -g);
+            }
+            if let Some(nn) = c.nn {
+                mat.add(nn, g);
+            }
+        }
+        None => stamp_conductance_at(&mut mat.a, pos, neg, g),
+    }
+}
+
 pub fn stamp_conductance_at(a: &mut [SparseRow], pos: NodeId, neg: NodeId, g: f64) {
     if let Some(p) = pos {
         a[p][p] += g;
@@ -1501,16 +1771,20 @@ fn stamp_mutual_conductance(
 }
 
 /// Stamp a 2-terminal value (conductance, capacitance, or 1/L) between two MNA
-/// rows identified by [`crate::device::NodeId`], into a raw row-major dense
-/// matrix. Ground (`None`) terminals are skipped. This is the shared kernel for
-/// both the netlist-element AC/noise stamps and the device small-signal
-/// reactance stamps.
-pub fn stamp_2port_by_id(
-    mat: &mut [Vec<f64>],
+/// rows identified by [`crate::device::NodeId`]. Ground (`None`) terminals are
+/// skipped. This is the shared kernel for both the netlist-element AC/noise
+/// stamps and the device small-signal reactance stamps.
+///
+/// Generic over the row so `.ac` / `.noise` can stamp `C` and `L` into
+/// [`SparseRow`]s — `Vec<f64>` rows work too, and the unit tests use them.
+pub fn stamp_2port_by_id<R>(
+    mat: &mut [R],
     pos: crate::device::NodeId,
     neg: crate::device::NodeId,
     val: f64,
-) {
+) where
+    R: std::ops::IndexMut<usize, Output = f64>,
+{
     if let Some(p) = pos {
         mat[p][p] += val;
         if let Some(n) = neg {
@@ -1526,13 +1800,15 @@ pub fn stamp_2port_by_id(
 /// Stamp a 2-terminal passive value (G or C) into a raw matrix, looking node
 /// names up in `idx` (ground / unknown names resolve to `None` and are skipped).
 /// Thin wrapper over [`stamp_2port_by_id`]; shared by `ac.rs` and `noise.rs`.
-pub fn stamp_passive_2port(
-    mat: &mut [Vec<f64>],
+pub fn stamp_passive_2port<R>(
+    mat: &mut [R],
     idx: &IndexMap<String, usize>,
     pos: &str,
     neg: &str,
     val: f64,
-) {
+) where
+    R: std::ops::IndexMut<usize, Output = f64>,
+{
     stamp_2port_by_id(mat, idx.get(pos).copied(), idx.get(neg).copied(), val);
 }
 

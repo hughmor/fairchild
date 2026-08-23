@@ -249,6 +249,7 @@ pub fn dc_sensitivity(
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     let plan = StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
 
     let op = dc_op_nr_with_devices_opts(netlist, &topo, &mut devices, &ctx, opts)?;
     let x = op.x;
@@ -566,6 +567,7 @@ pub fn jacobian_check(
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
     let plan = StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
     let n = topo.size;
     if x.len() != n {
         return Err(SimError::ParameterError(format!(

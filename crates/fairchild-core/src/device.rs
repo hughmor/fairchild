@@ -292,7 +292,26 @@ pub trait Device: Send + Sync {
     /// exists for OSDI/Verilog-A, where ∂q_i/∂v_j need not equal ∂q_j/∂v_i
     /// (transcapacitance) and so cannot be expressed as reciprocal branches at
     /// all.
-    fn load_reactive_jacobian(&self, _c_mat: &mut [Vec<f64>]) {}
+    fn load_reactive_jacobian(&self, _c_mat: &mut [crate::mna::SparseRow]) {}
+
+    /// Resolve the matrix cells this device stamps into, once, against the
+    /// structural pattern the hot loop's matrix was built with.
+    ///
+    /// Finding a cell is a `binary_search` per stamp, per device, per Newton
+    /// iteration, per timestep. The pattern never moves, so the answer is
+    /// settled here instead of being re-derived hundreds of millions of times
+    /// (issue #24). A device that implements this stores
+    /// [`Pattern::id`](crate::mna::Pattern::id) alongside the cells and
+    /// compares it to [`MnaMatrix::pattern_id`](crate::mna::MnaMatrix::pattern_id)
+    /// before using them.
+    ///
+    /// Default is a no-op, and **not implementing it is always safe** — the
+    /// device keeps addressing cells by `a[r][c]`, which is slower and
+    /// identical. So is never calling it: a device with no resolved cells
+    /// takes the same searching path. That asymmetry is deliberate. A stamp
+    /// through a stale slot is a silent wrong answer, so every way of getting
+    /// this wrong has to land on the slow path rather than the wrong cell.
+    fn resolve_cells(&mut self, _pattern: &crate::mna::Pattern) {}
 
     /// Set a named real-valued parameter on this device instance.
     ///

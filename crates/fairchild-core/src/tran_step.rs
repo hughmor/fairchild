@@ -174,6 +174,7 @@ impl TranStepper {
         // solver and the structural sparsity pattern once.
         let solver = opts.linear_solver(topo.size);
         let plan = StampPlan::new(&topo, &netlist, &footprints);
+        plan.resolve_device_cells(&mut devices);
 
         // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
         // history is defined before the first step.

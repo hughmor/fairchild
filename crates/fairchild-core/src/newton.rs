@@ -1641,6 +1641,7 @@ pub fn dc_op_nr_with_registry_opts(
     // Built after build_devices: extra device rows have to be allocated first,
     // since they widen topo.size.
     let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
 
     if opts.verbose {
         let nonfinite = report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);

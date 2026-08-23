@@ -25,6 +25,7 @@ use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
     stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, RowFloor,
+    SparseRow,
 };
 use crate::newton::build_devices;
 use crate::options::SimOptions;
@@ -448,10 +449,8 @@ pub fn noise_analysis(
         }
     }
     topo.stamp_gmin(&mut g_mat, opts.gmin, RowFloor::GminOnly);
-    // ponytail: dense G/C/L and a dense 2n×2n adjoint system, same trade-off
-    // and same upgrade path as `ac.rs`. Tracked as task #12.
-    let mut c_mat = vec![vec![0.0f64; size]; size];
-    let mut l_mat = vec![vec![0.0f64; size]; size];
+    let mut c_mat = vec![SparseRow::default(); size];
+    let mut l_mat = vec![SparseRow::default(); size];
     for el in &netlist.elements {
         match el {
             Element::Capacitor {
@@ -516,33 +515,15 @@ pub fn noise_analysis(
     };
 
     for &f in freqs {
-        let omega = 2.0 * std::f64::consts::PI * f;
-
-        // B = ωC − L⁻¹/ω (purely real coefficient matrix; imaginary part of Y).
-        let mut b_mat = vec![vec![0.0f64; size]; size];
-        for i in 0..size {
-            for j in 0..size {
-                b_mat[i][j] = omega * c_mat[i][j] - l_mat[i][j] / omega;
-            }
-        }
-
         // Forward 2N×2N block system for the signal-path gain H(f):
         //   [ G  -B ] [V_re]   [b_re]
         //   [ B   G ] [V_im] = [b_im]
         // where the RHS injects 1 V at the input source's branch row.
         let n2 = 2 * size;
-        let mut a_fwd = vec![vec![0.0f64; n2]; n2];
-        for i in 0..size {
-            for j in 0..size {
-                a_fwd[i][j] = g_mat[i][j];
-                a_fwd[i][size + j] = -b_mat[i][j];
-                a_fwd[size + i][j] = b_mat[i][j];
-                a_fwd[size + i][size + j] = g_mat[i][j];
-            }
-        }
+        let a_fwd = crate::ac::ac_block(&g_mat, &c_mat, &l_mat, crate::ac::omega_of(f));
         let mut rhs_fwd = vec![0.0f64; n2];
         rhs_fwd[n_nodes + input_vsrc_idx] = 1.0; // unit AC amplitude on V source
-        let v_fwd = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_fwd), &rhs_fwd)?;
+        let v_fwd = noise_solver.solve(&a_fwd, &rhs_fwd)?;
         let v_re_fwd = &v_fwd[..size];
         let v_im_fwd = &v_fwd[size..];
         let h_re = pick(v_re_fwd, out_pos_idx) - pick(v_re_fwd, out_neg_idx);
@@ -556,15 +537,8 @@ pub fn noise_analysis(
         // |λ[p]−λ[n]|² in the noise sum this is fine — conjugation preserves
         // magnitude — but we MUST NOT compare λ values directly to an A^T λ
         // solution from a different convention.
-        let mut a_adj = vec![vec![0.0f64; n2]; n2];
-        for i in 0..size {
-            for j in 0..size {
-                a_adj[i][j] = g_mat[j][i];
-                a_adj[i][size + j] = b_mat[j][i];
-                a_adj[size + i][j] = -b_mat[j][i];
-                a_adj[size + i][size + j] = g_mat[j][i];
-            }
-        }
+        // and which is exactly `a_fwd` transposed.
+        let a_adj = crate::solver::transpose_sparse(&a_fwd, n2);
         let mut rhs_adj = vec![0.0f64; n2];
         // e_out: +1 at out_pos, -1 at out_neg, both in the real block (imag
         // RHS is zero — we observe a real-valued node voltage).
@@ -574,7 +548,7 @@ pub fn noise_analysis(
         if let Some(i) = out_neg_idx {
             rhs_adj[i] -= 1.0;
         }
-        let lam = noise_solver.solve(&CircuitTopology::sparse_from_dense(&a_adj), &rhs_adj)?;
+        let lam = noise_solver.solve(&a_adj, &rhs_adj)?;
         let lam_re = &lam[..size];
         let lam_im = &lam[size..];
 
