@@ -262,6 +262,18 @@ fn klu_matches_sparse_across_an_ac_sweep() {
     }
 }
 
+/// #76: `Auto` prefers KLU when the feature is compiled in (this file only
+/// builds with it). Dense keeps the small systems; the faer-sparse fallback
+/// is pinned by the `cfg(not(feature = "klu"))` twin in `solver.rs`'s unit
+/// tests, which is what a build without SuiteSparse runs.
+#[test]
+fn auto_prefers_klu_when_it_is_compiled_in() {
+    use fairchild_core::solver::make_solver;
+    assert_eq!(make_solver(SolverKind::Auto, 100).name(), "klu");
+    assert_eq!(make_solver(SolverKind::Auto, 5).name(), "dense");
+    assert_eq!(make_solver(SolverKind::Sparse, 100).name(), "faer-sparse");
+}
+
 /// `.noise` is the only caller of the transpose solve. KLU now answers it with
 /// `klu_tsolve` on the existing factorisation instead of materialising a dense
 /// transpose, so this pins that the two agree.

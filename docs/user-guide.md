@@ -1020,7 +1020,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `temp_k` | 300.15 | Operating temperature (K) |
 | `uic` | false | Use `.ic` / element `IC=` instead of DC |
 | `pnjlim` | true | Diode / MOSFET junction limiting in NR |
-| `solver` | `auto` | `auto` / `dense` / `sparse` / `klu` linear backend (`klu` needs the `klu` build feature) |
+| `solver` | `auto` | `auto` / `dense` / `sparse` / `klu` linear backend (`klu` needs the `klu` build feature; `auto` picks dense below ~20 nodes, then `klu` when built in, `sparse` otherwise) |
 | `equilibrate` | false | Two-sided (Ruiz) matrix scaling before LU; improves conditioning of badly-scaled systems, transparent to the solution |
 | `cond_estimate` | false | Print a 2-norm condition-number estimate κ(A) of the MNA matrix at the DC operating point |
 | `lambda_center_m` | 1.55e-6 | Photonic band-centre default (laser λ, PN-PS reference, waveguide bootstrap). Set via `lambda_center_nm` for nm units. |

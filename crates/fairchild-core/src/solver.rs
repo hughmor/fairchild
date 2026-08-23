@@ -15,10 +15,11 @@
 //!
 //! Three backends ship today:
 //!
-//!  - `DenseSolver`         — faer partial-pivot LU.  Best for ≤ ~50 nodes
+//!  - `DenseSolver`         — faer partial-pivot LU.  Best for ≤ ~20 nodes
 //!    where the sparse setup cost dominates.
-//!  - `FaerSparseSolver`    — faer sparse LU.  Pure Rust, no C deps; default
-//!    at larger N.  Given a structural pattern (see
+//!  - `FaerSparseSolver`    — faer sparse LU.  Pure Rust, no C deps; what
+//!    `Auto` uses at larger N when KLU is not
+//!    compiled in.  Given a structural pattern (see
 //!    `mna::Pattern`) the cache handle keeps both the
 //!    CSC structure and the symbolic LU, so a refactor
 //!    is a value refill plus
@@ -38,16 +39,21 @@ use crate::mna::{MnaMatrix, SparseRow};
 /// to each analysis loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverKind {
-    /// Dense `partial_piv_lu` via faer.  Recommended for ≤ ~50 nodes.
+    /// Dense `partial_piv_lu` via faer.  Recommended for ≤ ~20 nodes
+    /// (the measured crossover behind [`AUTO_DENSE_MAX`]).
     Dense,
-    /// Sparse LU via `faer::sparse`.  Pure-Rust default at larger N.
+    /// Sparse LU via `faer::sparse`.  The pure-Rust sparse backend, and what
+    /// a build without the `klu` feature uses at larger N.
     Sparse,
     /// SuiteSparse KLU.  Sparse direct LU specialised for circuit
     /// matrices (BTF + dense LU on diagonal blocks).  Typically 2-5×
     /// faster than the faer-sparse path on circuit problems.  Requires
     /// the `klu` cargo feature and a system install of SuiteSparse.
     Klu,
-    /// Pick automatically from system size (Dense if n < 50, else Sparse).
+    /// Pick automatically from system size: Dense below [`AUTO_DENSE_MAX`],
+    /// then KLU when the `klu` feature is compiled in, faer-sparse otherwise.
+    /// `Dense` and `Sparse` stay selectable by name — a bug bisected against
+    /// a second factorisation is worth more than the speed.
     Auto,
 }
 
@@ -67,6 +73,11 @@ pub enum SolverKind {
 pub trait LinearSolver: Send + Sync {
     /// Solve `A · x = b`.  Returns `SingularMatrix` if the result is non-finite.
     fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError>;
+
+    /// Short stable name of the backend ("dense", "faer-sparse", "klu").
+    /// Exists so logs — and the test pinning what `SolverKind::Auto` actually
+    /// dispatched to — can see the choice; wrappers report their inner backend.
+    fn name(&self) -> &'static str;
 
     /// Solve `A^T · x = b`.  Default falls back to constructing the explicit
     /// transpose and reusing `solve` — backends with cached factorisations
@@ -187,6 +198,10 @@ impl Factorisation for NoCacheFactorisation {
 pub struct DenseSolver;
 
 impl LinearSolver for DenseSolver {
+    fn name(&self) -> &'static str {
+        "dense"
+    }
+
     fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let n = b.len();
         if n == 0 {
@@ -313,6 +328,10 @@ impl Default for FaerSparseSolver {
 }
 
 impl LinearSolver for FaerSparseSolver {
+    fn name(&self) -> &'static str {
+        "faer-sparse"
+    }
+
     fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         use faer::sparse::{SparseColMat, Triplet};
 
@@ -629,6 +648,10 @@ impl LinearSolver for KluSolver {
         f.refactor_then(b, true, false)
     }
 
+    fn name(&self) -> &'static str {
+        "klu"
+    }
+
     /// Sparse rows carry their own structure, so this needs no `MnaMatrix` and no
     /// separate [`crate::mna::Pattern`] — which is why there is no
     /// `factorise_mat` override any more.
@@ -903,7 +926,20 @@ pub fn make_solver(kind: SolverKind, n: usize) -> Box<dyn LinearSolver> {
             if n < AUTO_DENSE_MAX {
                 Box::new(DenseSolver)
             } else {
-                Box::new(FaerSparseSolver::default())
+                // KLU when it was compiled in, faer-sparse otherwise. A
+                // compile-time cfg, not a runtime probe: a build without
+                // SuiteSparse behaves exactly as before. Measured on
+                // benchmarks/circuits/ring_osc_499.sp this is 2.3× end-to-end
+                // (#76), and it only became safe once the one-shot solve
+                // stopped re-densifying (#75).
+                #[cfg(feature = "klu")]
+                {
+                    Box::new(KluSolver)
+                }
+                #[cfg(not(feature = "klu"))]
+                {
+                    Box::new(FaerSparseSolver::default())
+                }
             }
         }
     }
@@ -1001,6 +1037,11 @@ pub(crate) fn transpose_sparse(a: &[SparseRow], n: usize) -> Vec<SparseRow> {
 }
 
 impl LinearSolver for EquilibratedSolver {
+    /// The wrapper changes conditioning, not the backend: report the inner one.
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
     fn solve(&self, a: &[SparseRow], b: &[f64]) -> Result<Vec<f64>, SimError> {
         let (dr, dc) = equilibration_factors(a);
         let (a_s, b_s) = apply_equilibration(a, b, &dr, &dc);
@@ -1120,6 +1161,17 @@ mod tests {
     }
 
     use super::*;
+
+    /// The twin of `auto_prefers_klu_when_it_is_compiled_in` (integration
+    /// tests, `--features klu`): a build without SuiteSparse must behave
+    /// exactly as it did before #76 — dense below the crossover, faer-sparse
+    /// above it.
+    #[test]
+    #[cfg(not(feature = "klu"))]
+    fn auto_uses_faer_sparse_without_klu() {
+        assert_eq!(make_solver(SolverKind::Auto, 100).name(), "faer-sparse");
+        assert_eq!(make_solver(SolverKind::Auto, 5).name(), "dense");
+    }
 
     #[test]
     fn dense_matches_sparse_on_small_matrix() {
