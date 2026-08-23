@@ -31,3 +31,48 @@ a 6 % solution error, 1 % gives 12 %, 5 % gives 68 %.
 
 Two decks, as everywhere else here: ideal weights first to prove the loop
 closes, then the same topology on the real rings.
+
+## Status
+
+| step | state |
+|---|---|
+| `build_mpc_deck.py` — both decks | done; both converge |
+| `characterize.py` — operating point, per-neuron `G` | done; see below |
+| per-ring trim to equalise `G` | **next** |
+| bias solve (row-sum rule) | not started |
+| program `W`, check the fixed point against a digital QP | not started |
+| close the plant loop | not started |
+
+### Operating point
+
+30 mW/channel, `PDB = −8 V`, `Iht ≈ 3.12 mA`, where `G = 2.49` on neuron 1
+against the 1.18 the weights need.
+
+**More laser power is not simply more gain.** The corrected modulator model has
+real self-heating (`r_th = 3139.9`), and the absorbed light detunes the ring off
+the resonance the modulation depends on:
+
+| P/channel | thru/P on its own channel | ring ΔT | resonance shift |
+|---|---|---|---|
+| 0.03 mW | 1.8 % — the full notch | 0.03 K | 1.7 pm |
+| 1 mW | 21 % | 0.65 K | 45 pm |
+| 30 mW | 73 % — notch washed out | 3.4 K | **236 pm** |
+
+The linewidth is ~167 pm, so 30 mW sits 1.4 linewidths off. `G` still rises with
+power — 3× the power from 10 to 30 mW buys 2.8× the gain — but sublinearly, and
+10 mW gives only `G = 0.89`, short of the 1.18 needed. The old `fc_pn_th_ps`
+card had `r_th = 0` and was structurally blind to this, so it is a prediction of
+the corrected model rather than a measurement. It is worth testing against the
+chip, because it says the WTA's answer to low gain — more power — was pushing
+against a wall it could not see.
+
+### The thing to fix next
+
+At a single shared trim, per-neuron `G` spans **1.58 to 5.60**. Every neuron
+clears the threshold, so the loop will close, but the spread is the problem:
+row `i` of `W` scales by `1/G_i`, so the strong neurons use a fifth of the
+weight range and their weights land proportionally coarser. Against the 0.5 %
+precision budget above, that is a 3.5× penalty on the best-off row.
+
+Every ring got ring 1's `Iht`. Trimming each ring individually to equalise `G`
+is what makes the precision budget reachable on every row rather than one.

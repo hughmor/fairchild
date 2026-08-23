@@ -8,7 +8,8 @@ experiment, it is in the wrong place.
 | `ringfit.py` | dataset → observables (`load_sweep`, `extract_data`), netlist assembly, the ring wavelength sweep, the staged fitter, and the fit plotting |
 | `rnn_drive.py` | the network driver: bias solve, `.op`, transient, `.param` substitution over the RNN deck |
 | `giona_pn_th_ps.inc` | the device card — **the** deliverable of `pn_modulator_fit`, and an input to everything downstream |
-| `netlists/` | decks no experiment owns: legacy hand-written captures of the chip kept for reference |
+| `netlists/neuron_junction_wdm8.sp` | the O/E/O neuron: balanced PD pair, shunt/bias network, driving the modulator cathode. Shared by `rnn_characterization` and `mpc`. |
+| `netlists/` (rest) | decks no experiment owns: legacy hand-written captures of the chip kept for reference |
 
 `ringfit.py` keeps its own CLI, which runs the staged fit. That run belongs to
 `pn_modulator_fit`, and its `RESULTS` points there. A caller wanting figures
