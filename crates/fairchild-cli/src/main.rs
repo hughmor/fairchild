@@ -174,7 +174,9 @@ struct Cli {
     /// Default behaviour when `--output` is given: write one file per
     /// corner (e.g. `out.alter_pvtfast.temp_-40c.csv`) and run the
     /// corners in parallel.  With `--single-output`, runs are serial
-    /// so headers and rows stay in deterministic order.
+    /// so headers and rows stay in deterministic order.  (`--verbose`
+    /// also forces the serial single-file path — interleaved per-corner
+    /// NR diagnostics would be unreadable.)
     #[arg(long)]
     single_output: bool,
 }
