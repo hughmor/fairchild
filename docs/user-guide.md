@@ -820,7 +820,10 @@ re-run with overrides applied.
 .options  <key>=<value>  ...
 ```
 
-Any field of `SimOptions` ([§7](#7-simoptions-and-convergence-knobs)) can be set this way.
+Any field of `SimOptions` ([§7](#7-simoptions-and-convergence-knobs)) can be set
+this way, under the key the §7 table lists — which is not always the field's
+own name: temperature is `temp`, in °C, not the kelvin field `temp_k`. An
+unrecognised key warns and has no effect.
 
 ### Subcircuits (and PCells)
 
@@ -1012,12 +1015,14 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
 | `itl1` | 150 | DC max NR iterations |
-| `itl4` | 50 | Transient per-step max NR iterations |
+| `itl4` | 150 | Transient per-step max NR iterations |
 | `max_rejections` | 30 | Var-step max step rejections |
 | `method` | `tr` | `be` / `tr` / `gear` |
 | `max_step` | ∞ | Transient max step (s) |
-| `srcsteps` | 11 | Source-stepping homotopy resolution |
-| `temp_k` | 300.15 | Operating temperature (K) |
+| `tstart` | 0 | Discard transient output before this time (s); the run still integrates from 0. Also `.tran`'s third positional argument |
+| `variable_step` | false | LTE-controlled variable-step transient; `step` becomes the initial/maximum stride. Alias: `variablestep`. CLI `--variable-step` |
+| `srcsteps` | 10 | Source-stepping homotopy resolution. Alias: `srcmax` |
+| `temp` | 27 | Operating temperature in **°C** (stored internally as kelvin; the struct field is `temp_k`, but `temp_k` is not an accepted key). `tnom` takes the same units |
 | `uic` | false | Use `.ic` / element `IC=` instead of DC |
 | `pnjlim` | true | Diode / MOSFET junction limiting in NR |
 | `solver` | `auto` | `auto` / `dense` / `sparse` / `klu` linear backend (`klu` needs the `klu` build feature; `auto` picks dense below ~20 nodes, then `klu` when built in, `sparse` otherwise) |
@@ -1027,6 +1032,9 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `trannoise` | false | Inject the `.noise` sources into `.tran` as random currents. Fixed step only. Aliases: `tran_noise`, `transient_noise`. See [Noise](#noise). |
 | `noiseseed` | 1 | Transient-noise RNG seed. Same seed ⇒ same waveform. |
 | `noisescale` | 1.0 | Multiplier on transient-noise **amplitude** (power goes as its square). |
+| `enable_bidirectional` | false | Bundles carry forward **and** backward fields (5 wires/channel instead of 3); reflective devices become meaningful. Aliases: `bidirectional`, `bidirectional_propagation`. See [§14](#14-verilog-a-models-osdi) |
+| `sanity_check` | true | Netlist preflight pass (R=0, duplicate refdes, zero-parameter `fc_*`, …) warning before analysis. Disable with `nosanitycheck` / `sanity_check=0` |
+| `verbose` | false | Solver progress notes to stderr: matrix size/NNZ, which convergence phase ran, top residual rows on NR failure. CLI `-v` |
 | `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See [`fc_waveguide`](photonic-models.md#fc_waveguide--lossy-waveguide). |
 
 Setting any of these from the netlist:
@@ -1067,11 +1075,13 @@ fairchild [OPTIONS] --file <FILE>
 |---|---|
 | `-f, --file <FILE>` | Input SPICE netlist |
 | `--format csv\|nutmeg` | Output format (default csv) |
-| `-o, --output <FILE>` | Output destination (default stdout) |
+| `-o, --output <FILE>` | Output destination (default stdout). With more than one `.alter` × `.temp` corner, the path becomes a *stem* and one file per corner is written (e.g. `out.alter_pvtfast.temp_-40c.csv`), the corners running in parallel — unless `--single-output` or `--verbose` |
+| `--single-output` | Bundle all corner outputs into the single `--output` file (with `# alter=…` / `# temp_c=…` header lines), run serially in deterministic order |
 | `--probe <SIG,…>` | Comma-separated CSV signal filter. An unmatched name is an error; `V(node)` selects an AC sweep's `mag_`/`phase_deg_` pair |
 | `--param ELEM.PARAM=VAL` | Override a circuit parameter (repeatable) |
 | `--opt KEY=VAL` | Override a SimOptions field (repeatable) |
 | `--reltol`, `--gmin`, `--method`, `--maxstep`, `--solver` | Convenience flags |
+| `--variable-step` | LTE-controlled variable-step transient (same as `.options variable_step=1`) |
 | `--no-pnjlim` | Disable junction limiting |
 | `--check` | Parse + discipline-check only |
 | `--list-nodes` / `--list-models` | Inspect parsed netlist, then exit |
