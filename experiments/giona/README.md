@@ -25,13 +25,16 @@ scripts here assume the chip's topology, PCB network, and dataset layout.
 | `build_frontend.py` | — | generates the chip front-end netlist (source bank → 8-ring modulator bank → 2 mm bus → 1:8 log tree → 8 banks of 8 weight rings) | `netlists/giona_frontend.sp` |
 | `compare_va_mrm.py` | — | the Verilog-A add-drop ring against the native `mrm.sp` cell it replaces | `results/va_mrm_match.json` |
 | `va_vs_may_data.py` | May sparse joint IV+spectra | the same Verilog-A ring against the capture the card was fitted to | `results/va_vs_may_data.json` |
-| `nheater_readout.py` | — | the weight ring finding its own resonance through its heater current | `results/nheater_readout.png` |
+| `nheater_readout.py` | — | the weight ring finding its own resonance in its own resistance | `results/nheater_readout.png` |
 
 The chip has two kinds of ring and now two Verilog-A models for them:
 `examples/verilog_a/models/mrm_addrop.va` for the 8 PN modulators and
 `ring_nheater.va` for the 64 N-doped-heater weight rings. `build_frontend.py`
 instantiates both; neither needs the hand-generated 8-channel subckt this
-directory used to carry, because both are bundle-aware.
+directory used to carry, because both are bundle-aware. It writes two decks:
+`giona_frontend.sp` with the 64 real rings, and `giona_frontend_idealW.sp` with
+`fc_optical_2x2` blocks where `V(Wij)` is the weight directly — same net names,
+so a script can swap decks before the weight-to-voltage map exists.
 
 `ringfit.py` is also the shared library: dataset → observables
 (`load_sweep`, `extract_data`), netlist assembly, ring wavelength sweep,

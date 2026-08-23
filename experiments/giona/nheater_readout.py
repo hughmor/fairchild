@@ -2,15 +2,18 @@
 """nheater_readout.py — the weight ring reading its own resonance out.
 
 `examples/verilog_a/models/ring_nheater.va` has no photodiode. It has a ring
-whose waveguide is doped n-type so it can be used as a resistor, and doping a
-waveguide puts free carriers in the optical mode, and free carriers absorb. What
-they absorb becomes heat in the same silicon whose resistance is being measured.
+whose waveguide is doped n-type so it can be used as a resistor, and light lands
+in that resistance twice, with opposite signs: absorbed photons make carriers,
+which conduct and pull R DOWN, and what everything dissipates warms the silicon,
+whose positive tempco pushes R up. The carriers win by nearly two orders of
+magnitude, so the resonance shows up as a DIP.
 
-So: put a laser on the bus, sweep the heater voltage, measure the CURRENT. The
-heater walks the resonance across the laser line; when it crosses, the
-circulating power spikes by the cavity enhancement, the extra absorbed power
-warms the ring further, and the resistance rises. The resonance appears in an
-electrical measurement with no detector in the circuit.
+Driven in CURRENT mode, deliberately. The self-heating closes a loop around the
+readout and its sign depends on the drive: at constant current a falling R means
+less power means cooler means R falls further, so the signal is amplified
+(1.6x at 1.25 mA); at constant voltage the same fall means more power and the
+loop fights it. Current mode also runs away above 2.73 mA on these defaults,
+which is presumably why the published sweep stops at 1.25.
 
     .venv/bin/python experiments/giona/nheater_readout.py
 
@@ -18,13 +21,8 @@ Writes results/nheater_readout.png.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-os.environ.setdefault(
-    "FAIRCHILD_OPENVAF",
-    "/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r",
-)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -36,6 +34,14 @@ HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 VA = HERE.parents[1] / "examples" / "verilog_a" / "models" / "ring_nheater.va"
 
+# The model's own n_eff already puts the cold resonance about a third of a
+# nanometre blue of 1550, so the sweep crosses it near the middle. Nothing to
+# trim here.
+#
+# Worth knowing before reading the contrast: tuning is 0.251 nm/mW and 1.25 mA
+# reaches 4.3 mW, so the ENTIRE current range is worth about 1.1 nm — two
+# linewidths of this 0.57 nm ring. A sweep like this never gets far off
+# resonance, which is why the on/off ratio below is a few and not a hundred.
 DECK = f""".va {VA}
 .optical_port src
 .optical_port th
@@ -43,29 +49,29 @@ DECK = f""".va {VA}
 .optical_port dr
 XL src fc_cw_laser power_mW=1.0 wavelength_nm=1550
 Xr src th ad dr hp 0 tr ring_nheater
-VH hp 0 DC 0
+IH 0 hp DC 1e-6
 .op
 """
-# 1 uW stands in for dark: the model has no zero-power path, and a microwatt
-# absorbs a millionth of what a milliwatt does.
-P_DARK_MW = 1e-3
-POWERS_MW = (0.5, 1.0, 2.0, 4.0)
-V = np.linspace(0.05, 2.4, 130)
+# 0.1 uW stands in for dark: the model has no zero-power path, and it absorbs
+# ten thousand times less than the 1 mW trace.
+P_DARK_MW = 1e-4
+POWERS_MW = (0.25, 0.5, 1.0, 2.0)
+I_MA = np.linspace(0.02, 1.25, 110)
 
 
 def sweep(ckt, p_mw: float):
+    """Ramp the heater CURRENT; read the voltage it develops."""
     ckt.set_param("XL", "power_mW", float(p_mw))
-    r_ohm, drop, thru, dT = (np.empty(len(V)) for _ in range(4))
-    for i, v in enumerate(V):
-        ckt.set_param("VH", "dc", float(v))
+    v_h, r_ohm, drop, dT = (np.empty(len(I_MA)) for _ in range(4))
+    for i, i_ma in enumerate(I_MA):
+        ckt.set_param("IH", "dc", float(i_ma * 1e-3))
         r = ckt.run("op")
-        i_h = -float(r["I(vh)"][0])
-        r_ohm[i] = v / i_h
+        v_h[i] = float(r["V(hp)"][0])
+        r_ohm[i] = v_h[i] / (i_ma * 1e-3)
         dT[i] = float(r["V(tr)"][0])
-        for name, out in (("dr", drop), ("th", thru)):
-            out[i] = (float(r[f"V({name}_re_0)"][0]) ** 2
-                      + float(r[f"V({name}_im_0)"][0]) ** 2)
-    return r_ohm, drop, thru, dT
+        drop[i] = (float(r["V(dr_re_0)"][0]) ** 2
+                   + float(r["V(dr_im_0)"][0]) ** 2)
+    return r_ohm, drop, v_h, dT
 
 
 def main() -> None:
@@ -73,41 +79,49 @@ def main() -> None:
     ckt = fc.Circuit()
     ckt.load_str(DECK)
 
-    dark, _, _, dT_dark = sweep(ckt, P_DARK_MW)
+    dark, _, v_dark, _ = sweep(ckt, P_DARK_MW)
     runs = {p: sweep(ckt, p) for p in POWERS_MW}
 
-    print(f"{'P_in mW':>8} {'V_res':>7} {'R_res':>9} {'excess ppm':>11}"
-          f" {'dT opt K':>9} {'dI uA':>8}")
-    for p, (r_ohm, drop, _, dT) in runs.items():
+    print(f"dark sweep: R {dark[0]:.0f} -> {dark[-1]:.0f} ohm, "
+          f"V {v_dark[0]:.3f} -> {v_dark[-1]:.3f} V over "
+          f"{I_MA[0]:.2f}-{I_MA[-1]:.2f} mA  (paper: 2200 -> ~2800, just over 3 V)")
+    print(f"\n{'P_in mW':>8} {'I_res mA':>9} {'dR_res':>8} {'dR_end':>8}"
+          f" {'on/off':>7} {'dV_res mV':>10}")
+    for p, (r_ohm, drop, v_h, _) in runs.items():
         k = int(np.argmax(drop))
-        exc = (r_ohm - dark) / dark
-        j = int(np.argmax(exc))
-        i_lit, i_dark = V[j] / r_ohm[j], V[j] / dark[j]
-        print(f"{p:8.2f} {V[k]:7.3f} {r_ohm[k]:9.2f} {exc[j] * 1e6:11.1f}"
-              f" {dT[j] - dT_dark[j]:9.4f} {(i_lit - i_dark) * 1e6:8.2f}")
+        dr = r_ohm - dark
+        print(f"{p:8.2f} {I_MA[k]:9.3f} {dr[k]:8.1f} {dr[-1]:8.1f}"
+              f" {dr.min() / dr[-1]:7.1f} {(v_h[k] - v_dark[k]) * 1e3:10.2f}")
+    print("paper: light shifts the whole curve DOWN, ~20 ohm off resonance and")
+    print("       ~300 ohm on it — a ratio of about 15")
+    print("The magnitude matches; the ratio does not, and the reason is the sweep")
+    print("range. Two linewidths of tuning is all 1.25 mA buys, so neither end of")
+    print("this sweep is off resonance in the sense the ratio assumes. A Lorentzian")
+    print("two half-widths out is only down 5x, which is about what shows up here.")
 
     fig, ax = plt.subplots(1, 3, figsize=(15.5, 4.6))
     cmap = plt.get_cmap("viridis")
-    for n, (p, (r_ohm, drop, thru, dT)) in enumerate(runs.items()):
+    for n, (p, (r_ohm, drop, _, _)) in enumerate(runs.items()):
         c = cmap(n / max(len(runs) - 1, 1))
-        ax[0].plot(V, drop / (p * 1e-3), color=c, label=f"{p:.1f} mW")
-        ax[1].plot(V, r_ohm, color=c, label=f"{p:.1f} mW")
-        ax[2].plot(V, (r_ohm - dark) / dark * 1e6, color=c, label=f"{p:.1f} mW")
-    ax[0].plot(V, runs[1.0][2] / 1e-3, "k:", lw=1, label="thru, 1 mW")
-    ax[1].plot(V, dark, "k--", lw=1.2, label="dark")
+        ax[0].plot(I_MA, drop / (p * 1e-3), color=c, label=f"{p:.2f} mW")
+        ax[1].plot(I_MA, r_ohm, color=c, label=f"{p:.2f} mW")
+        ax[2].plot(I_MA, r_ohm - dark, color=c, label=f"{p:.2f} mW")
+    ax[1].plot(I_MA, dark, "k--", lw=1.4, label="dark")
+    ax[2].axhline(0, color="k", lw=0.8)
 
     ax[0].set_ylabel("drop / input")
-    ax[0].set_title("the optics: the heater tunes the ring\nthrough the laser line")
+    ax[0].set_title("the optics: the heater walks the ring\nthrough the laser line")
     ax[1].set_ylabel("heater resistance (ohm)")
-    ax[1].set_title("the electrics: R rises with its own\ntemperature, light or no light")
-    ax[2].set_ylabel("(R − R_dark) / R_dark  (ppm)")
-    ax[2].set_title("the readout: what the light adds,\nand it peaks on resonance")
+    ax[1].set_title("the electrics: self-heating raises R,\nand the light pulls it back down")
+    ax[2].set_ylabel("R − R_dark  (ohm)")
+    ax[2].set_title("the readout: carriers beat heat,\nso the resonance is a DIP")
     for a in ax:
-        a.set_xlabel("heater voltage (V)")
+        a.set_xlabel("heater current (mA)")
         a.legend(fontsize=8)
         a.grid(alpha=0.25)
-    fig.suptitle("ring_nheater — the doping that makes the resistor also makes the "
-                 "absorption, so the ring reads its own resonance out", fontsize=12)
+    fig.suptitle("ring_nheater in current mode — absorbed photons make carriers that "
+                 "conduct, so the ring reads its own resonance out as a drop in R",
+                 fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     out = RESULTS / "nheater_readout.png"
     fig.savefig(out, dpi=130)

@@ -2,9 +2,15 @@
 """build_frontend.py — generate the giona front-end netlist and the 8-channel
 ring cell it needs.
 
-Writes one file into `netlists/` (gitignored — it is generated):
+Writes two decks into `netlists/` (gitignored — they are generated), identical
+except for the weight bank and sharing every net name a script would read:
 
-  giona_frontend.sp the front-end itself (see the topology diagram below).
+  giona_frontend.sp        64 real add-drop rings with N-doped heaters. VWij is
+                           a heater VOLTAGE across 2.2 kOhm, not a weight.
+  giona_frontend_idealW.sp the same front end with 8 `fc_optical_2x2` blocks
+                           instead, run at w=0 dw_dv=1 so V(Wij) IS the weight
+                           in [-1,+1]. For getting an experiment working before
+                           the weight-to-voltage map is.
 
 It used to write two. The other was `mrm_wdm8.sp`, an 8-channel add-drop PCell
 spelled out wire by wire because a subckt body cannot declare `.optical_port`
@@ -28,18 +34,8 @@ Run:  .venv/bin/python experiments/giona/build_frontend.py
 from __future__ import annotations
 
 import math
-import os
 import sys
 from pathlib import Path
-
-# Both rings are Verilog-A now, so this file needs a compiler where it used to
-# need none. Without one, `two_pass`'s first pass fails, the failure is
-# swallowed, and the deck comes back with an arity error about a bundle model
-# that never got registered — so say it here rather than debug that.
-os.environ.setdefault(
-    "FAIRCHILD_OPENVAF",
-    "/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r",
-)
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -83,7 +79,7 @@ def n_eff_for(target_nm: float, guess: float = 2.2810) -> float:
 
 
 # ── the front end ────────────────────────────────────────────────────────────
-def frontend(trims: list[float], wtrims: list[float]) -> str:
+def frontend(trims: list[float], wtrims: list[float], real_weights: bool) -> str:
     L: list[str] = []
     add = L.append
 
@@ -218,6 +214,27 @@ def frontend(trims: list[float], wtrims: list[float]) -> str:
     add("")
 
     # ── weight blocks ──────────────────────────────────────────────────────
+    if not real_weights:
+        add("* ── 8 programmable 2x2 weight blocks, 8 weights each = 64 ──────────")
+        add("* IDEAL weights: w=0 dw_dv=1 makes V(Wij) the weight directly,")
+        add("* clamped to [-1,+1], with P_drop - P_thru = w * P_in. No rings, no")
+        add("* heaters, no thermal crosstalk, no mapping to configure.")
+        add("*")
+        add("* This deck exists so an experiment can be got working before the")
+        add("* weight-to-voltage map is. Its sibling giona_frontend.sp has the 64")
+        add("* real rings; the two share every other net name, so a script can")
+        add("* swap decks and keep its readouts.")
+        for i in range(1, N_CH + 1):
+            ctl = " ".join(f"W{i}{j}" for j in range(1, N_CH + 1))
+            add(f"Xw{i} win{i} dark{i} wthru{i} wdrop{i} {ctl} 0 fc_optical_2x2"
+                f" w=0 dw_dv=1")
+            for j in range(1, N_CH + 1):
+                add(f"VW{i}{j} W{i}{j} 0 DC 0")
+        add("")
+        add(".op")
+        add(".end")
+        return "\n".join(L) + "\n"
+
     add("* ── 8 weight banks of 8 add-drop rings each = 64 physical rings ──")
     add("* Each bank is a cascade on one bus, ring j trimmed onto channel j, so")
     add("* ring (i,j) weights wavelength j in block i. They are ring_nheater:")
@@ -257,12 +274,21 @@ def main() -> int:
     for wl, ne in zip(LAMBDAS_NM, trims):
         print(f"  {wl:.2f} nm → n_eff = {ne:.9f}")
 
-    deck = OUT / "giona_frontend.sp"
-    deck.write_text(frontend(trims, wtrims))
-    print(f"wrote {deck}")
+    decks = []
+    for name, real in (("giona_frontend.sp", True),
+                       ("giona_frontend_idealW.sp", False)):
+        d = OUT / name
+        d.write_text(frontend(trims, wtrims, real))
+        print(f"wrote {d}")
+        decks.append(d)
+    deck = decks[0]
 
-    # Smoke check: it must parse, expand and converge.
+    # Smoke check: both must parse, expand and converge.
     import fairchild as fc
+    ideal = fc.Circuit()
+    ideal.load(str(decks[1]))
+    ideal.run("op")
+    print(f"\n{decks[1].name}: parses and converges")
     c = fc.Circuit()
     c.load(str(deck))
     r = c.run("op")

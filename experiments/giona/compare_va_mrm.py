@@ -46,13 +46,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
-os.environ.setdefault(
-    "FAIRCHILD_OPENVAF",
-    "/Users/hugh/Local/src/OpenVAF-Reloaded/target/release/openvaf-r",
-)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt

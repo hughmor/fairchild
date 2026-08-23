@@ -1634,11 +1634,15 @@ holds it to that — so the compatibility path is a tested one, not a claim.
 
 `ring_nheater.va` is the third: the same add-drop ring with no junction at all,
 tuned by doping its own waveguide n-type and running current through it. It is
-worth reading for one loop the other two do not have — the doping that makes the
-resistor also puts free carriers in the optical mode, so what the ring absorbs
-warms the silicon whose resistance you are measuring. Sweep the heater with a
-laser on the bus and the resonance shows up in the *current*, with no detector
-in the circuit (`experiments/giona/nheater_readout.py` plots it).
+worth reading for one loop the other two do not have: light lands in the
+resistance twice and with opposite signs. Absorbed photons make carriers, which
+conduct and pull R down; what everything dissipates warms silicon whose tempco
+pushes R up. The carriers win, so ramping the heater current with a laser on the
+bus finds the resonance as a *dip in resistance*, with no detector in the
+circuit (`experiments/giona/nheater_readout.py` plots it). Which way the
+self-heating then feeds back depends on the drive — amplifying at constant
+current, opposing at constant voltage — so these are characterised in current
+mode, and the model says why in its header.
 
 The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
 node whose operating point is far from the seed can still get there. A flat
