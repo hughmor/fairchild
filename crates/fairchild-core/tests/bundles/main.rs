@@ -15,6 +15,7 @@ mod bidirectional_endtoend;
 mod bidirectional_option;
 mod bundle_arity_registry;
 mod dark_channel_transient;
+mod lambda_in_signal_listings;
 mod lambda_is_a_label;
 mod lambda_is_not_an_unknown;
 mod lambda_resolution;

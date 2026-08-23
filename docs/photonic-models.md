@@ -67,10 +67,13 @@ Every "optical port" is a **3-wire bundle** `(re, im, λ)`:
 - `λ` — propagation wavelength in metres. A **label**, not an unknown: it is
   routed from whatever source emits it and never computed, so it is resolved
   once before the solve and occupies no matrix row. The wire keeps its name —
-  `V(bus_wl_0)` reports the resolved wavelength, and the positional `X`-line ABI
-  is unchanged — but nothing solves for it, nothing differentiates against it,
-  and it does not appear in the signal list a run returns. Removing it took 864
-  of 2840 unknowns off the giona 8-neuron RNN.
+  nothing solves for it, nothing differentiates against it — but it stays a
+  signal like any other: `V(bus_wl_0)` reports the resolved wavelength, the
+  positional `X`-line ABI is unchanged, and `.op` and `.tran` outputs list it
+  alongside the solved nodes (as a constant column, since a label does not
+  move). Removing it from the matrix took 864 of 2840 unknowns off the giona
+  8-neuron RNN. An AC output carries no λ column: a small-signal phasor sweep
+  has no λ component to report.
 
 `.optical_port NAME [N]` declares a bundle. **Every photonic device is
 bundle-aware**: a single device instance handles all N optical channels.

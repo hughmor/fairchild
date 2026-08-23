@@ -218,6 +218,31 @@ impl CircuitTopology {
             .ok_or_else(|| SimError::UnknownNode(node.to_string()))
     }
 
+    /// λ nets that belong in signal listings, with their resolved wavelengths,
+    /// sorted by name so every output surface is deterministic (the underlying
+    /// map is a `HashMap`).
+    ///
+    /// These are the labels #59 took out of the matrix: still nets, still
+    /// probeable through [`Self::node_voltage`]'s fallback, but absent from
+    /// `node_index` — which is what every enumeration used to iterate, so λ
+    /// was probeable at `.op` and listed nowhere (#71). A λ net some other
+    /// element pins as a real row (`Vwl bus_wl_0 0 …`) is already in
+    /// `node_index` and is not repeated here.
+    ///
+    /// Every listing surface — `NrResult::all_voltages`, the CSV headers, the
+    /// Nutmeg `Variables:` blocks, Python's `signals()` — takes its λ set from
+    /// this one method, so they cannot disagree.
+    pub fn lambda_signals(&self) -> Vec<(&str, f64)> {
+        let mut v: Vec<(&str, f64)> = self
+            .lambda
+            .nets()
+            .filter(|n| !self.node_index.contains_key(*n))
+            .map(|n| (n, self.lambda.get(n).expect("nets() iterates by_net")))
+            .collect();
+        v.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        v
+    }
+
     /// Retrieve a voltage-source branch current from a solution vector.
     pub fn vsrc_current(&self, vsrc_name: &str, x: &[f64]) -> Result<f64, SimError> {
         self.vsrc_index
