@@ -27,9 +27,14 @@ pub fn parse_spice_value(s: &str) -> Result<f64, crate::ParseError> {
 // them unqualified (as they did before the split).
 use bundles::{expand_bundle_ports, scan_bidirectional};
 use common::{canon_node, expand_bus_vectors, parse_port_decl, parse_value};
+/// `v(node)` / `v(node,ref)` / `i(vsrc)`, for a frontend that takes an output
+/// spelling from a caller rather than from a card.  The same function the
+/// `.tf`, `.sens` and `.noise` cards go through, so a Python `out="v(a,b)"` and
+/// a deck's `.tf v(a,b)` cannot come to mean different things.
+pub use directives::parse_outvar;
 use directives::{
     is_silent_directive, parse_ac, parse_dc, parse_measure, parse_node_assignments, parse_noise,
-    parse_options_directive, parse_tran, select_directive,
+    parse_options_directive, parse_pz, parse_sens, parse_tf, parse_tran, select_directive,
 };
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
@@ -226,6 +231,12 @@ fn parse_resolved(input: &str, oracle: &dyn ArityOracle) -> Result<Netlist, Pars
             netlist.analyses.push(parse_dc(&lc, *lineno)?);
         } else if lc.starts_with(".noise") {
             netlist.analyses.push(parse_noise(&lc, *lineno)?);
+        } else if lc.starts_with(".tf") {
+            netlist.analyses.push(parse_tf(&lc, *lineno)?);
+        } else if lc.starts_with(".sens") {
+            netlist.analyses.push(parse_sens(&lc, *lineno)?);
+        } else if lc.starts_with(".pz") {
+            netlist.analyses.push(parse_pz(&lc, *lineno)?);
         } else if lc.starts_with(".temp") {
             // .temp <T1_celsius> [<T2_celsius> …] — one entry per sweep point.
             for tok in lc.split_whitespace().skip(1) {

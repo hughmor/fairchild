@@ -16,7 +16,7 @@ use fairchild_core::{
 use fairchild_osdi::VaOptions;
 use fairchild_parser::{
     check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, BundleArity, Netlist,
-    PermissiveArity, StaticArity,
+    OutVar, PermissiveArity, StaticArity,
 };
 
 /// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
@@ -1250,7 +1250,134 @@ fn run_corner_analyses_ctx(
                 }
                 ran_something = true;
             }
+
+            Analysis::Tf { out, input_src } => {
+                warn_probe_ignored(probe_list, ".tf");
+                if ctx.verbose {
+                    eprintln!("info: running transfer-function analysis on {input_src}...");
+                }
+                let result =
+                    fairchild_core::transfer_function(netlist, registry, opts, out, input_src)
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: .tf failed: {e}");
+                            std::process::exit(1);
+                        });
+                let out_label = outvar_label(out);
+                let mut buf = Vec::new();
+                match ctx.format {
+                    Format::Csv => result.write_csv(&mut buf, &out_label, input_src),
+                    Format::Nutmeg => result.write_nutmeg(&mut buf, title, &out_label, input_src),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
+
+            Analysis::Sens { out, params } => {
+                warn_probe_ignored(probe_list, ".sens");
+                if ctx.verbose {
+                    let n = if params.is_empty() {
+                        "every element value".to_string()
+                    } else {
+                        format!("{} parameter(s)", params.len())
+                    };
+                    eprintln!("info: running sensitivity analysis over {n}...");
+                }
+                let result = fairchild_core::sensitivity(netlist, registry, opts, out, params)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: .sens failed: {e}");
+                        std::process::exit(1);
+                    });
+                // Unreached parameters are a zero that was never computed.
+                // Nobody reading a column of numbers can tell the difference,
+                // so say it on stderr as well as in the `reached` column.
+                let missed = result.unreached();
+                if !missed.is_empty() {
+                    let names: Vec<&str> = missed.iter().map(|r| r.name.as_str()).collect();
+                    eprintln!(
+                        "warning: no gradient for {} — their reported 0 is a placeholder, \
+                         not an insensitivity (the model does not accept the parameter; \
+                         see docs/model_status.md)",
+                        names.join(", ")
+                    );
+                }
+                let mut buf = Vec::new();
+                match ctx.format {
+                    Format::Csv => result.write_csv(&mut buf),
+                    Format::Nutmeg => result.write_nutmeg(&mut buf, title),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
+
+            Analysis::Pz {
+                in_pos,
+                in_neg,
+                out_pos,
+                out_neg,
+                drive,
+                want,
+            } => {
+                warn_probe_ignored(probe_list, ".pz");
+                if ctx.verbose {
+                    eprintln!(
+                        "info: running pole-zero analysis ({in_pos},{in_neg}) → \
+                         ({out_pos},{out_neg})..."
+                    );
+                }
+                let t0 = Instant::now();
+                let result = fairchild_core::pole_zero(
+                    netlist, registry, opts, in_pos, in_neg, out_pos, out_neg, *drive, *want,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("error: .pz failed: {e}");
+                    std::process::exit(1);
+                });
+                if ctx.verbose {
+                    eprintln!(
+                        "info: pole-zero complete: {} pole(s), {} zero(s) [{:.1} ms]",
+                        result.poles.len(),
+                        result.zeros.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                let mut buf = Vec::new();
+                match ctx.format {
+                    Format::Csv => result.write_csv(&mut buf),
+                    Format::Nutmeg => result.write_nutmeg(&mut buf, title),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
         }
     }
     ran_something
+}
+
+/// `--probe` selects signals out of a waveform table, and the small-signal
+/// reports are not one — their rows are named quantities, all of which are the
+/// answer.  Say so rather than dropping the flag in silence, which is the
+/// failure `.print` was fixed for.
+fn warn_probe_ignored(probe_list: &[String], card: &str) {
+    if !probe_list.is_empty() {
+        fairchild_core::warn_user!(
+            "--probe does not apply to {card}: it reports named quantities, not \
+             a signal table, so every row is printed"
+        );
+    }
+}
+
+/// `v(out)` / `v(a,b)` / `i(vsrc)` — how the card spelled the output, for the
+/// labels a `.tf` report is read by.
+fn outvar_label(out: &OutVar) -> String {
+    match out {
+        OutVar::NodeVoltage { pos, neg } if neg == "0" => format!("v({pos})"),
+        OutVar::NodeVoltage { pos, neg } => format!("v({pos},{neg})"),
+        OutVar::BranchCurrent(name) => format!("i({name})"),
+    }
 }

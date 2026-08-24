@@ -24,7 +24,7 @@ the photonics have [their own guide](photonic-models.md).
 
 **Running it**
 
-5. [Analyses](#5-analyses) — `.op`, `.dc`, `.tran`, `.ac`, `.noise`
+5. [Analyses](#5-analyses) — `.op`, `.dc`, `.tran`, `.ac`, `.noise`, `.tf`, `.sens`, `.pz`
 6. [Directives](#6-directives)
 7. [SimOptions and convergence knobs](#7-simoptions-and-convergence-knobs)
 8. [CLI reference](#8-cli-reference)
@@ -666,6 +666,69 @@ multi-tap `CorrelatedNoise` (the mechanism exists — laser RIN uses it).
 
 ---
 
+### Small-signal reports: `.tf`, `.sens`, `.pz`
+
+These three answer a question about the circuit rather than producing a
+waveform, so they return a table instead of a sweep. All three linearise about
+the DC operating point.
+
+```
+.tf   <v(node[,ref])|i(vsrc)>  <input_source>
+.sens <v(node[,ref])|i(vsrc)>  [<element>[.<param>] …]
+.pz   <n1> <n2> <n3> <n4>  cur|vol  pol|zer|pz
+```
+
+```bash
+fairchild -f amp.sp                    # cards run in deck order, like any other
+```
+
+```python
+c.tf()                                  # the deck's .tf card, whole
+c.tf(out="v(out)", src="Vin")           # explicit; needs no card
+# {'gain': 0.75, 'r_in': 4000.0, 'r_out': 750.0, 'out_value': 0.75}
+
+c.sens(out="v(out)")                    # every R/C/L/V/I value in the deck
+c.sens(out="v(out)", wrt=["r1", "m1.w"])
+# [{'param': 'r1.value', 'nominal': 1000.0, 'sensitivity': -1.875e-4,
+#   'normalised': -0.1875, 'reached': True, 'fd_error': 3.6e-11}, …]
+
+c.pz(in_pos="in", out_pos="out")        # in_neg/out_neg default to ground
+# {'poles': [(-50000+998749.2j), (-50000-998749.2j)], 'zeros': [], …}
+```
+
+Pass no analysis arguments and the deck's card is adopted whole; pass any and
+the card is not used at all — the same rule `run("tran")` follows, so the
+numbers in one result always come from one place. They are their own methods
+rather than `run("tf")` because a `SimResult` is a waveform container and these
+have no waveform to put in it.
+
+**`.tf`** gives the gain, the resistance the input source sees, and the
+resistance the output port presents. Signs follow ngspice: a branch current
+counts positive into a source's `+` terminal, so a driving source reads negative
+and a sense source in the return path reads positive.
+
+**`.sens`** is the adjoint, not ngspice's per-parameter re-solve — every
+parameter costs one transposed solve between them, and the result is good to
+~1e-10 relative rather than to `reltol`. **Read the `reached` flag.** A
+parameter the adjoint could not perturb reports `0.0` with `reached = False`,
+and a genuine insensitivity reports `0.0` with `reached = True`; a gradient
+descent that cannot tell them apart stalls at what looks like a stationary
+point. Which model parameters are reachable is `docs/model_status.md`.
+
+**`.pz`** reports roots in rad/s. `vol` drives the input port from a voltage
+source (using the deck's own, if one is already there) and `cur` injects current
+into an open port — the two give different pole sets, and that is the physics,
+not an inconsistency. The eigensolve is dense: past 400 unknowns it is a hard
+error naming the limit rather than an unbounded wait.
+
+> **A pole-zero listing is only as linear as the operating point it was taken
+> at.** Like `.noise` above, `.pz` and `.tf` describe the circuit *at one bias*.
+> A deck idling at zero reports the poles of the idle circuit, which for
+> anything with a nonlinear device is not the circuit you care about. Bias the
+> deck where you want the answer.
+
+---
+
 ## 6. Directives
 
 ### Initial conditions
@@ -1136,6 +1199,16 @@ tran  = c.run("tran", step=1e-9, stop=1e-6,
 ac    = c.run("ac", variation="dec", points=20, fstart=1, fstop=1e6)
 noise = c.run("noise", variation="dec", points=20, fstart=1, fstop=1e6,
               out_pos="out", src="V1")
+
+# The small-signal reports return tables, not waveforms, so they are their own
+# methods rather than run() kinds.  Each takes the deck's card when given no
+# arguments of its own.
+gain  = c.tf(out="v(out)", src="Vin")["gain"]
+grads = c.sens(out="v(out)")                      # check each row's ['reached']
+poles = c.pz(in_pos="in", out_pos="out")["poles"] # rad/s, complex
+
+# What the deck declares, without running any of it:
+c.analyses          # [{'kind': 'tran', …}, {'kind': 'pz', …}]
 
 # Parametric sweep — equivalent of Monte Carlo / corner runs.
 results = c.sweep("Rload.resistance", [1e3, 2e3, 5e3], "tran",

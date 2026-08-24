@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyComplex, PyDict};
 
 use fairchild_core::adjoint::dc_sensitivity;
 use fairchild_core::adjoint_ac::{AcAdjoint, AcOutput};
@@ -24,7 +24,7 @@ use fairchild_core::{
 };
 use fairchild_parser::{
     parse_spice_file_with_arity, parse_spice_with_arity, AcVariation, Analysis, ArityOracle,
-    Netlist, PermissiveArity,
+    Netlist, OutVar, ParamName, PermissiveArity, PzDrive, PzWant,
 };
 
 // ---------------------------------------------------------------------------
@@ -498,6 +498,61 @@ impl Default for Circuit {
     }
 }
 
+/// Rust-side helpers — deliberately outside `#[pymethods]`, which would try to
+/// expose them to Python and cannot, since they traffic in `Netlist` and
+/// `SimOptions`.
+impl Circuit {
+    /// The netlist, registry and options every analysis entry point starts
+    /// from: the loaded deck with `set_param` overrides, injected sources, a
+    /// `params=` kwarg and a chosen `.alter` block applied, in that order.
+    ///
+    /// One copy, shared by `run` and the three small-signal reports.  Four
+    /// copies of "apply the overrides, then the params, then the alter" is four
+    /// chances for one entry point to honour something the others do not, which
+    /// is how `params=` came to be silently dropped once already (#56).
+    fn prepare(
+        &self,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<(Netlist, DeviceRegistry, SimOptions)> {
+        let netlist = self
+            .netlist
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
+
+        let mut nl = netlist.clone();
+        apply_overrides(&mut nl, &self.overrides)?;
+        apply_source_overrides(&mut nl, &self.source_overrides);
+        // `params=` means here what it means on `tran_adjoint`: per-call
+        // `element.param` overrides that leave `set_param` and the deck alone.
+        // It used to be accepted and dropped, which made a fitting loop return
+        // its initial guess and call it converged (fairchild issue #56).
+        apply_param_kwarg(&mut nl, kwargs)?;
+
+        // Apply a `.alter` block if the user requested one via `alter=...`.
+        if let Some(kw) = kwargs {
+            if let Some(v) = kw.get_item("alter")? {
+                let label: String = v.extract()?;
+                let block = nl
+                    .alters
+                    .iter()
+                    .find(|b| b.label == label)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err(format!(
+                            "no .alter block named '{label}'; available: {:?}",
+                            nl.alters.iter().map(|b| &b.label).collect::<Vec<_>>()
+                        ))
+                    })?;
+                nl.apply_alter(&block);
+            }
+        }
+
+        let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
+        let opts = build_sim_options(&nl, kwargs)?;
+        Ok((nl, registry, opts))
+    }
+}
+
 #[pymethods]
 #[allow(clippy::useless_conversion)]
 impl Circuit {
@@ -651,10 +706,167 @@ impl Circuit {
                         d.set_item("fstart", fstart)?;
                         d.set_item("fstop", fstop)?;
                     }
+                    Analysis::Tf { out, input_src } => {
+                        d.set_item("kind", "tf")?;
+                        d.set_item("out", outvar_str(out))?;
+                        d.set_item("src", input_src)?;
+                    }
+                    Analysis::Sens { out, params } => {
+                        d.set_item("kind", "sens")?;
+                        d.set_item("out", outvar_str(out))?;
+                        let names: Vec<String> = params.iter().map(param_str).collect();
+                        d.set_item("params", names)?;
+                    }
+                    Analysis::Pz {
+                        in_pos,
+                        in_neg,
+                        out_pos,
+                        out_neg,
+                        drive,
+                        want,
+                    } => {
+                        d.set_item("kind", "pz")?;
+                        d.set_item("in_pos", in_pos)?;
+                        d.set_item("in_neg", in_neg)?;
+                        d.set_item("out_pos", out_pos)?;
+                        d.set_item("out_neg", out_neg)?;
+                        d.set_item(
+                            "drive",
+                            match drive {
+                                PzDrive::Vol => "vol",
+                                PzDrive::Cur => "cur",
+                            },
+                        )?;
+                        d.set_item(
+                            "want",
+                            match want {
+                                PzWant::Poles => "pol",
+                                PzWant::Zeros => "zer",
+                                PzWant::Both => "pz",
+                            },
+                        )?;
+                    }
                 }
                 Ok(d)
             })
             .collect()
+    }
+
+    /// Small-signal transfer function about the DC operating point.
+    ///
+    /// ```python
+    /// ckt.tf()                          # the deck's .tf card, whole
+    /// ckt.tf(out="v(out)", src="Vin")   # explicit; works with no card
+    /// # {'gain': 0.75, 'r_in': 4000.0, 'r_out': 750.0, 'out_value': 0.75}
+    /// ```
+    ///
+    /// `out` is `v(node)`, `v(node,ref)` or `i(vsrc)`; `src` names an
+    /// independent V or I source.  Pass neither and the deck's `.tf` card is
+    /// adopted whole; pass either and the card is not used at all — the same
+    /// rule `run()` follows, so the numbers in a result always come from one
+    /// place.
+    #[pyo3(signature = (**kwargs))]
+    pub fn tf<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let (nl, registry, opts) = self.prepare(kwargs)?;
+        let (out, src) = tf_args(&nl, kwargs)?;
+        let r = py
+            .allow_threads(|| fairchild_core::transfer_function(&nl, &registry, &opts, &out, &src))
+            .map_err(sim_err)?;
+        let d = PyDict::new_bound(py);
+        d.set_item("gain", r.gain)?;
+        d.set_item("r_in", r.r_in)?;
+        d.set_item("r_out", r.r_out)?;
+        d.set_item("out_value", r.out_value)?;
+        Ok(d)
+    }
+
+    /// DC parameter sensitivity of one output, by the adjoint method.
+    ///
+    /// ```python
+    /// ckt.sens()                                    # the deck's .sens card
+    /// ckt.sens(out="v(out)")                        # every element value
+    /// ckt.sens(out="v(out)", params=["r1", "m1.w"]) # named
+    /// # [{'param': 'r1.value', 'nominal': 1000.0, 'sensitivity': -1.875e-4,
+    /// #   'normalised': -0.1875, 'reached': True, 'fd_error': 3.6e-11}, …]
+    /// ```
+    ///
+    /// **Check `reached`.** A parameter the adjoint could not perturb reports
+    /// `sensitivity = 0.0` with `reached = False`, and a real insensitivity
+    /// reports the same zero with `reached = True`.  Optimising against the
+    /// first without looking stalls somewhere that looks like a stationary
+    /// point.
+    #[pyo3(signature = (**kwargs))]
+    pub fn sens<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let (nl, registry, opts) = self.prepare(kwargs)?;
+        let (out, params) = sens_args(&nl, kwargs)?;
+        let r = py
+            .allow_threads(|| fairchild_core::sensitivity(&nl, &registry, &opts, &out, &params))
+            .map_err(sim_err)?;
+        r.rows
+            .iter()
+            .map(|row| {
+                let d = PyDict::new_bound(py);
+                d.set_item("param", &row.name)?;
+                d.set_item("nominal", row.nominal)?;
+                d.set_item("sensitivity", row.sensitivity)?;
+                d.set_item("normalised", row.normalised)?;
+                d.set_item("reached", row.reached)?;
+                d.set_item("fd_error", row.fd_error)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Poles and zeros of the small-signal transfer function, in rad/s.
+    ///
+    /// ```python
+    /// ckt.pz()                                             # the deck's .pz card
+    /// ckt.pz(in_pos="in", out_pos="out", drive="vol")      # explicit
+    /// # {'poles': [(-50000.0+998749.2j), (-50000.0-998749.2j)],
+    /// #  'zeros': [], 'infinite_poles': 3, 'infinite_zeros': 0}
+    /// ```
+    ///
+    /// Roots come back as Python complex numbers in rad/s; divide by `2*pi` for
+    /// Hz.  `in_neg` and `out_neg` default to ground, `drive` to `"vol"` and
+    /// `want` to `"pz"`.  Refuses circuits past a dense-eigensolver size limit
+    /// rather than running for an unbounded time.
+    #[pyo3(signature = (**kwargs))]
+    pub fn pz<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let (nl, registry, opts) = self.prepare(kwargs)?;
+        let (ip, ineg, op, oneg, drive, want) = pz_args(&nl, kwargs)?;
+        let r = py
+            .allow_threads(|| {
+                fairchild_core::pole_zero(
+                    &nl, &registry, &opts, &ip, &ineg, &op, &oneg, drive, want,
+                )
+            })
+            .map_err(sim_err)?;
+        // Python complex, so a caller can hand the list straight to numpy and
+        // take `abs()` / `angle()` without unpacking pairs first.
+        let to_py = |roots: &[fairchild_core::Root]| -> Vec<Bound<'py, PyComplex>> {
+            roots
+                .iter()
+                .map(|r| PyComplex::from_doubles_bound(py, r.re, r.im))
+                .collect()
+        };
+        let d = PyDict::new_bound(py);
+        d.set_item("poles", to_py(&r.poles))?;
+        d.set_item("zeros", to_py(&r.zeros))?;
+        d.set_item("infinite_poles", r.infinite_poles)?;
+        d.set_item("infinite_zeros", r.infinite_zeros)?;
+        Ok(d)
     }
 
     /// Inject a numpy waveform as the source for a voltage or current source.
@@ -713,41 +925,11 @@ impl Circuit {
         analysis: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<SimResult> {
-        let netlist = self
-            .netlist
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("no netlist loaded; call load() first"))?;
-
-        let mut nl = netlist.clone();
-        apply_overrides(&mut nl, &self.overrides)?;
-        apply_source_overrides(&mut nl, &self.source_overrides);
-        // `params=` means here what it means on `tran_adjoint`: per-call
-        // `element.param` overrides that leave `set_param` and the deck alone.
-        // It used to be accepted and dropped, which made a fitting loop return
-        // its initial guess and call it converged (fairchild issue #56).
-        apply_param_kwarg(&mut nl, kwargs)?;
-
-        // Apply a `.alter` block if the user requested one via `alter=...`.
-        if let Some(kw) = kwargs {
-            if let Some(v) = kw.get_item("alter")? {
-                let label: String = v.extract()?;
-                let block = nl
-                    .alters
-                    .iter()
-                    .find(|b| b.label == label)
-                    .cloned()
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err(format!(
-                            "no .alter block named '{label}'; available: {:?}",
-                            nl.alters.iter().map(|b| &b.label).collect::<Vec<_>>()
-                        ))
-                    })?;
-                nl.apply_alter(&block);
-            }
-        }
-
-        let registry = build_registry(&nl, self.netlist_dir.as_ref())?;
-        let mut opts = build_sim_options(&nl, kwargs)?;
+        // Prologue extracted so `tf`/`sens`/`pz` get the same one.  Four copies
+        // of "apply the overrides, then the params, then the alter" is four
+        // chances for one entry point to honour something the others do not,
+        // which is how `params=` came to be silently dropped once already.
+        let (nl, registry, mut opts) = self.prepare(kwargs)?;
 
         let analysis_lc = analysis.to_lowercase();
         // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
@@ -836,8 +1018,18 @@ impl Circuit {
                     measurements: Vec::new(),
                 })
             }
+            // The small-signal reports are not waveform sets, so they do not
+            // come back as a `SimResult` and are not reachable through `run`.
+            // Saying where they went beats "unknown analysis" for someone who
+            // has just added the card to a deck.
+            kind @ ("tf" | "sens" | "pz") => Err(PyRuntimeError::new_err(format!(
+                "'{kind}' returns a report, not a waveform set, so it has its own \
+                 method: call ckt.{kind}(...) instead of run(\"{kind}\"). It takes the \
+                 deck's .{kind} card when passed no arguments, like run() does"
+            ))),
             other => Err(PyRuntimeError::new_err(format!(
-                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', or 'dc_sweep'",
+                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', or 'dc_sweep' \
+                 (the small-signal reports are ckt.tf(), ckt.sens() and ckt.pz())",
                 other
             ))),
         }
@@ -1313,6 +1505,164 @@ fn parse_tran_kwargs(
 /// silently skipped — they are consumed by the `parse_*_kwargs` helpers.
 /// Every other kwarg is forwarded to `SimOptions::set`; an unrecognised or
 /// unavailable key raises `PyRuntimeError` so misspellings surface immediately.
+/// A `v(a,b)` / `i(v1)` string from a caller, through the parser's own reader.
+fn outvar_from_str(s: &str) -> PyResult<OutVar> {
+    fairchild_parser::parse_outvar(s, 0)
+        .map_err(|e| PyRuntimeError::new_err(format!("bad output '{s}': {e}")))
+}
+
+/// An `OutVar` back as the string a caller would have written.
+fn outvar_str(out: &OutVar) -> String {
+    match out {
+        OutVar::NodeVoltage { pos, neg } if neg == "0" => format!("v({pos})"),
+        OutVar::NodeVoltage { pos, neg } => format!("v({pos},{neg})"),
+        OutVar::BranchCurrent(name) => format!("i({name})"),
+    }
+}
+
+fn param_str(p: &ParamName) -> String {
+    match &p.param {
+        Some(x) => format!("{}.{x}", p.element),
+        None => p.element.clone(),
+    }
+}
+
+/// Was any of `keys` passed?  This is what decides between "adopt the deck's
+/// card whole" and "the caller supplied its own", and it deliberately ignores
+/// the solver options and `alter`/`params`, which are orthogonal to both.
+fn any_given(kwargs: Option<&Bound<'_, PyDict>>, keys: &[&str]) -> PyResult<bool> {
+    let Some(kw) = kwargs else { return Ok(false) };
+    for k in keys {
+        if kw.get_item(*k)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn str_kwarg(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<Option<String>> {
+    let Some(kw) = kwargs else { return Ok(None) };
+    match kw.get_item(key)? {
+        Some(v) => Ok(Some(v.extract::<String>()?)),
+        None => Ok(None),
+    }
+}
+
+/// `.tf`'s two fields: the caller's, or else the deck's card taken whole.
+fn tf_args(nl: &Netlist, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(OutVar, String)> {
+    if !any_given(kwargs, &["out", "src"])? {
+        return match sole_card(nl, "tf", |a| matches!(a, Analysis::Tf { .. }))? {
+            Some(Analysis::Tf { out, input_src }) => Ok((out.clone(), input_src.clone())),
+            _ => Err(PyRuntimeError::new_err(
+                "tf() needs either a .tf card in the deck or out=… and src=… \
+                 (e.g. ckt.tf(out=\"v(out)\", src=\"Vin\"))",
+            )),
+        };
+    }
+    let out = str_kwarg(kwargs, "out")?
+        .ok_or_else(|| PyRuntimeError::new_err("tf(src=…) also needs out=\"v(node)\""))?;
+    let src = str_kwarg(kwargs, "src")?
+        .ok_or_else(|| PyRuntimeError::new_err("tf(out=…) also needs src=\"Vin\""))?;
+    Ok((outvar_from_str(&out)?, src.to_lowercase()))
+}
+
+/// `.sens`'s output and parameter list.
+fn sens_args(
+    nl: &Netlist,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(OutVar, Vec<ParamName>)> {
+    if !any_given(kwargs, &["out", "wrt"])? {
+        return match sole_card(nl, "sens", |a| matches!(a, Analysis::Sens { .. }))? {
+            Some(Analysis::Sens { out, params }) => Ok((out.clone(), params.clone())),
+            _ => Err(PyRuntimeError::new_err(
+                "sens() needs either a .sens card in the deck or out=… \
+                 (e.g. ckt.sens(out=\"v(out)\"), optionally wrt=[\"r1\", \"m1.w\"])",
+            )),
+        };
+    }
+    let out = str_kwarg(kwargs, "out")?
+        .ok_or_else(|| PyRuntimeError::new_err("sens(wrt=…) also needs out=\"v(node)\""))?;
+    let mut params = Vec::new();
+    if let Some(kw) = kwargs {
+        if let Some(v) = kw.get_item("wrt")? {
+            for name in v.extract::<Vec<String>>()? {
+                let lc = name.to_lowercase();
+                let (element, param) = match lc.split_once('.') {
+                    Some((e, p)) => (e.to_string(), Some(p.to_string())),
+                    None => (lc, None),
+                };
+                params.push(ParamName { element, param });
+            }
+        }
+    }
+    Ok((outvar_from_str(&out)?, params))
+}
+
+/// `.pz`'s ports and keywords.  Unlike `.tf`, most fields have a defensible
+/// default (ground for the far side of each port, a voltage drive, both root
+/// sets), so only the two live nodes are required.
+#[allow(clippy::type_complexity)]
+fn pz_args(
+    nl: &Netlist,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(String, String, String, String, PzDrive, PzWant)> {
+    const KEYS: &[&str] = &["in_pos", "in_neg", "out_pos", "out_neg", "drive", "want"];
+    if !any_given(kwargs, KEYS)? {
+        return match sole_card(nl, "pz", |a| matches!(a, Analysis::Pz { .. }))? {
+            Some(Analysis::Pz {
+                in_pos,
+                in_neg,
+                out_pos,
+                out_neg,
+                drive,
+                want,
+            }) => Ok((
+                in_pos.clone(),
+                in_neg.clone(),
+                out_pos.clone(),
+                out_neg.clone(),
+                *drive,
+                *want,
+            )),
+            _ => Err(PyRuntimeError::new_err(
+                "pz() needs either a .pz card in the deck or in_pos=… and out_pos=… \
+                 (e.g. ckt.pz(in_pos=\"in\", out_pos=\"out\"))",
+            )),
+        };
+    }
+    let need = |k: &str| -> PyResult<String> {
+        str_kwarg(kwargs, k)?
+            .ok_or_else(|| PyRuntimeError::new_err(format!("pz() needs {k}=\"<node>\"")))
+    };
+    let drive = match str_kwarg(kwargs, "drive")?.as_deref() {
+        None | Some("vol") => PzDrive::Vol,
+        Some("cur") => PzDrive::Cur,
+        Some(o) => {
+            return Err(PyRuntimeError::new_err(format!(
+                "pz(drive='{o}') — expected 'vol' or 'cur'"
+            )))
+        }
+    };
+    let want = match str_kwarg(kwargs, "want")?.as_deref() {
+        None | Some("pz") => PzWant::Both,
+        Some("pol") => PzWant::Poles,
+        Some("zer") => PzWant::Zeros,
+        Some(o) => {
+            return Err(PyRuntimeError::new_err(format!(
+                "pz(want='{o}') — expected 'pol', 'zer' or 'pz'"
+            )))
+        }
+    };
+    Ok((
+        need("in_pos")?,
+        str_kwarg(kwargs, "in_neg")?.unwrap_or_else(|| "0".into()),
+        need("out_pos")?,
+        str_kwarg(kwargs, "out_neg")?.unwrap_or_else(|| "0".into()),
+        drive,
+        want,
+    ))
+}
+
 fn build_sim_options(
     netlist: &Netlist,
     kwargs: Option<&Bound<'_, PyDict>>,
@@ -1337,8 +1687,17 @@ fn build_sim_options(
             "variation", // ac / noise
             "out_pos",
             "out_neg",
-            "out",    // noise
+            "out",    // noise / tf / sens
             "params", // tran_adjoint per-run parameter overrides
+            "in_pos", // pz
+            "in_neg",
+            "drive",
+            "want",
+            // `.sens`'s parameter list.  Not spelled `params`: that name is
+            // already taken by the per-run `element.param` override dict, and
+            // one kwarg meaning two things depending on which method reads it
+            // is a bug waiting for someone to write a fitting loop.
+            "wrt",
         ];
         for (k, v) in kw.iter() {
             let key: String = k.extract()?;

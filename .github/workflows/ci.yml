@@ -258,6 +258,49 @@ jobs:
           cm.load_str("* c\n.param sw = 0 $ 0 = off, 1 = on\nV1 a 0 1\nR1 a 0 1k $ load = 1k\n.op\n.end\n")
           assert abs(cm.run("op")["i(v1)"][0] + 1e-3) < 1e-12, cm.run("op")["i(v1)"]
           print("ok: params= overrides bite, and $ comments with '=' parse")
+
+          # The small-signal reports are their own methods, not run() kinds, so
+          # nothing in the block above touches them. The numbers are pinned in
+          # Rust against ngspice; what is checked here is the binding surface
+          # and the deck-vs-caller rule (#33), which only exists in Python.
+          import math
+          ss = fairchild.Circuit()
+          ss.load_str("""* divider
+          Vin in 0 DC 1
+          R1 in out 1k
+          R2 out 0 3k
+          .tf v(out) Vin
+          .sens v(out)
+          """)
+          assert [a["kind"] for a in ss.analyses] == ["tf", "sens"], ss.analyses
+          card = ss.tf()
+          assert math.isclose(card["gain"], 0.75, rel_tol=1e-6), card
+          assert math.isclose(card["r_in"], 4000.0, rel_tol=1e-6), card
+          assert math.isclose(card["r_out"], 750.0, rel_tol=1e-6), card
+          assert ss.tf(out="v(out)", src="Vin") == card, "kwargs and card disagree"
+          try:
+              ss.tf(out="v(out)")   # half a card is never applied
+              raise AssertionError("tf(out=) without src= must be an error")
+          except RuntimeError as e:
+              assert "src" in str(e), e
+          try:
+              ss.run("pz")          # says where it went, not "unknown analysis"
+              raise AssertionError("run('pz') must redirect")
+          except RuntimeError as e:
+              assert "ckt.pz" in str(e), e
+
+          rows = ss.sens()
+          assert [r["param"] for r in rows] == ["vin.value", "r1.value", "r2.value"], rows
+          assert all(r["reached"] for r in rows), rows
+          assert math.isclose(rows[1]["sensitivity"], -1.875e-4, rel_tol=1e-5), rows[1]
+
+          pzc = fairchild.Circuit()
+          pzc.load_str("* rlc\nVin in 0 DC 0 AC 1\nR1 in a 100\nL1 a out 1m\nC1 out 0 1n\n")
+          pr = pzc.pz(in_pos="in", out_pos="out")
+          assert len(pr["poles"]) == 2, pr
+          for p in pr["poles"]:
+              assert isinstance(p, complex) and math.isclose(p.real, -5e4, rel_tol=1e-5), p
+          print(f"ok: tf/sens/pz reachable, card-vs-kwargs honoured, {len(pr['poles'])} poles")
           PY
 
           # The bindings and the CLI once disagreed by a factor of 116 on a noise

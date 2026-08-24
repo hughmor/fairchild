@@ -48,6 +48,9 @@ fn resolve_output(
     let r = dc_op_nr_with_registry_opts(&net, &reg, opts).expect("DC OP");
     match out {
         Output::NodeVoltage(n) => r.node_voltage(n).unwrap(),
+        Output::NodeVoltageDiff { pos, neg } => {
+            r.node_voltage(pos).unwrap() - r.node_voltage(neg).unwrap()
+        }
         Output::BranchCurrent(n) => r.topo.vsrc_current(n, &r.x).unwrap(),
         Output::OpticalPower { net: n, channel } => {
             let re = r.node_voltage(&format!("{n}_re_{channel}")).unwrap();

@@ -254,6 +254,61 @@ pub(crate) fn assemble_ac(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<AcSystem, SimError> {
+    let (topo, g_mat, c_mat, l_mat, _) = assemble_ac_matrices(netlist, registry, opts)?;
+    let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source).ok_or(SimError::NoAcSource)?;
+    Ok(AcSystem {
+        topo,
+        g_mat,
+        c_mat,
+        l_mat,
+        b_re: b_ac_re,
+        b_im: b_ac_im,
+    })
+}
+
+/// One inductive branch, as a branch rather than as its `1/(jωL)` admittance
+/// stamp.
+///
+/// `l_mat` is the admittance form, which is what `.ac` and `.noise` want — they
+/// evaluate at a known `ω` and the `1/ω` is just a number.  `.pz` cannot use
+/// it: solving for `s` in `det(G + sC + Λ/s) = 0` means clearing the `1/s`, and
+/// that turns a linear matrix pencil into a quadratic one.  Carrying the branch
+/// list lets `.pz` reintroduce each inductor current as an unknown instead,
+/// which is the ordinary MNA branch stamp and stays linear in `s`.
+///
+/// Emitted by the same loops that fill `l_mat`, so the two cannot come to hold
+/// different opinions about which elements are inductive.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LBranch {
+    /// Row index of the `+` node, or `None` for ground.
+    pub pos: Option<usize>,
+    /// Row index of the `−` node, or `None` for ground.
+    pub neg: Option<usize>,
+    pub henries: f64,
+}
+
+/// `(topology, G, C, Λ, inductor branches)` — what [`assemble_ac_matrices`]
+/// returns.  `Λ` is the `1/(jωL)` admittance form and the branch list is the
+/// same inductors as branches; a consumer wants one or the other, never both.
+pub(crate) type AcMatrices = (
+    CircuitTopology,
+    Vec<SparseRow>,
+    Vec<SparseRow>,
+    Vec<SparseRow>,
+    Vec<LBranch>,
+);
+
+/// The frequency-independent matrices of the AC system, without an excitation.
+///
+/// Split out of [`assemble_ac`] because `.pz` needs `G`, `C` and the inductor
+/// branches but has no AC source to name — its excitation comes from the card's
+/// port, not from an `AC` spec on an element — and `assemble_ac` refuses a deck
+/// with no AC source, correctly, for `.ac`'s sake.
+pub(crate) fn assemble_ac_matrices(
+    netlist: &Netlist,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+) -> Result<AcMatrices, SimError> {
     crate::connectivity::check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
@@ -317,6 +372,7 @@ pub(crate) fn assemble_ac(
     // For inductors in DC OP they appear as short circuits; their AC stamp is 1/(jωL).
     // We track "L" values and handle 1/ω at solve time.
     let mut l_mat = vec![SparseRow::default(); size];
+    let mut l_branches: Vec<LBranch> = Vec::new();
     for el in &netlist.elements {
         if let Element::Inductor {
             pos,
@@ -326,6 +382,11 @@ pub(crate) fn assemble_ac(
         } = el
         {
             stamp_passive_2port(&mut l_mat, &topo.node_index, pos, neg, 1.0 / inductance);
+            l_branches.push(LBranch {
+                pos: topo.node_index.get(pos).copied(),
+                neg: topo.node_index.get(neg).copied(),
+                henries: *inductance,
+            });
         }
     }
 
@@ -343,6 +404,11 @@ pub(crate) fn assemble_ac(
                 }
                 ReactiveKind::Inductor if r.value != 0.0 => {
                     stamp_2port_by_id(&mut l_mat, r.pos, r.neg, 1.0 / r.value);
+                    l_branches.push(LBranch {
+                        pos: r.pos,
+                        neg: r.neg,
+                        henries: r.value,
+                    });
                 }
                 ReactiveKind::Inductor => {}
             }
@@ -352,20 +418,7 @@ pub(crate) fn assemble_ac(
         dev.load_reactive_jacobian(&mut c_mat);
     }
 
-    // --- AC excitation vector ---
-    // Build the RHS for AC: voltage sources contribute to the stub row; current sources to node rows.
-    // Voltage source in MNA: stamps A[vi][p]=+1, A[vi][n]=-1, A[p][vi]=+1, A[n][vi]=-1, b[vi]=V_ac.
-    // For the AC analysis, we set V_ac = 1 for the chosen source(s).
-    let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source).ok_or(SimError::NoAcSource)?;
-
-    Ok(AcSystem {
-        topo,
-        g_mat,
-        c_mat,
-        l_mat,
-        b_re: b_ac_re,
-        b_im: b_ac_im,
-    })
+    Ok((topo, g_mat, c_mat, l_mat, l_branches))
 }
 /// Run a small-signal AC sweep.
 ///

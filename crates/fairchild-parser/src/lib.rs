@@ -8,7 +8,7 @@ pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
 pub use spectre::parse_spectre;
 pub use spice::{
-    bundle_arity_for, parse_spice, parse_spice_file, parse_spice_file_with_arity,
+    bundle_arity_for, parse_outvar, parse_spice, parse_spice_file, parse_spice_file_with_arity,
     parse_spice_value, parse_spice_with_arity, ArityOracle, ArityQuery, BundleArity,
     PermissiveArity, StaticArity,
 };
@@ -922,6 +922,32 @@ pub enum Analysis {
         step: f64,
         nested: Option<DcSweepSpec>,
     },
+    /// `.tf <outvar> <insrc>` — small-signal transfer function about the DC
+    /// operating point: gain, input resistance at `insrc`, output resistance
+    /// across the output port.
+    Tf {
+        out: OutVar,
+        input_src: String,
+    },
+    /// `.sens <outvar> [<param> …]` — DC sensitivity of `out` to each design
+    /// parameter.  An empty `params` means "every element value in the deck",
+    /// resolved at run time because the parser does not know what a device
+    /// will accept.
+    Sens {
+        out: OutVar,
+        params: Vec<ParamName>,
+    },
+    /// `.pz <n1> <n2> <n3> <n4> CUR|VOL POL|ZER|PZ` — poles and zeros of the
+    /// transfer function from the port `(n1, n2)` to the port `(n3, n4)`,
+    /// linearised about the DC operating point.
+    Pz {
+        in_pos: String,
+        in_neg: String,
+        out_pos: String,
+        out_neg: String,
+        drive: PzDrive,
+        want: PzWant,
+    },
     /// `.noise V(<out_node>[,<ref_node>]) <input_src> DEC|OCT|LIN <pts> <fstart> <fstop>`
     ///
     /// Small-signal noise sweep.  Reports output noise PSD at the observation
@@ -935,6 +961,56 @@ pub enum Analysis {
         fstart: f64,
         fstop: f64,
     },
+}
+
+/// The quantity a `.tf` / `.sens` card reports on — one scalar read off the
+/// operating point.  Written as `v(node)`, `v(node,ref)` or `i(vsrc)`, which is
+/// how every SPICE spells it, and parsed in exactly one place (`parse_outvar`
+/// in the SPICE directive parser) so the three cards that accept one cannot
+/// disagree about what `v(a,b)` means.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutVar {
+    /// `v(pos)` or `v(pos,neg)`; `neg` is `"0"` for the one-argument form.
+    NodeVoltage { pos: String, neg: String },
+    /// `i(vsrc)` — the branch current of a voltage source, SPICE sign
+    /// convention (positive into the `+` terminal).
+    BranchCurrent(String),
+}
+
+/// One `element[.param]` name off a `.sens` card.  `param` is `None` for the
+/// bare `r1` form, meaning "that element's value".
+///
+/// Deliberately *not* resolved here: which parameter names an element accepts
+/// is the solver's business (`fairchild_core::netlist_edit`), and a parser-side
+/// copy of that table is a second list to disagree with the first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamName {
+    pub element: String,
+    pub param: Option<String>,
+}
+
+/// How a `.pz` input port is driven.  Decides both the transfer function whose
+/// zeros are wanted *and* the pole set, because the source is part of the
+/// linear network: `Vol` shorts the input port for the homogeneous problem,
+/// `Cur` leaves it open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PzDrive {
+    /// `vol` — a voltage source across `(n1, n2)`; the transfer is `V_out/V_in`.
+    Vol,
+    /// `cur` — a current injected into `(n1, n2)`; the transfer is `V_out/I_in`,
+    /// a transimpedance.
+    Cur,
+}
+
+/// Which halves of a `.pz` run to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PzWant {
+    /// `pol` — poles only.
+    Poles,
+    /// `zer` — zeros only.
+    Zeros,
+    /// `pz` — both.
+    Both,
 }
 
 /// One leg of a `.dc` sweep (the nested form's inner specification).
