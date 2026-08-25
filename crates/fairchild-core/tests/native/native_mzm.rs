@@ -97,18 +97,51 @@ Vsig vsig 0 DC 3.0
     );
 }
 
-/// `f_c` is accepted as a forward-compat keyword.  Setting it changes
-/// nothing at this commit (DC analysis only).
+/// `f_c` is accepted as a forward-compat keyword and is **not wired into the
+/// response**, and this pins both halves of that.
+///
+/// It used to assert only that a deck naming `f_c` still solved — a test that
+/// passes whether `f_c` is implemented, dropped, or deleted from the model. The
+/// no-op is the actual claim (`mzm.rs`: "accepted but not yet wired into the
+/// response"), so the no-op is what gets asserted. When someone implements the
+/// EO cutoff, this fails and points at the doc comment that has to change with
+/// it.
+///
+/// Two settings three decades apart: if `f_c` ever reaches the response, a DC
+/// point may still not move, so the assertion is deliberately about *this*
+/// analysis and says so in its name.
 #[test]
-fn mzm_f_c_keyword_is_accepted() {
-    let netlist = "\
-.optical_port in0
-.optical_port out0
-Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
-Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 f_c=10G
-Vsig vsig 0 DC 0.0
-.op
-";
-    let net = parse_spice(netlist).unwrap();
-    let _r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP with f_c");
+fn mzm_f_c_is_accepted_and_does_not_move_the_dc_point() {
+    let deck = |extra: &str| {
+        format!(
+            ".optical_port in0\n.optical_port out0\n\
+             Xl0 in0 fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xmzm in0 out0 vsig 0 fc_mzm V_pi=3.0 {extra}\n\
+             Vsig vsig 0 DC 0.0\n.op\n"
+        )
+    };
+    let solve = |src: String| {
+        let net = parse_spice(&src).unwrap();
+        let r = dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP");
+        r.node_voltage("out0_re_0").expect("out0_re_0")
+    };
+    let none = solve(deck(""));
+    let slow = solve(deck("f_c=1G"));
+    let fast = solve(deck("f_c=1000G"));
+    assert_eq!(
+        none, slow,
+        "f_c is not wired into the response; it moved V(out0_re_0)"
+    );
+    assert_eq!(
+        slow, fast,
+        "f_c=1G and f_c=1000G must agree while f_c is a no-op"
+    );
+
+    // …and the keyword is genuinely recognised rather than ignored as a typo.
+    use fairchild_core::device::Device;
+    let mut mzm = fairchild_core::models::NativeMzm::default();
+    assert!(
+        mzm.set_real_param("f_c", 1e10),
+        "f_c must be recognised, not fall through as unknown"
+    );
 }

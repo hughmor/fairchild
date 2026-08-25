@@ -18,6 +18,7 @@ mod global_nets;
 mod inductor_is_a_dc_short;
 mod model_parameter_diagnostics;
 mod no_false_convergence_on_stalled_line_search;
+mod options_take_effect;
 mod passive_parasitics;
 mod pcell_subckt;
 mod reactive_history_seeding;

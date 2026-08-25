@@ -79,10 +79,13 @@
 //!   scales as `1/α` rather than `α` and carries its flux as hidden state, so it
 //!   fits neither the `J_q` extraction nor the co-state recursion above.  It is
 //!   rejected loudly rather than silently mis-differentiated.
-//! * **Variable step.**  This drives the fixed-step integrator
-//!   ([`TranStepper`]), so `gear2_h_prev` is always absent and BDF-2 demotes to
-//!   BE exactly as it does for a plain `.tran`.  `variable_step=1` is refused
-//!   rather than dropped — see [`TranAdjoint::run`].
+//! * **Variable step**, refused rather than dropped — see [`TranAdjoint::run`].
+//! * **BDF-2** (`method=gear`), refused for the same reason.  The backward pass
+//!   passes `gear2_h_prev: None` at every `prepare`, so it integrates with
+//!   Backward Euler.  That used to match what a plain `.tran` did, because the
+//!   fixed-step path demoted BDF-2 too (#93); now that it does not, an adjoint
+//!   taken here would differentiate a different discretisation than the forward
+//!   solve — a gradient that is smooth, plausible and wrong.
 
 use fairchild_parser::Netlist;
 
@@ -189,6 +192,23 @@ impl TranAdjoint {
                     .into(),
             ));
         }
+        // BDF-2 is a three-point formula and the backward pass is written for
+        // the two-point one: `prepare` is called with `gear2_h_prev: None`
+        // throughout, deliberately, because the charge-Jacobian extraction
+        // re-stamps a timepoint at a second step size and needs the
+        // discretisation to stay put while it does.  Until the recursion carries
+        // the extra point, differentiating a BDF-2 forward run here would answer
+        // about a Backward Euler one.
+        if matches!(opts.method, IntegratorMode::Gear) {
+            return Err(SimError::ParameterError(
+                "the transient adjoint does not support `method=gear` (BDF-2); use \
+                 `method=be` or `method=tr`. The co-state recursion is written for a \
+                 two-point formula, and running it against a three-point forward \
+                 solve would differentiate a discretisation the forward run did not \
+                 use"
+                .into(),
+            ));
+        }
         let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
         reject_inductance(netlist, &st)?;
 
@@ -241,7 +261,7 @@ impl TranAdjoint {
             // The probing above left the devices linearised at a probe point and
             // the companions built for the second step size; the history advance
             // reads both, so put them back first.
-            st.prepare(t_next, mode, out.step);
+            st.prepare(t_next, mode, out.step, None);
             st.stamp_at(&xk);
             st.advance_history();
 
@@ -469,15 +489,15 @@ impl TranAdjoint {
         mode: IntegratorMode,
         x: &[f64],
     ) -> (Vec<SparseRow>, Vec<SparseRow>) {
-        st.prepare(t, mode, self.step);
+        st.prepare(t, mode, self.step, None);
         st.stamp_at(x);
         let raw = st.matrix().a.clone();
-        st.prepare(t, mode, 2.0 * self.step);
+        st.prepare(t, mode, 2.0 * self.step, None);
         st.stamp_at(x);
         let d_alpha = alpha_of(mode, self.step) - alpha_of(mode, 2.0 * self.step);
         let jq = scaled_difference(&raw, &st.matrix().a, 1.0 / d_alpha);
 
-        st.prepare(t, mode, self.step);
+        st.prepare(t, mode, self.step, None);
         (self.stamp_and_repair(st, x, false), jq)
     }
 
@@ -600,7 +620,7 @@ impl TranAdjoint {
             moved += dot(&r, &r);
         }
         for (k, x) in self.x.iter().enumerate().skip(1) {
-            st.prepare(self.t[k], self.mode[k], self.step);
+            st.prepare(self.t[k], self.mode[k], self.step, None);
             st.stamp_at(x);
             st.matrix().residual_into(x, &mut r);
             acc += dot(&lambdas[k], &r);
@@ -783,7 +803,7 @@ pub fn jacobian_check_tran(
     // One `prepare`, then never again: the companion is what the Newton loop
     // held fixed, so freezing it here is what makes the comparison the one the
     // solver actually faced.
-    st.prepare(t, mode, step);
+    st.prepare(t, mode, step, None);
     st.stamp_at(&x);
     let stamped = CircuitTopology::to_dense(&st.matrix().a, n);
 
@@ -854,12 +874,12 @@ pub fn charge_lag(
     let (mode, t) = (st.step_mode(), st.time());
 
     // As stamped: `prepare` reads whatever the last eval cached.
-    st.prepare(t, mode, step);
+    st.prepare(t, mode, step, None);
     let before = st.device_branch_conductances();
 
     // As intended: evaluate at this step's own solution first, then rebuild.
     st.stamp_at(&x);
-    st.prepare(t, mode, step);
+    st.prepare(t, mode, step, None);
     let after = st.device_branch_conductances();
 
     Ok(before

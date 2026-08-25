@@ -101,7 +101,11 @@ fn cmt_resonance_nearest(lambda_center_m: f64) -> f64 {
 
 /// Low-level probe of the access() function to understand the OSDI id mapping.
 /// Prints n_inst, n_model, all param names, and what offset access(MODEL|j) returns.
+/// A debugging harness, not a test: it prints the descriptor's parameter table
+/// and asserts nothing. `#[ignore]`d for the same reason as
+/// `setup_runs_without_the_device_layer`.
 #[test]
+#[ignore = "diagnostic harness: prints, asserts nothing"]
 fn access_ptr_diagnostic() {
     let path = model_path("cw_laser");
     if skip_if_missing(&path) {

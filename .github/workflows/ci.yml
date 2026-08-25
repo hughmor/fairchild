@@ -401,6 +401,71 @@ jobs:
           print(f"ok: bindings and CLI agree on {len(cli_f)} noise points")
           PY
 
+      # `SimOptions::set` is shared by `.options`, `--opt` and every Python
+      # kwarg, so the Rust suite covers the parsing. What it cannot cover is
+      # stderr — an option whose *value* fails to parse must say so, and that
+      # warning is the only thing standing between a mistyped `--opt` and a run
+      # silently tuned with the defaults. Nor can it cover the CLI's own
+      # plumbing: `--opt` and the deck's `.options` reaching the same solver.
+      - name: Solver options — the value reaches the solver, and a bad one is reported
+        run: |
+          cargo build --release
+          cat > /tmp/opt_rc.sp <<'SP'
+          * rc
+          V1 in 0 PULSE(0 1 0 1p 1p 1 2)
+          R1 in out 1k
+          C1 out 0 1n
+          .tran 100n 3u
+          SP
+          FC=target/release/fairchild
+
+          # A value the option cannot parse is named, not swallowed. This was
+          # silent: every numeric arm read `parse_num(v).unwrap_or(default)`.
+          $FC -f /tmp/opt_rc.sp --opt reltol=banana 2>&1 >/dev/null \
+            | grep -q "reltol=banana" \
+            || { echo "FAIL: an unparseable option value was not reported"; exit 1; }
+          $FC -f /tmp/opt_rc.sp --opt itl1=lots 2>&1 >/dev/null \
+            | grep -q "itl1=lots" \
+            || { echo "FAIL: an unparseable integer option was not reported"; exit 1; }
+
+          # An unknown key is still reported (it already was; this keeps it).
+          $FC -f /tmp/opt_rc.sp --opt notanoption=1 2>&1 >/dev/null \
+            | grep -qi "unknown solver option" \
+            || { echo "FAIL: an unknown option key was not reported"; exit 1; }
+
+          # A good value is silent — otherwise the checks above pass on noise.
+          if $FC -f /tmp/opt_rc.sp --opt reltol=1e-6 2>&1 >/dev/null | grep -q .; then
+            echo "FAIL: a valid option produced a warning"; exit 1
+          fi
+
+          # `--opt` and `.options` reach the same solver: same key, same answer.
+          $FC -f /tmp/opt_rc.sp --opt method=gear > /tmp/via_opt.csv
+          cat > /tmp/opt_rc_deck.sp <<'SP'
+          * rc
+          V1 in 0 PULSE(0 1 0 1p 1p 1 2)
+          R1 in out 1k
+          C1 out 0 1n
+          .options method=gear
+          .tran 100n 3u
+          SP
+          $FC -f /tmp/opt_rc_deck.sp > /tmp/via_deck.csv
+          cmp -s /tmp/via_opt.csv /tmp/via_deck.csv \
+            || { echo "FAIL: --opt and .options disagree"; diff /tmp/via_opt.csv /tmp/via_deck.csv; exit 1; }
+
+          # And the option does something: #93 had `gear` byte-identical to `be`
+          # through this exact path, with every Rust golden green.
+          $FC -f /tmp/opt_rc.sp --opt method=be > /tmp/m_be.csv
+          $FC -f /tmp/opt_rc.sp --opt method=tr > /tmp/m_tr.csv
+          for pair in "be:gear" "be:tr" "tr:gear"; do
+            a=${pair%%:*}; b=${pair##*:}
+            [ "$a" = "gear" ] && fa=/tmp/via_opt.csv || fa=/tmp/m_$a.csv
+            [ "$b" = "gear" ] && fb=/tmp/via_opt.csv || fb=/tmp/m_$b.csv
+            if cmp -s "$fa" "$fb"; then
+              echo "FAIL: method=$a and method=$b are byte-identical (this is #93)"; exit 1
+            fi
+          done
+          echo "ok: options reach the solver, bad values are reported, methods differ"
+
       # The C header is hand-written, so nothing in the Rust tests catches it
       # drifting from the exported signatures.  Compiling a real C consumer
       # against it does, and running it proves the library links and steps.

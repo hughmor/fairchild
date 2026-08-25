@@ -283,6 +283,33 @@ pub fn tran_nr_with_registry(
 ///
 /// This is a driver over [`TranStepper`] — the integrator itself lives there so
 /// that batch runs and host-driven mixed-signal stepping cannot drift apart.
+/// Run the transient the way `opts` says to — fixed step, or LTE-controlled
+/// variable step if `opts.variable_step` is set.
+///
+/// `variable_step` is a field on the shared [`SimOptions`], so a caller that
+/// hands the struct over and gets a fixed-step run has been ignored without
+/// being told. Both frontends dispatched on it themselves, identically, which
+/// left the rule written down twice and available to a third caller nowhere.
+/// This is that rule, once.
+///
+/// [`tran_nr_with_registry_opts`] and [`tran_nr_with_registry_var_opts`] remain
+/// the explicit primitives, for the callers that genuinely mean one of them —
+/// the transient adjoint needs the fixed-step integrator and *refuses*
+/// `variable_step` rather than quietly overriding it.
+pub fn tran_nr_configured(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+) -> Result<TranResult, SimError> {
+    if opts.variable_step {
+        tran_nr_with_registry_var_opts(netlist, step, stop, registry, opts)
+    } else {
+        tran_nr_with_registry_opts(netlist, step, stop, registry, opts)
+    }
+}
+
 pub fn tran_nr_with_registry_opts(
     netlist: &Netlist,
     step: f64,

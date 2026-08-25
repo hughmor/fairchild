@@ -63,6 +63,31 @@ passed against a bug they were written to catch. An agreement invariant between
 two subsystems cannot detect a fault common to both — it needs an absolute
 anchor on one side.
 
+**Tests are judged by what they would catch, not by how many there are.**
+A test earns its place by failing on a plausible bug. Three shapes do not:
+
+- *It ran.* `expect("solve")` with no value compared. `X_keyword_is_accepted`
+  passes whether the parameter is implemented, dropped, or deleted.
+- *It agrees with itself.* Two subsystems compared where a shared fault is
+  invisible. One side must be an absolute anchor — a closed form, an analytic
+  limit, another simulator.
+- *It only covers the on state.* A feature test that always runs with the
+  feature enabled cannot tell you the switch is wired up. `.options method=gear`
+  parsed, stored, and then ran Backward Euler; every golden passed because none
+  of them asked for anything but the default (#93).
+
+The last one is the expensive one, because it is an absence rather than a
+weakness — no existing test looks wrong. Prefer a **table with a completeness
+gate**: enumerate the knobs, assert each does something, and make adding a knob
+without an entry a failure. `tests/circuit/options_take_effect.rs` is the
+pattern — it derives the field list from `SimOptions`'s own `Debug` output, so a
+new option cannot be added silently, and it carries an explicit `NOT_OBSERVABLE`
+list with a reason per entry rather than a silent gap.
+
+Prefer one generalising test over five specific ones, and delete a test that
+cannot fail rather than leaving it to be counted. A `#[test]` that only prints
+is a debugging harness: mark it `#[ignore]`.
+
 **One place interprets each concept.** `crate::reactive` owns "what is
 reactive" and "what does `method` mean"; `crate::noise::NoiseSources` owns "what
 is a noise source"; `crate::tolerance` owns "what unit is this row". Two lists
