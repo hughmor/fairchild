@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::behavioral::BehavioralDevice;
 use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
-use crate::device_registry::{DeviceRegistry, ParamSet};
+use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint, RowFloor};
 use crate::options::SimOptions;
@@ -200,6 +200,20 @@ pub fn build_devices(
     build_devices_with_footprints(netlist, topo, ctx, registry).map(|(d, _)| d)
 }
 
+/// Name the element a construction failure belongs to.
+///
+/// A factory's `Err` describes what is wrong with the *device* — "reflectance +
+/// transmittance = 1.4, must be ≤ 1" — because that is all a device knows. Which
+/// element and which model is the caller's half, and this is the only place that
+/// has both.
+fn attribute(
+    built: Result<Box<dyn Device>, String>,
+    name: &str,
+    model_name: &str,
+) -> Result<Box<dyn Device>, SimError> {
+    built.map_err(|e| SimError::ParameterError(format!("{name} ('{model_name}'): {e}")))
+}
+
 /// Register a built device: allocate its extra MNA rows, bind them, and record
 /// the structural footprint `mna::Pattern` needs — every row/column it can
 /// stamp into.
@@ -277,6 +291,10 @@ pub fn build_devices_with_footprints(
     registry: &DeviceRegistry,
 ) -> Result<DevicesWithFootprints, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
+    // Parameters already reported for a `.model` card in this build — see
+    // `unknown_param_reports`.
+    let mut reported: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     let mut foot: Vec<Footprint> = Vec::new();
     // Every auxiliary row allocated below lands at or after this index, in
     // device order — `check_exclusive_potential_drivers` walks the same order
@@ -302,16 +320,18 @@ pub fn build_devices_with_footprints(
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                let ps = ParamSet::new(params);
-                let dev = factory(&[pos, neg], &ps, ctx);
+                let ps = registry.params_for(model_name, params);
+                let dev = attribute(factory(&[pos, neg], &ps, ctx), name, model_name)?;
                 // A diode instance parameter used to reach the netlist and stop:
                 // `D1 a k dm area=2` parsed, changed nothing, and said nothing.
                 // AREA is honoured now; anything else gets named here.
-                for key in ps.unconsumed() {
-                    warn_user!(
-                        "{name} ('{model_name}'): instance parameter '{key}' is not \
-                         honoured by this model and was dropped"
-                    );
+                for msg in crate::device_registry::unknown_param_reports(
+                    &ps,
+                    name,
+                    model_name,
+                    &mut reported,
+                ) {
+                    warn_user!("{msg}");
                 }
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
@@ -336,7 +356,11 @@ pub fn build_devices_with_footprints(
                     let factory = registry
                         .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-                    let dev = factory(&[d, g, s, b], &ParamSet::new(params), ctx);
+                    let dev = attribute(
+                        factory(&[d, g, s, b], &registry.params_for(model_name, params), ctx),
+                        name,
+                        model_name,
+                    )?;
                     push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 }
             }
@@ -395,8 +419,8 @@ pub fn build_devices_with_footprints(
                 // build() applies the instance params (and the model-card
                 // defaults baked into the factory). It also tracks which params
                 // the device consumed, so we can warn about typos.
-                let ps = ParamSet::new(params);
-                let dev = factory(&terminals, &ps, ctx);
+                let ps = registry.params_for(model_name, params);
+                let dev = attribute(factory(&terminals, &ps, ctx), name, model_name)?;
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
                     // Used to be a warning that grounded the missing terminals
@@ -412,8 +436,13 @@ pub fn build_devices_with_footprints(
                         terminals.len()
                     )));
                 }
-                for key in ps.unconsumed() {
-                    warn_user!("'{model_name}' instance: unknown parameter '{key}' ignored");
+                for msg in crate::device_registry::unknown_param_reports(
+                    &ps,
+                    name,
+                    model_name,
+                    &mut reported,
+                ) {
+                    warn_user!("{msg}");
                 }
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:

@@ -10,6 +10,7 @@
 //! and does not compile the files beside it on their own — so declaring them
 //! as modules here collapses that without touching a single test. Name
 //! filters still read the same way: `cargo test --test circuit <name>`.
+mod construction_order;
 mod controlled_sources;
 mod coupled_inductors;
 mod differential_pair_dc;

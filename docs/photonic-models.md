@@ -539,6 +539,8 @@ leave it at 0 when you want the speed.
 
 **Passivity guard.** An explicit matrix with gain is rejected unless
 `allow_gain=1`, because a gain block inside a feedback path diverges silently.
+The rejection happens when the device is built, and names the element, so a deck
+with forty of these says which one.
 Weight mode is unitary by construction and its clamp keeps it that way under
 any control voltage.
 
@@ -572,7 +574,9 @@ the unset ones take the remainder, `loss` first. Setting all three requires them
 to sum to 1. **Only `reflectance` changes the answer** — light that leaves via
 `transmittance` or `loss` is gone either way, and there is no second port for it
 to arrive at. The other two exist so the budget is written down and checked;
-`reflectance=0.9 transmittance=0.5` is an error, not an average.
+`reflectance=0.9 transmittance=0.5` is an error, not an average — refused when
+the device is built, with the element named, whether the numbers came from the
+element line, a `.model` card, or one of each.
 
 Reflection applies `A_bw = √R · e^(−jφ) · A_fw`, the same phase convention the
 waveguide uses for propagation.

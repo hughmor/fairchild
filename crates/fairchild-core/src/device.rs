@@ -322,6 +322,38 @@ pub trait Device: Send + Sync {
         false
     }
 
+    /// Last word on whether this device's configuration makes sense, called
+    /// once at construction after the terminals are bound *and* every parameter
+    /// has been applied.
+    ///
+    /// This is the only point in a device's life at which both halves of its
+    /// configuration are present: `setup_instance` knows the terminals but not
+    /// the parameters, and `set_real_param` knows one parameter but not the
+    /// geometry. Anything that needs both — a power budget that must sum to one,
+    /// a transfer matrix that must be passive, a port count that follows from a
+    /// parameter — can only be judged here.
+    ///
+    /// Devices used to reach for one of two workarounds instead, and both are
+    /// worse than an error:
+    ///
+    /// - **Defer to the first `eval`** behind a "have I been checked yet" flag.
+    ///   `eval` cannot return an error, so the check had to `assert!`, which
+    ///   means a mis-typed power budget arrived as a panic from inside the
+    ///   solve — through `pyo3`, for a Python caller — rather than as a
+    ///   diagnostic naming the element.
+    /// - **Assert inside `setup_instance`**, which fires before the parameter
+    ///   that would have made the configuration legal has been applied.
+    ///
+    /// The `Err` string says what is wrong with the device; the caller
+    /// (`build_devices`) prefixes the element and model name, so an
+    /// implementation should not repeat them.
+    ///
+    /// Returning `Ok` is always safe: a device with nothing to check does not
+    /// implement this.
+    fn validate(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Scale this device's INDEPENDENT source output for source-stepping
     /// homotopy, where `scale` ramps 0 → 1.
     ///

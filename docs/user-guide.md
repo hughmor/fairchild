@@ -1619,6 +1619,40 @@ That's the minimum. The hard part is what to put inside `eval`,
 `load_residual`, `load_jacobian` — that's the device physics. The
 sections below give you the standard patterns.
 
+#### Refusing a configuration
+
+A device is built in one order, always: `setup_model`, `setup_instance`, then
+every parameter, then `validate`. Only the last of those sees both the terminals
+and the parameters, so it is the only place a device can judge itself:
+
+```rust
+    fn validate(&mut self) -> Result<(), String> {
+        if self.my_param <= 0.0 {
+            return Err(format!("my_param={} must be positive", self.my_param));
+        }
+        Ok(())
+    }
+```
+
+The `Err` describes the device's problem and nothing else — the caller prefixes
+the element and model name, so `xf1 ('fc_facet'): my_param=-1 must be positive`
+is what the user reads. Returning `Ok` is the default; a device with nothing to
+check does not implement it.
+
+Do **not** reach for the two things this replaced. Asserting inside
+`setup_instance` fires before the parameter that would have made the
+configuration legal has arrived. Deferring the check to the first `eval` behind a
+"have I been checked yet" flag means it has to panic, because `eval` cannot
+return an error — so a mistyped parameter arrives as a panic from inside the
+solve (and, for a Python caller, out through `pyo3`) instead of as a diagnostic
+before the solve starts.
+
+`set_real_param` may be called in any order relative to `setup_instance`, and a
+device that needs the terminal count to interpret a parameter should record it
+and apply it when the count is known (`fc_optical_2x2` does this for its
+per-channel weights). Construction currently sets up first, but nothing should
+depend on that.
+
 ### 13.3 Stamp patterns by physics type
 
 #### Linear resistance (Ohm's law)

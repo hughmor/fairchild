@@ -21,6 +21,27 @@ fn run(body: &str) -> fairchild_core::newton::NrResult {
     dc_op_nr_with_registry(&net, &DeviceRegistry::new()).expect("DC OP should converge")
 }
 
+/// The error a deck is refused with, or the test fails.
+///
+/// These used to be `#[should_panic]`: the budget check ran on the first `eval`,
+/// so a typo arrived as a panic from inside the solve. It is a
+/// `Device::validate` now (#31), which means the deck is refused during
+/// construction and the message names the element — so the assertion can be on
+/// the text a user actually sees.
+fn refusal(params: &str) -> String {
+    let src = format!(
+        ".options enable_bidirectional=1\n\
+         Xf p_re_fw p_im_fw p_re_bw p_im_bw p_wl fc_facet {params}\n\
+         V_re p_re_fw 0 DC 1\nV_im p_im_fw 0 DC 0\n\
+         V_wl p_wl 0 DC 1.55e-6\n.op\n"
+    );
+    let net = parse_spice(&src).expect("netlist should parse");
+    match dc_op_nr_with_registry(&net, &DeviceRegistry::new()) {
+        Ok(_) => panic!("expected '{params}' to be refused, but it built and solved"),
+        Err(e) => e.to_string(),
+    }
+}
+
 /// Drive one facet directly and read the reflected field back off the same port.
 fn reflect(params: &str, drive_re: f64, drive_im: f64) -> (f64, f64) {
     let r = run(&format!(
@@ -95,29 +116,45 @@ fn the_budget_infers_whichever_term_is_left_out() {
 /// Over-unity is a typo, not a design. A facet that silently renormalised
 /// would hide exactly the mistake the three-parameter form exists to catch.
 #[test]
-#[should_panic(expected = "no power left")]
 fn an_over_unity_budget_is_rejected() {
-    reflect("reflectance=0.9 transmittance=0.5", A_IN, 0.0);
+    let e = refusal("reflectance=0.9 transmittance=0.5");
+    assert!(e.contains("no power left"), "{e}");
+    // The element is named, which is the point of refusing at construction: a
+    // deck with forty facets says which one.
+    assert!(e.contains("xf"), "the refusal should name the element: {e}");
 }
 
 #[test]
-#[should_panic(expected = "must be 1")]
 fn a_fully_specified_budget_must_sum_to_one() {
-    reflect("reflectance=0.5 transmittance=0.2 loss=0.2", A_IN, 0.0);
+    let e = refusal("reflectance=0.5 transmittance=0.2 loss=0.2");
+    assert!(e.contains("must be 1"), "{e}");
+}
+
+/// A fraction outside [0, 1] is refused before the budget arithmetic, so the
+/// message points at the parameter rather than at a sum.
+#[test]
+fn a_fraction_outside_zero_to_one_is_rejected() {
+    let e = refusal("reflectance=1.5");
+    assert!(e.contains("not a power fraction"), "{e}");
 }
 
 /// Unidirectional propagation has no backward wire, so a reflector has nowhere
 /// to put the light. Failing loudly beats being a terminator that the deck
 /// believes is a mirror.
 #[test]
-#[should_panic(expected = "enable_bidirectional")]
 fn a_reflector_needs_bidirectional_propagation() {
+    // No `.options enable_bidirectional=1` here, so the port has three wires and
+    // no backward pair to drive.
     let net = parse_spice(
         "Xf p_re p_im p_wl fc_facet reflectance=0.5\n\
          V_re p_re 0 DC 1\nV_im p_im 0 DC 0\nV_wl p_wl 0 DC 1.55e-6\n.op\n",
     )
     .unwrap();
-    let _ = dc_op_nr_with_registry(&net, &DeviceRegistry::new());
+    let e = match dc_op_nr_with_registry(&net, &DeviceRegistry::new()) {
+        Ok(_) => panic!("a reflector without a backward wire must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("enable_bidirectional"), "{e}");
 }
 
 /// A terminator is still legal without bidirectional propagation — there is

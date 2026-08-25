@@ -55,10 +55,10 @@ pub struct NativeFacet {
     transmittance: Option<f64>,
     loss: Option<f64>,
     phase_deg: f64,
-    /// `√R`, resolved on the first `eval` — the budget cannot be checked at
-    /// `setup_instance` because the registry sets parameters after it.
+    /// `√R`, recomputed on every parameter write so it is never stale. The
+    /// *checking* of the budget happens in `validate`, which is the first point
+    /// at which both the parameters and `wpc` are known.
     rho: f64,
-    checked: bool,
     n_channels: usize,
     wpc: usize,
     nodes: Vec<NodeId>,
@@ -79,7 +79,6 @@ impl NativeFacet {
             loss: None,
             phase_deg: 0.0,
             rho: 0.0,
-            checked: false,
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
@@ -87,11 +86,28 @@ impl NativeFacet {
         }
     }
 
-    /// Resolve `R`, `T`, `L` from whichever were given and check they are a
-    /// power budget.  Panics on an over-unity or negative one — a facet that
-    /// quietly normalised its own numbers would hide the typo it exists to
-    /// catch.
-    fn resolve(&mut self) {
+    /// The reflectance the given fractions imply, whether or not they are a
+    /// legal budget. Cheap and total, so it can run on every parameter write and
+    /// `rho` is never stale.
+    fn reflectance(&self) -> f64 {
+        match (self.reflectance, self.transmittance, self.loss) {
+            (Some(r), _, _) => r,
+            // R is the remainder only when the other two pin it; otherwise a
+            // facet that was told nothing about reflection does not reflect.
+            (None, Some(t), Some(l)) => 1.0 - t - l,
+            _ => 0.0,
+        }
+    }
+
+    /// Check `R`, `T`, `L` are a power budget.  Refuses an over-unity or
+    /// negative one — a facet that quietly normalised its own numbers would hide
+    /// the typo it exists to catch.
+    ///
+    /// This used to be an `assert!` behind a `checked` flag, run on the first
+    /// `eval` because that was the earliest point at which the parameters were
+    /// all in. It is a `Device::validate` now, so a bad budget is a diagnostic
+    /// naming the element instead of a panic out of the middle of a solve.
+    fn check_budget(&self) -> Result<(), String> {
         let given: Vec<(&str, f64)> = [
             ("reflectance", self.reflectance),
             ("transmittance", self.transmittance),
@@ -101,42 +117,39 @@ impl NativeFacet {
         .filter_map(|(n, v)| v.map(|v| (n, v)))
         .collect();
         for (name, v) in &given {
-            assert!(
-                (0.0..=1.0).contains(v),
-                "fc_facet: {name}={v} is not a power fraction in [0, 1]"
-            );
+            if !(0.0..=1.0).contains(v) {
+                return Err(format!("{name}={v} is not a power fraction in [0, 1]"));
+            }
         }
         let sum: f64 = given.iter().map(|(_, v)| v).sum();
         match given.len() {
-            3 => assert!(
-                (sum - 1.0).abs() < 1e-9,
-                "fc_facet: reflectance + transmittance + loss = {sum}, must be 1 \
-                 (leave one out and it takes the remainder)"
-            ),
-            _ => assert!(
-                sum <= 1.0 + 1e-9,
-                "fc_facet: {} sum to {sum} > 1 — no power left for the rest",
-                given
-                    .iter()
-                    .map(|(n, _)| *n)
-                    .collect::<Vec<_>>()
-                    .join(" + ")
-            ),
+            3 if (sum - 1.0).abs() >= 1e-9 => {
+                return Err(format!(
+                    "reflectance + transmittance + loss = {sum}, must be 1 \
+                     (leave one out and it takes the remainder)"
+                ))
+            }
+            3 => {}
+            _ if sum > 1.0 + 1e-9 => {
+                return Err(format!(
+                    "{} sum to {sum} > 1 — no power left for the rest",
+                    given
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                ))
+            }
+            _ => {}
         }
-        let r = match (self.reflectance, self.transmittance, self.loss) {
-            (Some(r), _, _) => r,
-            // R is the remainder only when the other two pin it; otherwise a
-            // facet that was told nothing about reflection does not reflect.
-            (None, Some(t), Some(l)) => 1.0 - t - l,
-            _ => 0.0,
-        };
-        self.rho = r.max(0.0).sqrt();
-        assert!(
-            self.rho == 0.0 || self.wpc == 5,
-            "fc_facet: reflectance={r} needs a backward wire; \
-             set `.options enable_bidirectional=1` (or use reflectance=0 as a terminator)"
-        );
-        self.checked = true;
+        let r = self.reflectance();
+        if r != 0.0 && self.wpc != 5 {
+            return Err(format!(
+                "reflectance={r} needs a backward wire; set \
+                 `.options enable_bidirectional=1` (or use reflectance=0 as a terminator)"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -183,7 +196,7 @@ impl Device for NativeFacet {
             "phase_deg" | "phi_deg" => self.phase_deg = value,
             _ => return false,
         }
-        self.checked = false;
+        self.rho = self.reflectance().max(0.0).sqrt();
         true
     }
 
@@ -195,11 +208,11 @@ impl Device for NativeFacet {
         (0..n).map(|k| wpc * k + wpc - 1).collect()
     }
 
-    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {
-        if !self.checked {
-            self.resolve();
-        }
+    fn validate(&mut self) -> Result<(), String> {
+        self.check_budget()
     }
+
+    fn eval(&mut self, _x: &[f64], _flags: EvalFlags, _ctx: &SimContext) {}
 
     fn load_residual(&self, _b: &mut [f64]) {}
 
