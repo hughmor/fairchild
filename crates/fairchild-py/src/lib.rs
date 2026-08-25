@@ -13,6 +13,7 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyComplex, PyDict};
+use rayon::prelude::*;
 
 use fairchild_core::adjoint::dc_sensitivity;
 use fairchild_core::adjoint_ac::{AcAdjoint, AcOutput};
@@ -752,6 +753,110 @@ impl Circuit {
             .collect()
     }
 
+    /// Every corner the deck declares, as `{'alter': …, 'temp_c': …}`.
+    ///
+    /// The `.alter` × `.temp` grid, base run first. Paired with `run()`'s
+    /// `alter=` and `temp=` kwargs this is the loop-it-yourself route, for when
+    /// you want to do something between corners rather than collect them all:
+    ///
+    /// ```python
+    /// for c in ckt.corners:
+    ///     r = ckt.run("tran", alter=c["alter"], temp=c["temp_c"])
+    ///     print(c["alter"], c["temp_c"], r["V(out)"].max())
+    /// ```
+    ///
+    /// Always at least one entry (`alter = "base"`), so a deck declaring no
+    /// corners needs no special case. `run_all()` covers the same grid when you
+    /// just want every result.
+    #[getter]
+    pub fn corners<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let Some(netlist) = self.netlist.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let opts = SimOptions::from_netlist(netlist);
+        fairchild_core::expand_corners(netlist, &opts)
+            .corners
+            .iter()
+            .map(|c| {
+                let d = PyDict::new_bound(py);
+                d.set_item("alter", &c.alter_label)?;
+                d.set_item("temp_c", c.temp_c())?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Run every analysis the deck declares, at every corner it declares.
+    ///
+    /// This is what the CLI does with the same file. `run()` runs one named
+    /// analysis at one corner; this runs the whole deck — the `.alter` × `.temp`
+    /// grid crossed with the deck's analysis list, in deck order, corners in
+    /// parallel.
+    ///
+    /// ```python
+    /// for row in ckt.run_all():
+    ///     print(row["alter"], row["temp_c"], row["kind"])
+    ///     row["result"]        # SimResult, or a report dict for tf/sens/pz
+    /// ```
+    ///
+    /// Each row carries the corner it came from because the results are
+    /// otherwise indistinguishable — two `.tran` rows from a two-corner deck
+    /// are the same analysis at different temperatures, and nothing in a
+    /// `SimResult` says which.
+    ///
+    /// A deck declaring no analyses returns an empty list rather than guessing
+    /// at one: `run_all` runs what the deck asked for, and a deck that asked
+    /// for nothing gets nothing. Solver-option kwargs (`reltol`, `method`, …)
+    /// apply to every corner; `alter=` and `temp=` do not belong here — pick a
+    /// single corner with `run()` instead.
+    #[pyo3(signature = (**kwargs))]
+    pub fn run_all<'py>(
+        &self,
+        py: Python<'py>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        for reject in ["alter", "temp"] {
+            if kwargs.is_some_and(|kw| kw.get_item(reject).ok().flatten().is_some()) {
+                return Err(PyRuntimeError::new_err(format!(
+                    "run_all() runs every corner, so {reject}= would contradict it. \
+                     Use run(analysis, {reject}=…) for a single corner, or ckt.corners \
+                     to loop over them yourself"
+                )));
+            }
+        }
+
+        let (nl, _registry, opts) = self.prepare(kwargs)?;
+        let grid = fairchild_core::expand_corners(&nl, &opts);
+        let netlist_dir = self.netlist_dir.clone();
+
+        // Corners are independent simulations, so they fan out. The registry is
+        // built inside the worker rather than shared: it holds factory closures
+        // that are not `Sync`, and building one is cheap next to a solve.
+        //
+        // Everything here is plain Rust — no Python object is touched until the
+        // fan-out has finished, which is what makes releasing the GIL sound.
+        let per_corner: Vec<Result<Vec<(String, AnyResult)>, String>> = py.allow_threads(|| {
+            grid.corners
+                .par_iter()
+                .map(|corner| run_one_corner(corner, netlist_dir.as_ref()))
+                .collect()
+        });
+
+        let mut rows = Vec::new();
+        for (corner, outcome) in grid.corners.iter().zip(per_corner) {
+            let results = outcome.map_err(PyRuntimeError::new_err)?;
+            for (kind, result) in results {
+                let d = PyDict::new_bound(py);
+                d.set_item("alter", &corner.alter_label)?;
+                d.set_item("temp_c", corner.temp_c())?;
+                d.set_item("kind", &kind)?;
+                d.set_item("result", result.into_py_object(py)?)?;
+                rows.push(d);
+            }
+        }
+        Ok(rows)
+    }
+
     /// Small-signal transfer function about the DC operating point.
     ///
     /// ```python
@@ -776,12 +881,7 @@ impl Circuit {
         let r = py
             .allow_threads(|| fairchild_core::transfer_function(&nl, &registry, &opts, &out, &src))
             .map_err(sim_err)?;
-        let d = PyDict::new_bound(py);
-        d.set_item("gain", r.gain)?;
-        d.set_item("r_in", r.r_in)?;
-        d.set_item("r_out", r.r_out)?;
-        d.set_item("out_value", r.out_value)?;
-        Ok(d)
+        tf_dict(py, &r)
     }
 
     /// DC parameter sensitivity of one output, by the adjoint method.
@@ -810,19 +910,7 @@ impl Circuit {
         let r = py
             .allow_threads(|| fairchild_core::sensitivity(&nl, &registry, &opts, &out, &params))
             .map_err(sim_err)?;
-        r.rows
-            .iter()
-            .map(|row| {
-                let d = PyDict::new_bound(py);
-                d.set_item("param", &row.name)?;
-                d.set_item("nominal", row.nominal)?;
-                d.set_item("sensitivity", row.sensitivity)?;
-                d.set_item("normalised", row.normalised)?;
-                d.set_item("reached", row.reached)?;
-                d.set_item("fd_error", row.fd_error)?;
-                Ok(d)
-            })
-            .collect()
+        sens_rows(py, &r)
     }
 
     /// Poles and zeros of the small-signal transfer function, in rad/s.
@@ -853,20 +941,7 @@ impl Circuit {
                 )
             })
             .map_err(sim_err)?;
-        // Python complex, so a caller can hand the list straight to numpy and
-        // take `abs()` / `angle()` without unpacking pairs first.
-        let to_py = |roots: &[fairchild_core::Root]| -> Vec<Bound<'py, PyComplex>> {
-            roots
-                .iter()
-                .map(|r| PyComplex::from_doubles_bound(py, r.re, r.im))
-                .collect()
-        };
-        let d = PyDict::new_bound(py);
-        d.set_item("poles", to_py(&r.poles))?;
-        d.set_item("zeros", to_py(&r.zeros))?;
-        d.set_item("infinite_poles", r.infinite_poles)?;
-        d.set_item("infinite_zeros", r.infinite_zeros)?;
-        Ok(d)
+        pz_dict(py, &r)
     }
 
     /// Inject a numpy waveform as the source for a voltage or current source.
@@ -1521,6 +1596,260 @@ fn parse_tran_kwargs(
 /// silently skipped — they are consumed by the `parse_*_kwargs` helpers.
 /// Every other kwarg is forwarded to `SimOptions::set`; an unrecognised or
 /// unavailable key raises `PyRuntimeError` so misspellings surface immediately.
+/// The three report shapes, in one place each.
+///
+/// `ckt.tf()` and a `run_all()` row must hand back the same dict — otherwise
+/// code that reads one breaks on the other, and the deck-vs-caller consistency
+/// #33 bought would only hold for the waveform analyses.
+fn tf_dict<'py>(py: Python<'py>, r: &fairchild_core::TfResult) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("gain", r.gain)?;
+    d.set_item("r_in", r.r_in)?;
+    d.set_item("r_out", r.r_out)?;
+    d.set_item("out_value", r.out_value)?;
+    Ok(d)
+}
+
+fn sens_rows<'py>(
+    py: Python<'py>,
+    r: &fairchild_core::SensResult,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    r.rows
+        .iter()
+        .map(|row| {
+            let d = PyDict::new_bound(py);
+            d.set_item("param", &row.name)?;
+            d.set_item("nominal", row.nominal)?;
+            d.set_item("sensitivity", row.sensitivity)?;
+            d.set_item("normalised", row.normalised)?;
+            d.set_item("reached", row.reached)?;
+            d.set_item("fd_error", row.fd_error)?;
+            Ok(d)
+        })
+        .collect()
+}
+
+fn pz_dict<'py>(py: Python<'py>, r: &fairchild_core::PzResult) -> PyResult<Bound<'py, PyDict>> {
+    // Python complex, so a caller can hand the list straight to numpy and take
+    // `abs()` / `angle()` without unpacking pairs first.
+    let to_py = |roots: &[fairchild_core::Root]| -> Vec<Bound<'py, PyComplex>> {
+        roots
+            .iter()
+            .map(|k| PyComplex::from_doubles_bound(py, k.re, k.im))
+            .collect()
+    };
+    let d = PyDict::new_bound(py);
+    d.set_item("poles", to_py(&r.poles))?;
+    d.set_item("zeros", to_py(&r.zeros))?;
+    d.set_item("infinite_poles", r.infinite_poles)?;
+    d.set_item("infinite_zeros", r.infinite_zeros)?;
+    Ok(d)
+}
+
+/// Any analysis's result, so `run_all` can carry a heterogeneous deck's output
+/// out of the parallel fan-out before any of it becomes a Python object.
+///
+/// Deliberately *not* `SimResult`: building one needs the GIL, and the whole
+/// point of the fan-out is that it holds no GIL. The conversion happens once,
+/// afterwards, in [`AnyResult::into_py_object`].
+enum AnyResult {
+    Dc(fairchild_core::NrResult),
+    Tran(fairchild_core::TranResult, Vec<(String, f64)>),
+    Ac(fairchild_core::AcResult),
+    Noise(fairchild_core::NoiseResult),
+    DcSweep(fairchild_core::DcSweepResult),
+    Tf(fairchild_core::TfResult),
+    Sens(fairchild_core::SensResult),
+    Pz(fairchild_core::PzResult),
+}
+
+impl AnyResult {
+    /// The waveform analyses become a `SimResult`; the reports become the same
+    /// dict / list of dicts their own methods return, so a `run_all` row and a
+    /// direct `ckt.tf()` are the same shape.
+    fn into_py_object(self, py: Python<'_>) -> PyResult<PyObject> {
+        let sim = |inner, measurements| {
+            SimResult {
+                inner,
+                measurements,
+            }
+            .into_py(py)
+        };
+        Ok(match self {
+            AnyResult::Dc(r) => sim(SimResultInner::Dc(r), Vec::new()),
+            AnyResult::Tran(r, m) => sim(SimResultInner::Tran(r), m),
+            AnyResult::Ac(r) => sim(SimResultInner::Ac(r), Vec::new()),
+            AnyResult::Noise(r) => sim(SimResultInner::Noise(r), Vec::new()),
+            AnyResult::DcSweep(r) => sim(SimResultInner::DcSweep(r), Vec::new()),
+            AnyResult::Tf(r) => tf_dict(py, &r)?.into_py(py),
+            AnyResult::Sens(r) => sens_rows(py, &r)?.into_py(py),
+            AnyResult::Pz(r) => pz_dict(py, &r)?.into_py(py),
+        })
+    }
+}
+
+/// Run every analysis one corner declares, in deck order.
+///
+/// Returns `(kind, result)` pairs. Errors come back as strings rather than
+/// `PyErr` so the caller can attribute them to a corner — a failure at 125 °C
+/// and a failure in the `slow` block are different bugs, and "DC op failed" on
+/// its own does not say which.
+fn run_one_corner(
+    corner: &fairchild_core::Corner,
+    netlist_dir: Option<&PathBuf>,
+) -> Result<Vec<(String, AnyResult)>, String> {
+    let nl = &corner.netlist;
+    let opts = &corner.opts;
+    let label = || {
+        format!(
+            "corner alter={} temp={:.1}C",
+            corner.alter_label,
+            corner.temp_c()
+        )
+    };
+    let registry = build_registry(nl, netlist_dir).map_err(|e| format!("{}: {e}", label()))?;
+    let fail = |what: &str, e: SimError| format!("{} at {}: {e}", what, label());
+
+    let mut out = Vec::new();
+    for analysis in &nl.analyses {
+        let entry = match analysis {
+            Analysis::Op => (
+                "op".to_string(),
+                AnyResult::Dc(
+                    dc_op_nr_with_registry_opts(nl, &registry, opts).map_err(|e| fail(".op", e))?,
+                ),
+            ),
+            Analysis::Tran {
+                step,
+                stop,
+                tstart,
+                tmax,
+                uic,
+            } => {
+                // Each card's tstart/tmax/UIC belong to that card's run only —
+                // the same rule the CLI follows, and the leak #33 closed.
+                let mut local = opts.clone();
+                local.apply_tran_card(*tstart, *tmax, *uic);
+                let r = if local.variable_step {
+                    tran_nr_with_registry_var_opts(nl, *step, *stop, &registry, &local)
+                } else {
+                    tran_nr_with_registry_opts(nl, *step, *stop, &registry, &local)
+                }
+                .map_err(|e| fail(".tran", e))?;
+                let meas = evaluate_measurements(&nl.measurements, &r)
+                    .into_iter()
+                    .map(|m| (m.name, m.value))
+                    .collect();
+                ("tran".to_string(), AnyResult::Tran(r, meas))
+            }
+            Analysis::Ac {
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
+                let freqs = freq_points(*variation, *fstart, *fstop, *points);
+                (
+                    "ac".to_string(),
+                    AnyResult::Ac(
+                        ac_analysis_opts(nl, &freqs, None, &registry, opts)
+                            .map_err(|e| fail(".ac", e))?,
+                    ),
+                )
+            }
+            Analysis::Dc {
+                src,
+                start,
+                stop,
+                step,
+                nested,
+            } => {
+                let nested = nested
+                    .as_ref()
+                    .map(|n| (n.src.clone(), n.start, n.stop, n.step));
+                (
+                    "dc_sweep".to_string(),
+                    AnyResult::DcSweep(
+                        dc_sweep_with_registry_opts(
+                            nl,
+                            src,
+                            *start,
+                            *stop,
+                            *step,
+                            nested.as_ref().map(|(s, a, b, c)| (s.as_str(), *a, *b, *c)),
+                            &registry,
+                            opts,
+                        )
+                        .map_err(|e| fail(".dc", e))?,
+                    ),
+                )
+            }
+            Analysis::Noise {
+                out_pos,
+                out_neg,
+                input_src,
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
+                let freqs = freq_points(*variation, *fstart, *fstop, *points);
+                (
+                    "noise".to_string(),
+                    AnyResult::Noise(
+                        fairchild_core::noise_analysis(
+                            nl, &freqs, out_pos, out_neg, input_src, &registry, opts,
+                        )
+                        .map_err(|e| fail(".noise", e))?,
+                    ),
+                )
+            }
+            Analysis::Tf { out, input_src } => (
+                "tf".to_string(),
+                AnyResult::Tf(
+                    fairchild_core::transfer_function(nl, &registry, opts, out, input_src)
+                        .map_err(|e| fail(".tf", e))?,
+                ),
+            ),
+            Analysis::Sens { out, params } => (
+                "sens".to_string(),
+                AnyResult::Sens(
+                    fairchild_core::sensitivity(nl, &registry, opts, out, params)
+                        .map_err(|e| fail(".sens", e))?,
+                ),
+            ),
+            Analysis::Pz {
+                in_pos,
+                in_neg,
+                out_pos,
+                out_neg,
+                drive,
+                want,
+            } => (
+                "pz".to_string(),
+                AnyResult::Pz(
+                    fairchild_core::pole_zero(
+                        nl, &registry, opts, in_pos, in_neg, out_pos, out_neg, *drive, *want,
+                    )
+                    .map_err(|e| fail(".pz", e))?,
+                ),
+            ),
+        };
+        out.push(entry);
+    }
+    Ok(out)
+}
+
+/// `DEC`/`OCT`/`LIN` to a frequency list, in one place so `.ac` and `.noise`
+/// cannot disagree about what a card's variation means.
+fn freq_points(variation: AcVariation, fstart: f64, fstop: f64, points: usize) -> Vec<f64> {
+    match variation {
+        AcVariation::Dec => fairchild_core::freq_decade(fstart, fstop, points),
+        AcVariation::Oct => fairchild_core::freq_oct(fstart, fstop, points),
+        AcVariation::Lin => fairchild_core::freq_linear(fstart, fstop, points),
+    }
+}
+
 /// A `v(a,b)` / `i(v1)` string from a caller, through the parser's own reader.
 fn outvar_from_str(s: &str) -> PyResult<OutVar> {
     fairchild_parser::parse_outvar(s, 0)

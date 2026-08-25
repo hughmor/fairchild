@@ -887,7 +887,34 @@ One thing is refused rather than guessed:
 
 `.temp` re-runs every analysis once per listed temperature (°C). `.alter`
 blocks describe deltas from the base netlist; each block produces a full
-re-run with overrides applied.
+re-run with overrides applied. The two cross: a deck with two `.alter` blocks
+and three temperatures has **nine** corners (base plus two blocks, times three),
+and every analysis in the deck runs at each of them.
+
+A single `.temp 75` is not a sweep — it just sets the temperature, so the deck
+still has one corner.
+
+The CLI runs the whole grid, one output file per corner (see
+[§8](#8-cli-reference)). From Python it is the same grid, expanded by the same
+code, reachable two ways:
+
+```python
+c.corners              # [{'alter': 'base', 'temp_c': -40.0}, …] — what the deck declares
+c.run_all()            # every analysis at every corner; one row per (corner, analysis)
+
+for corner in c.corners:                      # or drive them yourself
+    r = c.run("tran", alter=corner["alter"], temp=corner["temp_c"])
+```
+
+`run_all()` returns rows of `{'alter', 'temp_c', 'kind', 'result'}`. Each row
+names its corner because the results are otherwise indistinguishable — two
+`.tran` rows from a two-corner deck are the same analysis at different
+temperatures, and nothing inside a `SimResult` says which. Corners are
+independent, so they run in parallel.
+
+`run_all(alter=…)` and `run_all(temp=…)` are **errors**, not filters: asking the
+run-everything verb for one corner is a contradiction. Use `run()` for that.
+Solver options (`reltol`, `method`, …) do apply to every corner.
 
 ### Solver options
 
@@ -1221,6 +1248,15 @@ poles = c.pz(in_pos="in", out_pos="out")["poles"] # rad/s, complex
 
 # What the deck declares, without running any of it:
 c.analyses          # [{'kind': 'tran', …}, {'kind': 'pz', …}]
+c.corners           # [{'alter': 'base', 'temp_c': 27.0}, …]
+
+# Run the whole deck — every analysis at every corner, like the CLI does.
+for row in c.run_all():
+    print(row["alter"], row["temp_c"], row["kind"], row["result"])
+
+# Or drive the corners yourself, one at a time:
+for corner in c.corners:
+    r = c.run("tran", alter=corner["alter"], temp=corner["temp_c"])
 
 # Parametric sweep — equivalent of Monte Carlo / corner runs.
 results = c.sweep("Rload.resistance", [1e3, 2e3, 5e3], "tran",

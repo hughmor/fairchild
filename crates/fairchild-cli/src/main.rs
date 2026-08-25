@@ -10,7 +10,7 @@ use fairchild_core::netlist_edit::set_element_param;
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
-    tran_nr_with_registry_var_opts, ArityDecl, DeviceRegistry, SimOptions,
+    tran_nr_with_registry_var_opts, ArityDecl, Corner, CornerGrid, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
@@ -684,43 +684,19 @@ fn main() {
         );
     }
 
-    // .temp <T1> [<T2> ...] sweep: re-run every analysis once per temperature.
-    // Empty `temps` ⇒ single pass at whatever `opts.temp_k` already is.
-    let temp_sweep: Vec<f64> = if netlist.temps.len() > 1 {
-        netlist.temps.clone()
-    } else {
-        vec![opts.temp_k]
-    };
-    // .alter sweep: base run + one re-run per .alter block.
-    let mut alter_runs: Vec<(String, Netlist)> = vec![("base".into(), netlist.clone())];
-    for block in &netlist.alters {
-        let mut patched = netlist.clone();
-        patched.apply_alter(block);
-        alter_runs.push((block.label.clone(), patched));
-    }
-
-    // Flatten the (alter × temp) grid into a list of corners.  Each
-    // corner is an independent simulation; we either run them serially
-    // into one shared writer (`--single-output`, no `--output`, only
-    // one corner, or `--verbose`) or in parallel into per-corner files.
-    let mut corners: Vec<Corner> = Vec::with_capacity(alter_runs.len() * temp_sweep.len());
-    for (ai, (alter_label, alter_netlist)) in alter_runs.iter().enumerate() {
-        for (ti, &temp_k) in temp_sweep.iter().enumerate() {
-            let mut corner_opts = opts.clone();
-            corner_opts.temp_k = temp_k;
-            corners.push(Corner {
-                alter_idx: ai,
-                temp_idx: ti,
-                alter_label: alter_label.clone(),
-                temp_k,
-                netlist: alter_netlist.clone(),
-                opts: corner_opts,
-            });
-        }
-    }
-
-    let n_alters = alter_runs.len();
-    let n_temps = temp_sweep.len();
+    // The (alter × temp) grid.  Each corner is an independent simulation; we
+    // either run them serially into one shared writer (`--single-output`, no
+    // `--output`, only one corner, or `--verbose`) or in parallel into
+    // per-corner files.
+    //
+    // Expanded by `fairchild_core::expand_corners`, which is also what
+    // `Circuit.run_all()` calls — one definition of what corners a deck
+    // declares, rather than one per frontend.
+    let CornerGrid {
+        corners,
+        n_alters,
+        n_temps,
+    } = fairchild_core::expand_corners(&netlist, &opts);
     let n_corners = corners.len();
 
     // Dispatch: file-per-corner only when (a) an output path is given,
@@ -760,17 +736,6 @@ fn main() {
 // ---------------------------------------------------------------------------
 // Corner sweep — `.alter` × `.temp` grid
 // ---------------------------------------------------------------------------
-
-/// One leaf of the `.alter` × `.temp` grid: a fully-resolved netlist
-/// plus a `SimOptions` carrying the per-corner temperature.
-struct Corner {
-    alter_idx: usize,
-    temp_idx: usize,
-    alter_label: String,
-    temp_k: f64,
-    netlist: Netlist,
-    opts: SimOptions,
-}
 
 /// Derive a per-corner output path by suffixing the base `--output`
 /// path with `.alter_<label>` and `.temp_<C>c` where the corresponding

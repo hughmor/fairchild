@@ -300,6 +300,39 @@ jobs:
           for p in pr["poles"]:
               assert isinstance(p, complex) and math.isclose(p.real, -5e4, rel_tol=1e-5), p
           print(f"ok: tf/sens/pz reachable, card-vs-kwargs honoured, {len(pr['poles'])} poles")
+
+          # run_all() means *all*: the deck's analyses crossed with the .alter x
+          # .temp grid, which is what the CLI does with the same file. The bug
+          # this guards is the grid silently collapsing to one corner.
+          rc = fairchild.Circuit()
+          rc.load_str("""* corners
+          Vin in 0 DC 1
+          R1 in out 1k
+          R2 out 0 3k
+          .temp -40 27 125
+          .op
+          .tf v(out) Vin
+          .alter slow
+          R1 in out 2k
+          """)
+          assert len(rc.corners) == 6, rc.corners          # (base, slow) x 3 temps
+          assert rc.corners[0]["alter"] == "base", rc.corners[0]
+          all_rows = rc.run_all()
+          assert len(all_rows) == 12, len(all_rows)        # 6 corners x 2 analyses
+          assert {r["alter"] for r in all_rows} == {"base", "slow"}
+          assert {round(r["temp_c"]) for r in all_rows} == {-40, 27, 125}
+          # The alter axis must actually reach the numbers: r_in is R1 + R2.
+          rin = {r["alter"]: r["result"]["r_in"] for r in all_rows
+                 if r["kind"] == "tf" and round(r["temp_c"]) == 27}
+          assert round(rin["base"]) == 4000 and round(rin["slow"]) == 5000, rin
+          # A single corner is run() with alter=/temp=; asking run_all for one
+          # is a contradiction, not a filter.
+          try:
+              rc.run_all(alter="slow")
+              raise AssertionError("run_all(alter=) must be refused")
+          except RuntimeError as e:
+              assert "every corner" in str(e), e
+          print(f"ok: run_all covered {len(all_rows)} rows over {len(rc.corners)} corners")
           PY
 
           # The bindings and the CLI once disagreed by a factor of 116 on a noise
