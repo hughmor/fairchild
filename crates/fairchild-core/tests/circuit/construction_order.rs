@@ -15,6 +15,7 @@
 //! `ParamSet` before construction. That is the change with the most room to drop
 //! a value on the floor.
 
+use fairchild_core::device::SimContext;
 use fairchild_core::{dc_op_nr, dc_op_nr_with_registry, DeviceRegistry};
 use fairchild_parser::parse_spice;
 
@@ -148,4 +149,61 @@ fn current(src: &str) -> f64 {
         .vsrc_current("v1")
         .expect("source current")
         .abs()
+}
+
+/// A parameter the device consumed is never reported as dropped, and a card's
+/// unrecognised parameter is reported by *somebody*.
+///
+/// Both of these broke while this refactor was being written, and neither
+/// showed up in a value: the numbers stayed right and only the warnings went
+/// wrong. The cause was one thing — a `.model` card factory that merged its
+/// defaults into a *copy* of the `ParamSet`. Consumption is tracked on the set,
+/// so the copy absorbed it: the caller's set still thought its own
+/// `reflectance` had gone unread (and said so, about a parameter that had
+/// worked perfectly), while the copy's unrecognised keys were reported by
+/// nobody at all.
+///
+/// The fix is that no copy exists — `DeviceRegistry::params_for` merges the
+/// card's parameters before the set is created, so there is one set, one
+/// consumption record, and one report. These assertions are what would have
+/// caught it, so they stay.
+///
+/// Checked through `unconsumed()` rather than stderr, because `warn_user!`
+/// prints and a test cannot see it.
+#[test]
+fn consumption_is_tracked_on_the_set_the_caller_reports_on() {
+    let src = ".options enable_bidirectional=1\n\
+               .model mirror fc_facet (reflectance=0.25 bogus_card_param=1)\n\
+               Xf p_re_fw p_im_fw p_re_bw p_im_bw p_wl mirror reflectance=0.64\n\
+               V_re p_re_fw 0 DC 1\n.op\n";
+    let net = parse_spice(src).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    registry.register_loaded_model_cards(&net.models);
+
+    // The set the caller builds and reports on already holds both halves.
+    // The deck asks for bidirectional propagation, so the port is five wires
+    // wide and the context has to say so — a facet sizes itself from the
+    // terminal count divided by the stride.
+    let ctx = SimContext {
+        bidirectional_propagation: true,
+        ..Default::default()
+    };
+    let ps = registry.params_for("mirror", &[("reflectance".into(), 0.64)]);
+    let dev =
+        registry.get("mirror").expect("card registered")(&[None; 5], &ps, &ctx).expect("build");
+    drop(dev);
+
+    let left: Vec<String> = ps.unconsumed().into_iter().map(|u| u.key).collect();
+    // `reflectance` was consumed — reporting it would be a false alarm about a
+    // parameter that worked.
+    assert!(
+        !left.iter().any(|k| k == "reflectance"),
+        "a consumed parameter must not be reported: {left:?}"
+    );
+    // …and the card's typo is not lost.
+    assert!(
+        left.iter().any(|k| k == "bogus_card_param"),
+        "a card's unrecognised parameter must still be reported: {left:?}"
+    );
 }

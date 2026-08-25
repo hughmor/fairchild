@@ -1,5 +1,5 @@
 use crate::warn_user;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use fairchild_parser::{ArityOracle, ArityQuery, BundleArity, Expr, ModelCard};
@@ -163,6 +163,72 @@ impl ParamSet {
     }
 }
 
+/// Which unknown-parameter warnings an element should emit, given what earlier
+/// elements in the same build already reported.
+///
+/// Two different things are being reported, and they deserve different
+/// frequencies:
+///
+/// - **An element-line parameter** is reported every time. Each element line is
+///   a separate thing someone wrote, so two elements with the same typo are two
+///   typos and both want naming.
+/// - **A `.model` card parameter** is reported once, however many elements name
+///   the card. A card is one line: a netlist with 500 diodes on one card has one
+///   thing wrong with it, not 500. `register_builtin_diodes` has always followed
+///   that rule for the parameters it validates at registration; the card path
+///   did not, and printed the same line once per instance.
+///
+/// `seen` is the dedup memory, keyed on (card, parameter). Scoped to one
+/// `build_devices` call rather than to the process: a warning is cosmetic, but a
+/// library that silently stopped mentioning something because an earlier
+/// simulation had mentioned it would be worse than a repeated line.
+///
+/// Returns the messages rather than printing them, so the rule above is
+/// testable — `warn_user!` writes to stderr and a test cannot see it.
+pub fn unknown_param_reports(
+    ps: &ParamSet,
+    elem: &str,
+    model_name: &str,
+    seen: &mut HashSet<(String, String)>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in ps.unconsumed() {
+        match &p.card {
+            Some(card) => {
+                // Deliberately does not name an element: the card is what is
+                // wrong, and naming one arbitrary instance out of 500 would
+                // point the reader at a line that is fine.
+                if seen.insert((card.clone(), p.key.clone())) {
+                    // Not "…by '{model_name}'": for a card instance the two
+                    // are the same name, and the message read
+                    // ".model 'mirror' … not honoured by 'mirror'".
+                    out.push(format!(
+                        ".model '{card}': parameter '{}' is not honoured by this \
+                         model and was ignored",
+                        p.key
+                    ));
+                }
+            }
+            None => out.push(format!(
+                "{elem} ('{model_name}'): instance parameter '{}' is not honoured \
+                 by this model and was dropped",
+                p.key
+            )),
+        }
+    }
+    out
+}
+
+/// A card's parameters without `LEVEL`, which selects the device rather than
+/// configuring it and is consumed by the registrar.
+fn without_level(params: &[(String, f64)]) -> Vec<(String, f64)> {
+    params
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
+        .cloned()
+        .collect()
+}
+
 /// Set up, apply every parameter, then let the device judge itself.
 ///
 /// The one construction order in this file. It exists because the order is
@@ -287,6 +353,16 @@ pub struct DeviceRegistry {
     factories: HashMap<String, Factory>,
     /// WDM dispatch per model name, consulted through the `ArityOracle` impl.
     arities: HashMap<String, ArityDecl>,
+    /// Numeric `.model` card parameters, by card name.
+    ///
+    /// Held here rather than captured in the card's factory closure so the
+    /// *caller* can merge them into the one `ParamSet` it owns. A closure that
+    /// merges them itself has to build a second set, and then consumption
+    /// tracking happens on a set nobody else can see: the card's unrecognised
+    /// parameters get reported by nobody, and an element-line parameter the
+    /// device *did* consume is reported as dropped. Both of those were live for
+    /// exactly as long as it took to write a test for the warning.
+    card_defaults: HashMap<String, Arc<Vec<(String, f64)>>>,
     /// MOSFET model cards stored for W/L instance-param injection in build_devices.
     pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
     /// BJT model cards: model_name → (is_pnp, params).
@@ -340,6 +416,7 @@ impl DeviceRegistry {
         let mut reg = Self {
             factories: HashMap::new(),
             arities: HashMap::new(),
+            card_defaults: HashMap::new(),
             mosfet_cards: HashMap::new(),
             bjt_cards: HashMap::new(),
             switch_cards: HashMap::new(),
@@ -367,6 +444,36 @@ impl DeviceRegistry {
     /// of any model that can carry an optical or electrical bundle port.
     pub fn declare_arity(&mut self, name: impl Into<String>, decl: ArityDecl) {
         self.arities.insert(name.into().to_lowercase(), decl);
+    }
+
+    /// Record the numeric parameters of a `.model` card, for the caller to
+    /// merge into the instance `ParamSet`. See [`Self::card_defaults`].
+    fn declare_card_defaults(&mut self, card: &str, params: Vec<(String, f64)>) {
+        if params.is_empty() {
+            return;
+        }
+        self.card_defaults
+            .insert(card.to_lowercase(), Arc::new(params));
+    }
+
+    /// The `.model` card parameters recorded for `name`, if it is a card.
+    pub fn card_defaults(&self, name: &str) -> Option<&[(String, f64)]> {
+        self.card_defaults
+            .get(&name.to_lowercase())
+            .map(|v| v.as_slice())
+    }
+
+    /// The instance parameters for an element, with its `.model` card's
+    /// parameters merged in underneath. The element line wins.
+    ///
+    /// The single place a device's full parameter set is assembled, which is what
+    /// makes one `unconsumed()` report cover both halves.
+    pub fn params_for(&self, model_name: &str, instance: &[(String, f64)]) -> ParamSet {
+        let ps = ParamSet::new(instance);
+        match self.card_defaults(model_name) {
+            Some(defaults) => ps.with_defaults(defaults, model_name),
+            None => ps,
+        }
     }
 
     /// Declared arity for `name`, if any.
@@ -497,18 +604,12 @@ impl DeviceRegistry {
             let Some(target) = self.factories.get(&kind).cloned() else {
                 continue;
             };
-            let defaults: Arc<Vec<(String, f64)>> = Arc::new(
-                card.params
-                    .iter()
-                    .map(|(k, v)| (k.to_lowercase(), *v))
-                    .collect(),
-            );
-            let label = card.name.clone();
+            self.declare_card_defaults(&card.name, card.params.clone());
+            // A plain alias. The card's parameters are merged by `params_for`
+            // before this is ever called, so there is nothing to do here — which
+            // is the point: one set, one consumption record, one report.
             self.register(card_name, move |terminals, params: &ParamSet, ctx| {
-                // Merged, not patched on afterwards: the target validates itself
-                // at the end of its own construction, and it can only do that
-                // with the card's parameters already present.
-                target(terminals, &params.with_defaults(&defaults, &label), ctx)
+                target(terminals, params, ctx)
             });
         }
     }
@@ -716,9 +817,8 @@ impl DeviceRegistry {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("sfile"))
                     .map(|(_, v)| v.clone());
-                let numeric: Vec<(String, f64)> = card.params.clone();
+                self.declare_card_defaults(&card.name, card.params.clone());
                 let name = card.name.clone();
-                let label = card.name.clone();
                 self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                     let mut d = NativeAwgr::new();
                     d.setup_model(ctx);
@@ -735,7 +835,7 @@ impl DeviceRegistry {
                             ),
                         }
                     }
-                    apply_and_validate(d, &ps.with_defaults(&numeric, &label))
+                    apply_and_validate(d, ps)
                 });
                 continue;
             }
@@ -768,18 +868,10 @@ impl DeviceRegistry {
                     .find(|(k, _)| k == "g_pn")
                     .map(|(_, v)| *v)
                     .unwrap_or(1e-3);
-                let numeric: Vec<(String, f64)> = card
-                    .params
-                    .iter()
-                    .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
-                    .cloned()
-                    .collect();
-                let label = card.name.clone();
+                self.declare_card_defaults(&card.name, without_level(&card.params));
                 self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                     let d = expr_phase_shifter(dneff.clone(), dalpha.clone(), g_pn);
-                    // Card params and instance params in one set, element line
-                    // winning — so the device sees all of them before it judges.
-                    finish(d, terminals, &ps.with_defaults(&numeric, &label), ctx)
+                    finish(d, terminals, ps, ctx)
                 });
                 continue;
             }
@@ -817,17 +909,12 @@ impl DeviceRegistry {
                 }
                 _ => continue,
             };
-            // Model-card params (minus LEVEL) bake in at construction; instance
-            // params on the X-line apply on top (via the ParamSet).
-            let params: Vec<(String, f64)> = card
-                .params
-                .iter()
-                .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
-                .cloned()
-                .collect();
-            let label = card.name.clone();
+            // `LEVEL` selected the constructor above and is not a device
+            // parameter, so it does not go in the table — otherwise every
+            // instance would report it as unrecognised.
+            self.declare_card_defaults(&card.name, without_level(&card.params));
             self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
-                finish(ctor(), terminals, &ps.with_defaults(&params, &label), ctx)
+                finish(ctor(), terminals, ps, ctx)
             });
         }
     }
@@ -1049,6 +1136,74 @@ impl Default for DeviceRegistry {
 mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
+
+    /// A `.model` card's bad parameter is reported once, however many elements
+    /// name the card. An element line's is reported every time.
+    ///
+    /// The frequencies differ because the mistakes differ: a card is one line in
+    /// the deck, and 500 diodes on it are 500 symptoms of one typo. Two element
+    /// lines with the same typo are two typos.
+    ///
+    /// Tested on the rule rather than on stderr because `warn_user!` prints and
+    /// a test cannot see that — the printing is a one-line wrapper over this.
+    #[test]
+    fn a_card_parameter_is_reported_once_and_an_instance_one_every_time() {
+        let mut seen = HashSet::new();
+        let card = ParamSet::empty().with_defaults(&[("bogus".into(), 1.0)], "nch");
+
+        let first = unknown_param_reports(&card, "d1", "dm", &mut seen);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].contains("nch") && first[0].contains("bogus"),
+            "{first:?}"
+        );
+        // The card name appears once, not twice: for a card instance the model
+        // name *is* the card name.
+        assert_eq!(first[0].matches("nch").count(), 1, "{first:?}");
+        // The card is what is wrong, so the message does not name an element.
+        assert!(
+            !first[0].contains("d1"),
+            "a card report should not name one arbitrary instance: {first:?}"
+        );
+
+        // Same card, a different element: silent.
+        let again = card_set();
+        assert!(
+            unknown_param_reports(&again, "d2", "dm", &mut seen).is_empty(),
+            "the second element must not repeat the card warning"
+        );
+        // …and a third, in case the dedup only held for one repeat.
+        let third = card_set();
+        assert!(unknown_param_reports(&third, "d3", "dm", &mut seen).is_empty());
+
+        // A *different* bad key on the same card is a different mistake.
+        let other = ParamSet::empty().with_defaults(&[("alsobogus".into(), 1.0)], "nch");
+        assert_eq!(
+            unknown_param_reports(&other, "d4", "dm", &mut seen).len(),
+            1
+        );
+
+        // The same key on a *different* card is also a different mistake.
+        let other_card = ParamSet::empty().with_defaults(&[("bogus".into(), 1.0)], "pch");
+        assert_eq!(
+            unknown_param_reports(&other_card, "d5", "dm", &mut seen).len(),
+            1
+        );
+
+        // An element-line parameter repeats: two elements, two reports.
+        let inst = || ParamSet::new(&[("bogus".into(), 1.0)]);
+        assert_eq!(
+            unknown_param_reports(&inst(), "x1", "m", &mut seen).len(),
+            1
+        );
+        let second = unknown_param_reports(&inst(), "x2", "m", &mut seen);
+        assert_eq!(second.len(), 1, "an element-line typo is named every time");
+        assert!(second[0].contains("x2"), "{second:?}");
+    }
+
+    fn card_set() -> ParamSet {
+        ParamSet::empty().with_defaults(&[("bogus".into(), 1.0)], "nch")
+    }
 
     /// Register a PDK-style alias mapping `pdk_widget_wg` →
     /// `fc_waveguide` with parameter-name remapping, then verify a netlist

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::behavioral::BehavioralDevice;
 use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
-use crate::device_registry::{DeviceRegistry, ParamSet};
+use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint, RowFloor};
 use crate::options::SimOptions;
@@ -291,6 +291,10 @@ pub fn build_devices_with_footprints(
     registry: &DeviceRegistry,
 ) -> Result<DevicesWithFootprints, SimError> {
     let mut devices: Vec<Box<dyn Device>> = Vec::new();
+    // Parameters already reported for a `.model` card in this build — see
+    // `unknown_param_reports`.
+    let mut reported: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     let mut foot: Vec<Footprint> = Vec::new();
     // Every auxiliary row allocated below lands at or after this index, in
     // device order — `check_exclusive_potential_drivers` walks the same order
@@ -316,24 +320,18 @@ pub fn build_devices_with_footprints(
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
-                let ps = ParamSet::new(params);
+                let ps = registry.params_for(model_name, params);
                 let dev = attribute(factory(&[pos, neg], &ps, ctx), name, model_name)?;
                 // A diode instance parameter used to reach the netlist and stop:
                 // `D1 a k dm area=2` parsed, changed nothing, and said nothing.
                 // AREA is honoured now; anything else gets named here.
-                for p in ps.unconsumed() {
-                    match &p.card {
-                        Some(card) => warn_user!(
-                            "{name}: .model '{card}' parameter '{}' is not honoured by \
-                             '{model_name}' and was dropped",
-                            p.key
-                        ),
-                        None => warn_user!(
-                            "{name} ('{model_name}'): instance parameter '{}' is not \
-                             honoured by this model and was dropped",
-                            p.key
-                        ),
-                    }
+                for msg in crate::device_registry::unknown_param_reports(
+                    &ps,
+                    name,
+                    model_name,
+                    &mut reported,
+                ) {
+                    warn_user!("{msg}");
                 }
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
@@ -359,7 +357,7 @@ pub fn build_devices_with_footprints(
                         .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                     let dev = attribute(
-                        factory(&[d, g, s, b], &ParamSet::new(params), ctx),
+                        factory(&[d, g, s, b], &registry.params_for(model_name, params), ctx),
                         name,
                         model_name,
                     )?;
@@ -421,7 +419,7 @@ pub fn build_devices_with_footprints(
                 // build() applies the instance params (and the model-card
                 // defaults baked into the factory). It also tracks which params
                 // the device consumed, so we can warn about typos.
-                let ps = ParamSet::new(params);
+                let ps = registry.params_for(model_name, params);
                 let dev = attribute(factory(&terminals, &ps, ctx), name, model_name)?;
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
@@ -438,18 +436,13 @@ pub fn build_devices_with_footprints(
                         terminals.len()
                     )));
                 }
-                for p in ps.unconsumed() {
-                    match &p.card {
-                        Some(card) => warn_user!(
-                            "{name}: .model '{card}' parameter '{}' is unknown to \
-                             '{model_name}' and was ignored",
-                            p.key
-                        ),
-                        None => warn_user!(
-                            "'{model_name}' instance: unknown parameter '{}' ignored",
-                            p.key
-                        ),
-                    }
+                for msg in crate::device_registry::unknown_param_reports(
+                    &ps,
+                    name,
+                    model_name,
+                    &mut reported,
+                ) {
+                    warn_user!("{msg}");
                 }
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:
