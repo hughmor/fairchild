@@ -75,10 +75,21 @@ Rload pd_a bias 1k
     assert!((v - 1.8).abs() < 0.01, "V(anode) = {v}; expected ≈ 1.8 V");
 }
 
-/// The c_par keyword is accepted (forward-compat) but does nothing at the
-/// L1 tier.  Sanity check: setting c_par must not crash.
+/// `c_par` is accepted for forward compatibility and is a **no-op** at the L1
+/// tier, and this pins both halves of that.
+///
+/// It used to assert only that a deck naming `c_par` still solved, which is a
+/// test that cannot fail: it passes whether the parameter is wired up, dropped,
+/// or removed from the model entirely. Asserting the documented no-op instead
+/// means the day someone implements `c_par` this test fails and points at
+/// `docs/model_status.md`, which is where the claim lives.
+///
+/// Note what is *not* asserted: that the user is told. Photonic `X`-line
+/// parameters do not go through `crate::unmodelled`, which is the mechanism the
+/// `.model`-card families use, so accepting `c_par` is silent. That gap is real
+/// and is not this test's to fix.
 #[test]
-fn pd_c_par_keyword_is_accepted() {
+fn pd_c_par_is_accepted_and_provably_does_nothing() {
     let netlist = "\
 V_re in_re 0 DC 0.0316228
 V_im in_im 0 DC 0.0
@@ -88,7 +99,30 @@ Vb bias 0 DC 1.0
 Rload pd_a bias 1k
 .op
 ";
-    let net = parse_spice(netlist).unwrap();
-    let _r = dc_op_nr_with_registry(&net, &DeviceRegistry::new())
-        .expect("DC OP with c_par keyword accepted");
+    let with_c_par = parse_spice(netlist).unwrap();
+    let got = dc_op_nr_with_registry(&with_c_par, &DeviceRegistry::new())
+        .expect("DC OP with c_par accepted")
+        .node_voltage("pd_a")
+        .unwrap();
+
+    // The same deck with the keyword removed.
+    let without = parse_spice(&netlist.replace(" c_par=100f", "")).unwrap();
+    let want = dc_op_nr_with_registry(&without, &DeviceRegistry::new())
+        .expect("DC OP without c_par")
+        .node_voltage("pd_a")
+        .unwrap();
+    assert_eq!(
+        got, want,
+        "c_par is documented as a no-op at L1; it moved V(pd_a) from {want} to {got}"
+    );
+
+    // And the keyword really is recognised — otherwise the equality above is
+    // satisfied by the parameter being ignored as a typo, which is a different
+    // thing and would come with a warning.
+    use fairchild_core::device::Device;
+    let mut pd = fairchild_core::models::NativePhotodetector::default();
+    assert!(
+        pd.set_real_param("c_par", 100e-15),
+        "c_par must be recognised, not fall through as unknown"
+    );
 }

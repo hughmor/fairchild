@@ -19,9 +19,9 @@ use fairchild_core::adjoint::dc_sensitivity;
 use fairchild_core::adjoint_ac::{AcAdjoint, AcOutput};
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
-    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
-    tran_nr_with_registry_var_opts, AcResult, DcSweepResult, DeviceRegistry, NrResult, Output,
-    ParamRef, SimError, SimOptions, TranAdjoint, TranResult,
+    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_configured, AcResult,
+    DcSweepResult, DeviceRegistry, NrResult, Output, ParamRef, SimError, SimOptions, TranAdjoint,
+    TranResult,
 };
 use fairchild_parser::{
     parse_spice_file_with_arity, parse_spice_with_arity, AcVariation, Analysis, ArityOracle,
@@ -616,13 +616,7 @@ impl Circuit {
             "tran" | "transient" => {
                 let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
                 let result = py
-                    .allow_threads(|| {
-                        if opts.variable_step {
-                            tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
-                        } else {
-                            tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                        }
-                    })
+                    .allow_threads(|| tran_nr_configured(&nl, step, stop, &registry, &opts))
                     .map_err(sim_err)?;
                 let measurements = evaluate_measurements(&nl.measurements, &result)
                     .into_iter()
@@ -1463,12 +1457,8 @@ impl Circuit {
                 }
                 "tran" | "transient" => {
                     let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
-                    let r = if opts.variable_step {
-                        tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
-                    } else {
-                        tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                    }
-                    .map_err(sim_err)?;
+                    let r =
+                        tran_nr_configured(&nl, step, stop, &registry, &opts).map_err(sim_err)?;
                     let measurements = evaluate_measurements(&nl.measurements, &r)
                         .into_iter()
                         .map(|m| (m.name, m.value))
@@ -1811,12 +1801,8 @@ fn run_one_corner(
                 // the same rule the CLI follows, and the leak #33 closed.
                 let mut local = opts.clone();
                 local.apply_tran_card(*tstart, *tmax, *uic);
-                let r = if local.variable_step {
-                    tran_nr_with_registry_var_opts(nl, *step, *stop, &registry, &local)
-                } else {
-                    tran_nr_with_registry_opts(nl, *step, *stop, &registry, &local)
-                }
-                .map_err(|e| fail(".tran", e))?;
+                let r = tran_nr_configured(nl, *step, *stop, &registry, &local)
+                    .map_err(|e| fail(".tran", e))?;
                 let meas = evaluate_measurements(&nl.measurements, &r)
                     .into_iter()
                     .map(|m| (m.name, m.value))

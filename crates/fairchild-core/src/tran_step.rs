@@ -263,7 +263,7 @@ impl TranStepper {
     /// companion models were built for `self.step` and the batch driver's final
     /// clamped step relies on exactly this behaviour.
     pub(crate) fn solve_at(&mut self, t_next: f64) -> Result<(), SimError> {
-        self.prepare(t_next, self.step_mode(), self.step);
+        self.prepare(t_next, self.step_mode(), self.step, self.gear2_h_prev());
         // One noise realisation for this step, drawn at the previous accepted
         // bias and then held: shot noise follows the current, and the current
         // is whatever the circuit last settled at.  Devices are re-evaluated at
@@ -343,21 +343,54 @@ impl TranStepper {
     /// difference, and because rebuilding companions per Newton iteration would
     /// be pure waste.  Reactive history is physical, so calling this again with
     /// the step's own `h` restores exactly what the last call left behind.
-    pub(crate) fn prepare(&mut self, t: f64, mode: IntegratorMode, h: f64) {
+    /// `gear2_h_prev` is the previous accepted step size, and `None` means
+    /// "integrate this step with Backward Euler even under `IntegratorMode::Gear`".
+    ///
+    /// It is a parameter rather than something derived here because the two
+    /// callers genuinely want different answers, and the difference used to be
+    /// silent. [`Self::solve_at`] wants BDF-2 to actually happen. The transient
+    /// adjoint re-stamps a timepoint at a *second* step size to read the charge
+    /// Jacobian out of the difference, and needs BDF-2 to stay demoted while it
+    /// does — see the note at the top of `adjoint_tran`. Hardcoding `None` here
+    /// gave the adjoint what it wanted and left `.options method=gear` running
+    /// Backward Euler on the fixed-step path, which is the default one (#93).
+    pub(crate) fn prepare(
+        &mut self,
+        t: f64,
+        mode: IntegratorMode,
+        h: f64,
+        gear2_h_prev: Option<f64>,
+    ) {
         self.ctx.time_s = t;
         // Companions for this step, derived from physical history rather than
         // advanced in place.  One rebuild per step buys a single representation
         // that any step size can consume — see `crate::reactive`.
-        self.reactive.build(&self.devices, mode, h, None);
+        self.reactive.build(&self.devices, mode, h, gear2_h_prev);
         // Devices that stamp their own reactance (OSDI/Verilog-A `ddt`) need the
         // method, not just `alpha`, which can only express Backward Euler. Same
-        // `mode` and the same absent BDF-2 history as the branch stamper in
-        // `stamp_at`, so one decision still reaches everything.
+        // `mode` and the same BDF-2 history as the branch stamper in `stamp_at`,
+        // so one decision still reaches everything.
         self.ctx.discretisation = Some(crate::device::Discretisation {
             mode,
             h,
-            gear2_h_prev: None,
+            gear2_h_prev,
         });
+    }
+
+    /// The previous step size to hand BDF-2, or `None` to demote to Backward
+    /// Euler for this step.
+    ///
+    /// On a fixed step the previous size is the current one — there is nothing
+    /// to remember. What there *is* to check is whether every reactive branch
+    /// has two accepted points behind it: BDF-2 is a three-point formula, so the
+    /// first step of any run has to be Backward Euler, exactly as Trapezoidal's
+    /// is. `ReactiveState::gear2_ready` is the same gate the variable-step
+    /// integrator uses, so the two paths demote on the same condition.
+    pub(crate) fn gear2_h_prev(&self) -> Option<f64> {
+        match self.mode {
+            IntegratorMode::Gear if self.reactive.gear2_ready() => Some(self.step),
+            _ => None,
+        }
     }
 
     /// Stamp the whole transient system at `probe`, leaving `A` and `b` in
@@ -392,9 +425,15 @@ impl TranStepper {
         // device-declared linear reactive branch (uses the device's current
         // bias-dependent value AND the history from the previous accepted
         // timestep).
-        // BDF-2 needs two-timepoint history, which only the variable-step
-        // integrator carries; GEAR demotes to BE here, as it always has for the
-        // built-in C/L on this path too.
+        // The same BDF-2 history `ReactiveState::build` used for this step, and
+        // it has to be the same one: `dev_state` holds the companion built
+        // there, and this stamps the conductance for the device's *current*
+        // bias-dependent value. Build one with BDF-2 and stamp the other with
+        // Backward Euler and the two describe different circuits — Newton then
+        // has no fixed point to find, which is exactly what happened: a photonic
+        // deck with a device-declared `C_j` stopped converging the moment BDF-2
+        // started working on this path (#93). Two places interpreting one
+        // method, which is the failure this codebase warns about.
         stamp_device_branches(
             &self.devices,
             &self.reactive.dev_state,
@@ -402,7 +441,7 @@ impl TranStepper {
             probe,
             d.h,
             d.mode,
-            None,
+            d.gear2_h_prev,
         );
 
         self.topo

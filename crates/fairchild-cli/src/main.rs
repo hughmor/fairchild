@@ -9,8 +9,8 @@ use rayon::prelude::*;
 use fairchild_core::netlist_edit::set_element_param;
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
-    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_with_registry_opts,
-    tran_nr_with_registry_var_opts, ArityDecl, Corner, CornerGrid, DeviceRegistry, SimOptions,
+    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_configured, ArityDecl,
+    Corner, CornerGrid, DeviceRegistry, SimOptions,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
@@ -1018,15 +1018,11 @@ fn run_corner_analyses_ctx(
                     eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?} {mode})...", opts.method);
                 }
                 let t0 = Instant::now();
-                let result = if opts.variable_step {
-                    tran_nr_with_registry_var_opts(netlist, *step, *stop, registry, opts)
-                } else {
-                    tran_nr_with_registry_opts(netlist, *step, *stop, registry, opts)
-                }
-                .unwrap_or_else(|e| {
-                    eprintln!("error: tran failed: {e}");
-                    std::process::exit(1);
-                });
+                let result = tran_nr_configured(netlist, *step, *stop, registry, opts)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: tran failed: {e}");
+                        std::process::exit(1);
+                    });
                 if ctx.verbose {
                     eprintln!(
                         "info: transient complete: {} time-points [{:.1} ms]",

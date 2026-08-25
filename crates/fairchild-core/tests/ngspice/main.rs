@@ -16,6 +16,7 @@ mod ngspice_coupled_inductors_golden;
 mod ngspice_diode_golden;
 mod ngspice_diode_tran_golden;
 mod ngspice_golden;
+mod ngspice_method_golden;
 mod ngspice_mosfet_golden;
 mod ngspice_noise_golden;
 mod ngspice_switch_golden;

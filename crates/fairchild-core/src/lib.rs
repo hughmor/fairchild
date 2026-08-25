@@ -62,8 +62,8 @@ pub use sens::{sensitivity, SensResult, SensRow};
 pub use solver::SolverKind;
 pub use tf::{transfer_function, TfResult};
 pub use tran::{
-    tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry, tran_nr_with_registry_opts,
-    tran_nr_with_registry_tr, tran_nr_with_registry_var, tran_nr_with_registry_var_opts,
-    IntegratorMode, TranResult,
+    tran_nr, tran_nr_configured, tran_nr_tr, tran_nr_var, tran_nr_with_registry,
+    tran_nr_with_registry_opts, tran_nr_with_registry_tr, tran_nr_with_registry_var,
+    tran_nr_with_registry_var_opts, IntegratorMode, TranResult,
 };
 pub use tran_step::TranStepper;

@@ -35,7 +35,12 @@ fn empty_paras(slot: &mut *mut i8, slot_str: &mut *mut i8) -> OsdiSimParas {
     }
 }
 
+/// A debugging harness, not a test: it calls `setup_model`/`setup_instance`
+/// by hand and prints what happens. It asserts nothing, so running it in the
+/// suite costs time and buys no signal — `#[ignore]` keeps it available
+/// (`cargo test -- --ignored`) without pretending it covers anything.
 #[test]
+#[ignore = "diagnostic harness: prints, asserts nothing"]
 fn setup_runs_without_the_device_layer() {
     let Ok(path) = std::env::var("OSDI_ATTRIB") else {
         eprintln!("OSDI_ATTRIB unset — skipping attribution harness");

@@ -308,10 +308,10 @@ impl SimOptions {
     pub fn set(&mut self, key: &str, value: &str) -> bool {
         let key_lc = key.to_lowercase();
         match key_lc.as_str() {
-            "reltol" => self.reltol = parse_num(value).unwrap_or(self.reltol),
-            "abstol" => self.abstol = parse_num(value).unwrap_or(self.abstol),
-            "vntol" => self.vntol = parse_num(value).unwrap_or(self.vntol),
-            "temptol" => self.temptol = parse_num(value).unwrap_or(self.temptol),
+            "reltol" => self.reltol = num_or_warn(key, value, self.reltol),
+            "abstol" => self.abstol = num_or_warn(key, value, self.abstol),
+            "vntol" => self.vntol = num_or_warn(key, value, self.vntol),
+            "temptol" => self.temptol = num_or_warn(key, value, self.temptol),
             "lambdatol" => {
                 // Retired rather than dropped: `.options lambdatol=…` in an old
                 // deck must say why it no longer applies instead of falling
@@ -324,23 +324,23 @@ impl SimOptions {
                      matrix row carries one (see docs/photonic-models.md)"
                 );
             }
-            "vmax" => self.vmax = parse_num(value).unwrap_or(self.vmax),
-            "gmin" => self.gmin = parse_num(value).unwrap_or(self.gmin),
-            "itl1" => self.itl1 = parse_int(value).unwrap_or(self.itl1),
-            "itl4" => self.itl4 = parse_int(value).unwrap_or(self.itl4),
-            "maxstep" | "max_step" => self.max_step = parse_num(value).unwrap_or(self.max_step),
-            "tstart" => self.tstart = parse_num(value).unwrap_or(self.tstart),
-            "gmin_max" | "gminmax" => self.gmin_max = parse_num(value).unwrap_or(self.gmin_max),
-            "srcsteps" | "srcmax" => self.srcsteps = parse_int(value).unwrap_or(self.srcsteps),
-            "temp" => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
-            "tnom" => self.temp_k = parse_num(value).unwrap_or(self.temp_k) + 273.15,
+            "vmax" => self.vmax = num_or_warn(key, value, self.vmax),
+            "gmin" => self.gmin = num_or_warn(key, value, self.gmin),
+            "itl1" => self.itl1 = int_or_warn(key, value, self.itl1),
+            "itl4" => self.itl4 = int_or_warn(key, value, self.itl4),
+            "maxstep" | "max_step" => self.max_step = num_or_warn(key, value, self.max_step),
+            "tstart" => self.tstart = num_or_warn(key, value, self.tstart),
+            "gmin_max" | "gminmax" => self.gmin_max = num_or_warn(key, value, self.gmin_max),
+            "srcsteps" | "srcmax" => self.srcsteps = int_or_warn(key, value, self.srcsteps),
+            "temp" => self.temp_k = num_or_warn(key, value, self.temp_k) + 273.15,
+            "tnom" => self.temp_k = num_or_warn(key, value, self.temp_k) + 273.15,
             "lambda_center_nm" => {
                 self.lambda_center_m = parse_num(value)
                     .map(|nm| nm * 1e-9)
                     .unwrap_or(self.lambda_center_m);
             }
             "lambda_center_m" => {
-                self.lambda_center_m = parse_num(value).unwrap_or(self.lambda_center_m);
+                self.lambda_center_m = num_or_warn(key, value, self.lambda_center_m);
             }
             "verbose" => {
                 self.verbose = matches!(
@@ -404,9 +404,7 @@ impl SimOptions {
                     "" | "1" | "true" | "yes" | "on"
                 );
             }
-            "max_rejections" => {
-                self.max_rejections = parse_int(value).unwrap_or(self.max_rejections)
-            }
+            "max_rejections" => self.max_rejections = int_or_warn(key, value, self.max_rejections),
             "method" => match value.to_lowercase().as_str() {
                 "be" | "backwardeuler" | "gear1" => self.method = IntegratorMode::BackwardEuler,
                 "tr" | "trap" | "trapezoidal" => self.method = IntegratorMode::Trapezoidal,
@@ -455,6 +453,38 @@ impl SimOptions {
 }
 
 /// Parse a SPICE-style number with optional suffix (k, meg, m, u, n, p, f).
+/// [`parse_num`], or a warning naming the option and the value it kept.
+///
+/// Every numeric option used to be written `parse_num(value).unwrap_or(self.field)`,
+/// which turns a typo into silence. `--opt reltol=banana` kept the default and
+/// said nothing, so a run tuned with a mistyped option was indistinguishable
+/// from one tuned correctly — and an unknown *key* was already reported, which
+/// made the gap in the value half easy to miss. Found while auditing #93.
+fn num_or_warn(key: &str, value: &str, keep: f64) -> f64 {
+    match parse_num(value) {
+        Some(v) => v,
+        None => {
+            warn_user!(
+                "solver option '{key}={value}' is not a number; keeping {keep} \
+                 (engineering suffixes like 1e-3, 1m, 4k7 are accepted)"
+            );
+            keep
+        }
+    }
+}
+
+/// [`parse_int`], or a warning naming the option and the value it kept. See
+/// [`num_or_warn`].
+fn int_or_warn(key: &str, value: &str, keep: usize) -> usize {
+    match parse_int(value) {
+        Some(v) => v,
+        None => {
+            warn_user!("solver option '{key}={value}' is not an integer; keeping {keep}");
+            keep
+        }
+    }
+}
+
 fn parse_num(s: &str) -> Option<f64> {
     let s_lc = s.to_lowercase();
     let (num, mult) = if let Some(n) = s_lc.strip_suffix("meg") {
