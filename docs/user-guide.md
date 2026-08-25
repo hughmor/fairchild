@@ -707,12 +707,22 @@ Pass no analysis arguments and the deck's card is adopted whole; pass any and
 the card is not used at all — the same rule `run("tran")` follows, so the
 numbers in one result always come from one place.
 
-`run("tf")`, `run("sens")` and `run("pz")` work too and are the *same call* —
-`run` delegates to the method, so the two spellings cannot drift apart. What
-they do not do is return a `SimResult`: that class is arrays indexed by signal
-name, and a report has neither an axis nor signals, so every accessor would
-have to answer with an empty array — which is also what a `SimResult` returns
-when something went wrong. These return a dict (or a list of dicts) instead.
+**Every analysis has a method and a name.** `ckt.op()`, `ckt.tran()`, `ckt.ac()`,
+`ckt.noise()`, `ckt.dc_sweep()`, `ckt.tf()`, `ckt.sens()`, `ckt.pz()` — and
+`run("<name>")` for each, which dispatches to exactly that method. One
+implementation under either spelling, so they cannot drift apart.
+
+The reports differ from the waveform analyses in one way: they return a dict (or
+a list of dicts), not a `SimResult`. That class is arrays indexed by signal name,
+and a report has neither an axis nor signals, so every accessor would have to
+answer with an empty array — which is also what a `SimResult` returns when
+something went wrong.
+
+`ckt.dc()` exists to mirror `run("dc")` and inherits its ambiguity — an
+operating point unless `src=` makes it a sweep. Prefer `op()` or `dc_sweep()`,
+which each mean one thing. Note that a deck's `.dc` card reports as
+`kind: "dc_sweep"` in `ckt.analyses`, so `run(a["kind"])` round-trips to the
+analysis the deck declared.
 
 **`.tf`** gives the gain, the resistance the input source sees, and the
 resistance the output port presents. Signs follow ngspice: a branch current
@@ -1231,17 +1241,20 @@ c.load("rc_step.sp")                     # load from file
 # Override scalar element parameters before running:
 c.set_param("Rload", "resistance", 2e3)
 
-# Run any analysis with SimOptions kwargs:
-op    = c.run("op")
-tran  = c.run("tran", step=1e-9, stop=1e-6,
-              method="gear", reltol=1e-5, variable_step=True)
-ac    = c.run("ac", variation="dec", points=20, fstart=1, fstop=1e6)
-noise = c.run("noise", variation="dec", points=20, fstart=1, fstop=1e6,
-              out_pos="out", src="V1")
+# Every analysis has a method and a name, and they are the same call —
+# run(name) dispatches to the method, so pick whichever reads better.
+op    = c.op()
+tran  = c.tran(step=1e-9, stop=1e-6,
+               method="gear", reltol=1e-5, variable_step=True)
+ac    = c.ac(variation="dec", points=20, fstart=1, fstop=1e6)
+noise = c.noise(variation="dec", points=20, fstart=1, fstop=1e6,
+                out_pos="out", src="V1")
+sweep = c.dc_sweep(src="V1", start=0, stop=2, step=0.1)
 
-# The small-signal reports return tables, not waveforms.  Either spelling works
-# — c.run("tf") delegates to c.tf() — but both return a dict, not a SimResult.
-# Each takes the deck's card when given no arguments of its own.
+tran  = c.run("tran", step=1e-9, stop=1e-6)      # identical to c.tran(...)
+
+# The small-signal reports return tables, not waveforms, so these return a dict
+# rather than a SimResult.  Each takes the deck's card when given no arguments.
 gain  = c.tf(out="v(out)", src="Vin")["gain"]
 grads = c.sens(out="v(out)")                      # check each row's ['reached']
 poles = c.pz(in_pos="in", out_pos="out")["poles"] # rad/s, complex

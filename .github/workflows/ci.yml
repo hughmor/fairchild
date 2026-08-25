@@ -333,6 +333,40 @@ jobs:
           except RuntimeError as e:
               assert "every corner" in str(e), e
           print(f"ok: run_all covered {len(all_rows)} rows over {len(rc.corners)} corners")
+
+          # Every analysis has a method AND a name, and they are the same call.
+          # A renamed pyo3 export or a method that stopped delegating shows up
+          # here and nowhere in the Rust tests.
+          mc = fairchild.Circuit()
+          mc.load_str("""* every analysis
+          Vin in 0 DC 1 AC 1
+          R1 in out 1k
+          R2 out 0 3k
+          C1 out 0 1n
+          .op
+          .tran 1n 20n
+          .ac dec 10 1 1meg
+          .noise V(out) Vin dec 5 1 1meg
+          .dc Vin 0 2 0.5
+          .tf v(out) Vin
+          .sens v(out)
+          .pz in 0 out 0 vol pz
+          """)
+          WAVE = ["op", "tran", "ac", "noise", "dc_sweep"]
+          for nm in WAVE + ["tf", "sens", "pz", "dc"]:
+              assert hasattr(mc, nm), f"ckt.{nm}() is missing"
+          for nm in WAVE:
+              a, b = getattr(mc, nm)(), mc.run(nm)
+              assert a.signals() == b.signals(), nm
+              assert hasattr(a, "time"), f"{nm}() must return a SimResult"
+          for nm in ["tf", "sens", "pz"]:
+              assert getattr(mc, nm)() == mc.run(nm), nm
+              assert not hasattr(getattr(mc, nm)(), "time"), f"{nm}() must be a report"
+          # `.dc` reports kind 'dc_sweep', so run(a["kind"]) round-trips to the
+          # analysis the deck declared instead of quietly running an .op.
+          assert "dc_sweep" in [a["kind"] for a in mc.analyses], mc.analyses
+          assert mc.run("dc_sweep").is_dc_sweep and mc.op().is_dc
+          print(f"ok: {len(mc.analyses)} analyses, each reachable both ways")
           PY
 
           # The bindings and the CLI once disagreed by a factor of 116 on a noise

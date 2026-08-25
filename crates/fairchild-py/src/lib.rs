@@ -552,6 +552,121 @@ impl Circuit {
         let opts = build_sim_options(&nl, kwargs)?;
         Ok((nl, registry, opts))
     }
+
+    /// Every waveform analysis, in one place.
+    ///
+    /// `op()`, `tran()`, `ac()`, `noise()`, `dc_sweep()`, `dc()` and
+    /// `run(name)` are all thin wrappers over this, so there is one
+    /// implementation per analysis no matter which spelling reaches it.
+    /// Outside `#[pymethods]` because it selects the analysis by name,
+    /// which is `run`'s job to expose and not a seventh public method.
+    fn run_waveform(
+        &self,
+        py: Python<'_>,
+        analysis: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<SimResult> {
+        // Prologue shared with `tf`/`sens`/`pz`.  Several copies of "apply the
+        // overrides, then the params, then the alter" would be several chances
+        // for one entry point to honour something the others do not, which is
+        // how `params=` came to be silently dropped once already.
+        let (nl, registry, mut opts) = self.prepare(kwargs)?;
+
+        let analysis_lc = analysis.to_lowercase();
+        // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
+        let is_dc_sweep = analysis_lc == "dc_sweep"
+            || (analysis_lc == "dc"
+                && kwargs
+                    .and_then(|kw| kw.get_item("src").ok().flatten())
+                    .is_some());
+
+        if is_dc_sweep {
+            let p = parse_dc_kwargs(&nl, kwargs)?;
+            let nested_arg = p
+                .nested
+                .as_ref()
+                .map(|(s, a, b, st)| (s.as_str(), *a, *b, *st));
+            // GIL released around every solve: they touch no Python objects,
+            // and holding it serialises Python threads that want to run
+            // independent simulations concurrently (a finite-difference
+            // Jacobian over bias points, a corner sweep).
+            let result = py
+                .allow_threads(|| {
+                    dc_sweep_with_registry_opts(
+                        &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts,
+                    )
+                })
+                .map_err(sim_err)?;
+            return Ok(SimResult {
+                inner: SimResultInner::DcSweep(result),
+                measurements: Vec::new(),
+            });
+        }
+
+        match analysis_lc.as_str() {
+            "op" | "dc" => {
+                let result = py
+                    .allow_threads(|| dc_op_nr_with_registry_opts(&nl, &registry, &opts))
+                    .map_err(sim_err)?;
+                Ok(SimResult {
+                    inner: SimResultInner::Dc(result),
+                    measurements: Vec::new(),
+                })
+            }
+            "tran" | "transient" => {
+                let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
+                let result = py
+                    .allow_threads(|| {
+                        if opts.variable_step {
+                            tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
+                        } else {
+                            tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
+                        }
+                    })
+                    .map_err(sim_err)?;
+                let measurements = evaluate_measurements(&nl.measurements, &result)
+                    .into_iter()
+                    .map(|m| (m.name, m.value))
+                    .collect();
+                Ok(SimResult {
+                    inner: SimResultInner::Tran(result),
+                    measurements,
+                })
+            }
+            "ac" => {
+                let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
+                let result = py
+                    .allow_threads(|| {
+                        ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
+                    })
+                    .map_err(sim_err)?;
+                Ok(SimResult {
+                    inner: SimResultInner::Ac(result),
+                    measurements: Vec::new(),
+                })
+            }
+            "noise" => {
+                let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(&nl, kwargs)?;
+                let result = py
+                    .allow_threads(|| {
+                        fairchild_core::noise_analysis(
+                            &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
+                        )
+                    })
+                    .map_err(sim_err)?;
+                Ok(SimResult {
+                    inner: SimResultInner::Noise(result),
+                    measurements: Vec::new(),
+                })
+            }
+            other => Err(PyRuntimeError::new_err(format!(
+                "unknown analysis '{other}'; every analysis has a method and a name: \
+                 ckt.op(), ckt.tran(), ckt.ac(), ckt.noise(), ckt.dc_sweep(), ckt.tf(), \
+                 ckt.sens(), ckt.pz() — or run(\"op\"|\"tran\"|\"ac\"|\"noise\"|\
+                 \"dc_sweep\"|\"tf\"|\"sens\"|\"pz\"), which dispatch to exactly those"
+            ))),
+        }
+    }
 }
 
 #[pymethods]
@@ -677,7 +792,13 @@ impl Circuit {
                         step,
                         nested,
                     } => {
-                        d.set_item("kind", "dc")?;
+                        // `"dc_sweep"`, not `"dc"`, and the difference matters:
+                        // a `.dc` card *is* a sweep, but `run("dc")` without a
+                        // `src` kwarg is an operating-point alias. Reporting
+                        // `"dc"` here made `run(a["kind"])` quietly run an `.op`
+                        // instead of the sweep the deck declared — the same
+                        // round-trip `run_all` gets right internally.
+                        d.set_item("kind", "dc_sweep")?;
                         d.set_item("src", src)?;
                         d.set_item("start", start)?;
                         d.set_item("stop", stop)?;
@@ -1005,127 +1126,87 @@ impl Circuit {
         analysis: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        // The small-signal reports are reachable by either spelling, and are
-        // *the same call* either way — `run` delegates rather than reimplements,
-        // so the two can never come to disagree. What they do not do is arrive
-        // wrapped in a `SimResult`: that class is arrays indexed by signal name,
-        // and a report has neither an axis nor signals, so every accessor would
-        // have to answer with an empty array — which is also what a `SimResult`
-        // returns when something went wrong.
+        // `run(name)` is a *synonym*, not a second implementation: every
+        // analysis has a method of its own and this dispatches to it. That is
+        // the whole reason the two spellings cannot come to disagree the way the
+        // two frontends did in #33 — there is only one code path under either.
+        //
+        // The return type is `PyObject` because the two families answer with
+        // different shapes: a waveform analysis gives a `SimResult`, a report
+        // gives a dict. See the note on `tf` for why a report is not forced into
+        // a `SimResult`.
         match analysis.to_lowercase().as_str() {
-            "tf" => return Ok(self.tf(py, kwargs)?.into_py(py)),
-            "sens" => return Ok(self.sens(py, kwargs)?.into_py(py)),
-            "pz" => return Ok(self.pz(py, kwargs)?.into_py(py)),
-            _ => {}
-        }
-
-        // Prologue extracted so `tf`/`sens`/`pz` get the same one.  Four copies
-        // of "apply the overrides, then the params, then the alter" is four
-        // chances for one entry point to honour something the others do not,
-        // which is how `params=` came to be silently dropped once already.
-        let (nl, registry, mut opts) = self.prepare(kwargs)?;
-
-        let analysis_lc = analysis.to_lowercase();
-        // "dc" with a src kwarg is a sweep; without one it's an op-point alias.
-        let is_dc_sweep = analysis_lc == "dc_sweep"
-            || (analysis_lc == "dc"
-                && kwargs
-                    .and_then(|kw| kw.get_item("src").ok().flatten())
-                    .is_some());
-
-        if is_dc_sweep {
-            let p = parse_dc_kwargs(&nl, kwargs)?;
-            let nested_arg = p
-                .nested
-                .as_ref()
-                .map(|(s, a, b, st)| (s.as_str(), *a, *b, *st));
-            // GIL released around every solve: they touch no Python objects,
-            // and holding it serialises Python threads that want to run
-            // independent simulations concurrently (a finite-difference
-            // Jacobian over bias points, a corner sweep).
-            let result = py
-                .allow_threads(|| {
-                    dc_sweep_with_registry_opts(
-                        &nl, &p.src, p.start, p.stop, p.step, nested_arg, &registry, &opts,
-                    )
-                })
-                .map_err(sim_err)?;
-            return Ok(SimResult {
-                inner: SimResultInner::DcSweep(result),
-                measurements: Vec::new(),
-            }
-            .into_py(py));
-        }
-
-        match analysis_lc.as_str() {
-            "op" | "dc" => {
-                let result = py
-                    .allow_threads(|| dc_op_nr_with_registry_opts(&nl, &registry, &opts))
-                    .map_err(sim_err)?;
-                Ok(SimResult {
-                    inner: SimResultInner::Dc(result),
-                    measurements: Vec::new(),
-                }
-                .into_py(py))
-            }
-            "tran" | "transient" => {
-                let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
-                let result = py
-                    .allow_threads(|| {
-                        if opts.variable_step {
-                            tran_nr_with_registry_var_opts(&nl, step, stop, &registry, &opts)
-                        } else {
-                            tran_nr_with_registry_opts(&nl, step, stop, &registry, &opts)
-                        }
-                    })
-                    .map_err(sim_err)?;
-                let measurements = evaluate_measurements(&nl.measurements, &result)
-                    .into_iter()
-                    .map(|m| (m.name, m.value))
-                    .collect();
-                Ok(SimResult {
-                    inner: SimResultInner::Tran(result),
-                    measurements,
-                }
-                .into_py(py))
-            }
-            "ac" => {
-                let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
-                let result = py
-                    .allow_threads(|| {
-                        ac_analysis_opts(&nl, &freqs, src.as_deref(), &registry, &opts)
-                    })
-                    .map_err(sim_err)?;
-                Ok(SimResult {
-                    inner: SimResultInner::Ac(result),
-                    measurements: Vec::new(),
-                }
-                .into_py(py))
-            }
-            "noise" => {
-                let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(&nl, kwargs)?;
-                let result = py
-                    .allow_threads(|| {
-                        fairchild_core::noise_analysis(
-                            &nl, &freqs, &out_pos, &out_neg, &input_src, &registry, &opts,
-                        )
-                    })
-                    .map_err(sim_err)?;
-                Ok(SimResult {
-                    inner: SimResultInner::Noise(result),
-                    measurements: Vec::new(),
-                }
-                .into_py(py))
-            }
-            other => Err(PyRuntimeError::new_err(format!(
-                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', 'dc_sweep', \
-                 or one of the small-signal reports 'tf', 'sens', 'pz' (which are also \
-                 ckt.tf(), ckt.sens() and ckt.pz())",
-                other
-            ))),
+            "tf" => Ok(self.tf(py, kwargs)?.into_py(py)),
+            "sens" => Ok(self.sens(py, kwargs)?.into_py(py)),
+            "pz" => Ok(self.pz(py, kwargs)?.into_py(py)),
+            _ => Ok(self.run_waveform(py, analysis, kwargs)?.into_py(py)),
         }
     }
 
+    /// DC operating point. `run("op")`.
+    ///
+    /// Takes solver-option kwargs only — an operating point has no parameters
+    /// of its own. See [`Circuit::run`] for the option list.
+    #[pyo3(signature = (**kwargs))]
+    pub fn op(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+        self.run_waveform(py, "op", kwargs)
+    }
+
+    /// Transient. `run("tran")`.
+    ///
+    /// `stop` and `step` in seconds, or the deck's `.tran` card taken whole —
+    /// pass either and the card is not used at all. With neither card nor
+    /// kwargs this errors naming both fixes.
+    #[pyo3(signature = (**kwargs))]
+    pub fn tran(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+        self.run_waveform(py, "tran", kwargs)
+    }
+
+    /// AC sweep. `run("ac")`.
+    ///
+    /// `fstart`, `fstop`, `points`, `variation` (`"dec"`/`"oct"`/`"lin"`), or the
+    /// deck's `.ac` card whole. `src` names the excitation and is not on the
+    /// card, so it stays yours either way.
+    #[pyo3(signature = (**kwargs))]
+    pub fn ac(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+        self.run_waveform(py, "ac", kwargs)
+    }
+
+    /// Small-signal noise. `run("noise")`.
+    ///
+    /// `out`/`out_pos`, `out_neg`, `src`, and the frequency axis, or the deck's
+    /// `.noise` card whole.
+    ///
+    /// Linearises about **one** operating point: a deck idling at zero reports
+    /// the idle answer, which for a modulated link is not the one you want.
+    #[pyo3(signature = (**kwargs))]
+    pub fn noise(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+        self.run_waveform(py, "noise", kwargs)
+    }
+
+    /// DC sweep. `run("dc_sweep")`.
+    ///
+    /// `src`, `start`, `stop`, `step`, and optionally `src2`/`start2`/`stop2`/
+    /// `step2` for the nested inner loop — or the deck's `.dc` card whole.
+    #[pyo3(signature = (**kwargs))]
+    pub fn dc_sweep(
+        &self,
+        py: Python<'_>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<SimResult> {
+        self.run_waveform(py, "dc_sweep", kwargs)
+    }
+
+    /// `run("dc")` — an operating point, *unless* `src=` makes it a sweep.
+    ///
+    /// Mirrors `run("dc")` exactly, ambiguity included, because that spelling
+    /// already exists and a method that quietly differed from it would be worse
+    /// than one that shares its wart. **Prefer [`Circuit::op`] or
+    /// [`Circuit::dc_sweep`]**, which each mean one thing.
+    #[pyo3(signature = (**kwargs))]
+    pub fn dc(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<SimResult> {
+        self.run_waveform(py, "dc", kwargs)
+    }
     /// Run a transient that can be differentiated, and return the run.
     ///
     /// `probes` maps a name you choose to what it reads:
