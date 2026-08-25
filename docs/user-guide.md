@@ -2203,11 +2203,21 @@ say why they are skipping. The in-tree fixtures in
 `crates/fairchild-osdi/tests/models/abi_*.va` cover the same ABI corners
 individually and always run.
 
-`docs/model_status.md` §9b is the per-field audit of what of the ABI is honoured
-and what is not. The three that were not, until this was measured, each produced
-a wrong answer with no diagnostic: an `integer` parameter written at the wrong
-width, node collapsing ignored, and the resistive Jacobian array read as a
-prefix instead of the packed subset it is.
+Widening from there, every model in OpenVAF-Reloaded's `integration_tests/` was
+put through the same comparison — BSIM3/4/BULK/CMG/IMG/SOI, PSP102, PSP103,
+JUNCAP200, HiSIM2, HiSIM-SOTB, EKV, HICUM/L2, MEXTRAM 505, DIODE, DIODE_CMC,
+ASM-HEMT, MVSG_CMC and the small fixtures. They all agree, and every remaining
+difference is a fixed sub-picoamp offset against currents up to 0.28 A: the two
+simulators put `gmin` on slightly different sets of nodes. The per-family table,
+and the three cases not covered, are in `docs/model_status.md` §9b.
+
+That audit is also the record of what of the ABI is *not* honoured. Four things
+were not, until this was measured, and each produced a wrong answer with no
+diagnostic: an `integer` parameter written at the wrong width, node collapsing
+ignored, the resistive Jacobian array read as a prefix instead of the packed
+subset it is, and a module name with any upper case in it — `PSP102VA`,
+`DIODE_CMC`, `JUNCAP200`, `hicumL2va` — loading successfully and then failing as
+`unknown model` at the element that used it.
 
 ### 14.6 Implementation notes
 

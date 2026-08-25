@@ -1462,6 +1462,21 @@ fn nr_inner(
         // limit, because the stopping point depends on reltol rather than on the
         // circuit. Refusing to converge here turns a confidently wrong answer
         // into an honest failure that the homotopy can then try to fix.
+        // NOTE: this test can still pass on a step the `vmax` trust region cut
+        // short, and then it means nothing — `|dx|` is the clamp, not the
+        // distance to the solution, and `abstol + reltol·|x|` grows with `|x|`
+        // until the two meet. A node heading for hundreds of volts stops
+        // wherever the walk happens to be, and is reported as converged. An
+        // ideal VCCS into 1 kΩ — linear, one solve from the answer — reads
+        // 0.0502 V on a node the deck pins at 0.1 V. `.options vmax=1e5` gives
+        // the right answer, which is the diagnosis.
+        //
+        // Adding `&& max_dv <= opts.vmax` here does fix it, and costs a 15×
+        // slowdown on this repository's own test suite: circuits that were
+        // reaching a right answer on a clamped step now exhaust `itl1` and fall
+        // into homotopy at every timestep. The honest fix is a residual-based
+        // convergence test rather than a step-based one, which is a solver
+        // change too broad to make from here. Tracked separately.
         let converged = tol.converged(&x_next, &x) && !armijo_fell_back;
 
         x = x_next;

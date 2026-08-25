@@ -108,3 +108,28 @@ fn a_collapsed_internal_node_shares_its_neighbours_row() {
         "rs=250",
     );
 }
+
+#[test]
+fn a_mixed_case_module_name_is_reachable_from_a_deck() {
+    let Some(osdi) = compiled("AbiMixedCase") else {
+        return;
+    };
+    // Verilog-A preserves the case the author wrote; SPICE does not
+    // distinguish. So all three spellings must resolve, and the registry is
+    // where the folding has to happen — it is the one place that sees both the
+    // registrar's name and the deck's.
+    for line in [
+        "Xr a 0 AbiMixedCase G=1m\n",
+        "Xr a 0 abimixedcase G=1m\n",
+        "Xr a 0 ABIMIXEDCASE G=1m\n",
+    ] {
+        close(v_at(&osdi, line), 1.0, line.trim());
+    }
+    // …and through a `.model` card, which is the foundry idiom and the path
+    // `PSP102VA` and friends arrive on.
+    close(
+        v_at(&osdi, "Xr a 0 mycard\n.model mycard AbiMixedCase (G=4m)\n"),
+        0.25,
+        "card",
+    );
+}
