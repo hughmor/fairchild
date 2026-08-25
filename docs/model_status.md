@@ -382,8 +382,8 @@ Not covered, and why:
   all — the `vmax` trust region interacting with the relative convergence test.
   An ideal VCCS into a 1 kΩ load is linear and one solve from its answer, and
   fairchild reports 0.0502 V on a node the deck pins at 0.1 V, as a converged
-  operating point. `.options vmax=1e5` gives the right answer. Tracked
-  separately; see the note in `newton.rs` beside the convergence test.
+  operating point. `.options vmax=1e5` gives the right answer. Tracked in #90;
+  see the note in `newton.rs` beside the convergence test.
 - **MVSG_CMC** looked like a 0.07% disagreement and is not one: ngspice's *own*
   DC sweep drifts from its own operating point at its default `reltol`, and at
   `reltol=1e-10` it lands where fairchild already was.

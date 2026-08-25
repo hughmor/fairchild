@@ -1476,7 +1476,7 @@ fn nr_inner(
         // reaching a right answer on a clamped step now exhaust `itl1` and fall
         // into homotopy at every timestep. The honest fix is a residual-based
         // convergence test rather than a step-based one, which is a solver
-        // change too broad to make from here. Tracked separately.
+        // change too broad to make from here. Tracked in #90.
         let converged = tol.converged(&x_next, &x) && !armijo_fell_back;
 
         x = x_next;
