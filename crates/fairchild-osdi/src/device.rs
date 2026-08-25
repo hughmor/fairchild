@@ -101,6 +101,28 @@ pub struct OsdiDevice {
     /// wavelength disagrees with the one the deck's own sources imply, instead
     /// of overwriting it in silence.
     wl_given: Vec<(usize, f64)>,
+    /// The terminal rows the netlist gave this instance, kept because the node
+    /// mapping is re-derived from scratch every time the model's collapse
+    /// decisions could have changed.
+    terminals: Vec<NodeId>,
+    /// Whether `setup_instance` has run yet.
+    ///
+    /// Gates the re-setup inside `set_real_param`: OSDI's own order is *write
+    /// the parameters, then set up*, so a parameter applied before setup needs
+    /// no re-derivation and must not trigger one — calling `setup_instance`
+    /// before the node mapping exists is not defined.
+    setup_done: bool,
+    /// First MNA row of this device's block of internal rows, once
+    /// `bind_extra_nodes` has allocated them. `None` before that.
+    extra_first: Option<usize>,
+    /// The temperature `setup_instance` was last given.
+    ///
+    /// Re-running setup after a parameter write has to hand the model the same
+    /// temperature the deck asked for. `SimContext::default()` was standing in
+    /// here, so any deck with `.temp` had its devices re-derived at 300.15 K the
+    /// moment a parameter was applied — every parameter a deck sets is applied
+    /// after setup, so that was every device.
+    temperature: f64,
 }
 
 /// Where a bundle-dialect model's wavelength labels live, computed once at
@@ -160,6 +182,10 @@ impl OsdiDevice {
             handle: descriptor_name(descriptor),
             bundle_lambda: None,
             wl_given: Vec::new(),
+            terminals: Vec::new(),
+            setup_done: false,
+            extra_first: None,
+            temperature: SimContext::default().temperature,
         }
     }
 
@@ -195,6 +221,10 @@ impl OsdiDevice {
             handle: descriptor_name(descriptor),
             bundle_lambda: None,
             wl_given: Vec::new(),
+            terminals: Vec::new(),
+            setup_done: false,
+            extra_first: None,
+            temperature: SimContext::default().temperature,
         })
     }
 
@@ -219,6 +249,12 @@ impl OsdiDevice {
     #[inline]
     fn inst_ptr(&self) -> *mut c_void {
         self.instance.as_ptr() as *mut c_void
+    }
+
+    /// The MNA row each of this device's OSDI nodes ended up on, after node
+    /// collapsing. `None` is the reference node.
+    pub fn mna_nodes(&self) -> &[NodeId] {
+        &self.mna_nodes
     }
 
     /// Expose raw instance/model pointers for integration-test diagnostics.
@@ -251,11 +287,211 @@ impl OsdiDevice {
                 if ptr.is_null() {
                     return None;
                 }
-                let value = unsafe { *(ptr as *const f64) };
+                // Same width rule as `set_real_param`: an `integer` parameter is
+                // an i32, and reading it as f64 answers with garbage.
+                let value = match param.flags & crate::ffi::PARA_TY_MASK {
+                    crate::ffi::PARA_TY_INT => f64::from(unsafe { *(ptr as *const i32) }),
+                    crate::ffi::PARA_TY_STR => return None,
+                    _ => unsafe { *(ptr as *const f64) },
+                };
                 let offset =
                     unsafe { (ptr as *const u8).offset_from(self.model.as_ptr() as *const u8) };
                 return Some((value, offset));
             }
+        }
+        None
+    }
+
+    /// Which node each of this device's nodes was collapsed into, as the model
+    /// decided during `setup_instance`.
+    ///
+    /// `repr[i] == None` means node `i` is shorted to the global reference and
+    /// needs no unknown at all; otherwise `repr[i]` is the node whose MNA row
+    /// node `i` shares.
+    ///
+    /// # Why this exists
+    ///
+    /// A compact model declares more internal nodes than it always uses: BSIM4
+    /// has `di`/`si` for the source/drain series resistance, `gi`/`gm` for the
+    /// gate network, `dbulk`/`sbulk` for the body diodes. When the parameter that
+    /// would give one of them a finite resistance is zero — the default for every
+    /// one of them — the model asks the simulator to *collapse* that node into
+    /// its neighbour, and then contributes nothing across the short.
+    ///
+    /// A simulator that ignores the request leaves those nodes with rows nothing
+    /// stamps. `d` is then joined to the channel only through `di`, which is
+    /// floating, so the drain current is whatever `gmin` allows and the
+    /// transistor conducts nothing whatever its bias (#66). Every foundry model
+    /// does this; the fixtures in this tree happen not to, which is why the
+    /// descriptor's `collapsible`/`collapsed_offset` pair sat unread.
+    ///
+    /// The union is biased toward the lowest node index, so a terminal always
+    /// wins over an internal node — terminals come first in OSDI's numbering.
+    pub fn collapse_repr(&self) -> Vec<Option<usize>> {
+        let desc = self.desc();
+        let n = desc.num_nodes as usize;
+        let num_pairs = desc.num_collapsible as usize;
+        let mut parent: Vec<usize> = (0..n).collect();
+        let mut grounded = vec![false; n];
+
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+
+        if num_pairs > 0 && !desc.collapsible.is_null() {
+            // C `bool`: one byte per pair, written by `setup_instance`.
+            let flags = unsafe {
+                std::slice::from_raw_parts(
+                    (self.instance.as_ptr() as *const u8).add(desc.collapsed_offset as usize),
+                    num_pairs,
+                )
+            };
+            let pairs = unsafe { std::slice::from_raw_parts(desc.collapsible, num_pairs) };
+            for (pair, &flag) in pairs.iter().zip(flags) {
+                if flag == 0 {
+                    continue;
+                }
+                let a = pair.node_1 as usize;
+                if a >= n {
+                    continue;
+                }
+                // `node_2 == UINT32_MAX` is OpenVAF's spelling of "collapse this
+                // one to ground" — an implicit equation the model retired.
+                if pair.node_2 == u32::MAX || pair.node_2 as usize >= n {
+                    let ra = find(&mut parent, a);
+                    grounded[ra] = true;
+                    continue;
+                }
+                let b = pair.node_2 as usize;
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    let (keep, drop) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                    parent[drop] = keep;
+                    grounded[keep] |= grounded[drop];
+                }
+            }
+        }
+
+        (0..n)
+            .map(|i| {
+                let r = find(&mut parent, i);
+                (!grounded[r]).then_some(r)
+            })
+            .collect()
+    }
+
+    /// Rebuild `mna_nodes` from the terminals, the allocated internal rows, and
+    /// the model's collapse decisions.
+    ///
+    /// The dense layout is what `push_device` assumes: terminal `i` on the row
+    /// the netlist gave it, internal node `i` on `extra_first + i - num_terminals`.
+    /// Collapsing only *redirects* nodes onto a row that layout already holds, so
+    /// a collapsed node's own row survives in the matrix with nothing stamped
+    /// into it and is pinned by `stamp_gmin`'s empty-row floor. That wastes a row
+    /// per collapsed node rather than renumbering, which would put this function
+    /// and `push_device`'s thermal-row arithmetic in disagreement — two places
+    /// interpreting one layout. Worth revisiting only if a netlist large enough
+    /// for the row count to matter turns up.
+    fn resolve_mna_nodes(&mut self) {
+        let num_nodes = self.desc().num_nodes as usize;
+        let num_terminals = self.desc().num_terminals as usize;
+        let extra_first = self.extra_first;
+        let dense: Vec<NodeId> = (0..num_nodes)
+            .map(|i| match i.checked_sub(num_terminals) {
+                None => self.terminals.get(i).copied().flatten(),
+                Some(off) => extra_first.map(|f| f + off),
+            })
+            .collect();
+        let repr = self.collapse_repr();
+        self.mna_nodes = repr.iter().map(|&r| r.and_then(|r| dense[r])).collect();
+    }
+
+    /// Write `mna_nodes` into the instance's `node_mapping` array.
+    ///
+    /// The model reads `node_mapping[i]` from `inst + node_mapping_offset` to
+    /// find which solution-vector index its `i`-th node lives on. `UINT32_MAX`
+    /// is the sentinel for ground.
+    fn write_node_mapping(&mut self) {
+        let off = self.desc().node_mapping_offset as usize;
+        let num_nodes = self.desc().num_nodes as usize;
+        let ptr = unsafe { (self.instance.as_mut_ptr() as *mut u8).add(off) as *mut u32 };
+        for i in 0..num_nodes {
+            let node = self.mna_nodes.get(i).copied().flatten();
+            unsafe {
+                *ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
+            }
+        }
+    }
+
+    /// Every operating-point variable the model exposes, in descriptor order.
+    ///
+    /// These are the model's own account of what it computed — `vth`, `ids`,
+    /// `gm`, `weff` and the rest — and on a platform where the formatted-output
+    /// tasks have to be stripped (see `portability`) they are the *only* channel
+    /// through which a compact model can say what it thinks it is doing.
+    pub fn opvar_names(&self) -> Vec<String> {
+        let desc = self.desc();
+        let n_params = desc.num_params as usize;
+        let n_opvars = desc.num_opvars as usize;
+        if n_opvars == 0 || desc.param_opvar.is_null() {
+            return Vec::new();
+        }
+        let all = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_params + n_opvars) };
+        all[n_params..]
+            .iter()
+            .map(|p| {
+                if p.name.is_null() {
+                    return String::new();
+                }
+                let first = unsafe { *p.name };
+                if first.is_null() {
+                    return String::new();
+                }
+                unsafe { CStr::from_ptr(first) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// Read one operating-point variable by name, as of the last `eval`.
+    ///
+    /// Opvar ids are the plain absolute `param_opvar` index, continuing past the
+    /// parameters — the same numbering `set_real_param` uses. The storage is in
+    /// the *instance*, so both pointers have to go in.
+    pub fn read_opvar(&self, name: &str) -> Option<f64> {
+        let desc = self.desc();
+        let access_fn = desc.access?;
+        let n_params = desc.num_params as usize;
+        let n_opvars = desc.num_opvars as usize;
+        if n_opvars == 0 || desc.param_opvar.is_null() {
+            return None;
+        }
+        let all = unsafe { std::slice::from_raw_parts(desc.param_opvar, n_params + n_opvars) };
+        for (i, p) in all.iter().enumerate().skip(n_params) {
+            if !osdi_param_name_matches(p, name) {
+                continue;
+            }
+            let ptr = unsafe {
+                access_fn(
+                    self.inst_ptr(),
+                    self.model_ptr(),
+                    i as u32,
+                    crate::ffi::ACCESS_FLAG_READ,
+                )
+            };
+            if ptr.is_null() {
+                return None;
+            }
+            return Some(match p.flags & crate::ffi::PARA_TY_MASK {
+                crate::ffi::PARA_TY_INT => f64::from(unsafe { *(ptr as *const i32) }),
+                crate::ffi::PARA_TY_STR => return None,
+                _ => unsafe { *(ptr as *const f64) },
+            });
         }
         None
     }
@@ -499,84 +735,20 @@ impl Device for OsdiDevice {
     }
 
     fn setup_model(&mut self, ctx: &SimContext) {
-        // Cache function pointer before any mutable borrow.
-        let setup_fn = self.desc().setup_model;
-        if let Some(f) = setup_fn {
-            let mut paras = null_sim_paras();
-            let mut res = OsdiInitInfo {
-                flags: 0,
-                num_errors: 0,
-                errors: std::ptr::null_mut(),
-            };
-            unsafe {
-                f(
-                    self.handle.as_ptr() as *mut c_void,
-                    self.model_ptr(),
-                    &mut paras,
-                    &mut res,
-                );
-            }
-            self.report_init(&res, "model setup");
-        }
+        self.call_setup_model();
         let _ = ctx; // temperature injection deferred — will go into OsdiSimParas
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
-        // Pre-size mna_nodes to num_nodes so internal slots are at least
-        // ground (UINT32_MAX).  `bind_extra_nodes` later overwrites them
-        // with real allocated row indices.
-        let num_nodes = self.desc().num_nodes as usize;
-        let num_terminals = self.desc().num_terminals as usize;
-        self.mna_nodes = terminals
-            .iter()
-            .copied()
-            .chain(std::iter::repeat_n(
-                None,
-                num_nodes.saturating_sub(terminals.len()),
-            ))
-            .take(num_nodes)
-            .collect();
-
-        // Cache all descriptor reads before taking the mutable borrow on instance.
-        // (desc() borrows self; as_mut_ptr() is a conflicting &mut borrow.)
-        let node_mapping_offset = self.desc().node_mapping_offset as usize;
-        let setup_fn = self.desc().setup_instance;
-
-        // Write the MNA↔OSDI node mapping into instance memory.
-        // The model reads node_mapping[i] from (inst + node_mapping_offset) to
-        // find which solution-vector index corresponds to its i-th node.
-        // UINT32_MAX is the sentinel for ground (NodeId = None).
-        // We write ALL num_nodes slots (terminals + internals).
-        let map_ptr =
-            unsafe { (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32 };
-        for i in 0..num_nodes {
-            let node = self.mna_nodes.get(i).copied().flatten();
-            unsafe {
-                *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
-            }
-        }
+        self.terminals = terminals.to_vec();
+        self.temperature = ctx.temperature;
+        self.setup_done = true;
         self.write_state_indices();
-
-        if let Some(f) = setup_fn {
-            let mut paras = null_sim_paras();
-            let mut res = OsdiInitInfo {
-                flags: 0,
-                num_errors: 0,
-                errors: std::ptr::null_mut(),
-            };
-            unsafe {
-                f(
-                    self.handle.as_ptr() as *mut c_void,
-                    self.inst_ptr(),
-                    self.model_ptr(),
-                    ctx.temperature,
-                    num_terminals as u32,
-                    &mut paras,
-                    &mut res,
-                );
-            }
-            self.report_init(&res, "instance setup");
-        }
+        self.call_setup_instance();
+        // Only now does the instance hold the model's collapse decisions, so the
+        // mapping is derived after the call rather than before it.
+        self.resolve_mna_nodes();
+        self.write_node_mapping();
     }
 
     /// Nodes the model declared `thermal`, read straight off the descriptor.
@@ -605,14 +777,7 @@ impl Device for OsdiDevice {
     }
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
-        let num_terminals = self.desc().num_terminals as usize;
-        let num_nodes = self.desc().num_nodes as usize;
-        // mna_nodes is sized to num_nodes already; overwrite the trailing
-        // internal slots with the allocated MNA row indices.
-        for i in num_terminals..num_nodes {
-            let offset = i - num_terminals;
-            self.mna_nodes[i] = Some(first_idx + offset);
-        }
+        self.extra_first = Some(first_idx);
         self.refresh_instance();
     }
 
@@ -738,21 +903,47 @@ impl Device for OsdiDevice {
             f(self.inst_ptr(), self.model_ptr(), jac_buf.as_mut_ptr());
         }
 
-        // jacobian_entries[0..num_resistive_jacobian_entries] are the resistive entries,
-        // in the same order that write_jacobian_array_resist writes to jac_buf.
+        // `write_jacobian_array_resist` writes a *packed* array: it walks every
+        // entry in `jacobian_entries` order and stores a value only for the ones
+        // that have a resistive part. So `jac_buf[k]` belongs to the k-th
+        // resistive entry, which is `jacobian_entries[k]` only when no
+        // reactive-only entry comes before it.
+        //
+        // Reading it as a prefix — `jacobian_entries[0..n_resist]` — silently
+        // pairs conductances with the wrong node pair on any model that has a
+        // capacitance the resistive Jacobian does not also touch. The linearised
+        // system then disagrees with the residual it was built from, and Newton
+        // converges to a point where the residual is *not* zero: BSIM4 answered
+        // 4.05 mA where the model itself computes 3.43 mA, with no diagnostic
+        // (#66). The reactive walk in `for_each_react_entry` already keys off the
+        // entry's own flag; this now does the same.
         let entries = unsafe {
             std::slice::from_raw_parts(desc.jacobian_entries, desc.num_jacobian_entries as usize)
         };
 
-        for (i, entry) in entries.iter().take(n_resist).enumerate() {
+        let resistive = entries
+            .iter()
+            .filter(|e| e.flags & crate::ffi::JACOBIAN_ENTRY_RESIST != 0);
+        for (i, entry) in resistive.enumerate() {
+            let Some(&value) = jac_buf.get(i) else {
+                // The descriptor's own two counts disagree. Stamping past the
+                // end would be reading the model's memory at random.
+                warn_user!(
+                    "{}: the model reports {n_resist} resistive Jacobian entries but at                      least {} carry the resistive flag; the extra ones are not stamped",
+                    self.handle.to_string_lossy(),
+                    i + 1
+                );
+                break;
+            };
             let osdi_r = entry.nodes.node_1 as usize;
             let osdi_c = entry.nodes.node_2 as usize;
-            // Map OSDI terminal index → MNA matrix row/col (skip ground).
+            // Map OSDI node index → MNA matrix row/col (skip ground). Two nodes
+            // the model collapsed share a row, so their entries accumulate.
             if let (Some(mr), Some(mc)) = (
                 self.mna_nodes.get(osdi_r).copied().flatten(),
                 self.mna_nodes.get(osdi_c).copied().flatten(),
             ) {
-                mat.a[mr][mc] += jac_buf[i];
+                mat.a[mr][mc] += value;
             }
         }
     }
@@ -997,8 +1188,30 @@ impl Device for OsdiDevice {
             };
             let ptr = unsafe { access_fn(inst, self.model_ptr(), i as u32, flags) };
             if !ptr.is_null() {
-                unsafe {
-                    *(ptr as *mut f64) = value;
+                // Write the width the model declared, not the width we happen to
+                // hold. `integer type = 1` stored as f64 reads back as 0 — a
+                // BSIM4 that is neither NMOS nor PMOS and conducts nothing.
+                match param.flags & crate::ffi::PARA_TY_MASK {
+                    crate::ffi::PARA_TY_INT => {
+                        let rounded = value.round();
+                        if (value - rounded).abs() > 1e-9 {
+                            fairchild_core::warn_user!(
+                                "{}: parameter '{name}' is an integer in the model; \
+                                 {value} was rounded to {rounded}",
+                                self.handle.to_string_lossy()
+                            );
+                        }
+                        unsafe { *(ptr as *mut i32) = rounded as i32 }
+                    }
+                    crate::ffi::PARA_TY_STR => {
+                        fairchild_core::warn_user!(
+                            "{}: parameter '{name}' is a string in the model and cannot \
+                             be set from a numeric deck value; it keeps its default",
+                            self.handle.to_string_lossy()
+                        );
+                        return false;
+                    }
+                    _ => unsafe { *(ptr as *mut f64) = value },
                 }
                 if let Some(k) = name
                     .strip_prefix("wl_")
@@ -1006,7 +1219,9 @@ impl Device for OsdiDevice {
                 {
                     self.wl_given.push((k, value));
                 }
-                self.refresh_instance();
+                if self.setup_done {
+                    self.refresh_instance();
+                }
                 return true;
             }
         }
@@ -1016,28 +1231,65 @@ impl Device for OsdiDevice {
 }
 
 impl OsdiDevice {
-    /// Re-run the OSDI setup_instance call with the current mna_nodes and model state.
-    /// Required after writing a model param via access(SET) so that setup_instance can
-    /// propagate the new value into the instance struct where eval() reads it.
+    /// Re-derive everything a parameter write invalidated: `setup_model`, then
+    /// `setup_instance`, then the node mapping.
+    ///
+    /// Reached from `bind_extra_nodes`, and from a `set_real_param` on a device
+    /// that is already set up — `set_resolved_lambda` writing a bundle's `wl_k`,
+    /// or any caller holding a built device. A deck's own parameters no longer
+    /// come this way: the registry applies them before setup, which is OSDI's
+    /// own order.
+    ///
+    /// **Both halves, not just the instance.** This used to redo only
+    /// `setup_instance`, which happens to be enough for every model in this tree
+    /// — OpenVAF derives into instance storage even for a parameter that lives
+    /// on the model. It is not enough in general, because `model_data` exists and
+    /// a model that caches a card-level derivation there would keep its default
+    /// in silence. Redoing both is one extra call and removes the exception.
+    ///
+    /// Not the #66 fix, though it was written while looking for it: reverting
+    /// this alone leaves BSIM4 answering correctly.
     fn refresh_instance(&mut self) {
-        let node_mapping_offset = self.desc().node_mapping_offset as usize;
+        self.call_setup_model();
+        self.write_state_indices();
+        self.call_setup_instance();
+        self.resolve_mna_nodes();
+        self.write_node_mapping();
+    }
+
+    /// The `setup_model` call itself, with nothing around it.
+    fn call_setup_model(&mut self) {
+        let setup_fn = self.desc().setup_model;
+        if let Some(f) = setup_fn {
+            let mut paras = null_sim_paras();
+            let mut res = OsdiInitInfo {
+                flags: 0,
+                num_errors: 0,
+                errors: std::ptr::null_mut(),
+            };
+            unsafe {
+                f(
+                    self.handle.as_ptr() as *mut c_void,
+                    self.model_ptr(),
+                    &mut paras,
+                    &mut res,
+                );
+            }
+            self.report_init(&res, "model setup");
+        }
+    }
+
+    /// The `setup_instance` call itself, with nothing around it.
+    ///
+    /// Split out so `setup_instance` and `refresh_instance` cannot drift on what
+    /// they pass the model — the temperature argument in particular, which used
+    /// to be `SimContext::default()` on the refresh path.
+    fn call_setup_instance(&mut self) {
         let setup_fn = self.desc().setup_instance;
         // OSDI's `num_terminals` argument is the count of *external* nodes;
         // internal flow-branch nodes are implicit (the rest of num_nodes).
         let num_terminals = self.desc().num_terminals;
-        let num_nodes = self.desc().num_nodes as usize;
-        let temperature = SimContext::default().temperature;
-
-        let map_ptr =
-            unsafe { (self.instance.as_mut_ptr() as *mut u8).add(node_mapping_offset) as *mut u32 };
-        for i in 0..num_nodes {
-            let node = self.mna_nodes.get(i).copied().flatten();
-            unsafe {
-                *map_ptr.add(i) = node.map(|n| n as u32).unwrap_or(u32::MAX);
-            }
-        }
-        self.write_state_indices();
-
+        let temperature = self.temperature;
         if let Some(f) = setup_fn {
             let mut paras = null_sim_paras();
             let mut res = OsdiInitInfo {

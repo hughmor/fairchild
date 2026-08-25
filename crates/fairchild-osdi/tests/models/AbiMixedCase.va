@@ -1,0 +1,18 @@
+// A module whose name is not all lower case, which Verilog-A preserves and
+// SPICE does not care about.
+//
+// Every foundry model family spells its module this way — `PSP102VA`,
+// `PSP103VA`, `DIODE_CMC`, `JUNCAP200`, `hicumL2va`. The descriptor was
+// registered under the name as written while every lookup asked with the
+// lowercased name the parser produces, so all five loaded without complaint and
+// then failed at the element that used them with `unknown model`.
+//
+// The file name matches the module so the fixture reads the way a PDK's would.
+`include "disciplines.vams"
+
+module AbiMixedCase(A, B);
+    inout A, B;
+    electrical A, B;
+    parameter real G = 1e-3 from (0:inf);
+    analog I(A, B) <+ G * V(A, B);
+endmodule

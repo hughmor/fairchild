@@ -319,6 +319,88 @@ device rather than a shared unknown.
 
 ---
 
+## 9b. The OSDI v0.4 ABI surface
+
+A compiled Verilog-A model is only as correct as the parts of the ABI the
+simulator honours, and a part left unread fails silently — the model does its
+job and the answer is wrong anyway. This is the per-field audit.
+
+| Descriptor surface | Honoured | Validated |
+|---|---|---|
+| `setup_model` / `setup_instance` | ✅ parameters written first, then setup, which is OSDI's order | ✅ every OSDI test |
+| `real` parameters | ✅ | ✅ `osdi_device.rs`, `osdi_model_card.rs` |
+| `integer` parameters | ✅ written as `i32`, at the width the model declared | ✅ `osdi_abi_contract.rs` — including a negative value and a neighbouring field used as a clobber witness |
+| `string` parameters | ⚠️ cannot be set from a deck; a numeric value is refused with a warning naming the parameter, and the model keeps its default |  |
+| instance vs model parameter split (`num_instance_params`) | ✅ | ✅ `inst_param.va` fixture |
+| a module name that is not all lower case | ✅ the registry folds case on the way in as well as on the way out — Verilog-A preserves the case an author wrote, SPICE does not distinguish | ✅ `osdi_abi_contract.rs`; `PSP102VA`, `PSP103VA`, `DIODE_CMC`, `JUNCAP200` and `hicumL2va` all used to load and then fail as `unknown model` |
+| `$mfactor` from the deck's `m=` | ✅ | ✅ `osdi_device.rs` |
+| **node collapsing** (`collapsible` / `collapsed_offset`) | ✅ a collapsed node shares its neighbour's MNA row, or is dropped when collapsed to ground. Its own row stays allocated and unstamped rather than being renumbered — `stamp_gmin` pins it, so the cost is one wasted row per collapsed node | ✅ `osdi_abi_contract.rs` closed form; BSIM4 against ngspice |
+| resistive Jacobian (`write_jacobian_array_resist`) | ✅ read as the **packed** array it is: one value per entry carrying `JACOBIAN_ENTRY_RESIST`, not the first `num_resistive` entries | ✅ `osdi_abi_contract.rs` — a fixture whose first entry is reactive-only |
+| reactive Jacobian (`write_jacobian_array_react`) | ✅ keyed off `react_ptr_off` | ✅ `osdi_reactive.rs` |
+| `load_spice_rhs_dc` / `_tran` | ✅ | ✅ `osdi_dc_op.rs`, `osdi_tran.rs` |
+| `load_residual_react` | ✅ charge read back per node for the integrator | ✅ `osdi_reactive.rs` |
+| `$limit` (`num_states`, `OSDI_LIM_TABLE`) | ✅ `pnjlim` installed; state buffers swapped per eval | ✅ `osdi_limiting.rs` |
+| noise sources (`load_noise`) | ✅ `white_noise` / `flicker_noise` | ⚠️ see §10 `.noise` |
+| `thermal` nodes (via `units == "K"`) | ✅ | ✅ `thermal_discipline.rs` |
+| operating-point variables (`num_opvars`) | ⚠️ readable through `OsdiDevice::read_opvar`, and nothing surfaces them to a deck or a probe |  |
+| `OsdiSimParas` | ❌ a null table is passed, so a model's `$simparam("gmin")` and friends take the default written into the call rather than this simulator's value |  |
+| `eval`'s return flags | ❌ discarded — `EVAL_RET_FLAG_FATAL` means the model is telling us this evaluation is invalid, and it is not heard |  |
+| `ANALYSIS_IC` / `ANALYSIS_STATIC` / `ANALYSIS_NODESET` | ❌ never set; a model that branches on them behaves as if none applied |  |
+| `given_flag_model` / `given_flag_instance` | ❌ unused; "was this parameter given" is inferred from the deck instead |  |
+| init errors (`OsdiInitInfo`) | ⚠️ surfaced, but only `INIT_ERR_OUT_OF_BOUNDS` is decoded; any other code is reported as a bare number |  |
+| `bound_step_offset` | ❌ unused — a model cannot limit the timestep |  |
+| `load_jacobian_resist` (the aliasing path) | ❌ the copy path is used instead, deliberately |  |
+
+### What has been run through it
+
+Every model in OpenVAF-Reloaded's `integration_tests/` was compiled through
+fairchild's own `.va` path and then loaded by **ngspice-46 through `pre_osdi`**,
+so both simulators evaluate one identical `.osdi`. Any disagreement is a
+difference in how the two of them stamp it, with nothing else in the way. DC
+sweep, comparison per point, mixed tolerance (a relative metric is meaningless
+at the bottom of a sweep where both simulators sit on their own `gmin`).
+
+| Family | Models | Result |
+|---|---|---|
+| BSIM | BSIM3, BSIM4, BSIMBULK, BSIMCMG, BSIMIMG, BSIMSOI | agree; worst difference 2 pA |
+| PSP | PSP102, PSP103, JUNCAP200 | agree; worst 4 pA |
+| HiSIM | HiSIM2, HiSIMSOTB | agree; worst 6 pA |
+| EKV | EKV, EKV long-channel | agree; worst 1 pA |
+| BJT | HICUM/L2, MEXTRAM 505 (3- and 4-terminal) | agree; worst 5 pA |
+| Diode | DIODE, DIODE_CMC | agree; worst 1 pA |
+| Other | ASM-HEMT, MVSG_CMC, resistor, strings, amplifier, current source | agree; worst 3 pA |
+
+Every remaining difference is a fixed sub-picoamp offset — the two simulators put
+`gmin` on slightly different sets of nodes — against currents up to 0.28 A.
+
+Not covered, and why:
+
+- **HiSIM-HV** and the Verilog-A **resistor** fixture: ngspice fails on them
+  itself (`"impossible error" in OSDI setup_instance`, and a transient-op
+  failure), so there is no reference to compare against. fairchild runs both.
+- **VCCS / CCCS**: these expose a DC-solver fault that is not about models at
+  all — the `vmax` trust region interacting with the relative convergence test.
+  An ideal VCCS into a 1 kΩ load is linear and one solve from its answer, and
+  fairchild reports 0.0502 V on a node the deck pins at 0.1 V, as a converged
+  operating point. `.options vmax=1e5` gives the right answer. Tracked in #90;
+  see the note in `newton.rs` beside the convergence test.
+- **MVSG_CMC** looked like a 0.07% disagreement and is not one: ngspice's *own*
+  DC sweep drifts from its own operating point at its default `reltol`, and at
+  `reltol=1e-10` it lands where fairchild already was.
+
+The comparison needs a checkout of OpenVAF-Reloaded and is not in CI. The ABI
+corners it found are covered in-tree by
+`crates/fairchild-osdi/tests/models/abi_*.va` and run always.
+
+On macOS/aarch64 every formatted-output and severity task (`$strobe`, `$error`,
+`$fatal`, …) is stripped before compiling, loudly, because the compiler
+miscompiles the call and the process dies. See `crates/fairchild-osdi/src/portability.rs`.
+BSIM4 is 429 such calls, so on that platform the model cannot report anything
+about its own parameters — which is why the ABI table above is the only channel
+left.
+
+---
+
 ## 10. Analyses
 
 | Analysis | Implemented | Validated |

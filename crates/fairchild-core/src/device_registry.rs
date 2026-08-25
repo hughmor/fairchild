@@ -286,12 +286,23 @@ impl DeviceRegistry {
     }
 
     /// Register a factory for `name`. Overwrites any previous entry.
+    ///
+    /// The name is folded to lower case, because that is what every lookup here
+    /// asks with: a deck's model name arrives from the parser already
+    /// lowercased, SPICE being case-insensitive. A registrar that hands over a
+    /// name with any upper case in it — a Verilog-A module, which preserves the
+    /// case the author wrote — would otherwise put an entry in the map that no
+    /// deck can name. `PSP102VA`, `DIODE_CMC`, `JUNCAP200` and `hicumL2va` all
+    /// loaded successfully and then reported `unknown model` at the element
+    /// that used them. `declare_arity` had always folded; only this half did
+    /// not, which is the whole bug.
     pub fn register(
         &mut self,
         name: impl Into<String>,
         factory: impl Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static,
     ) {
-        self.factories.insert(name.into(), Arc::new(factory));
+        self.factories
+            .insert(name.into().to_lowercase(), Arc::new(factory));
     }
 
     /// Register a default-constructible device: `T::default()` + the standard
@@ -346,11 +357,14 @@ impl DeviceRegistry {
         target_name: &str,
         param_remap: HashMap<String, String>,
     ) -> Result<(), String> {
-        let target_factory: Factory =
-            self.factories.get(target_name).cloned().ok_or_else(|| {
+        let target_factory: Factory = self
+            .factories
+            .get(&target_name.to_lowercase())
+            .cloned()
+            .ok_or_else(|| {
                 format!(
                     "register_alias: unknown target factory '{target_name}' \
-                 (register it before creating aliases)"
+                     (register it before creating aliases)"
                 )
             })?;
         let remap = Arc::new(param_remap);
@@ -908,9 +922,9 @@ impl DeviceRegistry {
         Some(Box::new(dev))
     }
 
-    /// Look up a factory by model name.
+    /// Look up a factory by model name, case-insensitively — see `register`.
     pub fn get(&self, name: &str) -> Option<&Factory> {
-        self.factories.get(name)
+        self.factories.get(&name.to_lowercase())
     }
 }
 

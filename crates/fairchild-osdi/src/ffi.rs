@@ -35,10 +35,27 @@ pub const ANALYSIS_TRAN: u32 = 8192;
 pub const EVAL_RET_FLAG_LIM: u32 = 1;
 pub const EVAL_RET_FLAG_FATAL: u32 = 2;
 
+// `OsdiJacobianEntry::flags` bits from `osdi_0_4.h`.
+/// The entry has a resistive (∂f/∂x) part. `write_jacobian_array_resist` writes
+/// one value per entry carrying this bit and **skips the rest**, so the array it
+/// fills is packed: the k-th value belongs to the k-th *resistive* entry, not to
+/// `jacobian_entries[k]`.
+pub const JACOBIAN_ENTRY_RESIST: u32 = 4;
+/// The entry has a reactive (∂q/∂x) part; `react_ptr_off != u32::MAX` says the
+/// same thing, and the reactive walk keys off that.
+pub const JACOBIAN_ENTRY_REACT: u32 = 8;
+
 // Parameter kind/type flags
 pub const PARA_TY_REAL: u32 = 0;
 pub const PARA_TY_INT: u32 = 1;
 pub const PARA_TY_STR: u32 = 2;
+/// Low bits of `OsdiParamOpvar::flags` holding the `PARA_TY_*` storage type.
+///
+/// The width of the slot `access()` hands back follows this, not the caller's
+/// wishes: an `integer` parameter is an `i32` in the model struct, so writing a
+/// `f64` over it stores the low half of an IEEE bit pattern (1.0 becomes 0) and
+/// tramples the next four bytes as well.
+pub const PARA_TY_MASK: u32 = 0x3;
 pub const PARA_KIND_MODEL: u32 = 0 << 30;
 pub const PARA_KIND_INST: u32 = 1 << 30;
 pub const PARA_KIND_OPVAR: u32 = 2 << 30;
