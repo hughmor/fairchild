@@ -60,6 +60,13 @@ A fairchild netlist follows standard SPICE conventions:
 - Keywords are case-insensitive (`NMOS` = `nmos`).
 - SI suffixes: `k`=1e3, `meg`=1e6, `g`=1e9, `t`=1e12, `m`=1e-3, `u`=1e-6,
   `n`=1e-9, `p`=1e-12, `f`=1e-15.
+- **RKM is accepted**: the suffix may stand in for the decimal point, so `4k7`
+  is 4700 and `2n2` is 2.2 nF — the notation on the part, without transcribing
+  it. `m` is the one exception and is a hard error: SPICE reads `m` as milli
+  and RKM reads `M` as mega, so `4M7` is 4.7 mΩ or 4.7 MΩ depending on who is
+  reading. Write `4.7m` or `4.7meg`. Note that **ngspice does not support RKM**
+  — it reads `4k7` as 4000 and drops the `7` without a word — so an RKM deck is
+  a fairchild deck, and a deck you intend to run under both should not use it.
 - Node `0` (also `gnd`, `GND`) is ground.
 - `.end` is optional — end-of-file ends a deck. It is accepted for
   compatibility, but nothing may follow it: a trailing line is an error rather

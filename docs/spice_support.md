@@ -150,6 +150,24 @@ than refusing the file — see §4.7 for what that does and does not buy you. It
 Time-domain noise exists, but as `.options trannoise=1` over the `.noise` source
 list rather than as a `TRNOISE` source function.
 
+### One place fairchild accepts more than ngspice: RKM values
+
+`4k7` for 4700 and `2n2` for 2.2 nF — the suffix standing in for the decimal
+point, as parts are marked. This is a deliberate *superset*, and it is safe
+precisely because ngspice has no support for it: ngspice reads `4k7` as **4000**
+and drops the `7` in silence (verified on ngspice 46 by measuring the branch
+current), so no deck validated against ngspice can contain RKM and mean
+anything by it. The only decks that reach this path were written for fairchild
+on purpose.
+
+`m` is refused rather than interpreted. SPICE reads `m` as milli; RKM, coming
+from component marking, reads `M` as mega. `4M7` is therefore 4.7 mΩ or 4.7 MΩ
+depending on who is reading, a factor of 10⁹ in a token whose whole purpose is
+being read at a glance — so it is an error naming both unambiguous spellings.
+
+A deck meant to run under both simulators should not use RKM at all, since
+ngspice will accept it and be wrong.
+
 ---
 
 ## 4. The silent set
