@@ -200,6 +200,20 @@ pub fn build_devices(
     build_devices_with_footprints(netlist, topo, ctx, registry).map(|(d, _)| d)
 }
 
+/// Name the element a construction failure belongs to.
+///
+/// A factory's `Err` describes what is wrong with the *device* — "reflectance +
+/// transmittance = 1.4, must be ≤ 1" — because that is all a device knows. Which
+/// element and which model is the caller's half, and this is the only place that
+/// has both.
+fn attribute(
+    built: Result<Box<dyn Device>, String>,
+    name: &str,
+    model_name: &str,
+) -> Result<Box<dyn Device>, SimError> {
+    built.map_err(|e| SimError::ParameterError(format!("{name} ('{model_name}'): {e}")))
+}
+
 /// Register a built device: allocate its extra MNA rows, bind them, and record
 /// the structural footprint `mna::Pattern` needs — every row/column it can
 /// stamp into.
@@ -303,15 +317,23 @@ pub fn build_devices_with_footprints(
                 let pos: NodeId = topo.node_index.get(anode).copied();
                 let neg: NodeId = topo.node_index.get(cathode).copied();
                 let ps = ParamSet::new(params);
-                let dev = factory(&[pos, neg], &ps, ctx);
+                let dev = attribute(factory(&[pos, neg], &ps, ctx), name, model_name)?;
                 // A diode instance parameter used to reach the netlist and stop:
                 // `D1 a k dm area=2` parsed, changed nothing, and said nothing.
                 // AREA is honoured now; anything else gets named here.
-                for key in ps.unconsumed() {
-                    warn_user!(
-                        "{name} ('{model_name}'): instance parameter '{key}' is not \
-                         honoured by this model and was dropped"
-                    );
+                for p in ps.unconsumed() {
+                    match &p.card {
+                        Some(card) => warn_user!(
+                            "{name}: .model '{card}' parameter '{}' is not honoured by \
+                             '{model_name}' and was dropped",
+                            p.key
+                        ),
+                        None => warn_user!(
+                            "{name} ('{model_name}'): instance parameter '{}' is not \
+                             honoured by this model and was dropped",
+                            p.key
+                        ),
+                    }
                 }
                 push_device(&mut devices, &mut foot, topo, &[pos, neg], dev);
             }
@@ -336,7 +358,11 @@ pub fn build_devices_with_footprints(
                     let factory = registry
                         .get(model_name)
                         .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
-                    let dev = factory(&[d, g, s, b], &ParamSet::new(params), ctx);
+                    let dev = attribute(
+                        factory(&[d, g, s, b], &ParamSet::new(params), ctx),
+                        name,
+                        model_name,
+                    )?;
                     push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 }
             }
@@ -396,7 +422,7 @@ pub fn build_devices_with_footprints(
                 // defaults baked into the factory). It also tracks which params
                 // the device consumed, so we can warn about typos.
                 let ps = ParamSet::new(params);
-                let dev = factory(&terminals, &ps, ctx);
+                let dev = attribute(factory(&terminals, &ps, ctx), name, model_name)?;
                 let expected = dev.num_terminals();
                 if terminals.len() != expected {
                     // Used to be a warning that grounded the missing terminals
@@ -412,8 +438,18 @@ pub fn build_devices_with_footprints(
                         terminals.len()
                     )));
                 }
-                for key in ps.unconsumed() {
-                    warn_user!("'{model_name}' instance: unknown parameter '{key}' ignored");
+                for p in ps.unconsumed() {
+                    match &p.card {
+                        Some(card) => warn_user!(
+                            "{name}: .model '{card}' parameter '{}' is unknown to \
+                             '{model_name}' and was ignored",
+                            p.key
+                        ),
+                        None => warn_user!(
+                            "'{model_name}' instance: unknown parameter '{}' ignored",
+                            p.key
+                        ),
+                    }
                 }
                 // OSDI models that use direct potential contributions
                 // (`V(port) <+ ...`) declare internal flow-branch nodes:

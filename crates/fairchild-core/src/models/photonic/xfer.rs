@@ -119,8 +119,6 @@ pub struct NativeOptical2x2 {
     il_amp: f64,
     tau_s: f64,
     allow_gain: bool,
-    /// Passivity guard runs once, on the first eval (see `eval`).
-    checked: bool,
     n_channels: usize,
     wpc: usize,
     nodes: Vec<NodeId>,
@@ -155,7 +153,6 @@ impl NativeOptical2x2 {
             il_amp: 1.0,
             tau_s: 0.0,
             allow_gain: false,
-            checked: false,
             n_channels: 0,
             wpc: 3,
             nodes: Vec::new(),
@@ -402,29 +399,38 @@ impl Device for NativeOptical2x2 {
         true
     }
 
-    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
-        // Passivity guard, once, on the first eval — the registry applies
-        // instance params *after* setup_instance, so this is the earliest point
-        // at which the matrix is final. Weight mode is unitary by construction
-        // and its clamp keeps it so under any control voltage, hence explicit
-        // matrices only.
-        if !self.checked {
-            self.checked = true;
-            if !self.allow_gain {
-                for k in 0..self.n_channels {
-                    if self.explicit[k] {
-                        let sigma = Self::sigma_max(&self.s[k]) * self.il_amp;
-                        assert!(
-                            sigma <= 1.0 + 1e-9,
-                            "fc_optical_2x2: channel {k} matrix has gain (largest \
-                             singular value {sigma:.6} > 1). Set allow_gain=1 if that \
-                             is deliberate — otherwise it diverges silently in a \
-                             feedback path."
-                        );
-                    }
-                }
+    /// Passivity: an explicit transfer matrix must not have gain.
+    ///
+    /// This ran on the first `eval` behind a `checked` flag, because that was the
+    /// earliest point at which the matrix was final — the registry applied
+    /// instance parameters after `setup_instance`. It is a construction-time
+    /// check now, which is where it belonged: a matrix with gain diverges in a
+    /// feedback path, and the deck should hear about it before the solve starts
+    /// rather than as a panic from inside one.
+    ///
+    /// Weight mode is unitary by construction and its clamp keeps it so under any
+    /// control voltage, hence explicit matrices only.
+    fn validate(&mut self) -> Result<(), String> {
+        if self.allow_gain {
+            return Ok(());
+        }
+        for k in 0..self.n_channels {
+            if !self.explicit[k] {
+                continue;
+            }
+            let sigma = Self::sigma_max(&self.s[k]) * self.il_amp;
+            if sigma > 1.0 + 1e-9 {
+                return Err(format!(
+                    "channel {k} matrix has gain (largest singular value \
+                     {sigma:.6} > 1). Set allow_gain=1 if that is deliberate — \
+                     otherwise it diverges silently in a feedback path."
+                ));
             }
         }
+        Ok(())
+    }
+
+    fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let delay_active = flags.transient && self.tau_s > 0.0;
         self.refresh(x, delay_active, ctx);
     }
@@ -587,6 +593,49 @@ impl Device for NativeOptical2x2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A per-channel parameter lands whether it arrives before or after the
+    /// device knows how many channels it has.
+    ///
+    /// `pend` exists for the first order: N comes from the terminal count, so a
+    /// `w_2=` written before `setup_instance` has nowhere to go yet and is
+    /// replayed once the vectors are sized. Construction happens to use the
+    /// second order today, which makes the replay path unreachable from a deck —
+    /// and therefore invisible to every other test, and therefore something a
+    /// later cleanup would delete as dead.
+    ///
+    /// It is not dead: it is what makes the construction order in
+    /// `device_registry::finish` a free choice rather than a load-bearing
+    /// accident. #31's remaining work — a port count that follows from a
+    /// parameter — needs the parameters to arrive first, and this is the test
+    /// that says the device is ready for that.
+    #[test]
+    fn a_per_channel_parameter_lands_in_either_order() {
+        // 2 channels: 4 optical ports × 3 wires × 2 + 2 control + 1 return.
+        let terminals: Vec<NodeId> = (0..27).map(Some).collect();
+        let ctx = SimContext::default();
+
+        let mut before = NativeOptical2x2::new();
+        before.set_real_param("w_1", 1.0);
+        before.setup_model(&ctx);
+        before.setup_instance(&terminals, &ctx);
+
+        let mut after = NativeOptical2x2::new();
+        after.setup_model(&ctx);
+        after.setup_instance(&terminals, &ctx);
+        after.set_real_param("w_1", 1.0);
+
+        assert_eq!(
+            before.w0, after.w0,
+            "w_1 set before setup_instance did not reach the same place as after"
+        );
+        // …and it actually did something, or the equality above is two zeros.
+        assert_eq!(before.w0, vec![0.0, 1.0], "w_1=1 should set channel 1 only");
+        assert_eq!(
+            before.s[1], after.s[1],
+            "the channel matrix must match in either order"
+        );
+    }
 
     /// θ = ½·acos(−w) must give P_drop − P_thru = w for any w, with the pair
     /// summing to 1 — that identity is the whole reason `w` is a usable knob.

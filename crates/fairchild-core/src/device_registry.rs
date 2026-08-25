@@ -26,7 +26,22 @@ use crate::models::{
 pub struct ParamSet {
     /// Lower-cased (key, value) pairs in netlist order.
     params: Vec<(String, f64)>,
+    /// Where each key came from: `None` for the element line, `Some(card)` for a
+    /// `.model` card default merged in by [`ParamSet::with_defaults`].
+    ///
+    /// Kept so an unrecognised parameter is reported against the thing that
+    /// actually wrote it. Without it, merging card defaults into the set would
+    /// turn `.model 'nch': unknown parameter 'tox'` into a complaint about the
+    /// element line, which is not where the reader should look.
+    origin: Vec<Option<Arc<str>>>,
     consumed: std::cell::RefCell<Vec<bool>>,
+}
+
+/// A parameter no device recognised, and who wrote it.
+pub struct UnknownParam {
+    pub key: String,
+    /// The `.model` card that supplied it, or `None` for the element line.
+    pub card: Option<String>,
 }
 
 impl ParamSet {
@@ -37,6 +52,7 @@ impl ParamSet {
         let n = params.len();
         ParamSet {
             params,
+            origin: vec![None; n],
             consumed: std::cell::RefCell::new(vec![false; n]),
         }
     }
@@ -87,14 +103,19 @@ impl ParamSet {
     }
 
     /// Keys not consumed by `get`/`apply` — i.e. params the device did not
-    /// recognise (likely typos). Used to warn the user.
-    pub fn unconsumed(&self) -> Vec<String> {
+    /// recognise (likely typos), each with the card it came from if it was not
+    /// on the element line. Used to warn the user.
+    pub fn unconsumed(&self) -> Vec<UnknownParam> {
         let consumed = self.consumed.borrow();
         self.params
             .iter()
+            .zip(self.origin.iter())
             .zip(consumed.iter())
             .filter(|(_, c)| !**c)
-            .map(|((k, _), _)| k.clone())
+            .map(|(((k, _), o), _)| UnknownParam {
+                key: k.clone(),
+                card: o.as_ref().map(|c| c.to_string()),
+            })
             .collect()
     }
 
@@ -110,19 +131,87 @@ impl ParamSet {
             .collect();
         ParamSet::new(&renamed)
     }
+
+    /// This set plus a `.model` card's parameters, for the keys the element line
+    /// did not give. The element line always wins.
+    ///
+    /// The card's parameters are *merged into the set* rather than written onto
+    /// the device afterwards, and that ordering is the point: a device validates
+    /// itself once, at the end of construction, and it can only do that if every
+    /// parameter it will ever be given is already in hand. Patching defaults in
+    /// after the factory returned meant a card could complete a configuration
+    /// that had already been judged incomplete — or break one that had been
+    /// judged fine — with nothing to catch either.
+    pub fn with_defaults(&self, defaults: &[(String, f64)], card: &str) -> ParamSet {
+        let card: Arc<str> = Arc::from(card);
+        let mut params = self.params.clone();
+        let mut origin = self.origin.clone();
+        for (k, v) in defaults {
+            let k = k.to_lowercase();
+            if params.iter().any(|(p, _)| *p == k) {
+                continue; // element line wins
+            }
+            params.push((k, *v));
+            origin.push(Some(Arc::clone(&card)));
+        }
+        let n = params.len();
+        ParamSet {
+            params,
+            origin,
+            consumed: std::cell::RefCell::new(vec![false; n]),
+        }
+    }
+}
+
+/// Set up, apply every parameter, then let the device judge itself.
+///
+/// The one construction order in this file. It exists because the order is
+/// load-bearing and used to be spelled out at each of nine registration sites:
+/// `setup_model`, `setup_instance`, parameters, validation. Get it wrong in one
+/// place and that device alone sees defaults where the deck gave values, which
+/// is the failure mode #31 describes — plausible numbers, no diagnostic.
+fn finish<D: Device + 'static>(
+    mut d: D,
+    terminals: &[NodeId],
+    params: &ParamSet,
+    ctx: &SimContext,
+) -> Result<Box<dyn Device>, String> {
+    d.setup_model(ctx);
+    d.setup_instance(terminals, ctx);
+    apply_and_validate(d, params)
+}
+
+/// [`finish`] from `setup_instance` onwards, for the one device that has work to
+/// do in between: `fc_awgr` reads its spectrum file only once `setup_instance`
+/// has told it how many ports it has.
+fn apply_and_validate<D: Device + 'static>(
+    mut d: D,
+    params: &ParamSet,
+) -> Result<Box<dyn Device>, String> {
+    params.apply(&mut d);
+    d.validate()?;
+    Ok(Box::new(d))
 }
 
 /// A device factory: constructs a device from its terminal nodes, instance
 /// [`ParamSet`], and the [`SimContext`]. The returned device is fully set up
-/// (`setup_model` + `setup_instance` done) with the instance params applied; the
-/// caller (`build_devices`) handles extra-node allocation and unconsumed-param
-/// warnings. Stored behind `Arc` so the alias mechanism (B6) can clone a target
+/// (`setup_model` + `setup_instance` done), has every parameter applied, and has
+/// passed [`Device::validate`]; the caller (`build_devices`) handles extra-node
+/// allocation and unconsumed-param warnings.
+///
+/// **Fallible**, because that is the whole point of doing the work here: a
+/// device that cannot be built from the parameters it was given says so, once,
+/// with the element named, instead of asserting from inside `eval` halfway
+/// through a solve. The `Err` describes the device's own problem; the caller
+/// adds the element and model name. Stored behind `Arc` so the alias mechanism (B6) can clone a target
 /// factory into a wrapper that performs parameter-name translation. (A named
 /// `ModelFactory` trait could wrap this later for a dlopen plugin ABI; the
 /// closure form covers every in-tree need — OSDI captures `Arc<library>`, the
 /// LEVEL/expr factories capture their tables/expressions.)
-pub type ModelFactory =
-    dyn Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static;
+pub type ModelFactory = dyn Fn(&[NodeId], &ParamSet, &SimContext) -> Result<Box<dyn Device>, String>
+    + Send
+    + Sync
+    + 'static;
 type Factory = Arc<ModelFactory>;
 
 /// Name every model-card parameter the model accepts and does not model.
@@ -299,7 +388,10 @@ impl DeviceRegistry {
     pub fn register(
         &mut self,
         name: impl Into<String>,
-        factory: impl Fn(&[NodeId], &ParamSet, &SimContext) -> Box<dyn Device> + Send + Sync + 'static,
+        factory: impl Fn(&[NodeId], &ParamSet, &SimContext) -> Result<Box<dyn Device>, String>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.factories
             .insert(name.into().to_lowercase(), Arc::new(factory));
@@ -310,11 +402,7 @@ impl DeviceRegistry {
     /// passive/simple native device.
     pub fn register_default<T: Device + Default + 'static>(&mut self, name: impl Into<String>) {
         self.register(name, |terminals, params: &ParamSet, ctx| {
-            let mut d = T::default();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            params.apply(&mut d);
-            Box::new(d) as Box<dyn Device>
+            finish(T::default(), terminals, params, ctx)
         });
     }
 
@@ -323,11 +411,7 @@ impl DeviceRegistry {
     /// instance-param flow as [`register_default`](Self::register_default).
     fn register_ctor(&mut self, name: impl Into<String>, ctor: fn() -> ActiveOpticalDevice) {
         self.register(name, move |terminals, params: &ParamSet, ctx| {
-            let mut d = ctor();
-            d.setup_model(ctx);
-            d.setup_instance(terminals, ctx);
-            params.apply(&mut d);
-            Box::new(d) as Box<dyn Device>
+            finish(ctor(), terminals, params, ctx)
         });
     }
 
@@ -421,16 +505,10 @@ impl DeviceRegistry {
             );
             let label = card.name.clone();
             self.register(card_name, move |terminals, params: &ParamSet, ctx| {
-                let mut dev = target(terminals, params, ctx);
-                for (k, v) in defaults.iter() {
-                    if params.contains(k) {
-                        continue; // instance line wins
-                    }
-                    if !dev.set_real_param(k, *v) {
-                        warn_user!(".model '{label}': unknown parameter '{k}' ignored");
-                    }
-                }
-                dev
+                // Merged, not patched on afterwards: the target validates itself
+                // at the end of its own construction, and it can only do that
+                // with the card's parameters already present.
+                target(terminals, &params.with_defaults(&defaults, &label), ctx)
             });
         }
     }
@@ -454,11 +532,8 @@ impl DeviceRegistry {
             }
             warn_unmodelled("diode", &card.name, crate::unmodelled::DIODE, &params);
             self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
-                let (mut dev, _) = ShockleyDiode::from_params(&params);
-                dev.setup_model(ctx);
-                dev.setup_instance(terminals, ctx);
-                ps.apply(&mut dev);
-                Box::new(dev)
+                let (dev, _) = ShockleyDiode::from_params(&params);
+                finish(dev, terminals, ps, ctx)
             });
             // `build_devices` names whatever `apply` left unconsumed.
         }
@@ -643,6 +718,7 @@ impl DeviceRegistry {
                     .map(|(_, v)| v.clone());
                 let numeric: Vec<(String, f64)> = card.params.clone();
                 let name = card.name.clone();
+                let label = card.name.clone();
                 self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
                     let mut d = NativeAwgr::new();
                     d.setup_model(ctx);
@@ -659,11 +735,7 @@ impl DeviceRegistry {
                             ),
                         }
                     }
-                    for (k, v) in &numeric {
-                        d.set_real_param(k, *v);
-                    }
-                    ps.apply(&mut d);
-                    Box::new(d) as Box<dyn Device>
+                    apply_and_validate(d, &ps.with_defaults(&numeric, &label))
                 });
                 continue;
             }
@@ -702,16 +774,12 @@ impl DeviceRegistry {
                     .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
                     .cloned()
                     .collect();
+                let label = card.name.clone();
                 self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
-                    let mut d = expr_phase_shifter(dneff.clone(), dalpha.clone(), g_pn);
-                    d.setup_model(ctx);
-                    d.setup_instance(terminals, ctx);
-                    // Model-card numeric params first, then instance params on top.
-                    for (k, v) in &numeric {
-                        d.set_real_param(k, *v);
-                    }
-                    ps.apply(&mut d);
-                    Box::new(d) as Box<dyn Device>
+                    let d = expr_phase_shifter(dneff.clone(), dalpha.clone(), g_pn);
+                    // Card params and instance params in one set, element line
+                    // winning — so the device sees all of them before it judges.
+                    finish(d, terminals, &ps.with_defaults(&numeric, &label), ctx)
                 });
                 continue;
             }
@@ -757,15 +825,9 @@ impl DeviceRegistry {
                 .filter(|(k, _)| !k.eq_ignore_ascii_case("level"))
                 .cloned()
                 .collect();
+            let label = card.name.clone();
             self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
-                let mut d = ctor();
-                d.setup_model(ctx);
-                d.setup_instance(terminals, ctx);
-                for (k, v) in &params {
-                    d.set_real_param(k, *v);
-                }
-                ps.apply(&mut d);
-                Box::new(d) as Box<dyn Device>
+                finish(ctor(), terminals, &ps.with_defaults(&params, &label), ctx)
             });
         }
     }

@@ -152,7 +152,8 @@ impl OsdiLibrary {
                 params.apply(&mut dev);
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
-                Box::new(dev)
+                dev.validate()?;
+                Ok(Box::new(dev))
             });
         }
     }

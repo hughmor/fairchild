@@ -134,7 +134,15 @@ pub fn resolve(netlist: &Netlist, ctx: &SimContext, registry: &DeviceRegistry) -
             continue;
         };
         let unbound = vec![None; nets.len()];
-        let dev = factory(&unbound, &ParamSet::new(params), ctx);
+        // A probe construction, only to ask the device where its wavelength
+        // labels are. It is built with unbound terminals and thrown away, so a
+        // device that refuses its own parameters is skipped rather than reported
+        // here: `build_devices` runs next and says the same thing with the
+        // element named. Reporting it twice, once without the element, would send
+        // the reader to the wrong place first.
+        let Ok(dev) = factory(&unbound, &ParamSet::new(params), ctx) else {
+            continue;
+        };
         let declared = dev.lambda_terminals();
         if declared.is_empty() {
             silent.push((name, model_name, nets));
