@@ -319,6 +319,46 @@ device rather than a shared unknown.
 
 ---
 
+## 9b. The OSDI v0.4 ABI surface
+
+A compiled Verilog-A model is only as correct as the parts of the ABI the
+simulator honours, and a part left unread fails silently — the model does its
+job and the answer is wrong anyway. This is the per-field audit.
+
+| Descriptor surface | Honoured | Validated |
+|---|---|---|
+| `setup_model` / `setup_instance` | ✅ parameters written first, then setup, which is OSDI's order | ✅ every OSDI test |
+| `real` parameters | ✅ | ✅ `osdi_device.rs`, `osdi_model_card.rs` |
+| `integer` parameters | ✅ written as `i32`, at the width the model declared | ✅ `osdi_abi_contract.rs` — including a negative value and a neighbouring field used as a clobber witness |
+| `string` parameters | ⚠️ cannot be set from a deck; a numeric value is refused with a warning naming the parameter, and the model keeps its default |  |
+| instance vs model parameter split (`num_instance_params`) | ✅ | ✅ `inst_param.va` fixture |
+| `$mfactor` from the deck's `m=` | ✅ | ✅ `osdi_device.rs` |
+| **node collapsing** (`collapsible` / `collapsed_offset`) | ✅ a collapsed node shares its neighbour's MNA row, or is dropped when collapsed to ground. Its own row stays allocated and unstamped rather than being renumbered — `stamp_gmin` pins it, so the cost is one wasted row per collapsed node | ✅ `osdi_abi_contract.rs` closed form; BSIM4 against ngspice |
+| resistive Jacobian (`write_jacobian_array_resist`) | ✅ read as the **packed** array it is: one value per entry carrying `JACOBIAN_ENTRY_RESIST`, not the first `num_resistive` entries | ✅ `osdi_abi_contract.rs` — a fixture whose first entry is reactive-only |
+| reactive Jacobian (`write_jacobian_array_react`) | ✅ keyed off `react_ptr_off` | ✅ `osdi_reactive.rs` |
+| `load_spice_rhs_dc` / `_tran` | ✅ | ✅ `osdi_dc_op.rs`, `osdi_tran.rs` |
+| `load_residual_react` | ✅ charge read back per node for the integrator | ✅ `osdi_reactive.rs` |
+| `$limit` (`num_states`, `OSDI_LIM_TABLE`) | ✅ `pnjlim` installed; state buffers swapped per eval | ✅ `osdi_limiting.rs` |
+| noise sources (`load_noise`) | ✅ `white_noise` / `flicker_noise` | ⚠️ see §10 `.noise` |
+| `thermal` nodes (via `units == "K"`) | ✅ | ✅ `thermal_discipline.rs` |
+| operating-point variables (`num_opvars`) | ⚠️ readable through `OsdiDevice::read_opvar`, and nothing surfaces them to a deck or a probe |  |
+| `OsdiSimParas` | ❌ a null table is passed, so a model's `$simparam("gmin")` and friends take the default written into the call rather than this simulator's value |  |
+| `eval`'s return flags | ❌ discarded — `EVAL_RET_FLAG_FATAL` means the model is telling us this evaluation is invalid, and it is not heard |  |
+| `ANALYSIS_IC` / `ANALYSIS_STATIC` / `ANALYSIS_NODESET` | ❌ never set; a model that branches on them behaves as if none applied |  |
+| `given_flag_model` / `given_flag_instance` | ❌ unused; "was this parameter given" is inferred from the deck instead |  |
+| init errors (`OsdiInitInfo`) | ⚠️ surfaced, but only `INIT_ERR_OUT_OF_BOUNDS` is decoded; any other code is reported as a bare number |  |
+| `bound_step_offset` | ❌ unused — a model cannot limit the timestep |  |
+| `load_jacobian_resist` (the aliasing path) | ❌ the copy path is used instead, deliberately |  |
+
+On macOS/aarch64 every formatted-output and severity task (`$strobe`, `$error`,
+`$fatal`, …) is stripped before compiling, loudly, because the compiler
+miscompiles the call and the process dies. See `crates/fairchild-osdi/src/portability.rs`.
+BSIM4 is 429 such calls, so on that platform the model cannot report anything
+about its own parameters — which is why the ABI table above is the only channel
+left.
+
+---
+
 ## 10. Analyses
 
 | Analysis | Implemented | Validated |

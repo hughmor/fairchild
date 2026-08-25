@@ -1,0 +1,23 @@
+// A model whose behaviour hangs on an `integer` parameter.
+//
+// `access()` hands back a pointer to the storage the model declared, and for
+// `parameter integer` that is a 4-byte `int`. A simulator that writes an f64
+// there stores the low half of an IEEE bit pattern — `1.0` becomes `0` — and
+// tramples the next four bytes as well. This is how BSIM4's `type=1` (NMOS=1,
+// PMOS=-1) arrived as neither, leaving the transistor unable to conduct (#66).
+//
+// `sel` is signed so the test covers the `type=-1` half too, and `guard` sits
+// immediately after it so an 8-byte write is visible as corruption rather than
+// only as a lost value.
+`include "disciplines.vams"
+
+module abi_int_param(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter integer sel = 0;
+    parameter integer guard = 7;
+    parameter real g = 1e-3 from (0:inf);
+    // sel = +1 → g, sel = -1 → g/2, sel = 0 → open. `guard` scales it, so a
+    // clobbered neighbour changes the answer too.
+    analog I(a, b) <+ (sel == 1 ? g : (sel == -1 ? g / 2.0 : 0.0)) * guard * V(a, b);
+endmodule

@@ -13,9 +13,11 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod bsim4_acceptance;
 mod cmos_inverter;
 mod load_compiled;
 mod load_real_osdi;
+mod osdi_abi_contract;
 mod osdi_abstime;
 mod osdi_dc_op;
 mod osdi_device;

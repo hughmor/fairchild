@@ -1,0 +1,30 @@
+// A model with a Jacobian entry that is reactive **only**, declared on the
+// node the compiler numbers first.
+//
+// `write_jacobian_array_resist` fills a *packed* array: it walks every entry in
+// `jacobian_entries` order and stores a value only for the entries that have a
+// resistive part. So `jac_buf[k]` belongs to the k-th resistive entry, and
+// pairing it with `jacobian_entries[k]` is only correct when no reactive-only
+// entry comes first.
+//
+// `c` is a port so it is numbered ahead of `a` and `b`, and its capacitance to
+// ground is its only contribution — no resistive Jacobian entry at all. That
+// makes the misalignment start at index 0: the conductance between `a` and `b`
+// lands on `(c, c)` and every later value shifts by one.
+//
+// The failure is not a crash and not a convergence failure. The residual is
+// still built from the model's true Jacobian while the matrix holds the shifted
+// one, so Newton converges to the `x` where the two agree — which is not where
+// the residual is zero. A wrong DC answer, no diagnostic (#66).
+`include "disciplines.vams"
+
+module abi_jac_packing(c, a, b);
+    inout c, a, b;
+    electrical c, a, b;
+    parameter real g = 1e-3 from (0:inf);
+    parameter real cval = 1e-12 from (0:inf);
+    analog begin
+        I(c) <+ ddt(cval * V(c));
+        I(a, b) <+ g * V(a, b);
+    end
+endmodule

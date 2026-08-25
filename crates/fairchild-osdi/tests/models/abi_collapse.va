@@ -1,0 +1,31 @@
+// A model with an internal node it collapses away when its series resistance
+// is zero — the idiom every foundry compact model uses for `RD`/`RS`, the gate
+// network and the body diodes.
+//
+// A potential contribution of literal zero (`V(a, ai) <+ 0.0`) is what makes
+// OpenVAF emit a collapse hint: the simulator is told, through
+// `collapsible`/`collapsed_offset`, that `ai` and `a` are one unknown for this
+// instance. A simulator that ignores the hint leaves `ai` with a row nothing
+// stamps into, so the conductance to `b` hangs off a floating node and the
+// device passes only what `gmin` allows — whatever its parameters say. That is
+// BSIM4 measuring exactly `gmin · V` (#66).
+//
+// Both branches are worth testing: `rs = 0` collapses, `rs > 0` does not and
+// puts a real resistor in series, so the same fixture covers the hint being
+// honoured and the hint being absent.
+`include "disciplines.vams"
+
+module abi_collapse(a, b);
+    inout a, b;
+    electrical a, b;
+    electrical ai;
+    parameter real rs = 0.0 from [0:inf);
+    parameter real g = 1e-3 from (0:inf);
+    analog begin
+        if (rs > 0.0)
+            I(a, ai) <+ V(a, ai) / rs;
+        else
+            V(a, ai) <+ 0.0;
+        I(ai, b) <+ g * V(ai, b);
+    end
+endmodule

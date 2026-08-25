@@ -143,9 +143,15 @@ impl OsdiLibrary {
                 if let Some(l) = &lam {
                     dev.set_bundle_lambda(l.clone());
                 }
+                // OSDI's own order: write the parameters, *then* set up. The
+                // other way round works — `set_real_param` redoes the setup
+                // after each write — but it redoes it once per parameter, and
+                // on a model with a foundry-sized card that is a full
+                // `setup_model` + `setup_instance` per parameter on the line.
+                // Not a correctness fix; BSIM4 answers the same either way.
+                params.apply(&mut dev);
                 dev.setup_model(ctx);
                 dev.setup_instance(terminals, ctx);
-                params.apply(&mut dev);
                 Box::new(dev)
             });
         }

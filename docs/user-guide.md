@@ -2183,7 +2183,33 @@ line, including `M`, `Q` and `D`, and takes the same engineering suffixes as a
 netlist (`--param "M1.W=1u"`). It does **not** reach `.model` card parameters —
 for those, edit the card, or use a `.param` referenced as `{name}`.
 
-### 14.5 Implementation notes
+### 14.5 What has actually been run
+
+A foundry-class model exercises corners of the OSDI ABI that a small fixture
+never reaches, so "we support Verilog-A" is worth stating as a measurement
+rather than a capability.
+
+BSIM4.8 (cogenda's Verilog-A translation) runs end to end and agrees with
+ngspice-46 to seven significant figures, on NMOS and PMOS, long and short
+channel, with body bias and at 85 °C. The comparison is against ngspice loading
+**the same compiled `.osdi`** through `pre_osdi`, not against ngspice's built-in
+BSIM4 — so a disagreement is a difference in how the two simulators stamp one
+model, with nothing else in the way. The remaining gap is `gmin`, at 1 pS.
+
+The model itself cannot be shipped here: it is CC BY-NC-SA, which an Apache-2.0
+repository cannot vendor. Point `FAIRCHILD_BSIM4_VA` at a copy and
+`cargo test --test osdi bsim4` runs the comparison; without it those three tests
+say why they are skipping. The in-tree fixtures in
+`crates/fairchild-osdi/tests/models/abi_*.va` cover the same ABI corners
+individually and always run.
+
+`docs/model_status.md` §9b is the per-field audit of what of the ABI is honoured
+and what is not. The three that were not, until this was measured, each produced
+a wrong answer with no diagnostic: an `integer` parameter written at the wrong
+width, node collapsing ignored, and the resistive Jacobian array read as a
+prefix instead of the packed subset it is.
+
+### 14.6 Implementation notes
 
 Reactive Jacobian contributions are stamped through the
 `write_jacobian_array_react` copy path — `α·∂q/∂x` in transient, `ω·∂q/∂x` in
