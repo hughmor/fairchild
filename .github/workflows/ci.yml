@@ -258,6 +258,115 @@ jobs:
           cm.load_str("* c\n.param sw = 0 $ 0 = off, 1 = on\nV1 a 0 1\nR1 a 0 1k $ load = 1k\n.op\n.end\n")
           assert abs(cm.run("op")["i(v1)"][0] + 1e-3) < 1e-12, cm.run("op")["i(v1)"]
           print("ok: params= overrides bite, and $ comments with '=' parse")
+
+          # The small-signal reports are their own methods, not run() kinds, so
+          # nothing in the block above touches them. The numbers are pinned in
+          # Rust against ngspice; what is checked here is the binding surface
+          # and the deck-vs-caller rule (#33), which only exists in Python.
+          import math
+          ss = fairchild.Circuit()
+          ss.load_str("""* divider
+          Vin in 0 DC 1
+          R1 in out 1k
+          R2 out 0 3k
+          .tf v(out) Vin
+          .sens v(out)
+          """)
+          assert [a["kind"] for a in ss.analyses] == ["tf", "sens"], ss.analyses
+          card = ss.tf()
+          assert math.isclose(card["gain"], 0.75, rel_tol=1e-6), card
+          assert math.isclose(card["r_in"], 4000.0, rel_tol=1e-6), card
+          assert math.isclose(card["r_out"], 750.0, rel_tol=1e-6), card
+          assert ss.tf(out="v(out)", src="Vin") == card, "kwargs and card disagree"
+          try:
+              ss.tf(out="v(out)")   # half a card is never applied
+              raise AssertionError("tf(out=) without src= must be an error")
+          except RuntimeError as e:
+              assert "src" in str(e), e
+          # Both spellings are the same call, and neither returns a SimResult.
+          assert ss.run("tf") == card, "run('tf') and ckt.tf() disagree"
+          assert not hasattr(ss.run("tf"), "time"), "a report must not be a SimResult"
+          assert ss.run("tran", step=1e-9, stop=1e-8).is_tran, "run() still returns SimResult"
+
+          rows = ss.sens()
+          assert [r["param"] for r in rows] == ["vin.value", "r1.value", "r2.value"], rows
+          assert all(r["reached"] for r in rows), rows
+          assert math.isclose(rows[1]["sensitivity"], -1.875e-4, rel_tol=1e-5), rows[1]
+
+          pzc = fairchild.Circuit()
+          pzc.load_str("* rlc\nVin in 0 DC 0 AC 1\nR1 in a 100\nL1 a out 1m\nC1 out 0 1n\n")
+          pr = pzc.pz(in_pos="in", out_pos="out")
+          assert len(pr["poles"]) == 2, pr
+          for p in pr["poles"]:
+              assert isinstance(p, complex) and math.isclose(p.real, -5e4, rel_tol=1e-5), p
+          print(f"ok: tf/sens/pz reachable, card-vs-kwargs honoured, {len(pr['poles'])} poles")
+
+          # run_all() means *all*: the deck's analyses crossed with the .alter x
+          # .temp grid, which is what the CLI does with the same file. The bug
+          # this guards is the grid silently collapsing to one corner.
+          rc = fairchild.Circuit()
+          rc.load_str("""* corners
+          Vin in 0 DC 1
+          R1 in out 1k
+          R2 out 0 3k
+          .temp -40 27 125
+          .op
+          .tf v(out) Vin
+          .alter slow
+          R1 in out 2k
+          """)
+          assert len(rc.corners) == 6, rc.corners          # (base, slow) x 3 temps
+          assert rc.corners[0]["alter"] == "base", rc.corners[0]
+          all_rows = rc.run_all()
+          assert len(all_rows) == 12, len(all_rows)        # 6 corners x 2 analyses
+          assert {r["alter"] for r in all_rows} == {"base", "slow"}
+          assert {round(r["temp_c"]) for r in all_rows} == {-40, 27, 125}
+          # The alter axis must actually reach the numbers: r_in is R1 + R2.
+          rin = {r["alter"]: r["result"]["r_in"] for r in all_rows
+                 if r["kind"] == "tf" and round(r["temp_c"]) == 27}
+          assert round(rin["base"]) == 4000 and round(rin["slow"]) == 5000, rin
+          # A single corner is run() with alter=/temp=; asking run_all for one
+          # is a contradiction, not a filter.
+          try:
+              rc.run_all(alter="slow")
+              raise AssertionError("run_all(alter=) must be refused")
+          except RuntimeError as e:
+              assert "every corner" in str(e), e
+          print(f"ok: run_all covered {len(all_rows)} rows over {len(rc.corners)} corners")
+
+          # Every analysis has a method AND a name, and they are the same call.
+          # A renamed pyo3 export or a method that stopped delegating shows up
+          # here and nowhere in the Rust tests.
+          mc = fairchild.Circuit()
+          mc.load_str("""* every analysis
+          Vin in 0 DC 1 AC 1
+          R1 in out 1k
+          R2 out 0 3k
+          C1 out 0 1n
+          .op
+          .tran 1n 20n
+          .ac dec 10 1 1meg
+          .noise V(out) Vin dec 5 1 1meg
+          .dc Vin 0 2 0.5
+          .tf v(out) Vin
+          .sens v(out)
+          .pz in 0 out 0 vol pz
+          """)
+          WAVE = ["op", "tran", "ac", "noise", "dc_sweep"]
+          for nm in WAVE + ["tf", "sens", "pz", "dc"]:
+              assert hasattr(mc, nm), f"ckt.{nm}() is missing"
+          for nm in WAVE:
+              a, b = getattr(mc, nm)(), mc.run(nm)
+              assert a.signals() == b.signals(), nm
+              assert hasattr(a, "time"), f"{nm}() must return a SimResult"
+          for nm in ["tf", "sens", "pz"]:
+              assert getattr(mc, nm)() == mc.run(nm), nm
+              assert not hasattr(getattr(mc, nm)(), "time"), f"{nm}() must be a report"
+          # `.dc` reports kind 'dc_sweep', so run(a["kind"]) round-trips to the
+          # analysis the deck declared instead of quietly running an .op.
+          assert "dc_sweep" in [a["kind"] for a in mc.analyses], mc.analyses
+          assert mc.run("dc_sweep").is_dc_sweep and mc.op().is_dc
+          print(f"ok: {len(mc.analyses)} analyses, each reachable both ways")
           PY
 
           # The bindings and the CLI once disagreed by a factor of 116 on a noise

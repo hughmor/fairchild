@@ -107,9 +107,9 @@ expression source as a `B` element instead.
 | `.tran` | transient | ✅ incl. `tstart`, `tmax`, `UIC` | §4.4 |
 | `.noise` | noise analysis | ✅ | §4.4 |
 | `.disto` | small-signal distortion | ❌ | error |
-| `.pz` | pole-zero | ❌ | error |
-| `.sens` | sensitivity | ❌ | error |
-| `.tf` | transfer function | ❌ | error |
+| `.pz` | pole-zero | ✅ dense QZ, refuses past 400 unknowns | §6 |
+| `.sens` | sensitivity | ✅ adjoint, not perturbation | §6 |
+| `.tf` | transfer function | ✅ | §6 |
 | `.four` / `.fourier` | Fourier analysis | ❌ | error |
 | `.sp` | S-parameter | ❌ | error (verified) |
 | `.ic` | initial conditions | ✅ (honoured with `UIC`) | — |
@@ -149,6 +149,24 @@ than refusing the file — see §4.7 for what that does and does not buy you. It
 
 Time-domain noise exists, but as `.options trannoise=1` over the `.noise` source
 list rather than as a `TRNOISE` source function.
+
+### One place fairchild accepts more than ngspice: RKM values
+
+`4k7` for 4700 and `2n2` for 2.2 nF — the suffix standing in for the decimal
+point, as parts are marked. This is a deliberate *superset*, and it is safe
+precisely because ngspice has no support for it: ngspice reads `4k7` as **4000**
+and drops the `7` in silence (verified on ngspice 46 by measuring the branch
+current), so no deck validated against ngspice can contain RKM and mean
+anything by it. The only decks that reach this path were written for fairchild
+on purpose.
+
+`m` is refused rather than interpreted. SPICE reads `m` as milli; RKM, coming
+from component marking, reads `M` as mega. `4M7` is therefore 4.7 mΩ or 4.7 MΩ
+depending on who is reading, a factor of 10⁹ in a token whose whole purpose is
+being read at a glance — so it is an error naming both unambiguous spellings.
+
+A deck meant to run under both simulators should not use RKM at all, since
+ngspice will accept it and be wrong.
 
 ---
 
@@ -656,7 +674,69 @@ in `logical_lines`, before `+` continuations are joined. A `$` inside quotes
 (`sfile="a$b.csv"`, `.param x='1+2'`) and one mid-token (`a$b`) are data and
 survive. fairchild issue #57.
 
-## 6. What is left
+## 6. The small-signal reports: `.tf`, `.sens`, `.pz`
+
+These three produce a *report*, not a waveform set, and that shapes how they are
+reached. On the CLI they run in deck order like any other card and write a small
+table (`--format csv`) or a one-point rawfile (`--format nutmeg`). From Python
+they are `ckt.tf()`, `ckt.sens()` and `ckt.pz()`, and `run("tf")` and friends
+delegate to exactly those — every analysis has a method and a name, with one
+implementation under either spelling. The reports return a dict rather than a
+`SimResult`, which is arrays indexed by signal name and would have to answer
+every accessor with an empty array. Each takes its deck card whole when called
+with no arguments and ignores the card entirely when given any of its own, which
+is the rule `run()` follows for `.tran`.
+
+Every number below is pinned against ngspice in
+`crates/fairchild-core/tests/ngspice/ngspice_tf_pz_golden.rs`, including a
+nonlinear (diode-biased) `.tf` where the two simulators must agree about the
+*linearisation*, not merely about inverting the same constant matrix.
+
+### `.tf <out> <src>` — agrees with ngspice exactly
+
+`out` is `v(node)`, `v(node,ref)` or `i(vsrc)`; `src` is an independent V or I
+source. Reports the gain, the resistance the source sees, and the resistance the
+output port presents. The two resistances are the easy things to get
+self-consistently backwards, and the sign convention is ngspice's: a source's
+branch current counts positive *into* its `+` terminal, so a driving source
+reads negative and a sense source in the return path reads positive.
+
+### `.sens <out> [<element>[.<param>] …]` — better than ngspice's, and says so
+
+ngspice's `.sens` perturbs each parameter and re-solves: one nonlinear solve per
+parameter, differencing a result converged only to `reltol`. This uses the
+adjoint — every parameter from one transposed solve, differencing the residual
+rather than the solution, so the result is good to ~1e-10 relative instead of
+~1e-3. Omit the parameter list and every R, C, L, V and I value in the deck is
+differentiated; that costs the same as differentiating one.
+
+**The one thing to read carefully is the `reached` column.** A parameter the
+adjoint could not perturb — a model parameter whose device does not implement
+`set_real_param`, see `docs/model_status.md` — reports `0.0` with
+`reached = false`. A genuine insensitivity reports `0.0` with `reached = true`.
+They are the same number and mean opposite things, so the flag is a column of
+the CSV, a key of the Python dict, and a stderr warning on the CLI.
+
+### `.pz <n1> <n2> <n3> <n4> cur|vol pol|zer|pz` — bounded, and refuses past the bound
+
+ngspice's field order. Roots come back in rad/s (the CSV carries Hz alongside);
+a `vol` drive shorts the input port for the homogeneous problem and `cur` leaves
+it open, so the two report genuinely different pole sets. When the deck already
+has a voltage source across the input port, `vol` uses *that* source rather than
+adding a second in parallel with it — which would leave the pencil
+rank-deficient and the answers meaningless without an error.
+
+The eigensolve is a dense QZ, `O(N³)`. Past 400 unknowns it is a hard error
+naming the limit rather than an unbounded wait; a sparse shift-invert pass for
+large circuits is not implemented. `infinite_poles` counts the algebraic
+(non-dynamic) modes the pencil reported — not an error, and reported rather than
+hidden, because if every mode is infinite the circuit has no dynamics and an
+empty pole list is the right answer rather than a failure.
+
+Not implemented from this family: `.disto`, which needs second and third I/V
+derivatives from every device, and Monte Carlo. Both are in issue #78.
+
+## 7. What is left
 
 §4 is done, and `E`/`F`/`G`/`H` are in. Remaining, by (value × cheapness):
 

@@ -27,9 +27,14 @@ pub fn parse_spice_value(s: &str) -> Result<f64, crate::ParseError> {
 // them unqualified (as they did before the split).
 use bundles::{expand_bundle_ports, scan_bidirectional};
 use common::{canon_node, expand_bus_vectors, parse_port_decl, parse_value};
+/// `v(node)` / `v(node,ref)` / `i(vsrc)`, for a frontend that takes an output
+/// spelling from a caller rather than from a card.  The same function the
+/// `.tf`, `.sens` and `.noise` cards go through, so a Python `out="v(a,b)"` and
+/// a deck's `.tf v(a,b)` cannot come to mean different things.
+pub use directives::parse_outvar;
 use directives::{
     is_silent_directive, parse_ac, parse_dc, parse_measure, parse_node_assignments, parse_noise,
-    parse_options_directive, parse_tran, select_directive,
+    parse_options_directive, parse_pz, parse_sens, parse_tf, parse_tran, select_directive,
 };
 use element::{parse_element_expanded, parse_model};
 use subckt::{collect_defs, expand_instance, substitute_params};
@@ -226,6 +231,12 @@ fn parse_resolved(input: &str, oracle: &dyn ArityOracle) -> Result<Netlist, Pars
             netlist.analyses.push(parse_dc(&lc, *lineno)?);
         } else if lc.starts_with(".noise") {
             netlist.analyses.push(parse_noise(&lc, *lineno)?);
+        } else if lc.starts_with(".tf") {
+            netlist.analyses.push(parse_tf(&lc, *lineno)?);
+        } else if lc.starts_with(".sens") {
+            netlist.analyses.push(parse_sens(&lc, *lineno)?);
+        } else if lc.starts_with(".pz") {
+            netlist.analyses.push(parse_pz(&lc, *lineno)?);
         } else if lc.starts_with(".temp") {
             // .temp <T1_celsius> [<T2_celsius> …] — one entry per sweep point.
             for tok in lc.split_whitespace().skip(1) {
@@ -851,6 +862,59 @@ mod tests {
     #[test]
     fn parse_suffix_meg() {
         assert!((parse_value("1meg", 1).unwrap() - 1e6).abs() < 1.0);
+    }
+
+    /// RKM: the multiplier letter stands in for the decimal point.
+    ///
+    /// ngspice reads `4k7` as 4000 and drops the `7` in silence, so no deck
+    /// validated against ngspice can contain RKM and mean anything by it —
+    /// which is what makes adding it safe rather than a compatibility trap.
+    #[test]
+    fn parse_rkm_infix_notation() {
+        for (text, want) in [
+            ("4k7", 4700.0),
+            ("2n2", 2.2e-9),
+            ("1meg5", 1.5e6),
+            ("10k5", 10500.0),
+            ("4p7", 4.7e-12),
+            ("3g3", 3.3e9),
+            ("-4k7", -4700.0),
+        ] {
+            let got = parse_value(text, 1).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert!(
+                (got - want).abs() <= 1e-9 * want.abs().max(1e-12),
+                "{text}: got {got:e}, want {want:e}"
+            );
+        }
+    }
+
+    /// `m` in RKM position is refused rather than guessed at.  A component
+    /// marked `4M7` is 4.7 MΩ to whoever marked it and 4.7 mΩ to SPICE, and
+    /// picking either silently is a factor of 1e9 in a token meant to be read
+    /// at a glance.
+    #[test]
+    fn parse_rkm_refuses_ambiguous_m() {
+        for text in ["4m7", "4M7"] {
+            let err = parse_value(text, 7).unwrap_err().to_string();
+            assert!(err.contains("4.7m") && err.contains("4.7meg"), "{err}");
+        }
+        // The unambiguous spellings both still work.
+        assert!((parse_value("4.7m", 1).unwrap() - 4.7e-3).abs() < 1e-12);
+        assert!((parse_value("4.7meg", 1).unwrap() - 4.7e6).abs() < 1.0);
+    }
+
+    /// Everything that parsed before parses to the same number, and everything
+    /// that was an error still is.  RKM only fires with digits on both sides of
+    /// a multiplier, so a trailing unit (`10nF`) and an exponent (`1e3`) are
+    /// untouched.
+    #[test]
+    fn parse_rkm_does_not_disturb_existing_tokens() {
+        for (text, want) in [("1e3", 1e3), ("2k", 2e3), ("1meg", 1e6), ("-2.5", -2.5)] {
+            assert!((parse_value(text, 1).unwrap() - want).abs() <= 1e-9 * want.abs());
+        }
+        for text in ["10nf", "1kohm", "k5", "abc"] {
+            assert!(parse_value(text, 1).is_err(), "{text} should not parse");
+        }
     }
 
     #[test]

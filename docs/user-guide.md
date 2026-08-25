@@ -24,7 +24,7 @@ the photonics have [their own guide](photonic-models.md).
 
 **Running it**
 
-5. [Analyses](#5-analyses) — `.op`, `.dc`, `.tran`, `.ac`, `.noise`
+5. [Analyses](#5-analyses) — `.op`, `.dc`, `.tran`, `.ac`, `.noise`, `.tf`, `.sens`, `.pz`
 6. [Directives](#6-directives)
 7. [SimOptions and convergence knobs](#7-simoptions-and-convergence-knobs)
 8. [CLI reference](#8-cli-reference)
@@ -60,6 +60,13 @@ A fairchild netlist follows standard SPICE conventions:
 - Keywords are case-insensitive (`NMOS` = `nmos`).
 - SI suffixes: `k`=1e3, `meg`=1e6, `g`=1e9, `t`=1e12, `m`=1e-3, `u`=1e-6,
   `n`=1e-9, `p`=1e-12, `f`=1e-15.
+- **RKM is accepted**: the suffix may stand in for the decimal point, so `4k7`
+  is 4700 and `2n2` is 2.2 nF — the notation on the part, without transcribing
+  it. `m` is the one exception and is a hard error: SPICE reads `m` as milli
+  and RKM reads `M` as mega, so `4M7` is 4.7 mΩ or 4.7 MΩ depending on who is
+  reading. Write `4.7m` or `4.7meg`. Note that **ngspice does not support RKM**
+  — it reads `4k7` as 4000 and drops the `7` without a word — so an RKM deck is
+  a fairchild deck, and a deck you intend to run under both should not use it.
 - Node `0` (also `gnd`, `GND`) is ground.
 - `.end` is optional — end-of-file ends a deck. It is accepted for
   compatibility, but nothing may follow it: a trailing line is an error rather
@@ -666,6 +673,84 @@ multi-tap `CorrelatedNoise` (the mechanism exists — laser RIN uses it).
 
 ---
 
+### Small-signal reports: `.tf`, `.sens`, `.pz`
+
+These three answer a question about the circuit rather than producing a
+waveform, so they return a table instead of a sweep. All three linearise about
+the DC operating point.
+
+```
+.tf   <v(node[,ref])|i(vsrc)>  <input_source>
+.sens <v(node[,ref])|i(vsrc)>  [<element>[.<param>] …]
+.pz   <n1> <n2> <n3> <n4>  cur|vol  pol|zer|pz
+```
+
+```bash
+fairchild -f amp.sp                    # cards run in deck order, like any other
+```
+
+```python
+c.tf()                                  # the deck's .tf card, whole
+c.tf(out="v(out)", src="Vin")           # explicit; needs no card
+# {'gain': 0.75, 'r_in': 4000.0, 'r_out': 750.0, 'out_value': 0.75}
+
+c.sens(out="v(out)")                    # every R/C/L/V/I value in the deck
+c.sens(out="v(out)", wrt=["r1", "m1.w"])
+# [{'param': 'r1.value', 'nominal': 1000.0, 'sensitivity': -1.875e-4,
+#   'normalised': -0.1875, 'reached': True, 'fd_error': 3.6e-11}, …]
+
+c.pz(in_pos="in", out_pos="out")        # in_neg/out_neg default to ground
+# {'poles': [(-50000+998749.2j), (-50000-998749.2j)], 'zeros': [], …}
+```
+
+Pass no analysis arguments and the deck's card is adopted whole; pass any and
+the card is not used at all — the same rule `run("tran")` follows, so the
+numbers in one result always come from one place.
+
+**Every analysis has a method and a name.** `ckt.op()`, `ckt.tran()`, `ckt.ac()`,
+`ckt.noise()`, `ckt.dc_sweep()`, `ckt.tf()`, `ckt.sens()`, `ckt.pz()` — and
+`run("<name>")` for each, which dispatches to exactly that method. One
+implementation under either spelling, so they cannot drift apart.
+
+The reports differ from the waveform analyses in one way: they return a dict (or
+a list of dicts), not a `SimResult`. That class is arrays indexed by signal name,
+and a report has neither an axis nor signals, so every accessor would have to
+answer with an empty array — which is also what a `SimResult` returns when
+something went wrong.
+
+`ckt.dc()` exists to mirror `run("dc")` and inherits its ambiguity — an
+operating point unless `src=` makes it a sweep. Prefer `op()` or `dc_sweep()`,
+which each mean one thing. Note that a deck's `.dc` card reports as
+`kind: "dc_sweep"` in `ckt.analyses`, so `run(a["kind"])` round-trips to the
+analysis the deck declared.
+
+**`.tf`** gives the gain, the resistance the input source sees, and the
+resistance the output port presents. Signs follow ngspice: a branch current
+counts positive into a source's `+` terminal, so a driving source reads negative
+and a sense source in the return path reads positive.
+
+**`.sens`** is the adjoint, not ngspice's per-parameter re-solve — every
+parameter costs one transposed solve between them, and the result is good to
+~1e-10 relative rather than to `reltol`. **Read the `reached` flag.** A
+parameter the adjoint could not perturb reports `0.0` with `reached = False`,
+and a genuine insensitivity reports `0.0` with `reached = True`; a gradient
+descent that cannot tell them apart stalls at what looks like a stationary
+point. Which model parameters are reachable is `docs/model_status.md`.
+
+**`.pz`** reports roots in rad/s. `vol` drives the input port from a voltage
+source (using the deck's own, if one is already there) and `cur` injects current
+into an open port — the two give different pole sets, and that is the physics,
+not an inconsistency. The eigensolve is dense: past 400 unknowns it is a hard
+error naming the limit rather than an unbounded wait.
+
+> **A pole-zero listing is only as linear as the operating point it was taken
+> at.** Like `.noise` above, `.pz` and `.tf` describe the circuit *at one bias*.
+> A deck idling at zero reports the poles of the idle circuit, which for
+> anything with a nonlinear device is not the circuit you care about. Bias the
+> deck where you want the answer.
+
+---
+
 ## 6. Directives
 
 ### Initial conditions
@@ -812,7 +897,34 @@ One thing is refused rather than guessed:
 
 `.temp` re-runs every analysis once per listed temperature (°C). `.alter`
 blocks describe deltas from the base netlist; each block produces a full
-re-run with overrides applied.
+re-run with overrides applied. The two cross: a deck with two `.alter` blocks
+and three temperatures has **nine** corners (base plus two blocks, times three),
+and every analysis in the deck runs at each of them.
+
+A single `.temp 75` is not a sweep — it just sets the temperature, so the deck
+still has one corner.
+
+The CLI runs the whole grid, one output file per corner (see
+[§8](#8-cli-reference)). From Python it is the same grid, expanded by the same
+code, reachable two ways:
+
+```python
+c.corners              # [{'alter': 'base', 'temp_c': -40.0}, …] — what the deck declares
+c.run_all()            # every analysis at every corner; one row per (corner, analysis)
+
+for corner in c.corners:                      # or drive them yourself
+    r = c.run("tran", alter=corner["alter"], temp=corner["temp_c"])
+```
+
+`run_all()` returns rows of `{'alter', 'temp_c', 'kind', 'result'}`. Each row
+names its corner because the results are otherwise indistinguishable — two
+`.tran` rows from a two-corner deck are the same analysis at different
+temperatures, and nothing inside a `SimResult` says which. Corners are
+independent, so they run in parallel.
+
+`run_all(alter=…)` and `run_all(temp=…)` are **errors**, not filters: asking the
+run-everything verb for one corner is a contradiction. Use `run()` for that.
+Solver options (`reltol`, `method`, …) do apply to every corner.
 
 ### Solver options
 
@@ -1129,13 +1241,35 @@ c.load("rc_step.sp")                     # load from file
 # Override scalar element parameters before running:
 c.set_param("Rload", "resistance", 2e3)
 
-# Run any analysis with SimOptions kwargs:
-op    = c.run("op")
-tran  = c.run("tran", step=1e-9, stop=1e-6,
-              method="gear", reltol=1e-5, variable_step=True)
-ac    = c.run("ac", variation="dec", points=20, fstart=1, fstop=1e6)
-noise = c.run("noise", variation="dec", points=20, fstart=1, fstop=1e6,
-              out_pos="out", src="V1")
+# Every analysis has a method and a name, and they are the same call —
+# run(name) dispatches to the method, so pick whichever reads better.
+op    = c.op()
+tran  = c.tran(step=1e-9, stop=1e-6,
+               method="gear", reltol=1e-5, variable_step=True)
+ac    = c.ac(variation="dec", points=20, fstart=1, fstop=1e6)
+noise = c.noise(variation="dec", points=20, fstart=1, fstop=1e6,
+                out_pos="out", src="V1")
+sweep = c.dc_sweep(src="V1", start=0, stop=2, step=0.1)
+
+tran  = c.run("tran", step=1e-9, stop=1e-6)      # identical to c.tran(...)
+
+# The small-signal reports return tables, not waveforms, so these return a dict
+# rather than a SimResult.  Each takes the deck's card when given no arguments.
+gain  = c.tf(out="v(out)", src="Vin")["gain"]
+grads = c.sens(out="v(out)")                      # check each row's ['reached']
+poles = c.pz(in_pos="in", out_pos="out")["poles"] # rad/s, complex
+
+# What the deck declares, without running any of it:
+c.analyses          # [{'kind': 'tran', …}, {'kind': 'pz', …}]
+c.corners           # [{'alter': 'base', 'temp_c': 27.0}, …]
+
+# Run the whole deck — every analysis at every corner, like the CLI does.
+for row in c.run_all():
+    print(row["alter"], row["temp_c"], row["kind"], row["result"])
+
+# Or drive the corners yourself, one at a time:
+for corner in c.corners:
+    r = c.run("tran", alter=corner["alter"], temp=corner["temp_c"])
 
 # Parametric sweep — equivalent of Monte Carlo / corner runs.
 results = c.sweep("Rload.resistance", [1e3, 2e3, 5e3], "tran",

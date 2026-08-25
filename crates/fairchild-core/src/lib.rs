@@ -4,6 +4,7 @@ pub mod adjoint_ac;
 pub mod adjoint_tran;
 pub mod behavioral;
 pub mod connectivity;
+pub mod corner;
 pub mod dc_sweep;
 pub mod delay;
 pub mod device;
@@ -17,9 +18,12 @@ pub mod netlist_edit;
 pub mod newton;
 pub mod noise;
 pub mod options;
+pub mod pz;
 pub mod reactive;
 pub mod sanity;
+pub mod sens;
 pub mod solver;
+pub mod tf;
 pub mod tolerance;
 pub mod tran;
 pub mod tran_step;
@@ -36,6 +40,7 @@ pub use ac::{ac_analysis, ac_analysis_opts, freq_decade, freq_linear, freq_oct, 
 pub use adjoint::{dc_sensitivity, Output, ParamRef, Sensitivities};
 pub use adjoint_tran::{TranAdjoint, TranSensitivities};
 pub use connectivity::check_connectivity;
+pub use corner::{expand_corners, Corner, CornerGrid};
 pub use dc_sweep::{dc_sweep_with_registry, dc_sweep_with_registry_opts, DcSweepResult, SweepAxis};
 pub use delay::DelayLine;
 pub use device::{Device, EvalFlags, NodeId, SimContext};
@@ -51,8 +56,11 @@ pub use newton::{
 };
 pub use noise::{noise_analysis, NoiseResult};
 pub use options::SimOptions;
+pub use pz::{pole_zero, PzResult, Root, MAX_PZ_SIZE};
 pub use sanity::check_netlist_sanity;
+pub use sens::{sensitivity, SensResult, SensRow};
 pub use solver::SolverKind;
+pub use tf::{transfer_function, TfResult};
 pub use tran::{
     tran_nr, tran_nr_tr, tran_nr_var, tran_nr_with_registry, tran_nr_with_registry_opts,
     tran_nr_with_registry_tr, tran_nr_with_registry_var, tran_nr_with_registry_var_opts,

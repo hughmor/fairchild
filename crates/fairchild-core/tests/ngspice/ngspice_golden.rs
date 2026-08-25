@@ -25,7 +25,7 @@ const REL_TOL: f64 = 1e-5; // 10 ppm relative
 /// The netlist must contain `.op` — we inject a `.control` block that calls
 /// `print` on every node/source we care about and parse the output.
 /// Find the ngspice binary, checking PATH and common install locations.
-fn find_ngspice() -> Option<std::path::PathBuf> {
+pub(super) fn find_ngspice() -> Option<std::path::PathBuf> {
     // Try bare name first (works when PATH is set correctly).
     if Command::new("ngspice").arg("--version").output().is_ok() {
         return Some("ngspice".into());

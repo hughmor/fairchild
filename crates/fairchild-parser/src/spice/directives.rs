@@ -1,7 +1,8 @@
 use super::common::{canon_node, parse_value};
 use crate::expr::{Expr, FuncDef, FuncTable};
 use crate::{
-    AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, ParseError,
+    AcVariation, Analysis, DcSweepSpec, MeasAnalysis, MeasKind, MeasOp, Measurement, OutVar,
+    ParamName, ParseError, PzDrive, PzWant,
 };
 
 /// `.backanno` (LTspice schematic back-annotation) is the one directive still
@@ -585,18 +586,21 @@ pub(super) fn parse_noise(line: &str, lineno: usize) -> Result<Analysis, ParseEr
     }
     // tokens[0] = ".noise"; tokens[1] = "v(out[,ref])"; tokens[2] = src;
     // tokens[3] = DEC|OCT|LIN; tokens[4] = pts; tokens[5..7] = fstart, fstop.
-    let v_expr = tokens[1];
-    let inside = v_expr
-        .strip_prefix("v(")
-        .and_then(|s| s.strip_suffix(')'))
-        .ok_or_else(|| ParseError::Syntax {
-            line: lineno,
-            msg: format!("expected V(node[,ref]); got '{v_expr}'"),
-        })?;
-    let (out_pos, out_neg) = if let Some((a, b)) = inside.split_once(',') {
-        (canon_node(a.trim()), canon_node(b.trim()))
-    } else {
-        (canon_node(inside.trim()), "0".to_string())
+    //
+    // A noise *current* has no meaning as an observation point here — the
+    // analysis reports a voltage PSD at a node pair — so `i(...)` is refused
+    // rather than quietly reinterpreted.
+    let (out_pos, out_neg) = match parse_outvar(tokens[1], lineno)? {
+        OutVar::NodeVoltage { pos, neg } => (pos, neg),
+        OutVar::BranchCurrent(src) => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!(
+                    ".noise observes a node voltage; got 'i({src})'. Write \
+                     v(node[,ref]) for the point the output PSD is measured at"
+                ),
+            })
+        }
     };
     let input_src = tokens[2].to_lowercase();
     let variation = match tokens[3] {
@@ -622,5 +626,139 @@ pub(super) fn parse_noise(line: &str, lineno: usize) -> Result<Analysis, ParseEr
         points,
         fstart: parse_value(tokens[5], lineno)?,
         fstop: parse_value(tokens[6], lineno)?,
+    })
+}
+
+/// `v(node)`, `v(node,ref)` or `i(vsrc)` — the output spelling every SPICE
+/// analysis card shares.
+///
+/// One parser for all of them.  `.noise` used to do this string surgery inline
+/// and `.tf`/`.sens` would have been a second and third copy; three copies of
+/// "what does `v(a,b)` mean" is three chances for a card to quietly disagree
+/// with the other two about which terminal is the reference.
+pub fn parse_outvar(tok: &str, lineno: usize) -> Result<OutVar, ParseError> {
+    let lc = tok.to_lowercase();
+    let bad = |msg: String| ParseError::Syntax { line: lineno, msg };
+
+    if let Some(inside) = lc.strip_prefix("i(").and_then(|s| s.strip_suffix(')')) {
+        let src = inside.trim();
+        if src.is_empty() {
+            return Err(bad(format!("empty source name in '{tok}'")));
+        }
+        return Ok(OutVar::BranchCurrent(src.to_string()));
+    }
+
+    let inside = lc
+        .strip_prefix("v(")
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| bad(format!("expected v(node[,ref]) or i(vsrc); got '{tok}'")))?;
+    let (pos, neg) = match inside.split_once(',') {
+        Some((a, b)) => (canon_node(a.trim()), canon_node(b.trim())),
+        None => (canon_node(inside.trim()), "0".to_string()),
+    };
+    if pos.is_empty() || neg.is_empty() {
+        return Err(bad(format!("empty node name in '{tok}'")));
+    }
+    Ok(OutVar::NodeVoltage { pos, neg })
+}
+
+/// `.tf <outvar> <insrc>`
+///
+/// Two fields, no options — ngspice's form exactly.  The card names the output
+/// and the source the transfer is taken from; everything else (which
+/// resistances to report, at which port) follows from those two and is not the
+/// deck's to choose.
+pub(super) fn parse_tf(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() != 3 {
+        return Err(ParseError::FieldCount {
+            expected: "3 (.tf <v(node[,ref])|i(vsrc)> <input_source>)",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    Ok(Analysis::Tf {
+        out: parse_outvar(tokens[1], lineno)?,
+        input_src: tokens[2].to_lowercase(),
+    })
+}
+
+/// `.sens <outvar> [<element>[.<param>] …]`
+///
+/// The trailing list is optional: with nothing after the output, every element
+/// value in the deck is differentiated.  That is affordable here in a way it is
+/// not in ngspice — the adjoint gets the whole gradient from one transposed
+/// solve per output, so "all of them" costs the same as "one of them" on the
+/// solve side.
+pub(super) fn parse_sens(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return Err(ParseError::FieldCount {
+            expected: "≥2 (.sens <v(node[,ref])|i(vsrc)> [element[.param] …])",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    let out = parse_outvar(tokens[1], lineno)?;
+    let mut params = Vec::new();
+    for tok in &tokens[2..] {
+        let lc = tok.to_lowercase();
+        let (element, param) = match lc.split_once('.') {
+            Some((e, p)) => (e.to_string(), Some(p.to_string())),
+            None => (lc.clone(), None),
+        };
+        if element.is_empty() {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!("missing element name in '{tok}'"),
+            });
+        }
+        params.push(ParamName { element, param });
+    }
+    Ok(Analysis::Sens { out, params })
+}
+
+/// `.pz <n1> <n2> <n3> <n4> <cur|vol> <pol|zer|pz>`
+///
+/// ngspice's field order, kept because a deck that carries a `.pz` card at all
+/// almost certainly carries ngspice's.  `(n1, n2)` is the input port and
+/// `(n3, n4)` the output port.
+pub(super) fn parse_pz(line: &str, lineno: usize) -> Result<Analysis, ParseError> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() != 7 {
+        return Err(ParseError::FieldCount {
+            expected: "7 (.pz <n1> <n2> <n3> <n4> cur|vol pol|zer|pz)",
+            got: tokens.len(),
+            line: lineno,
+        });
+    }
+    let drive = match tokens[5] {
+        "vol" => PzDrive::Vol,
+        "cur" => PzDrive::Cur,
+        other => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!("unknown .pz transfer type '{other}'; expected cur or vol"),
+            })
+        }
+    };
+    let want = match tokens[6] {
+        "pol" => PzWant::Poles,
+        "zer" => PzWant::Zeros,
+        "pz" => PzWant::Both,
+        other => {
+            return Err(ParseError::Syntax {
+                line: lineno,
+                msg: format!("unknown .pz request '{other}'; expected pol, zer, or pz"),
+            })
+        }
+    };
+    Ok(Analysis::Pz {
+        in_pos: canon_node(tokens[1]),
+        in_neg: canon_node(tokens[2]),
+        out_pos: canon_node(tokens[3]),
+        out_neg: canon_node(tokens[4]),
+        drive,
+        want,
     })
 }

@@ -120,6 +120,11 @@ impl ParamRef {
 pub enum Output {
     /// `v(node)`.
     NodeVoltage(String),
+    /// `v(pos) − v(neg)` — a port voltage rather than a ground-referenced one.
+    /// `.tf` and `.sens` both need it: a `.tf` output resistance is measured
+    /// *across a port*, and the port is only the same thing as a node when the
+    /// far side happens to be ground.
+    NodeVoltageDiff { pos: String, neg: String },
     /// The branch current through a voltage source, SPICE sign convention.
     BranchCurrent(String),
     /// Optical power `re² + im²` on one channel of an optical net, in watts —
@@ -149,6 +154,18 @@ impl Output {
                 // gradient; it has no row, so leave the seed at zero.
                 if let Some(&i) = topo.node_index.get(node) {
                     seed[i] = 1.0;
+                }
+                Ok((value, seed))
+            }
+            Output::NodeVoltageDiff { pos, neg } => {
+                let value = topo.node_voltage(pos, x)? - topo.node_voltage(neg, x)?;
+                // Ground has no row, so it contributes nothing to the seed —
+                // the same rule `NodeVoltage` follows, applied to both ends.
+                if let Some(&i) = topo.node_index.get(pos) {
+                    seed[i] += 1.0;
+                }
+                if let Some(&i) = topo.node_index.get(neg) {
+                    seed[i] -= 1.0;
                 }
                 Ok((value, seed))
             }
@@ -715,7 +732,11 @@ pub(crate) fn apply(
     }
 }
 
-fn element_name(el: &Element) -> Option<&str> {
+/// The name of an element the netlist stamps directly — the set
+/// [`crate::netlist_edit::set_element_param`] can retune without touching a
+/// device.  `None` for everything else, which is what makes it the right
+/// collision check for a synthetic probe element.
+pub(crate) fn element_name(el: &Element) -> Option<&str> {
     match el {
         Element::Resistor { name, .. }
         | Element::Capacitor { name, .. }

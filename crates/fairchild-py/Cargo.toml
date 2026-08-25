@@ -17,6 +17,7 @@ fairchild-parser = { path = "../fairchild-parser" }
 fairchild-osdi   = { path = "../fairchild-osdi", optional = true }
 pyo3             = { version = "0.22", features = ["extension-module"] }
 numpy            = "0.22"
+rayon            = { workspace = true }
 
 [features]
 default = ["osdi"]
