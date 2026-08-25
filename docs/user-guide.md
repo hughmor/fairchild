@@ -705,9 +705,14 @@ c.pz(in_pos="in", out_pos="out")        # in_neg/out_neg default to ground
 
 Pass no analysis arguments and the deck's card is adopted whole; pass any and
 the card is not used at all — the same rule `run("tran")` follows, so the
-numbers in one result always come from one place. They are their own methods
-rather than `run("tf")` because a `SimResult` is a waveform container and these
-have no waveform to put in it.
+numbers in one result always come from one place.
+
+`run("tf")`, `run("sens")` and `run("pz")` work too and are the *same call* —
+`run` delegates to the method, so the two spellings cannot drift apart. What
+they do not do is return a `SimResult`: that class is arrays indexed by signal
+name, and a report has neither an axis nor signals, so every accessor would
+have to answer with an empty array — which is also what a `SimResult` returns
+when something went wrong. These return a dict (or a list of dicts) instead.
 
 **`.tf`** gives the gain, the resistance the input source sees, and the
 resistance the output port presents. Signs follow ngspice: a branch current
@@ -1207,9 +1212,9 @@ ac    = c.run("ac", variation="dec", points=20, fstart=1, fstop=1e6)
 noise = c.run("noise", variation="dec", points=20, fstart=1, fstop=1e6,
               out_pos="out", src="V1")
 
-# The small-signal reports return tables, not waveforms, so they are their own
-# methods rather than run() kinds.  Each takes the deck's card when given no
-# arguments of its own.
+# The small-signal reports return tables, not waveforms.  Either spelling works
+# — c.run("tf") delegates to c.tf() — but both return a dict, not a SimResult.
+# Each takes the deck's card when given no arguments of its own.
 gain  = c.tf(out="v(out)", src="Vin")["gain"]
 grads = c.sens(out="v(out)")                      # check each row's ['reached']
 poles = c.pz(in_pos="in", out_pos="out")["poles"] # rad/s, complex

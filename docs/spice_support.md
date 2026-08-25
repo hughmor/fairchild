@@ -679,10 +679,12 @@ survive. fairchild issue #57.
 These three produce a *report*, not a waveform set, and that shapes how they are
 reached. On the CLI they run in deck order like any other card and write a small
 table (`--format csv`) or a one-point rawfile (`--format nutmeg`). From Python
-they are `ckt.tf()`, `ckt.sens()` and `ckt.pz()` — not `run("tf")`, which would
-have to return a `SimResult` with every waveform accessor empty. Each takes its
-deck card whole when called with no arguments and ignores the card entirely when
-given any of its own, which is the rule `run()` follows for `.tran`.
+they are `ckt.tf()`, `ckt.sens()` and `ckt.pz()`, and `run("tf")` and friends
+delegate to exactly those — one implementation, two spellings. They return a
+dict rather than a `SimResult`, which is arrays indexed by signal name and would
+have to answer every accessor with an empty array. Each takes its deck card
+whole when called with no arguments and ignores the card entirely when given any
+of its own, which is the rule `run()` follows for `.tran`.
 
 Every number below is pinned against ngspice in
 `crates/fairchild-core/tests/ngspice/ngspice_tf_pz_golden.rs`, including a

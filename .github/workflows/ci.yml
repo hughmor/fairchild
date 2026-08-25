@@ -283,11 +283,10 @@ jobs:
               raise AssertionError("tf(out=) without src= must be an error")
           except RuntimeError as e:
               assert "src" in str(e), e
-          try:
-              ss.run("pz")          # says where it went, not "unknown analysis"
-              raise AssertionError("run('pz') must redirect")
-          except RuntimeError as e:
-              assert "ckt.pz" in str(e), e
+          # Both spellings are the same call, and neither returns a SimResult.
+          assert ss.run("tf") == card, "run('tf') and ckt.tf() disagree"
+          assert not hasattr(ss.run("tf"), "time"), "a report must not be a SimResult"
+          assert ss.run("tran", step=1e-9, stop=1e-8).is_tran, "run() still returns SimResult"
 
           rows = ss.sens()
           assert [r["param"] for r in rows] == ["vin.value", "r1.value", "r2.value"], rows

@@ -887,6 +887,11 @@ impl Circuit {
     ///   `src` kwarg makes it a sweep; a deck's `.dc` card is reached through
     ///   `"dc_sweep"`.)
     ///
+    ///   `"tf"`, `"sens"` and `"pz"` also work here and are the same call as
+    ///   `ckt.tf()` / `ckt.sens()` / `ckt.pz()` — but they return a dict (or a
+    ///   list of dicts), **not** a `SimResult`, because a report has no time or
+    ///   frequency axis to index.
+    ///
     ///   Pass no analysis parameters and the deck's matching card is adopted
     ///   **whole**: `run("tran")` takes `step`, `stop`, `tstart`, `tmax` and
     ///   `UIC` off the `.tran` line.  Pass any one of them and the card is not
@@ -924,7 +929,21 @@ impl Circuit {
         py: Python<'_>,
         analysis: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<SimResult> {
+    ) -> PyResult<PyObject> {
+        // The small-signal reports are reachable by either spelling, and are
+        // *the same call* either way — `run` delegates rather than reimplements,
+        // so the two can never come to disagree. What they do not do is arrive
+        // wrapped in a `SimResult`: that class is arrays indexed by signal name,
+        // and a report has neither an axis nor signals, so every accessor would
+        // have to answer with an empty array — which is also what a `SimResult`
+        // returns when something went wrong.
+        match analysis.to_lowercase().as_str() {
+            "tf" => return Ok(self.tf(py, kwargs)?.into_py(py)),
+            "sens" => return Ok(self.sens(py, kwargs)?.into_py(py)),
+            "pz" => return Ok(self.pz(py, kwargs)?.into_py(py)),
+            _ => {}
+        }
+
         // Prologue extracted so `tf`/`sens`/`pz` get the same one.  Four copies
         // of "apply the overrides, then the params, then the alter" is four
         // chances for one entry point to honour something the others do not,
@@ -959,7 +978,8 @@ impl Circuit {
             return Ok(SimResult {
                 inner: SimResultInner::DcSweep(result),
                 measurements: Vec::new(),
-            });
+            }
+            .into_py(py));
         }
 
         match analysis_lc.as_str() {
@@ -970,7 +990,8 @@ impl Circuit {
                 Ok(SimResult {
                     inner: SimResultInner::Dc(result),
                     measurements: Vec::new(),
-                })
+                }
+                .into_py(py))
             }
             "tran" | "transient" => {
                 let (stop, step) = parse_tran_kwargs(&nl, kwargs, &mut opts)?;
@@ -990,7 +1011,8 @@ impl Circuit {
                 Ok(SimResult {
                     inner: SimResultInner::Tran(result),
                     measurements,
-                })
+                }
+                .into_py(py))
             }
             "ac" => {
                 let (freqs, src) = parse_ac_kwargs(&nl, kwargs)?;
@@ -1002,7 +1024,8 @@ impl Circuit {
                 Ok(SimResult {
                     inner: SimResultInner::Ac(result),
                     measurements: Vec::new(),
-                })
+                }
+                .into_py(py))
             }
             "noise" => {
                 let (freqs, out_pos, out_neg, input_src) = parse_noise_kwargs(&nl, kwargs)?;
@@ -1016,20 +1039,13 @@ impl Circuit {
                 Ok(SimResult {
                     inner: SimResultInner::Noise(result),
                     measurements: Vec::new(),
-                })
+                }
+                .into_py(py))
             }
-            // The small-signal reports are not waveform sets, so they do not
-            // come back as a `SimResult` and are not reachable through `run`.
-            // Saying where they went beats "unknown analysis" for someone who
-            // has just added the card to a deck.
-            kind @ ("tf" | "sens" | "pz") => Err(PyRuntimeError::new_err(format!(
-                "'{kind}' returns a report, not a waveform set, so it has its own \
-                 method: call ckt.{kind}(...) instead of run(\"{kind}\"). It takes the \
-                 deck's .{kind} card when passed no arguments, like run() does"
-            ))),
             other => Err(PyRuntimeError::new_err(format!(
-                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', or 'dc_sweep' \
-                 (the small-signal reports are ckt.tf(), ckt.sens() and ckt.pz())",
+                "unknown analysis '{}'; use 'op', 'tran', 'ac', 'noise', 'dc_sweep', \
+                 or one of the small-signal reports 'tf', 'sens', 'pz' (which are also \
+                 ckt.tf(), ckt.sens() and ckt.pz())",
                 other
             ))),
         }
