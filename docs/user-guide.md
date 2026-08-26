@@ -1123,7 +1123,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
 | `temptol` | 1e-3 | NR temperature absolute tolerance (K), on thermal rows |
-| `vmax` | 0.5 | Per-iteration |ΔV| clamp |
+| `vmax` | 0.5 | Per-iteration |ΔV| clamp, *plus* `reltol·|V|` — see below |
 | `gmin` | 1e-12 | Diagonal regularising conductance (S) |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
 | `itl1` | 150 | DC max NR iterations |
@@ -1493,6 +1493,15 @@ while self-heating stays solved on top.
 `examples/verilog_a/models/mrm_wdm.va` is a worked example: a microring whose
 resonance moves with a solved temperature, with `th` exposed so a deck can wire
 ring-to-ring thermal crosstalk.
+
+The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
+node whose operating point is far from the seed can still get there. A flat
+allowance meant a node heading for 10^9 V had to walk 0.5 V at a time, and the
+convergence test — `|ΔV| < vntol + reltol·|V|` — accepted the walk as soon as
+`reltol·|V|` overtook the step, stopping partway and reporting success. Tying the
+allowance's relative term to `reltol` itself makes a clamped step and a
+converged step disjoint at any tolerance. A clamped iteration is also never the
+last one, since a clamped step is shorter than the one that would arrive.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal

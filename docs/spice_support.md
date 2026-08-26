@@ -168,6 +168,43 @@ being read at a glance — so it is an error naming both unambiguous spellings.
 A deck meant to run under both simulators should not use RKM at all, since
 ngspice will accept it and be wrong.
 
+### One place fairchild answers differently from ngspice: nodal `gmin`
+
+`gmin` is added to **every** node's diagonal, not only to nodes that would
+otherwise carry no conductance. `stamp_gmin` writes `g` on every row and reserves
+its `1.0` pin for rows that are entirely empty, so a node with a real resistor on
+it still gets `gmin` in parallel with it.
+
+ngspice does not do this. Its `GMIN` goes across each pn junction; a resistor
+node gets nothing. On the same deck:
+
+```spice
+I1 0 p DC 1m
+Rs p 0 1T
+.op
+```
+
+| | `V(p)` |
+|---|---|
+| ideal (`I·R`) | 1e9 |
+| ngspice 46 | 1.000000000000e+09 |
+| fairchild | 5e8 |
+
+At `R = 1/gmin` the leakage is an equal second path and takes half the current.
+The error is `gmin·R` as a fraction — 1 ppm at 1 MΩ, 0.1% at 1 GΩ, 50% at 1 TΩ —
+so it is invisible at ordinary impedances and dominant at extreme ones.
+
+Whether that is the right policy is a real question and is **not settled here**:
+an unconditional nodal floor guarantees a non-singular matrix and is what
+`gmin`-stepping ramps, while a conditional one would match ngspice and leave the
+high-impedance answers exact. What is settled is that it should not be discovered
+by surprise, so it is written down.
+
+Consequence for tests: an expectation taken at `R` near `1/gmin` is a statement
+about `gmin`, not about the circuit. `trust_region_does_not_end_the_solve.rs`
+picks its impedances so the tolerance absorbs the leakage instead of asserting
+it.
+
 ---
 
 ## 4. The silent set
