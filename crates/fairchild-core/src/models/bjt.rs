@@ -46,7 +46,10 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::reactive::ChargeHistory;
 
-const GMIN: f64 = 1e-12;
+/// Seed conductance before the first `eval`, so a device stamped before being
+/// evaluated cannot present a singular row. The *operating* `gmin` comes from
+/// `SimContext::gmin`.
+const GMIN_SEED: f64 = 1e-12;
 
 /// Depletion capacitance at junction voltage `v` (SPICE3 piecewise model).
 fn cj_depl(c0: f64, v: f64, vj: f64, mj: f64, fc: f64) -> f64 {
@@ -129,6 +132,10 @@ pub struct GummelPoonBjt {
     /// error in an exponent — enough to advance a charge the evaluation never
     /// produced.  Cached here so both read the same number.
     vt: f64,
+    /// `SimContext::gmin` from the last `eval`, for the same reason `vt` is
+    /// stored: `commit_timestep` recomputes `op` from the converged solution and
+    /// must do it with the same solve-level constants the eval used.
+    gmin: f64,
 
     // ── Terminal bindings ─────────────────────────────────────────────────────
     // The intrinsic transistor physics operates on the *internal* nodes
@@ -286,6 +293,7 @@ impl GummelPoonBjt {
             polarity: if is_pnp { -1.0 } else { 1.0 },
             vcrit: 0.0,
             vt: 0.025864,
+            gmin: GMIN_SEED,
             collector: None,
             base: None,
             emitter: None,
@@ -294,10 +302,10 @@ impl GummelPoonBjt {
             emitter_ext: None,
             vbe_eff: 0.0,
             vbc_eff: 0.0,
-            gf: GMIN,
-            gce: GMIN,
-            gpi: GMIN / 100.0,
-            gmu: GMIN / 100.0,
+            gf: GMIN_SEED,
+            gce: GMIN_SEED,
+            gpi: GMIN_SEED / 100.0,
+            gmu: GMIN_SEED / 100.0,
             jeq_c: 0.0,
             jeq_b: 0.0,
             ic_eval: 0.0,
@@ -377,7 +385,7 @@ impl GummelPoonBjt {
     /// The junction currents, their derivatives, and the stored charges at one
     /// bias point — SPICE3 `BJTload`, minus excess phase and the TF bias
     /// modulation (`XTF`/`VTF`/`ITF`), which are not parsed.
-    fn op(&self, vbe: f64, vbc: f64, vt: f64) -> Op {
+    fn op(&self, vbe: f64, vbc: f64, vt: f64, gmin: f64) -> Op {
         // Transport currents.  These are the ones the base charge divides, and
         // the ones the high-injection knee is measured against — not the
         // base currents, which is why IKF is compared with IF and not with IB.
@@ -387,8 +395,8 @@ impl GummelPoonBjt {
         let e_bc = (vbc / nr_vt).exp();
         let i_f = self.is * (e_be - 1.0);
         let i_r = self.is * (e_bc - 1.0);
-        let gbe = self.is * e_be / nf_vt + GMIN;
-        let gbc = self.is * e_bc / nr_vt + GMIN;
+        let gbe = self.is * e_be / nf_vt;
+        let gbc = self.is * e_bc / nr_vt;
 
         // Non-ideal (recombination) leakage: a second, softer exponential in
         // parallel with each junction, and the reason a real beta falls off at
@@ -444,15 +452,34 @@ impl GummelPoonBjt {
 
         // ── Terminal currents ────────────────────────────────────────────────
         let it = (i_f - i_r) / qb; // transport, base-charge corrected
-        let ic = it - i_r / self.br - i_bcn;
-        let ib = i_f / self.bf + i_ben + i_r / self.br + i_bcn;
+
+        // `gmin·V` on each junction, matching the conductances added to
+        // `gpi`/`gmu` below. A conductance that carries no current would only
+        // condition the matrix, which is what this used to do.
+        let ic = it - i_r / self.br - i_bcn - gmin * vbc;
+        let ib = i_f / self.bf + i_ben + i_r / self.br + i_bcn + gmin * vbe + gmin * vbc;
 
         // ∂IC/∂V: the `it·∂qb/∂V / qb` terms ARE the output conductance.  Drop
         // the ∂qb/∂VBC one and the small-signal ro stops matching the DC slope.
         let gf = (gbe - it * dqb_dvbe) / qb;
         let gce = (gbc + it * dqb_dvbc) / qb + gbc / self.br + gbcn;
-        let gpi = gbe / self.bf + gben;
-        let gmu = gbc / self.br + gbcn;
+        // `gmin` across each junction, at the *terminal* pair.
+        //
+        // Not folded into `gbe`/`gbc`: those are transport quantities and are
+        // divided by `BF`/`BR` on the way out, so a `gmin` added there arrives as
+        // `gmin/100` and is not a conductance across anything. It also used to be
+        // Jacobian-only — `ic`/`ib` never saw it — so a reverse-biased BJT
+        // carried `2·IS = 2e-16` where ngspice carries `gmin·V ≈ 1e-12`.
+        //
+        // fairchild still reads *half* of ngspice's leakage on a 3-terminal BJT,
+        // and that is a different gap: ngspice also puts `gmin` across the
+        // collector-substrate junction, whose node defaults to ground. Confirmed
+        // by pinning the substrate at the collector potential in ngspice, which
+        // removes exactly one `gmin·V`. That junction is not modelled here at all
+        // (`docs/model_status.md` — `CJS`/`VJS`/`MJS`/`FCS`), so it is recorded
+        // rather than faked.
+        let gpi = gbe / self.bf + gben + gmin;
+        let gmu = gbc / self.br + gbcn + gmin;
 
         // Diffusion charge.  Forward carries the base-charge factor (it is the
         // stored minority charge of the transport current); reverse does not,
@@ -494,6 +521,7 @@ impl Device for GummelPoonBjt {
     fn setup_model(&mut self, ctx: &SimContext) {
         let vt = ctx.vt();
         self.vt = vt;
+        self.gmin = ctx.gmin;
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
     }
 
@@ -562,7 +590,8 @@ impl Device for GummelPoonBjt {
         self.vbc_eff = vbc_eff;
 
         self.vt = vt;
-        let op = self.op(vbe_eff, vbc_eff, vt);
+        self.gmin = ctx.gmin;
+        let op = self.op(vbe_eff, vbc_eff, vt, ctx.gmin);
 
         // Real currents into each physical terminal: pol * eff.
         // b[C] -= pol*ic; b[B] -= pol*ib; b[E] += pol*(ic + ib)
@@ -773,7 +802,7 @@ impl Device for GummelPoonBjt {
         // the same `op` the eval used, so the charge that gets integrated is the
         // charge the model evaluated.  `vt` comes from the last eval for the
         // same reason.
-        let op = self.op(vbe_eff, vbc_eff, self.vt);
+        let op = self.op(vbe_eff, vbc_eff, self.vt, self.gmin);
         let disc = self.disc;
         self.qbe_hist.advance(disc, op.qbe);
         self.qbc_hist.advance(disc, op.qbc);

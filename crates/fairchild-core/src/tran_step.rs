@@ -34,7 +34,7 @@ use fairchild_parser::{Element, Netlist, Waveform};
 use crate::device::{Device, EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{CircuitTopology, MnaMatrix, RowFloor, StampPlan};
+use crate::mna::{CircuitTopology, MnaMatrix, StampPlan};
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::reactive::{stamp_device_branches, ReactiveState};
@@ -444,8 +444,7 @@ impl TranStepper {
             d.gear2_h_prev,
         );
 
-        self.topo
-            .stamp_gmin(&mut self.mat.a, self.opts.gmin, RowFloor::PinEmptyRows);
+        self.topo.stamp_gmin(&mut self.mat.a, 0.0);
     }
 
     /// Stamp the *DC* system at `probe`, the way the `t = 0` operating point was
@@ -459,7 +458,6 @@ impl TranStepper {
             &self.netlist,
             &mut self.devices,
             &self.ctx,
-            &self.opts,
             1.0,
             0.0,
             Some(&self.plan),

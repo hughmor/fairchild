@@ -86,8 +86,11 @@ Vsrc_wl    src_wl_0    0 DC 1.55e-6
 * Drive bw from the OUTPUT side.
 Vbw_re wg_out_re_bw_0 0 DC 1.0
 Vbw_im wg_out_im_bw_0 0 DC 0.0
-Vout_fw_re wg_out_re_fw_0 0 DC 0
-Vout_fw_im wg_out_im_fw_0 0 DC 0
+* No sources on wg_out_re_fw_0 / wg_out_im_fw_0: those are the waveguide's own
+* forward *outputs* and it already has an equation for each. Forcing them too
+* gives two rows asserting one node voltage — consistent here (both say 0), so
+* the answer was right, but the matrix is rank-deficient and used to solve only
+* because gmin landed on the device's branch rows.
 Vout_wl    wg_out_wl_0    0 DC 1.55e-6
 Xwg src wg_out fc_waveguide L_um=100 n_g=4.2 alpha_dB_cm=2.0
 .op

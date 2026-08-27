@@ -279,6 +279,7 @@ impl SimOptions {
             temperature: self.temp_k,
             omega_0: 0.0,
             jlim_enabled: self.pnjlim,
+            gmin: self.gmin,
             lambda_center_m: self.lambda_center_m,
             bidirectional_propagation: self.bidirectional_propagation,
             waveguide_delay: self.waveguide_delay,
@@ -560,6 +561,25 @@ mod tests {
         assert_eq!(o.gmin, 1e-12);
         assert_eq!(o.itl1, 150);
         assert!(matches!(o.method, IntegratorMode::Trapezoidal));
+    }
+
+    /// `SimContext` has its own `Default`, used by tests and by callers that
+    /// build a context without options. Two defaults for one quantity is two
+    /// chances to drift, and a drift here would mean every model saw a different
+    /// `gmin` than `.options` reports.
+    #[test]
+    fn the_two_defaults_for_gmin_are_one_number() {
+        assert_eq!(
+            SimOptions::default().gmin,
+            crate::device::SimContext::default().gmin,
+            "SimContext::default().gmin must match SimOptions::default().gmin"
+        );
+        // And the plumbing: `sim_context()` carries the option, not the default.
+        let o = SimOptions {
+            gmin: 4.2e-9,
+            ..SimOptions::default()
+        };
+        assert_eq!(o.sim_context().gmin, 4.2e-9);
     }
 
     #[test]

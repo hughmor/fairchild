@@ -1123,8 +1123,8 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `abstol` | 1e-12 | NR current absolute tolerance (A) |
 | `vntol` | 1e-6 | NR voltage absolute tolerance (V) |
 | `temptol` | 1e-3 | NR temperature absolute tolerance (K), on thermal rows |
-| `vmax` | 0.5 | Per-iteration |ΔV| clamp |
-| `gmin` | 1e-12 | Diagonal regularising conductance (S) |
+| `vmax` | 0.5 | Per-iteration |ΔV| clamp, *plus* `reltol·|V|` — see below |
+| `gmin` | 1e-12 | Minimum conductance across each pn junction (S) — not a nodal floor; see below |
 | `gminmax` | 1.0 | GMIN-stepping starting value |
 | `itl1` | 150 | DC max NR iterations |
 | `itl4` | 150 | Transient per-step max NR iterations |
@@ -1171,7 +1171,9 @@ circuit.run("tran", step=1e-9, stop=100e-9,
 
 Convergence aids that don't appear as fields but always run:
 
-- **GMIN stepping**: starts at `gminmax`, ramps to `gmin`.
+- **GMIN stepping**: starts at `gminmax`, ramps to zero. It puts a large
+  conductance on every node and takes it away again; `gmin` itself is not a nodal
+  quantity, so the endpoint is 0 and the answer does not depend on the homotopy.
 - **Source stepping**: ramps sources 0 → final in `srcsteps` steps.
 - **Pseudo-transient continuation**: not yet implemented.
 
@@ -1494,9 +1496,18 @@ while self-heating stays solved on top.
 resonance moves with a solved temperature, with `th` exposed so a deck can wire
 ring-to-ring thermal crosstalk.
 
+The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
+node whose operating point is far from the seed can still get there. A flat
+allowance meant a node heading for 10^9 V had to walk 0.5 V at a time, and the
+convergence test — `|ΔV| < vntol + reltol·|V|` — accepted the walk as soon as
+`reltol·|V|` overtook the step, stopping partway and reporting success. Tying the
+allowance's relative term to `reltol` itself makes a clamped step and a
+converged step disjoint at any tolerance. A clamped iteration is also never the
+last one, since a clamped step is shorter than the one that would arrive.
+
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
 (`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal
-conductance from `gminmax` to `gmin`), source stepping (ramp sources 0 →
+conductance from `gminmax` to zero), source stepping (ramp sources 0 →
 final in `srcsteps` steps).
 
 ### Transient integration
@@ -2228,7 +2239,12 @@ ngspice-46 to seven significant figures, on NMOS and PMOS, long and short
 channel, with body bias and at 85 °C. The comparison is against ngspice loading
 **the same compiled `.osdi`** through `pre_osdi`, not against ngspice's built-in
 BSIM4 — so a disagreement is a difference in how the two simulators stamp one
-model, with nothing else in the way. The remaining gap is `gmin`, at 1 pS.
+model, with nothing else in the way.
+
+Seven digits was the limit while `gmin` sat on every node here and across pn
+junctions there; that mismatch was the whole of the remaining gap. With `gmin`
+across the junctions in both, the same points agree to **twelve** — femtoamps
+against milliamps, which is round-off at the precision ngspice prints.
 
 The model itself cannot be shipped here: it is CC BY-NC-SA, which an Apache-2.0
 repository cannot vendor. Point `FAIRCHILD_BSIM4_VA` at a copy and
@@ -2240,10 +2256,11 @@ individually and always run.
 Widening from there, every model in OpenVAF-Reloaded's `integration_tests/` was
 put through the same comparison — BSIM3/4/BULK/CMG/IMG/SOI, PSP102, PSP103,
 JUNCAP200, HiSIM2, HiSIM-SOTB, EKV, HICUM/L2, MEXTRAM 505, DIODE, DIODE_CMC,
-ASM-HEMT, MVSG_CMC and the small fixtures. They all agree, and every remaining
-difference is a fixed sub-picoamp offset against currents up to 0.28 A: the two
-simulators put `gmin` on slightly different sets of nodes. The per-family table,
-and the three cases not covered, are in `docs/model_status.md` §9b.
+ASM-HEMT, MVSG_CMC and the small fixtures. They all agree. The per-family
+residuals were a fixed sub-picoamp offset against currents up to 0.28 A, which
+was the nodal-`gmin` mismatch above; that sweep predates the fix and has not been
+re-run, so those numbers are upper bounds. The table, and the three cases not
+covered, are in `docs/model_status.md` §9b.
 
 That audit is also the record of what of the ABI is *not* honoured. Four things
 were not, until this was measured, and each produced a wrong answer with no

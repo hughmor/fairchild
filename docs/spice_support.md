@@ -168,6 +168,59 @@ being read at a glance — so it is an error naming both unambiguous spellings.
 A deck meant to run under both simulators should not use RKM at all, since
 ngspice will accept it and be wrong.
 
+### `gmin` goes across each pn junction, as it does in ngspice
+
+`GMIN` is a minimum conductance **across each pn junction** — between that
+junction's own two terminals — not a floor under every node. A node with no
+junction on it gets nothing:
+
+```spice
+I1 0 p DC 1m
+Rs p 0 1T
+.op
+```
+
+reads exactly `1e9` in both simulators, and keeps reading `I·R` when the deck
+raises `.options gmin`. A reverse-biased junction, on the other hand, carries
+`IS + gmin·V` and its leakage tracks the option. `ngspice_gmin_golden.rs` pins
+both directions against ngspice at three values of `gmin` spanning six decades.
+
+This was not always true here, and the two ways it was wrong are worth recording
+because neither showed up as a failure:
+
+* **`gmin` sat on every node's diagonal.** A junction-free node acquired a
+  companion resistor of `1/gmin` to ground, so the deck above read `5e8` — half
+  the current down a 1 TΩ path that is not in the circuit. The error is `gmin·R`
+  as a fraction: 1 ppm at 1 MΩ, 0.1% at 1 GΩ, 50% at 1 TΩ, invisible at ordinary
+  impedances and dominant at extreme ones.
+* **The models' `gmin` was Jacobian-only.** `diode.rs` added it to the junction
+  conductance and the Norton form `jeq = Id − gd·Vd` then cancelled it out of the
+  current *exactly*, so it conditioned the matrix and carried nothing. A
+  reverse-biased diode leaked `IS` and nothing else, and `.options gmin=` changed
+  no answer anywhere. Conditioning the matrix that way is a legitimate technique;
+  it is not what SPICE's `GMIN` is.
+
+`gmin`-stepping is unaffected: it still puts a large conductance on every node
+and ramps it away, but it now ramps to **zero** rather than to `opts.gmin`, so
+the answer no longer depends on the homotopy's endpoint. Rows that nothing
+reaches are pinned with a `1.0` on the diagonal instead — a pivot, not a
+conductance, so no reachable node's answer moves. The small-signal analyses pin
+a row only when `G`, `C` and `1/L` are all empty for it, since a node reachable
+only through a capacitor is reachable.
+
+#### The one remaining divergence: a BJT's collector-substrate junction
+
+ngspice puts `gmin` across four junctions on a BJT; fairchild models three.
+Base-collector and base-emitter agree. The collector-substrate junction is not
+modelled here at all — `docs/model_status.md` lists `CJS`/`VJS`/`MJS`/`FCS` as
+absent — so a reverse-biased BJT reads `1·gmin·V` where ngspice reads `2·gmin·V`.
+Measured, not inferred: pinning the substrate at the collector potential in
+ngspice with a four-terminal `Q1 c 0 0 s qm` removes exactly one `gmin·V`.
+
+At the default `gmin` that is a 1 pA difference on a device whose signal currents
+are milliamps. It is recorded rather than faked, because asserting ngspice's
+total would mean asserting a junction this simulator does not have.
+
 ---
 
 ## 4. The silent set

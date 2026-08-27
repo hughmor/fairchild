@@ -10,7 +10,7 @@ use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint, RowFloor};
+use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint};
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
 
@@ -713,7 +713,7 @@ fn report_matrix_stats(
     // device ever wrote to, or an unknown nothing depends on.
     {
         let mut a = mat.a.clone();
-        topo.stamp_gmin(&mut a, opts.gmin.max(1e-12), RowFloor::PinEmptyRows);
+        topo.stamp_gmin(&mut a, 0.0);
         let mut empty_rows: Vec<usize> = Vec::new();
         let mut col_nz = vec![0usize; n];
         // Rows are sparse: iterating yields the stored (column, value) pairs, so
@@ -767,11 +767,11 @@ fn report_matrix_stats(
         );
     }
     if opts.cond_estimate {
-        // Estimate κ on the matrix the solver actually factorises (with the
-        // gmin floor on node / internal rows), so floating nodes don't show as
-        // spuriously singular.  Work on a copy to leave `mat` untouched.
+        // Estimate κ on the matrix the solver actually factorises (empty rows
+        // pinned), so floating nodes don't show as spuriously singular. Work on
+        // a copy to leave `mat` untouched.
         let mut a_est = mat.a.clone();
-        topo.stamp_gmin(&mut a_est, opts.gmin, RowFloor::PinEmptyRows);
+        topo.stamp_gmin(&mut a_est, 0.0);
         match crate::solver::estimate_condition_2norm(&a_est) {
             Some(k) => eprintln!(
                 "info: estimated 2-norm condition number κ(A) ≈ {k:.3e} \
@@ -1190,7 +1190,6 @@ pub(crate) fn residual_l2(
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
-    opts: &SimOptions,
     source_scale: f64,
     gmin_extra: f64,
     plan: Option<&crate::mna::StampPlan>,
@@ -1213,11 +1212,7 @@ pub(crate) fn residual_l2(
         dev.load_residual(&mut scratch.b);
         dev.load_jacobian(scratch);
     }
-    topo.stamp_gmin(
-        &mut scratch.a,
-        opts.gmin + gmin_extra,
-        RowFloor::PinEmptyRows,
-    );
+    topo.stamp_gmin(&mut scratch.a, gmin_extra);
     scratch.residual_norm(x)
 }
 
@@ -1287,9 +1282,10 @@ fn nr_inner(
             dev.load_jacobian(&mut mat);
         }
 
-        // gmin floor on node + device-internal rows (skips vsource aux rows);
-        // `gmin_extra` is the homotopy step. See CircuitTopology::stamp_gmin.
-        topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra, RowFloor::PinEmptyRows);
+        // The homotopy's conductance, and a pivot on any row nothing reaches.
+        // `gmin_extra` ramps to zero — `opts.gmin` is across the junctions, not
+        // here. See CircuitTopology::stamp_gmin.
+        topo.stamp_gmin(&mut mat.a, gmin_extra);
 
         if first_stamp {
             // The pattern is a structural superset, so a stamped cell outside
@@ -1354,17 +1350,72 @@ fn nr_inner(
         // node in the circuit — empty in every non-thermal deck — and this runs
         // inside the Newton loop, where building a hash set per iteration would
         // cost more than the search it replaces.
+        // The allowance is `vmax + reltol·|v|`, per row, not a flat `vmax`.
+        //
+        // **Why relative at all.** A flat allowance cannot track a solution far
+        // from where the iterate starts: at `vmax = 0.5 V`, a node whose
+        // operating point is at 10^9 V needs two billion iterations to walk
+        // there. It never gets them, and the convergence test
+        // `|Δx| < vntol + reltol·|v|` accepts the walk as soon as `reltol·|v|`
+        // overtakes the step — so the solve stops partway and reports success.
+        // That is #90: an ideal VCCS into 1 kΩ, linear and one solve from its
+        // answer, read 0.0502 V on a node the deck pins at 0.1 V.
+        //
+        // **Why `reltol` and not a constant of its own.** With an allowance of
+        // `vmax + k·|v|`, a clamped step is exactly the allowance on the binding
+        // row, so it is mistaken for convergence only if
+        //
+        //     vmax + k·|v|  <  vntol + reltol·|v|
+        //
+        // which for `k = reltol` reduces to `vmax < vntol` — false by
+        // construction, at any tolerance the user sets. Tie `k` to anything else
+        // and the pathology comes back for `reltol > k`: at `k = 1e-3` and
+        // `reltol = 1e-2` a node at 1000 V has an allowance of 1.5 V against a
+        // bound of 10 V, and the walk is accepted again. So the coefficient is
+        // not a tuning knob — it is the one value that makes a clamped step and a
+        // converged step disjoint sets.
+        //
+        // That identity makes a clamped step and a converged step disjoint, but
+        // it is not sufficient on its own, and it took a failing test to find
+        // out: on a circuit whose Jacobian is nearly singular the Newton step
+        // *underestimates* how far the iterate still has to go, so it can be
+        // small while the answer is an order of magnitude away. A step-based test
+        // of any shape stops there. `!clamped` in the convergence test below is
+        // what keeps the climb going until it genuinely arrives —
+        // `no_false_convergence_on_stalled_line_search` is the test that
+        // distinguishes the two, and it stops at 4.6e7 instead of 5e8 without it.
+        //
+        // A third change — judging the Newton step rather than the clamped step
+        // taken — was tried and dropped: defensible, but no test could
+        // distinguish it from these two, and an unmeasurable change to a Newton
+        // loop is not worth its risk.
+        //
+        // **Why nothing else moves.** The relative term is keyed on the row's own
+        // value, so it is inert exactly where the flat bound was already right: a
+        // junction sits at ~0.7 V and gains 0.7 mV of allowance. Every diode,
+        // BJT and MOSFET golden is unchanged.
+        //
+        // Tracked as a *ratio* rather than a magnitude, so the clamp is no longer
+        // tripped by a row merely for sitting at a large voltage. Note what this
+        // does *not* fix: once tripped, `scale` is still applied to the whole
+        // step, so one row far from home does still shrink every other unknown —
+        // the complaint the comment below has been making about `max_dv` since it
+        // was written. Making the scaling per-row too is a separate change.
         let thermal = topo.thermal_rows.as_slice();
-        let mut max_dv = 0.0f64;
+        let mut max_ratio = 0.0f64;
         let mut max_dv_row = 0usize;
+        let mut max_dv = 0.0f64;
         for i in 0..n_nodes {
             if thermal.contains(&i) {
                 continue;
             }
             let d = (x_new[i] - x[i]).abs();
-            if d > max_dv {
-                max_dv = d;
+            let allowance = opts.vmax + opts.reltol * x[i].abs();
+            let ratio = d / allowance;
+            if ratio > max_ratio {
+                max_ratio = ratio;
                 max_dv_row = i;
+                max_dv = d;
             }
         }
 
@@ -1387,8 +1438,9 @@ fn nr_inner(
         // Declared per iteration: a value carried over from an earlier clamped
         // step would block convergence for the rest of the solve.
         let mut armijo_fell_back = false;
-        let x_next: Vec<f64> = if max_dv > opts.vmax {
-            let scale = opts.vmax / max_dv;
+        let clamped = max_ratio > 1.0;
+        let x_next: Vec<f64> = if clamped {
+            let scale = 1.0 / max_ratio;
             // Clamped Newton step: at α=1 this is the existing vmax-clamped
             // update; Armijo lets us back off when the residual would grow.
             let delta: Vec<f64> = x
@@ -1439,7 +1491,6 @@ fn nr_inner(
                 netlist,
                 devices,
                 ctx,
-                opts,
                 source_scale,
                 gmin_extra,
                 plan,
@@ -1462,7 +1513,6 @@ fn nr_inner(
                     netlist,
                     devices,
                     ctx,
-                    opts,
                     source_scale,
                     gmin_extra,
                     plan,
@@ -1491,22 +1541,14 @@ fn nr_inner(
         // limit, because the stopping point depends on reltol rather than on the
         // circuit. Refusing to converge here turns a confidently wrong answer
         // into an honest failure that the homotopy can then try to fix.
-        // NOTE: this test can still pass on a step the `vmax` trust region cut
-        // short, and then it means nothing — `|dx|` is the clamp, not the
-        // distance to the solution, and `abstol + reltol·|x|` grows with `|x|`
-        // until the two meet. A node heading for hundreds of volts stops
-        // wherever the walk happens to be, and is reported as converged. An
-        // ideal VCCS into 1 kΩ — linear, one solve from the answer — reads
-        // 0.0502 V on a node the deck pins at 0.1 V. `.options vmax=1e5` gives
-        // the right answer, which is the diagnosis.
-        //
-        // Adding `&& max_dv <= opts.vmax` here does fix it, and costs a 15×
-        // slowdown on this repository's own test suite: circuits that were
-        // reaching a right answer on a clamped step now exhaust `itl1` and fall
-        // into homotopy at every timestep. The honest fix is a residual-based
-        // convergence test rather than a step-based one, which is a solver
-        // change too broad to make from here. Tracked in #90.
-        let converged = tol.converged(&x_next, &x) && !armijo_fell_back;
+        // `!clamped` is the other half of #90, and the reason is the same one:
+        // a step the trust region cut short is shorter than the step that would
+        // reach the solution, so it cannot be the step that reaches it. Allowing
+        // it made a 1 GΩ shunt read half its operating point and a 10 GΩ shunt a
+        // tenth of it, both reported as converged. It is affordable only because
+        // the allowance is relative — see the block above — since otherwise the
+        // iterate has to walk `vmax` at a time to wherever it is going.
+        let converged = tol.converged(&x_next, &x) && !armijo_fell_back && !clamped;
 
         x = x_next;
         if converged {

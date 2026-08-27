@@ -242,8 +242,10 @@ const CHANGES_THE_ANSWER: &[(&str, &str, &str, &str)] = &[
     // Convergence tolerances need a circuit that iterates.
     ("reltol", "1e-1", "1e-10", decks::DIODE_RC),
     ("abstol", "1e-6", "1e-16", decks::DIODE_RC),
-    // gmin shunts every node.
-    ("gmin", "1e-12", "1e-5", decks::RC),
+    // gmin needs a junction to cross — it is not a nodal shunt. On `RC` the
+    // two settings agree to the last bit and *should*: ngspice reads the same
+    // there (`ngspice_gmin_golden.rs`).
+    ("gmin", "1e-12", "1e-5", decks::DIODE_RC),
     // Clamping the step changes how many points the run takes.
     ("maxstep", "100n", "10n", decks::RC),
     // A different integration schedule entirely.

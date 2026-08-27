@@ -27,3 +27,4 @@ mod small_signal_analyses;
 mod solver_klu;
 mod spectre_wrapper;
 mod transient_noise;
+mod trust_region_does_not_end_the_solve;

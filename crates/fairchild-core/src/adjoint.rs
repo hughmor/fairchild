@@ -282,7 +282,6 @@ pub fn dc_sensitivity(
         &work,
         &mut devices,
         &ctx,
-        opts,
         1.0,
         0.0,
         Some(&plan),
@@ -298,17 +297,8 @@ pub fn dc_sensitivity(
     let repaired = frozen
         .iter()
         .map(|&col| {
-            let column = fd_jacobian_column(
-                col,
-                &mut mat,
-                &topo,
-                &work,
-                &mut devices,
-                &ctx,
-                opts,
-                &plan,
-                &x,
-            );
+            let column =
+                fd_jacobian_column(col, &mut mat, &topo, &work, &mut devices, &ctx, &plan, &x);
             (col, column)
         })
         .collect::<Vec<_>>();
@@ -319,7 +309,6 @@ pub fn dc_sensitivity(
         &work,
         &mut devices,
         &ctx,
-        opts,
         1.0,
         0.0,
         Some(&plan),
@@ -381,7 +370,6 @@ pub fn dc_sensitivity(
                 &work,
                 &mut devices,
                 &ctx,
-                opts,
                 1.0,
                 0.0,
                 Some(&plan),
@@ -475,7 +463,6 @@ fn fd_jacobian_column(
     netlist: &Netlist,
     devices: &mut Vec<Box<dyn Device>>,
     ctx: &crate::device::SimContext,
-    opts: &SimOptions,
     plan: &StampPlan,
     x: &[f64],
 ) -> Vec<f64> {
@@ -495,7 +482,6 @@ fn fd_jacobian_column(
         netlist,
         devices,
         ctx,
-        opts,
         1.0,
         0.0,
         Some(plan),
@@ -510,7 +496,6 @@ fn fd_jacobian_column(
         netlist,
         devices,
         ctx,
-        opts,
         1.0,
         0.0,
         Some(plan),
@@ -602,7 +587,6 @@ pub fn jacobian_check(
             netlist,
             devices,
             &ctx,
-            opts,
             1.0,
             0.0,
             Some(&plan),
