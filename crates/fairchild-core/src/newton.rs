@@ -10,7 +10,7 @@ use crate::connectivity::check_connectivity;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint, RowFloor};
+use crate::mna::{stamp_netlist_scaled, CircuitTopology, Footprint};
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
 
@@ -713,7 +713,7 @@ fn report_matrix_stats(
     // device ever wrote to, or an unknown nothing depends on.
     {
         let mut a = mat.a.clone();
-        topo.stamp_gmin(&mut a, opts.gmin.max(1e-12), RowFloor::PinEmptyRows);
+        topo.stamp_gmin(&mut a, 0.0);
         let mut empty_rows: Vec<usize> = Vec::new();
         let mut col_nz = vec![0usize; n];
         // Rows are sparse: iterating yields the stored (column, value) pairs, so
@@ -767,11 +767,11 @@ fn report_matrix_stats(
         );
     }
     if opts.cond_estimate {
-        // Estimate κ on the matrix the solver actually factorises (with the
-        // gmin floor on node / internal rows), so floating nodes don't show as
-        // spuriously singular.  Work on a copy to leave `mat` untouched.
+        // Estimate κ on the matrix the solver actually factorises (empty rows
+        // pinned), so floating nodes don't show as spuriously singular. Work on
+        // a copy to leave `mat` untouched.
         let mut a_est = mat.a.clone();
-        topo.stamp_gmin(&mut a_est, opts.gmin, RowFloor::PinEmptyRows);
+        topo.stamp_gmin(&mut a_est, 0.0);
         match crate::solver::estimate_condition_2norm(&a_est) {
             Some(k) => eprintln!(
                 "info: estimated 2-norm condition number κ(A) ≈ {k:.3e} \
@@ -1190,7 +1190,6 @@ pub(crate) fn residual_l2(
     netlist: &Netlist,
     devices: &mut [Box<dyn Device>],
     ctx: &SimContext,
-    opts: &SimOptions,
     source_scale: f64,
     gmin_extra: f64,
     plan: Option<&crate::mna::StampPlan>,
@@ -1213,11 +1212,7 @@ pub(crate) fn residual_l2(
         dev.load_residual(&mut scratch.b);
         dev.load_jacobian(scratch);
     }
-    topo.stamp_gmin(
-        &mut scratch.a,
-        opts.gmin + gmin_extra,
-        RowFloor::PinEmptyRows,
-    );
+    topo.stamp_gmin(&mut scratch.a, gmin_extra);
     scratch.residual_norm(x)
 }
 
@@ -1287,9 +1282,10 @@ fn nr_inner(
             dev.load_jacobian(&mut mat);
         }
 
-        // gmin floor on node + device-internal rows (skips vsource aux rows);
-        // `gmin_extra` is the homotopy step. See CircuitTopology::stamp_gmin.
-        topo.stamp_gmin(&mut mat.a, opts.gmin + gmin_extra, RowFloor::PinEmptyRows);
+        // The homotopy's conductance, and a pivot on any row nothing reaches.
+        // `gmin_extra` ramps to zero — `opts.gmin` is across the junctions, not
+        // here. See CircuitTopology::stamp_gmin.
+        topo.stamp_gmin(&mut mat.a, gmin_extra);
 
         if first_stamp {
             // The pattern is a structural superset, so a stamped cell outside
@@ -1495,7 +1491,6 @@ fn nr_inner(
                 netlist,
                 devices,
                 ctx,
-                opts,
                 source_scale,
                 gmin_extra,
                 plan,
@@ -1518,7 +1513,6 @@ fn nr_inner(
                     netlist,
                     devices,
                     ctx,
-                    opts,
                     source_scale,
                     gmin_extra,
                     plan,

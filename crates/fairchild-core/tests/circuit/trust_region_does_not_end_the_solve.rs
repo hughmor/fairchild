@@ -170,23 +170,23 @@ fn ordinary_circuits_still_solve() {
 ///
 /// # About the tolerance
 ///
-/// The expectation is `I·R` and the tolerance is 1%, which is loose for a linear
-/// circuit on purpose: fairchild adds `gmin` (1e-12 S) to *every* node's
-/// diagonal, not only to nodes that would otherwise be empty, so the node's real
-/// conductance is `1/R + gmin` and the answer sits slightly below `I·R` — 0.1%
-/// low at 1 GΩ, 1% low at 10 GΩ. The tolerance **absorbs** that rather than
-/// asserting it, so this test says nothing about gmin's value and does not have
-/// to change if the nodal-gmin policy does. What it does catch is the factor-of-two
-/// error, which is four hundred times larger.
+/// `I·R` to within the solver's own convergence bound (`reltol`), because that
+/// is the honest floor: below it, the number is where Newton stopped rather than
+/// what the circuit is. Nothing else in this circuit can move the node —
+/// `gmin` lives across pn junctions now, and a shunt resistor is not one
+/// (`ngspice_gmin_golden.rs`), so no term stands between the answer and Ohm's
+/// law in either direction.
 ///
-/// (ngspice does not do this: `1 mA` into `1 TΩ` reads exactly 1e9 V there and
-/// 5e8 here. That divergence is real and is not this test's subject.)
+/// The failure this exists to catch — a walk cut short by the flat `vmax` trust
+/// region — is a factor of two or ten, five hundred times larger.
 ///
 /// A 1 GΩ shunt is not contrived — it is a photodiode's dark resistance, a gate
 /// leakage path, an ESD structure's off state.
 #[test]
 fn a_high_impedance_node_reaches_ohms_law() {
-    for (r_str, r, tol) in [("1G", 1e9, 1e-2), ("10G", 1e10, 2e-2)] {
+    // The bound the solver itself declared convergence on.
+    let tol = SimOptions::default().reltol;
+    for (r_str, r) in [("1G", 1e9), ("10G", 1e10)] {
         let deck = format!(
             "* high-impedance shunt
              .optical_port a
@@ -206,12 +206,6 @@ fn a_high_impedance_node_reaches_ohms_law() {
         assert!(
             rel < tol,
             "r_shunt={r_str}: V(p) = {v:.6e}, expected I·R = {want:.6e}              (rel {rel:.2e}). Half or a tenth of this means the walk was cut              short and the tolerance caught up with it — #90."
-        );
-        // …and low, not high: the only thing that should pull it below `I·R` is
-        // the nodal gmin, never above.
-        assert!(
-            v <= want * (1.0 + 1e-9),
-            "r_shunt={r_str}: V(p) = {v:.6e} exceeds I·R = {want:.6e}, which no              conductance in this circuit can explain"
         );
     }
 }

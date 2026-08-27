@@ -24,8 +24,7 @@ use crate::device::{Device, EvalFlags, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
-    stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, RowFloor,
-    SparseRow,
+    stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, SparseRow,
 };
 use crate::newton::build_devices;
 use crate::options::SimOptions;
@@ -351,8 +350,18 @@ pub(crate) fn assemble_ac_matrices(
             }
         }
     }
-    // GMIN — node rows and device-internal rows (skips vsource aux rows).
-    topo.stamp_gmin(&mut g_mat, opts.gmin, RowFloor::GminOnly);
+    // No nodal GMIN. Each junction's `gmin` is already in the conductance
+    // matrix, because it is a real conductance in the device's Jacobian (see
+    // `SimContext::gmin`) and `load_jacobian` above put it there. Adding
+    // `opts.gmin` to every node on top of that would both double-count the
+    // junctions and give the small-signal analyses a *different circuit* than
+    // the DC operating point they linearise around — a junction-free node would
+    // acquire a 1 TOhm companion to ground here and not there.
+    //
+    // Consequence: at exactly f = 0 a node whose only path to ground is a
+    // capacitor now has a singular row instead of a 1e-12 one. That is the
+    // honest answer — the solver reports it rather than inventing a
+    // conductance — and `.ac` never pinned an empty row anyway.
 
     // --- Capacitance matrix C (purely imaginary part of Y) ---
     let mut c_mat = vec![SparseRow::default(); size];
@@ -417,6 +426,10 @@ pub(crate) fn assemble_ac_matrices(
         // of two-terminal branches (OSDI/Verilog-A) stamp it themselves.
         dev.load_reactive_jacobian(&mut c_mat);
     }
+
+    // Now that C and L exist, pin what none of the three reaches. Replaces the
+    // nodal `opts.gmin` that used to make these rows solvable as a side effect.
+    topo.pin_rows_empty_in_all(&mut g_mat, &c_mat, &l_mat);
 
     Ok((topo, g_mat, c_mat, l_mat, l_branches))
 }
@@ -533,7 +546,10 @@ fn dc_op(
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
-        topo.stamp_gmin(&mut mat.a, opts.gmin, RowFloor::PinEmptyRows);
+        // 0.0, matching `newton.rs`: `opts.gmin` is across the junctions now,
+        // and this loop's job is to reproduce that operating point, not a
+        // differently-conditioned one. `PinEmptyRows` still guarantees a pivot.
+        topo.stamp_gmin(&mut mat.a, 0.0);
         let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new
             .iter()

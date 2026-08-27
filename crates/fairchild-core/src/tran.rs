@@ -15,7 +15,7 @@ use fairchild_parser::{Element, Netlist};
 use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
-use crate::mna::{CircuitTopology, RowFloor};
+use crate::mna::CircuitTopology;
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
 use crate::tran_step::TranStepper;
@@ -680,7 +680,7 @@ pub fn tran_nr_with_registry_var_opts(
                 gear2,
             );
 
-            topo.stamp_gmin(&mut mat.a, opts.gmin, RowFloor::PinEmptyRows);
+            topo.stamp_gmin(&mut mat.a, 0.0);
 
             let x_new = if let Some(f) = fact.as_mut() {
                 f.refactor_and_solve_mat(&mat)?
@@ -1077,10 +1077,16 @@ mod tests {
                         rd.voltage_at("a", t).unwrap(),
                         rr.voltage_at("a", t).unwrap(),
                     );
+                    // The solver's own convergence bound, not a tighter number:
+                    // anything below it is where Newton stopped, not what the
+                    // circuit is. The three methods separate by ~0.016 V on this
+                    // deck, so this still fails loudly if a device ignores one.
+                    let same = opts.vntol + opts.reltol * a.abs();
                     assert!(
-                        (a - b).abs() < 1e-9,
+                        (a - b).abs() < same,
                         "{mode:?} variable_step={variable_step} t={t:e}: \
-                         device-internal C gives {a:.9}, explicit C gives {b:.9} — \
+                         device-internal C gives {a:.9}, explicit C gives {b:.9} \
+                         (differ by more than the convergence bound {same:.2e}) — \
                          the integrator is not treating them as the same circuit"
                     );
                 }
@@ -1198,10 +1204,16 @@ mod tests {
                             rd.voltage_at("a", t).unwrap(),
                             rr.voltage_at("a", t).unwrap(),
                         );
+                        // See the sibling assertion above: the solver's own
+                        // convergence bound is the floor for "same answer". A
+                        // junction's `gmin` current lands ~2e-8 V apart between
+                        // these two decks, both equally converged.
+                        let same = opts.vntol + opts.reltol * a.abs();
                         assert!(
-                            (a - b).abs() < 1e-9,
+                            (a - b).abs() < same,
                             "{what} {mode:?} variable_step={variable_step} t={t:e}: \
-                             device-internal C gives {a:.9}, explicit C gives {b:.9} — \
+                             device-internal C gives {a:.9}, explicit C gives {b:.9} \
+                             (differ by more than the convergence bound {same:.2e}) — \
                              the device is not honouring the integration method"
                         );
                     }

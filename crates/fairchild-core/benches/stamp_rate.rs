@@ -32,7 +32,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fairchild_core::device::{Device, EvalFlags, SimContext};
 use fairchild_core::mna::{
-    stamp_netlist_scaled_in_place, CircuitTopology, InductorDc, MnaMatrix, RowFloor, StampPlan,
+    stamp_netlist_scaled_in_place, CircuitTopology, InductorDc, MnaMatrix, StampPlan,
 };
 use fairchild_core::newton::build_devices_with_footprints;
 use fairchild_core::{DeviceRegistry, SimOptions};
@@ -115,8 +115,7 @@ impl Bed {
             dev.load_residual(&mut self.mat.b);
             dev.load_jacobian(&mut self.mat);
         }
-        self.topo
-            .stamp_gmin(&mut self.mat.a, self.opts.gmin, RowFloor::PinEmptyRows);
+        self.topo.stamp_gmin(&mut self.mat.a, self.opts.gmin);
     }
 }
 

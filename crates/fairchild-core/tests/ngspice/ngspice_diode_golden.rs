@@ -154,3 +154,70 @@ diode_golden_test!(
     &["v(b)", "i(vdd)"],
     REL_TOL
 );
+
+/// `RS` in the model card is a series resistance, so it must equal an explicit
+/// resistor of the same value — and both must equal ngspice.
+///
+/// # What this caught
+///
+/// `RS` was eliminated by a *lagged* fixed point: `vd_j = vd_terminal − Id·RS`
+/// with `Id` from the previous eval, one step per outer Newton iteration. The
+/// junction voltage is internal state the outer Newton cannot see, so its
+/// convergence test could be satisfied with the lag still wide open — and is,
+/// immediately, whenever a voltage source pins the diode's terminals and the
+/// visible unknowns stop moving on iteration one. It read 2.7% low at 0.7 V, and
+/// 100% wrong at 1.0 V once `gmin` became a real conductance across the junction
+/// and gave the reverse-biased branch something to converge onto.
+///
+/// # Why both halves
+///
+/// The self-consistency half — internal `RS` against an external resistor —
+/// cannot detect a fault common to both forms, so ngspice anchors one side
+/// absolutely. ngspice has no lag to hide: it gives the intrinsic junction its
+/// own internal node (`dio_posPrime`) and lets the matrix solve for it.
+///
+/// 1.0 V is in the sweep because that is where the series drop dominates and the
+/// lag was largest; 0.4 V is below the knee, where it was invisible.
+#[test]
+fn rs_in_the_model_equals_an_external_resistor() {
+    // 1e-4 is ~30x above the convergence noise between two separate solves and
+    // ~270x below the smallest error the lag produced.
+    const TOL: f64 = 1e-4;
+    for v in [0.4, 0.7, 1.0] {
+        let internal = format!(
+            "* rs internal\n.model dm D (IS=1e-14 N=1 RS=10)\nV1 a 0 DC {v}\nD1 a 0 dm\n.op\n"
+        );
+        // Same circuit, drawn instead of parameterised.
+        let external = format!(
+            "* rs external\n.model dm D (IS=1e-14 N=1)\nV1 a 0 DC {v}\nR1 a m 10\nD1 m 0 dm\n.op\n"
+        );
+
+        let pick = |deck: &str| {
+            fairchild_nr_op(deck)
+                .unwrap_or_else(|e| panic!("V={v}: fairchild failed on\n{deck}\n{e:?}"))["i(v1)"]
+        };
+        let (int_i, ext_i) = (pick(&internal), pick(&external));
+        let rel = (int_i - ext_i).abs() / ext_i.abs();
+        assert!(
+            rel < TOL,
+            "V={v}: RS=10 in the model gives i(v1)={int_i:.9e} but an external \
+             10 Ohm gives {ext_i:.9e} (rel {rel:.2e}) — the same circuit. A lag \
+             in the RS elimination reads low, and reads low by more the further \
+             the series drop dominates."
+        );
+
+        let Some(ng) = ngspice_op(&internal, &["i(v1)"]) else {
+            eprintln!("ngspice not available — self-consistency checked, anchor skipped");
+            continue;
+        };
+        let ng_i = ng["i(v1)"];
+        let rel_ng = (int_i - ng_i).abs() / ng_i.abs();
+        assert!(
+            rel_ng < TOL,
+            "V={v}: RS=10 gives i(v1)={int_i:.9e}, ngspice {ng_i:.9e} \
+             (rel {rel_ng:.2e}). Both forms agreeing with each other and not \
+             with ngspice would mean the fault is in the junction, not the \
+             elimination."
+        );
+    }
+}

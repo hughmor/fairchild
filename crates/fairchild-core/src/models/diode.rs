@@ -2,8 +2,10 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::reactive::ChargeHistory;
 
-/// Small conductance added to every p-n junction for numerical conditioning.
-const GMIN: f64 = 1e-12;
+/// Seed conductance before the first `eval`, so a device that is stamped once
+/// prior to being evaluated cannot present a singular row. The *operating*
+/// `gmin` comes from `SimContext::gmin`; this is only a non-zero starting point.
+const GMIN_SEED: f64 = 1e-12;
 
 /// SPICE Shockley diode model.
 ///
@@ -71,8 +73,8 @@ impl ShockleyDiode {
             cathode: None,
             vd_prev: 0.0,
             id_junction: 0.0,
-            gd_junction: GMIN,
-            gd_eff: GMIN,
+            gd_junction: GMIN_SEED,
+            gd_eff: GMIN_SEED,
             jeq_eff: 0.0,
             vd_j_eval: 0.0,
             cj_total: 0.0,
@@ -147,6 +149,71 @@ impl ShockleyDiode {
         } else {
             vnew
         }
+    }
+
+    /// Junction current and its slope at `vd_j` — the Shockley law plus `gmin`.
+    ///
+    /// One place, because `eval` and [`Self::solve_series`] must agree exactly:
+    /// the series solve finds the root of a function `eval` then evaluates, and
+    /// two spellings of the same law is two chances for them to differ.
+    fn junction(&self, vd_j: f64, nvt: f64, gmin: f64) -> (f64, f64) {
+        let is = self.is_eff();
+        let exp_term = (vd_j / nvt).exp();
+        (
+            is * (exp_term - 1.0) + gmin * vd_j,
+            is * exp_term / nvt + gmin,
+        )
+    }
+
+    /// Solve `vd_j + RS·Id(vd_j) = vd_terminal` for the junction voltage.
+    ///
+    /// # Why this is a solve and not one step
+    ///
+    /// It used to be `vd_j = vd_terminal − Id·RS` with `Id` from the *previous*
+    /// eval — one lagged fixed-point step per outer Newton iteration. `vd_j` is
+    /// internal state the outer Newton cannot see, so its convergence test can
+    /// be satisfied while the lag is still wide open. That is exactly what
+    /// happens when a voltage source pins the diode's terminals: the visible
+    /// unknowns stop moving on the first iteration and the lag never closes.
+    /// Against ngspice, which gives the junction a real internal node, `RS=10`
+    /// read 2.7% low at 0.7 V — and once `gmin` gave the reverse branch a
+    /// conductance to converge onto, 100% wrong at 1.0 V.
+    ///
+    /// # Why scalar Newton is safe here
+    ///
+    /// `F(v) = v + RS·Id(v) − vd_terminal` has `F' = 1 + RS·gd ≥ 1` and is
+    /// increasing, so the root is unique and Newton cannot divide by anything
+    /// small. Overshoot into the exponential is the only hazard and `pnjlim` —
+    /// the same limiter the outer loop uses — bounds every step. Typically two
+    /// or three iterations from the warm start; `ITER_MAX` is a backstop, not a
+    /// budget.
+    ///
+    /// Costs nothing when `RS = 0`: the caller skips it, which is every diode
+    /// that does not set the parameter.
+    ///
+    /// `pnjlim` here is not the `nopnjlim` option's business. That option turns
+    /// off junction limiting of the *outer* iterate, which perturbs where the
+    /// solve goes; this is a step limiter inside a local root-find and the root
+    /// it returns is the same with or without it.
+    fn solve_series(&self, vd_terminal: f64, nvt: f64, gmin: f64, rs: f64, vt: f64) -> f64 {
+        const ITER_MAX: usize = 100;
+        // Warm start from the last junction voltage — across outer iterations
+        // this is usually within millivolts, which is why the loop is cheap.
+        let mut v = self.vd_prev;
+        for _ in 0..ITER_MAX {
+            let (id, gd) = self.junction(v, nvt, gmin);
+            let f = v + rs * id - vd_terminal;
+            let dv = -f / (1.0 + rs * gd);
+            let v_new = self.pnjlim(v + dv, v, vt);
+            let step = v_new - v;
+            v = v_new;
+            // Absolute *and* relative: `vd_j` is millivolts near the knee and
+            // thousands of volts if a deck reverse-biases hard.
+            if step.abs() <= 1e-14 * (1.0 + v.abs()) {
+                break;
+            }
+        }
+        v
     }
 
     /// SPICE depletion capacitance Cj(V).
@@ -255,27 +322,45 @@ impl Device for ShockleyDiode {
 
         let vt = ctx.vt();
 
-        // Junction voltage: iterate RS drop using Id from previous NR step.
-        let vd_j_raw = vd_terminal - self.id_junction * self.rs_eff();
-        let vd_j = if ctx.jlim_enabled {
-            self.pnjlim(vd_j_raw, self.vd_prev, vt)
+        let nvt = self.n * vt;
+        let rs = self.rs_eff();
+        let gmin = ctx.gmin;
+
+        // Junction voltage. With RS this is a solve, not a step — see
+        // `solve_series` for the lag it replaces. The series relation limits
+        // `vd_j` on its own (it grows logarithmically with the terminal
+        // voltage), so `pnjlim` is applied *inside* the solve rather than to its
+        // answer: limiting the converged root would put the lag straight back.
+        let vd_j = if rs > 0.0 {
+            self.solve_series(vd_terminal, nvt, gmin, rs, vt)
+        } else if ctx.jlim_enabled {
+            self.pnjlim(vd_terminal, self.vd_prev, vt)
         } else {
-            vd_j_raw
+            vd_terminal
         };
         self.vd_prev = vd_j;
         self.vd_j_eval = vd_j;
-
-        let nvt = self.n * vt;
-        let exp_term = (vd_j / nvt).exp();
-        let is = self.is_eff();
-        self.id_junction = is * (exp_term - 1.0);
-        self.gd_junction = is * exp_term / nvt + GMIN;
+        // `gmin` is a real conductance across the junction — it carries current,
+        // it is not only a floor under the Jacobian.
+        //
+        // It used to be added to `gd_junction` alone, and the Norton form below
+        // is `jeq = Id − gd·Vd_j`, so at the operating point the terminal current
+        // is `gd·Vd_j + jeq = Id` and the `gmin` term cancelled *exactly*. That
+        // conditioned the matrix without contributing anything, which is a
+        // legitimate technique and is not what SPICE means by `GMIN`: ngspice's
+        // reverse-biased diode at −1 V carries `IS + gmin·1 V`, and a deck that
+        // raises `.options gmin` sees the leakage follow it. Both are now true
+        // here — and the value comes from the solve rather than from a `const`
+        // in this file, so `.options gmin=` reaches the junction at all.
+        let (id, gd) = self.junction(vd_j, nvt, gmin);
+        self.id_junction = id;
+        self.gd_junction = gd;
 
         // Norton equivalent at the terminal pair, accounting for RS.
         // Derivation: linearise Id(Vd_j) and Vd_j = Vd_term - Id·RS simultaneously.
         //   gd_eff = gd_j / (1 + gd_j·RS)
         //   jeq_eff = (Id - gd_j·Vd_j) / (1 + gd_j·RS)
-        let denom = 1.0 + self.gd_junction * self.rs_eff();
+        let denom = 1.0 + self.gd_junction * rs;
         self.gd_eff = self.gd_junction / denom;
         self.jeq_eff = (self.id_junction - self.gd_junction * vd_j) / denom;
 
@@ -416,7 +501,7 @@ mod tests {
         let x = [0.0f64];
         d.eval(&x, EvalFlags::dc(), &ctx());
         let vt = ctx().vt();
-        let expected_gd = 1e-14 / vt + GMIN;
+        let expected_gd = 1e-14 / vt + ctx().gmin;
         assert!(
             (d.gd_eff - expected_gd).abs() < 1e-18,
             "gd at Vd=0: {:.4e}",
@@ -434,8 +519,12 @@ mod tests {
         d.vd_prev = vd;
         let x = [vd];
         d.eval(&x, EvalFlags::dc(), &ctx());
-        let id_expected = is * ((vd / vt).exp() - 1.0);
-        let gd_expected = is * (vd / vt).exp() / vt + GMIN;
+        // `gmin` is now a real conductance across the junction, so it is in the
+        // current as well as the slope. It used to be in the slope only, which
+        // cancelled it out of `jeq` exactly — see `eval`.
+        let gmin = ctx().gmin;
+        let id_expected = is * ((vd / vt).exp() - 1.0) + gmin * vd;
+        let gd_expected = is * (vd / vt).exp() / vt + gmin;
         let jeq_expected = id_expected - gd_expected * vd;
         assert!(
             (d.gd_eff - gd_expected).abs() / gd_expected < 1e-9,

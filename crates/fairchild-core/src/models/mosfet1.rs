@@ -2,8 +2,9 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::{Cell, MnaMatrix, Pattern};
 use crate::reactive::ChargeHistory;
 
-/// Small floor conductance for numerical stability.
-const GMIN: f64 = 1e-12;
+/// Seed floor before the first `eval`. The operating value is
+/// [`SimContext::gmin`] — see the note beside `gds_total` in `eval`.
+const GMIN_SEED: f64 = 1e-12;
 
 /// SPICE Level 1 (Shichman-Hodges) MOSFET, with full capacitance model.
 ///
@@ -216,8 +217,8 @@ impl Mosfet1 {
             source: None,
             bulk: None,
             jac_cells: None,
-            gm: GMIN,
-            gds: GMIN,
+            gm: GMIN_SEED,
+            gds: GMIN_SEED,
             gmbs: 0.0,
             jeq: 0.0,
             vgs_eff_prev: 0.0,
@@ -444,7 +445,20 @@ impl Device for Mosfet1 {
         let vgs = pol * vgs_eff;
         let vds = pol * vds_eff;
         let vbs = vb - vs;
-        let gds_total = gds_eff + GMIN;
+        // A conditioning floor on the *channel*, and deliberately
+        // Jacobian-only: `jeq` below subtracts `gds_total·vds`, so this term
+        // cancels exactly out of the terminal current and the operating point
+        // does not depend on it. That is what a conditioning floor should do,
+        // and it is the opposite of what `diode.rs`/`bjt.rs` needed — those have
+        // a pn junction, and SPICE's `GMIN` goes *across* a junction and carries
+        // current. Level 1 has no body diodes here (`IS`/`JS` are on
+        // `docs/model_status.md`'s unmodelled list), so there is no junction on
+        // this device to put one across, and a reverse-biased drain-bulk carries
+        // no `gmin` leakage where ngspice's does.
+        //
+        // The value comes from the solve so that `.options gmin=1e-5`, raised to
+        // get a stubborn circuit through, actually reaches the MOSFETs.
+        let gds_total = gds_eff + ctx.gmin;
         self.gm = gm_eff;
         self.gds = gds_total;
         self.gmbs = gmbs_eff;
@@ -699,7 +713,11 @@ mod tests {
         let x = [0.0_f64, 0.0, 0.0];
         m.eval(&x, EvalFlags::dc(), &ctx());
         assert!(m.gm.abs() < 1e-15, "gm in cutoff: {}", m.gm);
-        assert!((m.gds - GMIN).abs() < 1e-20, "gds in cutoff: {}", m.gds);
+        assert!(
+            (m.gds - ctx().gmin).abs() < 1e-20,
+            "gds in cutoff: {}",
+            m.gds
+        );
         assert!(
             m.jeq.abs() < 1e-20,
             "jeq in cutoff with VDS=0: {:.3e}",
@@ -814,7 +832,7 @@ mod tests {
             gm_fd
         );
         assert!(
-            (gds_analytic - gds_fd).abs().max(1e-14) / (gds_analytic.abs() + GMIN) < 0.01,
+            (gds_analytic - gds_fd).abs().max(1e-14) / (gds_analytic.abs() + GMIN_SEED) < 0.01,
             "gds analytic={:.4e} fd={:.4e}",
             gds_analytic,
             gds_fd

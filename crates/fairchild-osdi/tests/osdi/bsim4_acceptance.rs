@@ -93,10 +93,17 @@ fn compile(va: &Path) -> PathBuf {
 /// how each of them stamps it. A tolerance loose enough to be comfortable would
 /// have accepted the 18% the packed-Jacobian fault produced.
 ///
-/// The floor is `gmin`, which the two simulators put on slightly different sets
-/// of nodes: at the lowest current tested here, 1 pS against 119 µA is a
-/// relative 8e-9, and that is the whole of the remaining disagreement.
-const REL: f64 = 1e-7;
+/// There is no floor left to reserve for. `gmin` used to be one — fairchild put
+/// it on every node's diagonal and ngspice puts it across pn junctions, so 1 pS
+/// against 119 µA left a relative 8e-9 that no amount of correctness could close.
+/// With `gmin` across the junctions here too, the same four points agree to
+/// between 9e-14 and 6e-13: femtoamps against milliamps, which is round-off at
+/// ngspice's twelve printed digits.
+///
+/// `1e-11` is ~20x above the worst of those and four orders below the old floor.
+/// Tightening it is the point — a tolerance sized for a discrepancy that no
+/// longer exists is four orders of unearned room for the next one.
+const REL: f64 = 1e-11;
 
 #[test]
 fn bsim4_nmos_transfer_matches_ngspice_on_the_same_model() {

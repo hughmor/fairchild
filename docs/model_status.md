@@ -103,7 +103,7 @@ reveals.
 |---|---|---|---|
 | `IS` | ✅ | ✅ | ✅ ngspice DC |
 | `N` | ✅ | ✅ | ✅ ngspice DC |
-| `RS` | ✅ | ✅ | ✅ ngspice DC (`diode_series_rd`) |
+| `RS` | ✅ | ✅ | ✅ ngspice DC (`diode_series_rd`), and equal to an external resistor of the same value at 0.4/0.7/1.0 V (`rs_in_the_model_equals_an_external_resistor`) |
 | `CJO` / `CJ0` | ✅ | ✅ | ✅ ngspice transient; equivalence test vs a discrete `C` |
 | `VJ` | ✅ | ✅ | ⚠️ transitively via `CJO` |
 | `M` / `MJ` | ✅ | ✅ | ⚠️ transitively; `M=0` is exercised directly by the integrator equivalence test |
@@ -128,6 +128,25 @@ dropped. A value that cannot be read (`area=2x`) is a parse error — it used to
 be discarded, which read as "this simulator ignores AREA".
 
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
+
+### `gmin` and `RS`
+
+`.options gmin` is a real conductance across the junction — it is in `Id` as well
+as in `∂Id/∂V`, so a reverse-biased diode carries `IS + gmin·V` and the leakage
+follows the option. It used to be in the slope only, which the Norton form
+cancelled out exactly; see `docs/spice_support.md`.
+
+`RS` is solved, not lagged. The junction voltage satisfies
+`Vd_j + RS·Id(Vd_j) = Vd_terminal` at every eval, by a scalar Newton inside
+`ShockleyDiode::eval`. It used to be one fixed-point step per outer iteration
+using `Id` from the previous eval — and `Vd_j` is internal state the outer Newton
+cannot see, so its convergence test was satisfied with the lag still open. That
+happens immediately whenever a voltage source pins the diode's terminals, since
+the visible unknowns then stop moving on the first iteration. Measured against
+ngspice, which gives the junction a real internal node: 2.7% low at 0.7 V, and
+100% wrong at 1.0 V once `gmin` gave the reverse branch a conductance to converge
+onto. `RS = 0` skips the solve entirely, which is every diode that does not set
+the parameter.
 
 ---
 
@@ -165,6 +184,23 @@ Shot noise on both junctions is stamped for `.noise`, from the terminal currents
 of the last `eval`. It used to read the *Norton offsets* instead, which equal
 those currents only when every terminal sits at 0 V.
 
+### `gmin`
+
+`.options gmin` is a real conductance across each *modelled* junction, added at
+the terminal pair (`gpi`, `gmu`) and carried in `ic`/`ib`. It was previously
+folded into `gbe`/`gbc`, which are transport quantities divided by `BF`/`BR` on
+the way out — so it arrived as `gmin/100` and was not a conductance across
+anything — and the Norton form then cancelled it out of the terminal currents
+entirely. A reverse-biased BJT carried `2·IS = 2e-16` where ngspice carries
+`gmin·V ≈ 1e-12`.
+
+**One junction short of ngspice.** `CJS`/`VJS`/`MJS`/`FCS` are on the unmodelled
+list above, so there is no collector-substrate junction here to hang `gmin` on,
+and a reverse-biased BJT reads `1·gmin·V` against ngspice's `2·gmin·V`. Measured
+by pinning the substrate at the collector potential in ngspice, which removes
+exactly one `gmin·V`. 1 pA at the default, on a device whose signal currents are
+milliamps.
+
 ---
 
 ## 5. MOSFET (`M` / `.model … NMOS|PMOS`) — Level 1 Shichman-Hodges
@@ -192,6 +228,22 @@ there gets none of it, and now says so.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
+
+### `gmin`
+
+`.options gmin` reaches this device as a floor under the **channel**
+conductance (`gds`), and it is deliberately Jacobian-only: `jeq` subtracts
+`gds_total·vds`, so the term cancels exactly out of the terminal current and the
+operating point does not depend on it. That is what a conditioning floor is for,
+and it is not what `gmin` does on the diode and BJT, where it crosses a pn
+junction and carries current.
+
+The reason for the difference is `IS`/`JS` on the unmodelled list above: **there
+are no body diodes here**, so this device has no pn junction to put `gmin`
+across. A reverse-biased drain-bulk carries no `gmin` leakage where ngspice's
+does. What changed is only that the value now comes from the solve rather than
+from a `const` in `mosfet1.rs`, so a deck raising `gmin` to get a stubborn
+circuit through gets help from its MOSFETs as well as its junctions.
 
 ### Instance parameters
 
@@ -370,8 +422,17 @@ at the bottom of a sweep where both simulators sit on their own `gmin`).
 | Diode | DIODE, DIODE_CMC | agree; worst 1 pA |
 | Other | ASM-HEMT, MVSG_CMC, resistor, strings, amplifier, current source | agree; worst 3 pA |
 
-Every remaining difference is a fixed sub-picoamp offset — the two simulators put
-`gmin` on slightly different sets of nodes — against currents up to 0.28 A.
+The per-family numbers above were measured **before** `gmin` moved from every
+node's diagonal to across each pn junction, and that offset is exactly what they
+were: a fixed sub-picoamp difference attributed at the time to "the two
+simulators put `gmin` on slightly different sets of nodes". Re-measured for BSIM4
+after the change, the disagreement is 9e-14 to 6e-13 relative — femtoamps against
+milliamps, i.e. round-off at ngspice's twelve printed digits, and the in-tree
+`bsim4_acceptance.rs` tolerance came down from 1e-7 to 1e-11 with it.
+
+The rest of the table has not been re-run (it needs an OpenVAF-Reloaded
+checkout), so read those picoamps as upper bounds rather than as current
+measurements. The conclusion — every family agrees — is unaffected either way.
 
 Not covered, and why:
 

@@ -24,8 +24,7 @@ use crate::device::{Device, EvalFlags, NodeId, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
-    stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, RowFloor,
-    SparseRow,
+    stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, SparseRow,
 };
 use crate::newton::build_devices;
 use crate::options::SimOptions;
@@ -448,7 +447,10 @@ pub fn noise_analysis(
             }
         }
     }
-    topo.stamp_gmin(&mut g_mat, opts.gmin, RowFloor::GminOnly);
+    // No nodal GMIN — see the same spot in `ac.rs`. The junction `gmin` is
+    // already in `g_mat` via `load_jacobian` above, and adding `opts.gmin` to
+    // every node would linearise a different circuit than the DC operating
+    // point this analysis is built on.
     let mut c_mat = vec![SparseRow::default(); size];
     let mut l_mat = vec![SparseRow::default(); size];
     for el in &netlist.elements {
@@ -484,6 +486,10 @@ pub fn noise_analysis(
         // of two-terminal branches (OSDI/Verilog-A) stamp it themselves.
         dev.load_reactive_jacobian(&mut c_mat);
     }
+
+    // Now that C and L exist, pin what none of the three reaches — see
+    // `ac.rs`. Replaces the nodal `opts.gmin` that used to do this by accident.
+    topo.pin_rows_empty_in_all(&mut g_mat, &c_mat, &l_mat);
 
     // Locate the named input source so we can compute its signal-path gain.
     let input_vsrc_idx = topo.vsrc_index.get(input_src).copied().ok_or_else(|| {
@@ -616,7 +622,9 @@ fn run_dc_op(
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
-        topo.stamp_gmin(&mut mat.a, opts.gmin, RowFloor::PinEmptyRows);
+        // 0.0, matching `newton.rs` — this loop reproduces the DC operating
+        // point, so it must condition the matrix the same way.
+        topo.stamp_gmin(&mut mat.a, 0.0);
         let x_new = solver.solve(&mat.a, &mat.b)?;
         let max_dv = x_new
             .iter()

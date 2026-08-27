@@ -33,6 +33,22 @@ pub struct SimContext {
     /// When true, device models apply junction-step limiters (pnjlim, fetlim).
     /// Mapped from `SimOptions::pnjlim` / `.options nopnjlim`.
     pub jlim_enabled: bool,
+    /// Minimum conductance placed **across each pn junction** — SPICE's `GMIN`.
+    ///
+    /// A junction's `dI/dV` collapses to nothing in reverse bias, so a node that
+    /// reaches the circuit only through reverse-biased junctions gets a row of
+    /// almost zeros and the Jacobian goes near-singular. `gmin` in parallel keeps
+    /// every junction conducting something.
+    ///
+    /// It reaches devices through the context because it belongs to the *solve*,
+    /// not to the model card: `diode.rs`, `bjt.rs` and `mosfet1.rs` each used to
+    /// hardcode their own `const GMIN: f64 = 1e-12`, so `.options gmin=` moved a
+    /// nodal floor and left every junction alone.
+    ///
+    /// A junction is what it crosses, so `mosfet1.rs` — Level 1, no body diodes
+    /// — has nowhere to put it and keeps it as a Jacobian-only channel floor;
+    /// see the note there.
+    pub gmin: f64,
     /// Centre wavelength of the photonic band of interest, in metres.  Devices
     /// use this to bootstrap their λ wire during the initial NR iterate (when
     /// the laser hasn't driven the wire yet — value at x=0).  After iteration 0
@@ -89,6 +105,10 @@ impl Default for SimContext {
             temperature: 300.15,
             omega_0: 0.0,
             jlim_enabled: true,
+            // Matches `SimOptions::default().gmin`, asserted by
+            // `the_two_defaults_for_gmin_are_one_number` in `options.rs` — two
+            // defaults for one quantity is two chances to drift.
+            gmin: 1e-12,
             lambda_center_m: 1.55e-6,
             bidirectional_propagation: false,
             waveguide_delay: false,
