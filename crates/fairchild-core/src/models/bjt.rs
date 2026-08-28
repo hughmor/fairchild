@@ -143,6 +143,16 @@ pub struct GummelPoonBjt {
     xti: f64,
     /// `XTB` — the betas' temperature exponent.
     xtb: f64,
+    /// The two junction potentials and zero-bias capacitance factors at the
+    /// operating temperature.
+    ///
+    /// Nominal / 1.0 until `setup_model` runs, which is before any eval. Held
+    /// rather than recomputed: each potential costs two logs and an exponential
+    /// and depends on nothing that moves inside a solve.
+    vje_t: f64,
+    vjc_t: f64,
+    cje_t_factor: f64,
+    cjc_t_factor: f64,
     /// `IS(T)/IS` and `BF(T)/BF`, from `crate::temperature`.
     ///
     /// Factors rather than scaled parameters, so `setup_model` running twice
@@ -323,6 +333,10 @@ impl GummelPoonBjt {
             polarity: if is_pnp { -1.0 } else { 1.0 },
             vcrit: 0.0,
             vt: 0.025864,
+            vje_t: 0.75,
+            vjc_t: 0.75,
+            cje_t_factor: 1.0,
+            cjc_t_factor: 1.0,
             is_t_factor: 1.0,
             beta_t_factor: 1.0,
             gmin: GMIN_SEED,
@@ -571,6 +585,13 @@ impl Device for GummelPoonBjt {
         self.is_t_factor =
             crate::temperature::bjt_is_factor(ctx.temperature, self.tnom, self.eg, self.xti);
         self.beta_t_factor = crate::temperature::beta_factor(ctx.temperature, self.tnom, self.xtb);
+        // Both junctions' potentials and zero-bias capacitances. Idempotent, and
+        // derived from the nominal values rather than the previous result.
+        let (t, tnom) = (ctx.temperature, self.tnom);
+        self.vje_t = crate::temperature::scaled_junction_potential(self.vje, t, tnom);
+        self.vjc_t = crate::temperature::scaled_junction_potential(self.vjc, t, tnom);
+        self.cje_t_factor = crate::temperature::junction_cap_factor(self.vje, self.mje, t, tnom);
+        self.cjc_t_factor = crate::temperature::junction_cap_factor(self.vjc, self.mjc, t, tnom);
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
     }
 
@@ -665,10 +686,34 @@ impl Device for GummelPoonBjt {
             self.cbc_eff = op.cbc;
             self.qbe_now = op.qbe;
             self.qbc_now = op.qbc;
-            self.cje_eval = cj_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
-            self.cjc_eval = cj_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
-            self.q_je_eval = q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc);
-            self.q_jc_eval = q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc);
+            self.cje_eval = cj_depl(
+                self.cje * self.cje_t_factor,
+                vbe_eff,
+                self.vje_t,
+                self.mje,
+                self.fc,
+            );
+            self.cjc_eval = cj_depl(
+                self.cjc * self.cjc_t_factor,
+                vbc_eff,
+                self.vjc_t,
+                self.mjc,
+                self.fc,
+            );
+            self.q_je_eval = q_depl(
+                self.cje * self.cje_t_factor,
+                vbe_eff,
+                self.vje_t,
+                self.mje,
+                self.fc,
+            );
+            self.q_jc_eval = q_depl(
+                self.cjc * self.cjc_t_factor,
+                vbc_eff,
+                self.vjc_t,
+                self.mjc,
+                self.fc,
+            );
         } else {
             self.cbe_eff = 0.0;
             self.cbc_eff = 0.0;
@@ -855,10 +900,26 @@ impl Device for GummelPoonBjt {
         let disc = self.disc;
         self.qbe_hist.advance(disc, op.qbe);
         self.qbc_hist.advance(disc, op.qbc);
-        self.q_je_hist
-            .advance(disc, q_depl(self.cje, vbe_eff, self.vje, self.mje, self.fc));
-        self.q_jc_hist
-            .advance(disc, q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc));
+        self.q_je_hist.advance(
+            disc,
+            q_depl(
+                self.cje * self.cje_t_factor,
+                vbe_eff,
+                self.vje_t,
+                self.mje,
+                self.fc,
+            ),
+        );
+        self.q_jc_hist.advance(
+            disc,
+            q_depl(
+                self.cjc * self.cjc_t_factor,
+                vbc_eff,
+                self.vjc_t,
+                self.mjc,
+                self.fc,
+            ),
+        );
     }
 
     fn noise_sources(&self, ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {

@@ -36,6 +36,14 @@ pub struct ShockleyDiode {
     eg: f64,
     /// `XTI` — the saturation current's temperature exponent.
     xti: f64,
+    /// `VJ` and `CJO/CJO_nom` at the operating temperature.
+    ///
+    /// `vj_t` is nominal and `cjo_t_factor` is 1.0 until `setup_model` runs,
+    /// which is before any eval. Held rather than recomputed because `PHI(T)`
+    /// costs two logs and an exponential and depends on nothing that moves inside
+    /// a solve.
+    vj_t: f64,
+    cjo_t_factor: f64,
     /// `IS(T)/IS`, from [`crate::temperature::diode_is_factor`].
     ///
     /// A factor rather than a scaled `IS`, so `setup_model` running more than
@@ -119,6 +127,8 @@ impl ShockleyDiode {
             tnom: crate::temperature::TNOM_DEFAULT_K,
             eg: crate::temperature::EG_DEFAULT,
             xti: crate::temperature::XTI_DEFAULT,
+            vj_t: 1.0,
+            cjo_t_factor: 1.0,
             is_t_factor: 1.0,
             bv: None,
             ibv: 1e-3,
@@ -216,8 +226,10 @@ impl ShockleyDiode {
     }
 
     /// Zero-bias junction capacitance of the whole instance: `CJO·AREA`.
+    /// Zero-bias junction capacitance of the whole instance:
+    /// `CJO(T)·AREA`.
     fn cjo_eff(&self) -> f64 {
-        self.cjo * self.area
+        self.cjo * self.cjo_t_factor * self.area
     }
 
     /// Series resistance of the whole instance: `RS/AREA` — N junctions in
@@ -417,12 +429,12 @@ impl ShockleyDiode {
         if cjo == 0.0 {
             return 0.0;
         }
-        let fc_vj = self.fc * self.vj;
+        let fc_vj = self.fc * self.vj_t;
         if v < fc_vj {
-            cjo * (1.0 - v / self.vj).powf(-self.mj)
+            cjo * (1.0 - v / self.vj_t).powf(-self.mj)
         } else {
             let k = (1.0 - self.fc).powf(1.0 + self.mj);
-            cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj)
+            cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj_t)
         }
     }
 
@@ -432,18 +444,18 @@ impl ShockleyDiode {
         if cjo == 0.0 {
             return 0.0;
         }
-        let fc_vj = self.fc * self.vj;
+        let fc_vj = self.fc * self.vj_t;
         if v < fc_vj {
-            let x = 1.0 - v / self.vj;
-            cjo * self.vj / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
+            let x = 1.0 - v / self.vj_t;
+            cjo * self.vj_t / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
         } else {
             // Charge at the FC·VJ boundary
             let x_fc = 1.0 - self.fc;
-            let q_fc = cjo * self.vj / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
+            let q_fc = cjo * self.vj_t / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
             let k = x_fc.powf(1.0 + self.mj);
             let f2 = 1.0 - self.fc * (1.0 + self.mj);
             let dv = v - fc_vj;
-            q_fc + cjo / k * (f2 * dv + self.mj / (2.0 * self.vj) * (v * v - fc_vj * fc_vj))
+            q_fc + cjo / k * (f2 * dv + self.mj / (2.0 * self.vj_t) * (v * v - fc_vj * fc_vj))
         }
     }
 
@@ -486,6 +498,13 @@ impl Device for ShockleyDiode {
             self.xti,
             self.n,
         );
+        // The junction potential and the zero-bias capacitance. Both idempotent,
+        // both derived from the nominal values rather than from the previous
+        // result.
+        self.vj_t =
+            crate::temperature::scaled_junction_potential(self.vj, ctx.temperature, self.tnom);
+        self.cjo_t_factor =
+            crate::temperature::junction_cap_factor(self.vj, self.mj, ctx.temperature, self.tnom);
         // Deliberately the unit-area IS: `AREA` arrives after `setup_model`
         // (and can arrive twice, through the alias path). `vcrit` only decides
         // when pnjlim starts compressing steps, and AREA moves it by

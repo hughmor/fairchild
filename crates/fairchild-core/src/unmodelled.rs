@@ -40,12 +40,6 @@ pub const DIODE: Unmodelled = &[
         "high-injection roll-off is not modelled, so the forward current keeps \
          its exponential slope past the knee",
     ),
-    (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
-    ),
     ("trs1", "RS does not vary with temperature"),
     ("trs2", "RS does not vary with temperature"),
     (
@@ -84,12 +78,6 @@ pub const BJT: Unmodelled = &[
     ("vtf", "the forward transit time is constant (needs XTF)"),
     ("itf", "the forward transit time is constant (needs XTF)"),
     ("ptf", "excess phase is not modelled"),
-    (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
-    ),
 ];
 
 /// MOSFET (`.model … NMOS|PMOS`), Level 1.
@@ -154,12 +142,6 @@ pub const MOSFET: Unmodelled = &[
     ),
     ("eta", "static feedback on the threshold is not modelled"),
     ("kappa", "the saturation-field factor is not modelled"),
-    (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
-    ),
     ("php", "the sidewall junction uses PB as its potential"),
 ];
 

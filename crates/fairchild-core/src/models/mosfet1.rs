@@ -47,6 +47,15 @@ pub struct Mosfet1 {
     /// BJT carried exactly that bug once (see its `noise_sources`), so the
     /// current is stored rather than reconstructed.
     ids_eval: f64,
+    /// `PB` and the two bulk-capacitance factors at the operating temperature.
+    ///
+    /// Two factors because `CJ` grades by `MJ` and `CJSW` by `MJSW`, and SPICE
+    /// derives each correction from its own coefficient — one factor applied to
+    /// both would be wrong for any card where they differ, which is every card
+    /// that sets them.
+    pb_t: f64,
+    cj_t_factor: f64,
+    cjsw_t_factor: f64,
     /// `KF`/`AF` — flicker noise coefficient and exponent.
     kf: f64,
     af: f64,
@@ -263,6 +272,9 @@ impl Mosfet1 {
             source_ext: None,
             rd,
             rs,
+            pb_t: 0.8,
+            cj_t_factor: 1.0,
+            cjsw_t_factor: 1.0,
             ids_eval: 0.0,
             kf,
             af,
@@ -385,12 +397,12 @@ impl Mosfet1 {
         if c0 == 0.0 {
             return 0.0;
         }
-        let fc_pb = self.fc * self.pb;
+        let fc_pb = self.fc * self.pb_t;
         if v < fc_pb {
-            c0 * (1.0 - v / self.pb).powf(-m)
+            c0 * (1.0 - v / self.pb_t).powf(-m)
         } else {
             let k = (1.0 - self.fc).powf(1.0 + m);
-            c0 / k * (1.0 - self.fc * (1.0 + m) + m * v / self.pb)
+            c0 / k * (1.0 - self.fc * (1.0 + m) + m * v / self.pb_t)
         }
     }
 
@@ -398,27 +410,31 @@ impl Mosfet1 {
         if c0 == 0.0 {
             return 0.0;
         }
-        let fc_pb = self.fc * self.pb;
+        let fc_pb = self.fc * self.pb_t;
         if v < fc_pb {
-            let x = 1.0 - v / self.pb;
-            c0 * self.pb / (1.0 - m) * (1.0 - x.powf(1.0 - m))
+            let x = 1.0 - v / self.pb_t;
+            c0 * self.pb_t / (1.0 - m) * (1.0 - x.powf(1.0 - m))
         } else {
             let x_fc = 1.0 - self.fc;
-            let q_fc = c0 * self.pb / (1.0 - m) * (1.0 - x_fc.powf(1.0 - m));
+            let q_fc = c0 * self.pb_t / (1.0 - m) * (1.0 - x_fc.powf(1.0 - m));
             let k = x_fc.powf(1.0 + m);
             let f2 = 1.0 - self.fc * (1.0 + m);
             let dv = v - fc_pb;
-            q_fc + c0 / k * (f2 * dv + m / (2.0 * self.pb) * (v * v - fc_pb * fc_pb))
+            q_fc + c0 / k * (f2 * dv + m / (2.0 * self.pb_t) * (v * v - fc_pb * fc_pb))
         }
     }
 
     /// A whole bulk junction: bottom graded with `MJ`, sidewall with `MJSW`.
     fn cj_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
-        self.cj_depl_m(bot, v, self.mj) + self.cj_depl_m(sw, v, self.mjsw)
+        // Each area's own factor: `CJ` grades by `MJ` and `CJSW` by `MJSW`, and
+        // SPICE derives each correction from its own coefficient.
+        self.cj_depl_m(bot * self.cj_t_factor, v, self.mj)
+            + self.cj_depl_m(sw * self.cjsw_t_factor, v, self.mjsw)
     }
 
     fn q_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
-        self.q_depl_m(bot, v, self.mj) + self.q_depl_m(sw, v, self.mjsw)
+        self.q_depl_m(bot * self.cj_t_factor, v, self.mj)
+            + self.q_depl_m(sw * self.cjsw_t_factor, v, self.mjsw)
     }
 
     // ── Stamp helpers ────────────────────────────────────────────────────────
@@ -472,6 +488,12 @@ impl Device for Mosfet1 {
             self.tnom,
             self.polarity < 0.0,
         );
+        // The bulk junctions. `PB` moves by the same law as `PHI`; the two
+        // capacitance corrections each take their own grading coefficient.
+        self.pb_t = crate::temperature::scaled_junction_potential(self.pb, t, self.tnom);
+        self.cj_t_factor = crate::temperature::junction_cap_factor(self.pb, self.mj, t, self.tnom);
+        self.cjsw_t_factor =
+            crate::temperature::junction_cap_factor(self.pb, self.mjsw, t, self.tnom);
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {

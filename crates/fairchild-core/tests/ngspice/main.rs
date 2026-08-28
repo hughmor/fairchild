@@ -19,6 +19,7 @@ mod ngspice_diode_tran_golden;
 mod ngspice_flicker_golden;
 mod ngspice_gmin_golden;
 mod ngspice_golden;
+mod ngspice_junction_cap_temp_golden;
 mod ngspice_method_golden;
 mod ngspice_mosfet_golden;
 mod ngspice_noise_golden;
