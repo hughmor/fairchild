@@ -58,12 +58,14 @@ pub const BJT: Unmodelled = &[
          for FCS of 0.1, 0.5, 0.9 and absent",
     ),
     (
-        "rbm",
-        "the base resistance is constant: it does not fall towards RBM at high \
-         current",
+        "ptf",
+        "excess phase is not modelled: the transport current carries no delay, so \
+         a stage past 1/(2·pi·TF) has the right gain and the wrong phase. \
+         Measured against ngspice at 1 GHz with TF=1n: PTF=30 moves the collector \
+         phase and leaves the magnitude bit-identical. Unlike a capacitance this \
+         is a frequency-dependent transconductance, which the G + jwC − L/w \
+         assembly cannot express",
     ),
-    ("irb", "the base resistance is constant (needs RBM)"),
-    ("ptf", "excess phase is not modelled"),
 ];
 
 /// MOSFET (`.model … NMOS|PMOS`), Level 1.

@@ -294,7 +294,8 @@ instead. What bounds a step into breakdown now is the trust region
 | `FCS` | ⚠️ accepted, not modelled — **and ngspice ignores it too**, see below | ❌ | ✅ measured inert in the reference |
 | `XCJC` | ✅ | ✅ splits `CJC` across `RB`, internal share to the internal base | ✅ ngspice AC at six values, monotonic and matching |
 | `XTF`, `VTF`, `ITF` | ✅ | ✅ `TF_eff = TF·(1 + XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF)))`, with the capacitance as the charge's analytic derivative | ✅ ngspice AC at nine cards, plus a `VCE` sweep for the transcapacitance and a transient for its linearisation |
-| `RBM`, `IRB`, `PTF` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `RBM`, `IRB` | ✅ | ✅ the base resistance falls with base current, two laws selected by `IRB` | ✅ ngspice DC at 16 cards and biases, plus both closed-form limits |
+| `PTF` | ⚠️ accepted, not modelled — a frequency-dependent transconductance, see below | ❌ | ✅ measured real in the reference, phase only |
 
 ### Instance parameters
 
@@ -379,6 +380,66 @@ different fault. Out of the transient Jacobian: a wrong Newton step. Out of the 
 matrix: a wrong bandwidth. Out of the companion's `cv`: a spurious
 `scale·cbe_x·vbc` in the converged transient answer, which no AC test can see. The
 last one is worth 83% on a switching deck and has its own transient golden.
+
+### The base resistance, which is not constant
+
+`RB` used to be a fixed resistance. A real transistor's base resistance collapses
+under drive, and without that a hard-driven stage reads too little collector
+current. Two laws, and `IRB` alone selects which:
+
+```text
+IRB == 0   rb_eff = RBM + (RB − RBM)/qb
+IRB >  0   rb_eff = RBM + 3·(RB − RBM)·(tan z − z)/(z·tan²z)
+           z = (sqrt(1 + 144/pi²·IB/IRB) − 1) / ((24/pi²)·sqrt(IB/IRB))
+```
+
+`RBM` defaults to `RB`, which makes both laws return `RB` exactly — measured, not
+assumed: ngspice gives bit-identical currents for `RB=10k` and `RB=10k RBM=10k`.
+Any other default would silently change every card that sets `RB`.
+
+Extracted from ngspice by binary search on a *fixed* `RB` that reproduces the same
+collector current, so the extraction assumes no law:
+
+| `Vb` | `IRB` | `IB` | extracted | the `tan z` law |
+|---|---|---|---|---|
+| 0.9 | 1e−6 | 7.0213e−05 | 973.3028 | 973.7307 |
+| 1.0 | 1e−5 | 6.5150e−05 | 2621.3721 | 2622.2215 |
+| 1.5 | 1e−4 | 1.4017e−04 | 4590.6510 | 4591.7263 |
+
+`rb_eff` is a function of the iterate's own node voltages, through `IB` and `qb`, so
+it is **not** lagged internal state and the convergence test sees it stop moving when
+`x` does. The Jacobian stamps `1/rb_eff` without differentiating it, which costs
+Newton steps and not correctness: the residual defines the answer and both read the
+same value.
+
+Both limits of the `tan z` form are numerically hostile and each has a test. The
+bracket is written as `1/(z·tan z) − 1/tan²z`, a difference of two terms of size
+`z⁻²` whose difference is `1/3`, so the relative cancellation is `3z²` — eight
+digits left at `z = 1e-4`, none at `1e-8`. Below `1e-4` the series limit `1/3` is
+used instead. At the other end `tan z` overflows, and the same spelling makes both
+terms underflow to zero rather than forming `∞/∞`.
+
+### `PTF`, and why it is not modelled
+
+Excess phase is real in ngspice rather than inert. At 1 GHz with `TF = 1n`, so
+`1/(2·pi·TF)` is 159 MHz:
+
+| card | `ph(v(c))` | `mag(v(c))` |
+|---|---|---|
+| absent | 1.678594e+00 | 1.582311e+00 |
+| `PTF=0` | 1.678594e+00 | 1.582311e+00 |
+| `PTF=30` | −1.611270e+00 | 1.582311e+00 |
+| `PTF=90` | −1.907830e+00 | 1.582311e+00 |
+
+Phase only, magnitude bit-identical, which is what excess phase should do. So this
+is a gap and not an *ngspice ignores it too* case like `FCS`.
+
+It is left out because it is different in kind from everything else here. A
+capacitance is `jw·C` and fits the `G + jwC − L/w` assembly; excess phase is a
+delay on the transport current, so its contribution is a frequency-dependent
+*transconductance*. Expressing it needs a hook the small-signal assembly does not
+have. A stage past `1/(2·pi·TF)` gets the right gain and the wrong phase, which the
+warning says.
 
 ### The collector-substrate junction
 

@@ -137,6 +137,63 @@ fn q_js_charge(cjs: f64, v: f64, vjs: f64, mjs: f64) -> f64 {
     }
 }
 
+/// The base resistance at one bias point, falling from `rb` towards `rbm`.
+///
+/// Two laws, and which one applies is decided by `IRB` alone:
+///
+/// ```text
+/// IRB == 0   rbm + (rb − rbm)/qb
+/// IRB >  0   rbm + 3·(rb − rbm)·(tan z − z)/(z·tan²z)
+///            z = (sqrt(1 + 144/pi²·ib/IRB) − 1) / ((24/pi²)·sqrt(ib/IRB))
+/// ```
+///
+/// `rbm` defaults to `rb`, which makes both laws return `rb` exactly, so a card
+/// that does not ask for a variable base resistance does not get one. Measured:
+/// ngspice gives bit-identical currents for `RB=10k` and `RB=10k RBM=10k`.
+///
+/// # The limits are where this needs care
+///
+/// As `ib → 0`, `z → 0` and the `tan` expression is `0/0`. Its limit is `1/3`, so
+/// the whole factor tends to 1 and `rb_eff → rb`. Series-expanded below that
+/// threshold rather than evaluated, because the cancellation loses every digit.
+///
+/// As `ib → ∞`, `z → pi/2` and `tan z → ∞`. Written as
+/// `1/(z·tan z) − 1/tan²z` so both terms simply underflow to zero and
+/// `rb_eff → rbm`, instead of forming `∞/∞`.
+fn base_resistance(rb: f64, rbm: f64, irb: f64, ib: f64, qb: f64) -> f64 {
+    if rb <= 0.0 || rbm >= rb {
+        return rb;
+    }
+    if irb <= 0.0 {
+        // `qb` is at least 1 for any physical bias, so this only ever lowers it.
+        return if qb > 0.0 { rbm + (rb - rbm) / qb } else { rb };
+    }
+    if ib <= 0.0 {
+        return rb;
+    }
+    let x = ib / irb;
+    let sx = x.sqrt();
+    let z = ((1.0 + 144.0 / (std::f64::consts::PI * std::f64::consts::PI) * x).sqrt() - 1.0)
+        / ((24.0 / (std::f64::consts::PI * std::f64::consts::PI)) * sx);
+    if !z.is_finite() || z <= 0.0 {
+        return rb;
+    }
+    // Below this the `tan z − z` cancellation has no digits left; the series limit
+    // of the bracket is `1/3 + 2z²/15 + …`, and the leading term is enough here
+    // because `z < 1e-4` makes the correction 1e-9 relative.
+    const Z_SMALL: f64 = 1e-4;
+    let bracket = if z < Z_SMALL {
+        1.0 / 3.0
+    } else {
+        let t = z.tan();
+        if !t.is_finite() || t == 0.0 {
+            return rbm;
+        }
+        1.0 / (z * t) - 1.0 / (t * t)
+    };
+    rbm + 3.0 * (rb - rbm) * bracket
+}
+
 /// The constitutive equations evaluated at one bias point.
 ///
 /// One place computes this and both `eval` and `commit_timestep` read it.  They
@@ -161,30 +218,46 @@ struct Op {
     /// those, which is why nothing needed it before.
     cbe_x: f64,
     cbc: f64, // ∂QBC/∂VBC
+    /// The base charge factor, which `base_resistance` needs when `IRB` is absent.
+    qb: f64,
 }
 
 /// Gummel-Poon Level 1 BJT.
 pub struct GummelPoonBjt {
     // ── Model parameters ──────────────────────────────────────────────────────
-    is: f64,       // transport saturation current (A)
-    bf: f64,       // forward beta (current gain)
-    br: f64,       // reverse beta
-    nf: f64,       // forward emission coefficient
-    nr: f64,       // reverse emission coefficient
-    vaf: f64,      // forward Early voltage (V); f64::INFINITY = no Early effect
-    var: f64,      // reverse Early voltage (V)
-    ikf: f64,      // forward high-injection knee current (A); 0 = no roll-off
-    ikr: f64,      // reverse high-injection knee current (A)
-    ise: f64,      // B-E leakage saturation current (A)
-    ne: f64,       // B-E leakage emission coefficient
-    isc: f64,      // B-C leakage saturation current (A)
-    nc: f64,       // B-C leakage emission coefficient
-    tf: f64,       // forward transit time (s) — B-E diffusion charge
-    xtf: f64,      // TF bias-modulation coefficient
-    vtf: f64,      // the VBC scale in TF's modulation; 0 disables that term
-    itf: f64,      // the high-current knee in TF's modulation; 0 disables it
-    tr: f64,       // reverse transit time (s) — B-C diffusion charge
-    rb: f64,       // base ohmic series resistance (Ω); 0 = no internal node
+    is: f64,  // transport saturation current (A)
+    bf: f64,  // forward beta (current gain)
+    br: f64,  // reverse beta
+    nf: f64,  // forward emission coefficient
+    nr: f64,  // reverse emission coefficient
+    vaf: f64, // forward Early voltage (V); f64::INFINITY = no Early effect
+    var: f64, // reverse Early voltage (V)
+    ikf: f64, // forward high-injection knee current (A); 0 = no roll-off
+    ikr: f64, // reverse high-injection knee current (A)
+    ise: f64, // B-E leakage saturation current (A)
+    ne: f64,  // B-E leakage emission coefficient
+    isc: f64, // B-C leakage saturation current (A)
+    nc: f64,  // B-C leakage emission coefficient
+    tf: f64,  // forward transit time (s) — B-E diffusion charge
+    xtf: f64, // TF bias-modulation coefficient
+    vtf: f64, // the VBC scale in TF's modulation; 0 disables that term
+    itf: f64, // the high-current knee in TF's modulation; 0 disables it
+    tr: f64,  // reverse transit time (s) — B-C diffusion charge
+    rb: f64,  // base ohmic series resistance (Ω); 0 = no internal node
+    /// The floor `rb` falls towards at high base current. Defaults to `rb`, which
+    /// disables the variation.
+    rbm: f64,
+    /// The base current at which `rb` has fallen halfway. `0` selects the
+    /// `qb`-driven law instead of the `tan z` one.
+    irb: f64,
+    /// `rb` at the last `eval`, from [`base_resistance`].
+    ///
+    /// Not lagged state: it is a function of the iterate's own node voltages, so
+    /// once the convergence test says `x` has stopped moving this has too. The
+    /// Jacobian stamps `1/rb_eff` and does not differentiate it, which costs
+    /// Newton steps and not correctness — the residual defines the answer and
+    /// both read the same value.
+    rb_eff: f64,
     rc: f64,       // collector ohmic series resistance (Ω)
     re: f64,       // emitter ohmic series resistance (Ω)
     polarity: f64, // +1 NPN, -1 PNP
@@ -360,6 +433,8 @@ impl GummelPoonBjt {
         let mut mjc = 0.33;
         let mut fc = 0.5;
         let mut xcjc = 1.0_f64;
+        let mut rbm = 0.0_f64;
+        let mut irb = 0.0_f64;
         let mut xtf = 0.0_f64;
         let mut vtf = 0.0_f64;
         let mut itf = 0.0_f64;
@@ -405,6 +480,8 @@ impl GummelPoonBjt {
                 "itf" | "jtf" => itf = *v,
                 "tr" => tr = *v,
                 "rb" => rb = *v,
+                "rbm" => rbm = *v,
+                "irb" | "jrb" | "irb0" => irb = *v,
                 "rc" => rc = *v,
                 "re" => re = *v,
                 "cje" => cje = *v,
@@ -446,6 +523,12 @@ impl GummelPoonBjt {
             itf,
             tr,
             rb,
+            // `RBM` defaults to `RB`, and `0` on the card means "not given". A
+            // literal `RBM=0` would be a zero-resistance floor, which SPICE also
+            // reads as absent, so the two are indistinguishable and match.
+            rbm: if rbm > 0.0 { rbm } else { rb },
+            irb,
+            rb_eff: rb,
             rc,
             re,
             polarity: if is_pnp { -1.0 } else { 1.0 },
@@ -563,6 +646,11 @@ impl GummelPoonBjt {
             // `num_extra_nodes` tests — it cannot reach zero from a positive
             // value, so the internal-node count is unchanged.
             self.rb /= a;
+            // `RBM` is a resistance per device like `RB`, and `IRB` is a current,
+            // so N in parallel divide the first and multiply the second.
+            self.rbm /= a;
+            self.irb *= a;
+            self.rb_eff = self.rb;
             self.rc /= a;
             self.re /= a;
         }
@@ -730,6 +818,7 @@ impl GummelPoonBjt {
             cbe,
             cbe_x,
             cbc: self.tr * gbc,
+            qb,
         }
     }
 
@@ -848,6 +937,11 @@ impl Device for GummelPoonBjt {
         // eval-point voltages.  Jacobian entries (pol² = 1, so pol-independent):
         //   dIC_real/dVB = gf - gce, dIC_real/dVC = gce, dIC_real/dVE = -gf
         //   dIB_real/dVB = gpi + gmu, dIB_real/dVC = -gmu, dIB_real/dVE = -gpi
+        // The base resistance at this iterate. A function of the iterate's own
+        // node voltages through `ib` and `qb`, so it is not lagged state and the
+        // convergence test sees it stop moving when `x` does.
+        self.rb_eff = base_resistance(self.rb, self.rbm, self.irb, op.ib, op.qb);
+
         self.gf = op.gf;
         self.gce = op.gce;
         self.gpi = op.gpi;
@@ -1028,7 +1122,9 @@ impl Device for GummelPoonBjt {
         // grounded (None) terminals, which correctly yields a conductance-to-
         // ground when an external terminal is ground.
         if self.rb > 0.0 {
-            let g = 1.0 / self.rb;
+            // `rb_eff`, not `rb`: `RBM`/`IRB` make it fall with base current.
+            // Equal to `rb` for a card that gives neither.
+            let g = 1.0 / self.rb_eff;
             stamp!(self.base_ext, self.base_ext, g);
             stamp!(self.base_ext, self.base, -g);
             stamp!(self.base, self.base_ext, -g);

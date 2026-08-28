@@ -1084,3 +1084,170 @@ fn the_transcapacitance_is_in_the_transient_residual_too() {
     }
     assert_eq!(compared, 5, "every timepoint must have been compared");
 }
+
+/// `RBM` and `IRB` make the base resistance fall with base current.
+///
+/// Two laws, selected by `IRB` alone:
+///
+/// ```text
+/// IRB == 0   rb_eff = RBM + (RB − RBM)/qb
+/// IRB >  0   rb_eff = RBM + 3·(RB − RBM)·(tan z − z)/(z·tan²z)
+/// ```
+///
+/// A constant base resistance is the whole point of what this replaces: a real
+/// transistor's `RB` collapses under drive, and without it a hard-driven stage
+/// reads too little collector current. Measured by extracting ngspice's effective
+/// `rb` by binary search on a *fixed* `RB` that reproduces the same collector
+/// current, so the extraction assumes no law:
+///
+/// | `Vb` | `IRB` | `IB` | extracted `rb_eff` | the `tan z` law |
+/// |---|---|---|---|---|
+/// | 0.9 | 1e-6 | 7.0213e-05 | 973.3028 | 973.7307 |
+/// | 1.0 | 1e-5 | 6.5150e-05 | 2621.3721 | 2622.2215 |
+/// | 1.5 | 1e-4 | 1.4017e-04 | 4590.6510 | 4591.7263 |
+///
+/// The assertions below are on the collector current of the whole deck, which
+/// needs no extraction.
+#[test]
+fn rbm_and_irb_lower_the_base_resistance_under_drive() {
+    let mut compared = 0;
+    for extra in [
+        "",
+        "RBM=10k",
+        "RBM=100",
+        "RBM=1k",
+        "RBM=100 IRB=1e-6",
+        "RBM=100 IRB=1e-5",
+        "RBM=100 IRB=1e-4",
+        "RBM=1k IRB=1e-5",
+    ] {
+        for vb in [0.9, 1.5] {
+            let deck = format!(
+                "* variable base resistance\n\
+                 .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k {extra})\n\
+                 VB bb 0 DC {vb}\nR1 bb b 100\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+            );
+            let got = bjt_op(&deck).vsrc_current("vc").expect("i(vc)");
+            let Some(ng) = ngspice_one(&deck, "i(vc)") else {
+                eprintln!("ngspice not available — skipping");
+                return;
+            };
+            let rel = (got - ng).abs() / ng.abs();
+            assert!(
+                rel < 2e-3,
+                "'{extra}' at Vb={vb}: fairchild I(vc)={got:.6e}, ngspice \
+                 {ng:.6e} (rel {rel:.2e}). A constant RB gives the '' row for \
+                 every card here."
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 16, "every card and bias must have been compared");
+}
+
+/// `RBM` defaults to `RB`, so a card that does not ask gets no variation.
+///
+/// The default was read off rather than assumed: ngspice gives bit-identical
+/// currents for `RB=10k` and `RB=10k RBM=10k`. Any other default would silently
+/// change every existing card that sets `RB`.
+///
+/// `RBM=100` is the control, so the probe is known to be able to see a difference.
+#[test]
+fn rbm_defaults_to_rb_and_changes_nothing() {
+    let currents: Vec<f64> = ["", "RBM=10k", "RBM=100"]
+        .iter()
+        .map(|extra| {
+            let deck = format!(
+                "* rbm default\n\
+                 .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k {extra})\n\
+                 VB bb 0 DC 1.0\nR1 bb b 100\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+            );
+            bjt_op(&deck).vsrc_current("vc").expect("i(vc)")
+        })
+        .collect();
+    assert!(
+        (currents[0] - currents[1]).abs() / currents[0].abs() < 1e-12,
+        "an absent RBM must equal RBM=RB: {:.6e} against {:.6e}",
+        currents[0],
+        currents[1]
+    );
+    assert!(
+        (currents[2] / currents[0]).abs() > 1.05,
+        "the control failed: RBM=100 must raise the collector current, or this \
+         probe cannot tell a correct default from a broken law. Got {:.6e} \
+         against {:.6e}",
+        currents[2],
+        currents[0]
+    );
+}
+
+/// The `tan z` law's two limits, where it is `0/0` and `∞/∞`.
+///
+/// An absolute anchor, because ngspice cannot be driven to either limit exactly,
+/// and the limiting *values* are the claim rather than mere finiteness.
+///
+/// `z` is set by `IB/IRB`, so a huge `IRB` drives it towards zero and a tiny one
+/// towards `π/2`:
+///
+/// | limit | `z` | bracket | `rb_eff` |
+/// |---|---|---|---|
+/// | `IB/IRB → 0` | `→ 0` | `→ 1/3` | `→ RB` |
+/// | `IB/IRB → ∞` | `→ π/2` | `→ 0` | `→ RBM` |
+///
+/// Both are asymptotic, so the parameters are chosen to reach them rather than
+/// approach them. `z = π/2 − 1/(2.432·sqrt(x))`, so `IRB=1e-15` on this deck
+/// leaves `rb_eff` at 100.0068 and misses by 8.8e-6 — real, and the reason the
+/// exponent is 1e-24 instead.
+///
+/// Each is compared against the same model with that resistance fixed, so the
+/// assertion is on the limit and not on a second implementation of the law.
+///
+/// Both limits are numerically hostile. The bracket is written as
+/// `1/(z·tan z) − 1/tan²z`, a difference of two terms of size `z⁻²` whose
+/// difference is `1/3`, so the relative cancellation is `3z²`: at `z = 1e-4` that
+/// leaves eight digits, at `1e-6` four, and at `1e-8` none. Hence the series
+/// branch below `1e-4`. At the other end `tan z` overflows, and the same spelling
+/// makes both terms underflow to zero instead of forming `∞/∞`.
+#[test]
+fn the_variable_base_resistance_reaches_both_limits() {
+    // `IB/IRB → 0`: a weak drive and an enormous `IRB`. Must equal a fixed `RB`.
+    let small_z = "* small z\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k RBM=100 IRB=1e6)\n\
+        VB bb 0 DC 0.6\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let fixed_rb = "* fixed rb\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k)\n\
+        VB bb 0 DC 0.6\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let a = bjt_op(small_z).vsrc_current("vc").expect("i(vc)");
+    let b = bjt_op(fixed_rb).vsrc_current("vc").expect("i(vc)");
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "small-z limit is not finite: {a} against {b}"
+    );
+    assert!(
+        (a - b).abs() / b.abs() < 1e-6,
+        "as IB/IRB goes to zero the bracket tends to 1/3 and rb_eff to RB, so \
+         this must equal the fixed-RB card: {a:.9e} against {b:.9e}. Evaluating \
+         `1/(z·tan z) − 1/tan²z` there instead of its series loses every digit \
+         to cancellation."
+    );
+
+    // `IB/IRB → ∞`: a hard drive and a vanishing `IRB`. Must equal a fixed `RBM`.
+    let big_z = "* big z\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k RBM=100 IRB=1e-24)\n\
+        VB bb 0 DC 3.0\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let fixed_rbm = "* fixed rbm\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=100)\n\
+        VB bb 0 DC 3.0\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let a = bjt_op(big_z).vsrc_current("vc").expect("i(vc)");
+    let b = bjt_op(fixed_rbm).vsrc_current("vc").expect("i(vc)");
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "large-z limit is not finite: {a} against {b}"
+    );
+    assert!(
+        (a - b).abs() / b.abs() < 1e-6,
+        "as IB/IRB goes to infinity z tends to pi/2 and rb_eff to RBM, so this \
+         must equal the fixed-RBM card: {a:.9e} against {b:.9e}. Forming the \
+         bracket as (tan z − z)/(z·tan²z) gives inf/inf here."
+    );
+}
