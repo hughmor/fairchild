@@ -22,9 +22,44 @@ const GMIN_SEED: f64 = 1e-12;
 /// them a second time.
 pub struct ShockleyDiode {
     // Model parameters
-    is: f64,    // saturation current (A)
-    n: f64,     // ideality factor
-    rs: f64,    // series resistance (Ω)
+    is: f64, // saturation current (A)
+    n: f64,  // ideality factor
+    rs: f64, // series resistance (Ω)
+    /// `BV` — reverse breakdown voltage as a positive magnitude. `None` when the
+    /// card gives none, which is not the same as `0.0`: a card with `BV=0` breaks
+    /// down immediately and a card without one never does.
+    bv: Option<f64>,
+    /// `IBV` — the reverse current *at* `-BV`. SPICE's default is 1 mA.
+    ibv: f64,
+    /// `BV` shifted so `I(-BV)` comes out as exactly `IBV` — see
+    /// [`Self::adjusted_bv`]. `None` until the first `eval`, and while `bv` is.
+    bv_adj: Option<f64>,
+    /// The `N·vt` `bv_adj` was derived at, so a `.temp` sweep re-derives it and
+    /// a normal solve derives it once. `AREA` is deliberately *not* in the key:
+    /// see below.
+    ///
+    /// # AREA and the knee: a divergence from ngspice, on purpose
+    ///
+    /// `bv_adj` is derived from the **unit-area** `IS`, so the knee sits at the
+    /// same voltage whatever `AREA` says, and the breakdown current scales with
+    /// `AREA` like every other current in this model.
+    ///
+    /// Deriving it from `IS·AREA` instead — which is what ngspice does — makes the
+    /// breakdown branch *exactly independent of AREA*: doubling `IS` doubles the
+    /// prefactor and lifts `bv_adj` by `vte·ln 2`, and the two cancel to the last
+    /// bit. Measured in ngspice-46: `area=1` and `area=2` return the same current
+    /// at 4.8, 5.0, 5.1 and 5.3 V, ratio 1.0000, while the forward current
+    /// doubles correctly.
+    ///
+    /// ngspice does not agree with *itself* there: two diodes in parallel give
+    /// exactly twice the breakdown current that one with `area=2` gives. This
+    /// tree already decided which of those wins — `area_scales_the_diode_exactly`
+    /// asserts that "AREA=2 *is* two devices, so it has to agree with two devices
+    /// rather than merely being twice something" — and a `area=10` Zener silently
+    /// carrying a tenth of its knee current is the failure this codebase exists to
+    /// refuse. So: AREA scales breakdown here, `area=N` equals N in parallel, and
+    /// the divergence is against ngspice's `area=N` only.
+    bv_key: f64,
     cjo: f64,   // zero-bias junction capacitance (F)
     vj: f64,    // junction built-in potential (V)
     mj: f64,    // grading coefficient
@@ -62,6 +97,10 @@ impl ShockleyDiode {
             is,
             n,
             rs: 0.0,
+            bv: None,
+            ibv: 1e-3,
+            bv_adj: None,
+            bv_key: f64::NAN,
             cjo: 0.0,
             vj: 1.0,
             mj: 0.5,
@@ -95,6 +134,8 @@ impl ShockleyDiode {
         let mut mj = 0.5_f64;
         let mut fc = 0.5_f64;
         let mut tt = 0.0_f64;
+        let mut bv: Option<f64> = None;
+        let mut ibv = 1e-3_f64;
         let mut unknown = Vec::new();
         for (k, v) in params {
             match k.as_str() {
@@ -106,6 +147,12 @@ impl ShockleyDiode {
                 "m" | "mj" => mj = *v,
                 "fc" => fc = *v,
                 "tt" => tt = *v,
+                // `BV` is a magnitude in every SPICE dialect, and a card writing
+                // it negative means the same diode. `abs` rather than a refusal:
+                // `BV=-5` is unambiguous, and erroring on it would reject cards
+                // ngspice reads.
+                "bv" => bv = Some(v.abs()),
+                "ibv" => ibv = v.abs(),
                 // Accepted and NOT modelled: `crate::unmodelled` owns that list
                 // and the diagnostic that reads it.
                 k if crate::unmodelled::is_listed(crate::unmodelled::DIODE, k) => {}
@@ -119,6 +166,8 @@ impl ShockleyDiode {
         d.mj = mj;
         d.fc = fc;
         d.tt = tt;
+        d.bv = bv;
+        d.ibv = ibv;
         (d, unknown)
     }
 
@@ -139,6 +188,30 @@ impl ShockleyDiode {
     }
 
     /// SPICE pnjlim: logarithmically compress large voltage steps.
+    /// # Why there is no mirrored version of this for reverse breakdown
+    ///
+    /// The breakdown exponential is as steep as the forward one, so mirroring
+    /// this limiter about `-bv_adj` looks obviously right. It was written, and it
+    /// turned out to be a convergence trap that produces a silent wrong answer.
+    ///
+    /// `vold` is state the outer Newton cannot see. The mirror compresses the walk
+    /// into the knee logarithmically while the free node jumps to the supply in a
+    /// single step, so the device's stamp keeps saying "barely conducting" and
+    /// nothing pulls the node back. In that compressed region the terminal current
+    /// is around 1e-11 A — under `abstol` — so the visible unknowns stop moving and
+    /// Newton reports success. Measured at `.options vmax=1e6`: a 12 V / 1 kΩ
+    /// Zener regulator read `out = 12 V` with the mirror and the correct 5.0501 V
+    /// without it.
+    ///
+    /// This limiter is safe for the reason the mirror was not: while it is active
+    /// the current changes by orders of magnitude per iteration, so a stalled walk
+    /// cannot pass the convergence test. Reverse breakdown has a flat plateau
+    /// under `abstol` instead.
+    ///
+    /// What bounds a step into breakdown now is the trust region
+    /// (`vmax + reltol·|v|`), which covers both exponentials and keeps no state.
+    /// `a_zener_regulator_regulates_with_a_loosened_trust_region` is the test that
+    /// would have caught the mirror.
     fn pnjlim(&self, vnew: f64, vold: f64, vt: f64) -> f64 {
         if vnew > self.vcrit && (vnew - vold).abs() > 2.0 * vt {
             if vnew > vold {
@@ -151,6 +224,64 @@ impl ShockleyDiode {
         }
     }
 
+    /// `BV` shifted so the breakdown branch passes through `(-BV, -IBV)`.
+    ///
+    /// The card gives a knee voltage *and* a current at the knee, and both have
+    /// to hold at once, so the exponential's offset is solved for:
+    ///
+    /// ```text
+    /// IS·(exp((BV − bv_adj)/vte) − 1 + bv_adj/vte) = IBV
+    /// ```
+    ///
+    /// Measured, not assumed: ngspice returns `I(-BV) = IBV` to every printed
+    /// digit for any `N`, which is what says an adjustment happens at all. With
+    /// `BV=5, IBV=1 mA, IS=10 fA` it gives 4.3449 V, and that predicts ngspice's
+    /// current at 4.5 V (−4.02313e−12) exactly.
+    ///
+    /// # The clamp
+    ///
+    /// When `IBV` is below the current plain reverse saturation already gives at
+    /// `-BV`, there is no offset to solve for — the knee sits under the card's own
+    /// leakage floor — and `bv_adj` is `BV` unshifted. ngspice does the same and
+    /// lands on `-IS` at `-BV`.
+    ///
+    /// # Why an iteration here is not the hazard `solve_series` was
+    ///
+    /// This depends only on the card and the temperature, and it iterates to a
+    /// tolerance. It is not state carried between Newton iterations, so nothing
+    /// about it is hidden from the outer solve. The map contracts hard: its
+    /// derivative is `1/(IBV/IS + 1 − x/vte)`, about 1e-11 for a 1 mA knee on a
+    /// 10 fA diode.
+    fn adjusted_bv(&self, bv: f64, vte: f64) -> f64 {
+        // The *unit-area* IS, deliberately — see the AREA note on `bv_adj`.
+        let is = self.is;
+        if is <= 0.0 || vte <= 0.0 || self.ibv < is * bv / vte {
+            return bv;
+        }
+        let mut xbv = bv - vte * (1.0 + self.ibv / is).ln();
+        for _ in 0..25 {
+            let arg = self.ibv / is + 1.0 - xbv / vte;
+            if arg <= 0.0 {
+                return bv;
+            }
+            xbv = bv - vte * arg.ln();
+            let at_xbv = is * (((bv - xbv) / vte).exp() - 1.0 + xbv / vte);
+            if (at_xbv - self.ibv).abs() <= 1e-9 * self.ibv {
+                break;
+            }
+        }
+        xbv
+    }
+
+    /// Derive `bv_adj` when the inputs it depends on have moved. See `bv_key`.
+    fn refresh_breakdown(&mut self, nvt: f64) {
+        let Some(bv) = self.bv else { return };
+        if self.bv_key != nvt {
+            self.bv_adj = Some(self.adjusted_bv(bv, nvt));
+            self.bv_key = nvt;
+        }
+    }
+
     /// Junction current and its slope at `vd_j` — the Shockley law plus `gmin`.
     ///
     /// One place, because `eval` and [`Self::solve_series`] must agree exactly:
@@ -158,6 +289,16 @@ impl ShockleyDiode {
     /// two spellings of the same law is two chances for them to differ.
     fn junction(&self, vd_j: f64, nvt: f64, gmin: f64) -> (f64, f64) {
         let is = self.is_eff();
+        // Reverse breakdown, when the card asked for one: the Shockley
+        // exponential mirrored about `-bv_adj`, so current runs away as the
+        // junction is pushed past the knee. That runaway is the whole point of a
+        // Zener and of an ESD clamp, and without it both block instead.
+        if let Some(bv_adj) = self.bv_adj {
+            if vd_j <= -bv_adj {
+                let e = (-(vd_j + bv_adj) / nvt).exp();
+                return (-is * e + gmin * vd_j, is * e / nvt + gmin);
+            }
+        }
         let exp_term = (vd_j / nvt).exp();
         (
             is * (exp_term - 1.0) + gmin * vd_j,
@@ -325,6 +466,8 @@ impl Device for ShockleyDiode {
         let nvt = self.n * vt;
         let rs = self.rs_eff();
         let gmin = ctx.gmin;
+        // Before anything reads `junction`, including `solve_series`.
+        self.refresh_breakdown(nvt);
 
         // Junction voltage. With RS this is a solve, not a step — see
         // `solve_series` for the lag it replaces. The series relation limits

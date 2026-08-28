@@ -109,13 +109,46 @@ reveals.
 | `M` / `MJ` | ✅ | ✅ | ⚠️ transitively; `M=0` is exercised directly by the integrator equivalence test |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `TT` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
-| `BV`, `IBV`, `EG`, `XTI`, `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `BV` | ✅ | ✅ reverse breakdown, knee adjusted so `I(-BV) = IBV` | ✅ ngspice across the knee, and a Zener shunt regulator |
+| `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
+| `EG`, `XTI`, `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
-**Reverse breakdown is not modelled.** A Zener or an ESD clamp will simulate as
-an ordinary diode with no breakdown knee. The parameters are accepted so a
-foundry card loads, and a warning names them.
+### Reverse breakdown
+
+`BV` and `IBV` are modelled. Past `-BV` the current is the Shockley exponential
+mirrored about an adjusted knee voltage, so a Zener or an ESD clamp clamps instead
+of blocking. Every constant was back-solved from ngspice rather than read from the
+SPICE source, and the tests compare at runtime
+(`ngspice_diode_breakdown_golden.rs`).
+
+The knee is **adjusted**: the card gives a voltage *and* a current at that
+voltage, and both hold at once only if the exponential's offset solves
+`IS·(exp((BV − bv_adj)/vte) − 1 + bv_adj/vte) = IBV`. With `BV=5, IBV=1 mA,
+IS=10 fA` that is 4.3449 V, which predicts ngspice's current at 4.5 V
+(−4.02313e−12) exactly. The exponential's slope is `1/(N·vt)`, fitted from
+ngspice rather than assumed. When `IBV` falls below the leakage the card already
+has at `-BV` there is no offset to solve for, and `bv_adj` is `BV` unshifted —
+ngspice does the same.
+
+**One divergence, on purpose.** `AREA` scales the breakdown current here, so
+`area=N` equals N diodes in parallel. ngspice's breakdown branch is *exactly
+independent* of `area` — measured at 4.8, 5.0, 5.1 and 5.3 V, ratio 1.0000, while
+its forward current doubles correctly — because deriving the knee offset from
+`IS·AREA` doubles the prefactor and lifts the offset by `vte·ln 2`, and the two
+cancel. ngspice then disagrees with itself: two diodes in parallel give exactly
+twice the breakdown current of one `area=2` diode. This tree's rule is already
+written down in `area_scales_the_diode_exactly` — "AREA=2 *is* two devices" — and
+an `area=10` Zener silently carrying a tenth of its knee current is the failure
+this codebase refuses.
+
+**Mild reverse also diverges, and here fairchild is the exact one.** ngspice
+smooths its reverse saturation with a cubic fit, `-IS·(1 + (3·vte/(vd·e))³)`,
+which reads 1.86e-4 low against the Shockley law it is fitting at −0.5 V.
+fairchild evaluates the law. The test asserts both halves — fairchild against the
+closed form, and the gap to ngspice against ngspice's own fit — so the difference
+stays the one term we know about.
 
 ### Instance parameters
 
@@ -129,7 +162,7 @@ be discarded, which read as "this simulator ignores AREA".
 
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
 
-### `gmin` and `RS`
+### `gmin`, `RS`, and step limiting
 
 `.options gmin` is a real conductance across the junction — it is in `Id` as well
 as in `∂Id/∂V`, so a reverse-biased diode carries `IS + gmin·V` and the leakage
@@ -147,6 +180,25 @@ ngspice, which gives the junction a real internal node: 2.7% low at 0.7 V, and
 100% wrong at 1.0 V once `gmin` gave the reverse branch a conductance to converge
 onto. `RS = 0` skips the solve entirely, which is every diode that does not set
 the parameter.
+
+**There is no mirrored `pnjlim` for the breakdown exponential**, and that is a
+decision rather than an omission. Mirroring the forward limiter about `-bv_adj`
+looks obviously right — the knee is as steep as forward conduction — and it was
+written and then removed, because it produced a silent wrong answer. `vd_prev` is
+state the outer Newton cannot see: the mirror compressed the walk into the knee
+while a free node jumped straight to the supply, so the stamp kept reading "barely
+conducting", and in that region the terminal current is under `abstol`, so the
+visible unknowns stopped moving and Newton reported success. Measured at
+`.options vmax=1e6`: a 12 V / 1 kΩ Zener regulator read `out = 12 V` with the
+mirror and the correct 5.0501 V without it. At the default `vmax` it changed no
+answer on any deck, including 1 kV into 10 Ω, which is why it took a non-default
+setting to find.
+
+The forward `pnjlim` is safe for the reason the mirror was not: while it is active
+the current changes by orders of magnitude per iteration, so a stalled walk cannot
+pass the convergence test. Reverse breakdown has a flat plateau under `abstol`
+instead. What bounds a step into breakdown now is the trust region
+(`vmax + reltol·|v|`, #90), which covers both exponentials and keeps no state.
 
 ---
 

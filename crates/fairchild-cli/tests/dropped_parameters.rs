@@ -13,7 +13,7 @@ use std::process::Command;
 /// dropped ones.
 const DECK: &str = "\
 * dropped-parameter diagnostics
-.model dm D (IS=1e-14 N=1 BV=50)
+.model dm D (IS=1e-14 N=1 BV=50 IBV=1e-3 ISR=1e-12)
 .model qm NPN (IS=1e-16 BF=100 VAF=50 IKF=1e-3 KF=1e-15)
 .model nm NMOS (VTO=0.7 KP=100u CJ=0.5m CJSW=1n MJ=0.5 MJSW=0.33 RD=20)
 V1 a 0 DC 1.5
@@ -46,7 +46,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
     // Model-card parameters that are accepted and do nothing: named once, with
     // what the deck loses rather than just the key.
     for (key, phrase) in [
-        ("BV ignored", "breakdown"),
+        ("ISR ignored", "recombination"),
         ("KF ignored", "flicker"),
         ("RD ignored", "series resistance"),
     ] {
@@ -73,8 +73,17 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
     );
 
     // And the negative direction, which is what stops this becoming noise:
-    // nothing warns about a parameter that IS stamped.
-    for honoured in ["IKF ignored", "MJSW ignored", "VAF ignored", "'area'"] {
+    // nothing warns about a parameter that IS stamped. `BV`/`IBV` are on this
+    // list rather than the one above because reverse breakdown is modelled now —
+    // implementing a parameter is supposed to move it across.
+    for honoured in [
+        "BV ignored",
+        "IBV ignored",
+        "IKF ignored",
+        "MJSW ignored",
+        "VAF ignored",
+        "'area'",
+    ] {
         assert!(
             !err.contains(honoured),
             "warned about '{honoured}', which this simulator honours:\n{err}"
@@ -83,7 +92,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
 
     // One line per card, not one per instance.
     assert_eq!(
-        err.matches("BV ignored").count(),
+        err.matches("ISR ignored").count(),
         1,
         "a card's diagnostic must not repeat per instance:\n{err}"
     );

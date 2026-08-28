@@ -26,12 +26,6 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
-    (
-        "bv",
-        "reverse breakdown is not modelled — a Zener or an ESD clamp \
-         simulates as an ordinary diode with no knee",
-    ),
-    ("ibv", "the current at the breakdown knee is not modelled"),
     ("eg", "IS does not vary with temperature"),
     ("xti", "IS does not vary with temperature"),
     (
