@@ -544,6 +544,12 @@ the unmodelled list with that as its reason, because honouring it would move awa
 from the reference. The forward law holds out to 2 V, well past `VJS`, where the
 depletion law is singular — which is what the linearisation is for.
 
+The substrate junction contributes **no shot noise**. `noise_sources` reports one
+source across base-emitter and one across collector-emitter, and nothing across
+collector-substrate, so a `.noise` run does not see this junction's current. On a
+picoamp at the default `gmin` that is a completeness gap rather than an accuracy
+one, and it is recorded in #81 with the rest of the noise-source work.
+
 `CJS` takes no temperature factor. `TNOM` moves `CJE` and `CJC` here, and the
 substrate junction stays at its nominal value because nothing has measured the law
 for it.
