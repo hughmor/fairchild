@@ -1,0 +1,36 @@
+// A Shockley diode in Verilog-A, written to be the *same model* as fairchild's
+// native `ShockleyDiode` rather than merely a similar one.
+//
+// This exists for one measurement: what does the OSDI path cost against a native
+// Rust implementation of identical arithmetic? Any difference in the physics
+// would land in that number and be read as overhead, so the two must agree to
+// solver tolerance first — `benchmarks/osdi_vs_native.py` checks that before it
+// reports a single timing.
+//
+// Deliberately matching the native model's scope:
+//
+//   * `IS·(exp(V/(N·vt)) − 1)`, with no series resistance (`RS = 0` is the
+//     native fast path, and a series solve on one side only would be measuring
+//     that instead of the ABI);
+//   * `gmin·V` in parallel, read from `$simparam` so both sides use the
+//     simulator's value rather than one hardcoding it;
+//   * no junction capacitance, so a DC sweep exercises the resistive path alone
+//     and a transient exercises it per step without a charge term to differ on.
+//
+// `$vt` is not used: the native model derives `vt` from the context temperature,
+// so the temperature comes in explicitly to keep both sides reading the same one.
+`include "disciplines.vams"
+
+module osdi_shockley(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real is = 1e-14 from (0:inf);
+    parameter real n = 1.0 from (0:inf);
+    analog begin
+        // k/q to twelve digits, matching `SimContext::vt()`'s
+        // `K_BOLTZMANN / Q_ELECTRON` exactly — a shorter constant shows up as a
+        // physics difference in a number meant to report overhead.
+        I(a, c) <+ is * (exp(V(a, c) / (n * $temperature * 8.617333262145e-5)) - 1.0)
+                 + $simparam("gmin", 1e-12) * V(a, c);
+    end
+endmodule

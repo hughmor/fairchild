@@ -1,0 +1,21 @@
+// A bare conductance: the control that isolates OSDI's reactive path.
+//
+// `rc_shunt.va` measured 15x native in a 2048-device transient while
+// `osdi_shockley.va` — which does strictly more arithmetic, an `exp` per eval —
+// measured 6x. The difference cannot be the model's work, so it is the path: the
+// RC model has a `ddt()` and the diode does not, so only the RC model goes
+// through `load_residual_react` and `load_reactive_jacobian` every step.
+//
+// This model is `rc_shunt` with the `ddt` term removed and nothing else changed.
+// Its ratio against a native resistor, next to `rc_shunt`'s against a native
+// R and C, is the reactive path's cost with the arithmetic held constant.
+`include "disciplines.vams"
+
+module osdi_g_shunt(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter real gd = 1e-3 from (0:inf);
+    analog begin
+        I(a, b) <+ gd * V(a, b);
+    end
+endmodule

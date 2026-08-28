@@ -67,3 +67,51 @@ python3 benchmarks/plot.py
 
 Plots land in `docs/plots/`. The raw JSON from `run_all.py` can be diffed
 between runs to audit regressions.
+
+## The OSDI-vs-native comparison
+
+`benchmarks/osdi_vs_native.py` answers a different question from `run_all.py`:
+not "how does fairchild compare to ngspice" but "what does the compiled
+Verilog-A path cost against a native Rust model of the same arithmetic". That
+number sets the cost of the whole bring-your-own-PDK story, since BSIM, PSP,
+HiSIM, HICUM and MEXTRAM all arrive through OSDI.
+
+It follows the rules above, plus three of its own:
+
+5. **Correctness gates the measurement.** Each model pair must agree before a
+   single timing is reported, and the script exits non-zero if one does not. A
+   ratio between two models that compute different things is not a measurement of
+   overhead. All three pairs currently agree exactly — the Verilog-A Shockley
+   diode and the native one are bit-identical.
+
+6. **Interleaved A/B, not batched.** This machine drifts up to ~45% run to run,
+   which is larger than the effect. The two sides alternate within each rep.
+
+7. **Report absolute overhead, not only the ratio.** A ratio is relative to the
+   native side, so a model whose native counterpart is slow looks *better*. The
+   `nonlinear_exp` pair reads 6.1× against `resistive`'s 7.4× purely because a
+   native diode is slower than a native resistor; per device the two overheads are
+   231 and 232 µs, i.e. the same.
+
+### What it found
+
+Three pairs, chosen so the result can be attributed: a bare conductance, the same
+model plus one `ddt()`, and a Shockley diode with an `exp`.
+
+| | DC, 2048 devices | transient, 2048 devices | transient overhead |
+|---|---|---|---|
+| resistive (no `ddt`) | 2.40× | 7.39× | 232 µs/device |
+| reactive (one `ddt`) | 1.96× | 15.05× | 594 µs/device |
+| nonlinear (one `exp`) | 3.25× | 6.13× | 231 µs/device |
+
+* **The overhead is the ABI call, not the arithmetic.** An `exp` per eval costs
+  the same 231 µs/device as a bare multiply. So OSDI amortises well for a complex
+  model — BSIM4 does thousands of flops per eval — and badly for a trivial one.
+* **A `ddt()` term more than doubles it**, because the reactive residual and
+  Jacobian are a second pair of ABI calls every timestep.
+* **DC barely pays.** A handful of Newton iterations against a transient's
+  hundreds of steps.
+* **Unexplained, and a lead rather than a conclusion:** the per-device overhead
+  *rises* with device count instead of flattening. From 512 to 2048 the OSDI side
+  grows as N^1.5–1.7 where the native side grows as N^0.7–0.9. Something in the
+  OSDI path scales with more than the device's own footprint.
