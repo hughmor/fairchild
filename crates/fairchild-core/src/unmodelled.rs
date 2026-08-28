@@ -100,9 +100,11 @@ pub const MOSFET: Unmodelled = &[
          bulk conducts nothing",
     ),
     ("js", "the bulk junction diodes are not stamped"),
-    ("rd", "the drain ohmic series resistance is not stamped"),
-    ("rs", "the source ohmic series resistance is not stamped"),
-    ("rsh", "the ohmic series resistances are not stamped"),
+    (
+        "rsh",
+        "the sheet resistance needs NRD/NRS squares to become a resistance, and \
+         those instance parameters are not taken — give RD/RS directly",
+    ),
     ("nsub", "nothing is derived from the substrate doping"),
     (
         "nss",

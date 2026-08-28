@@ -313,11 +313,25 @@ milliamps.
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
-| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
+| `RD`, `RS` | ✅ | ✅ a real internal node each, `1/R` between the external terminal and it — not an analytic elimination, see below | ✅ ngspice DC, and equal to an external resistor of the same value |
+| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
 
-Note `RD`/`RS`/`RSH` in that list: a MOSFET card's series resistances are
-**not** stamped, unlike the BJT's. A card that models its access resistance
-there gets none of it, and now says so.
+### `RD`/`RS`, and why they are rows rather than an elimination
+
+Each non-zero series resistance allocates an **internal node**, exactly as the
+BJT's `RB`/`RC`/`RE` do, and stamps `1/R` between the external terminal and it.
+With no resistance the internal node aliases the external one, so a card without
+them allocates no extra rows and stamps no extra conductances.
+
+Not an analytic elimination, deliberately, and the diode's `RS` is why: it
+eliminated the series drop by iterating on a junction voltage the outer Newton
+could not see, read 2.7% low against ngspice, and the convergence test had no way
+to notice — see *`gmin`, `RS`, and step limiting* under the diode. A row costs one
+unknown. A hidden state costs a silent wrong answer.
+
+`RSH` stays unmodelled: it is a *sheet* resistance and needs `NRD`/`NRS` (numbers
+of squares) to become a resistance at all, and those are instance parameters this
+model does not take. A card giving `RSH` without `RD`/`RS` is still told.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).

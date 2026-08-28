@@ -31,6 +31,15 @@ pub struct Mosfet1 {
     lambda: f64, // channel-length modulation (1/V)
     gamma: f64,  // body-effect coefficient (V^0.5)
     phi: f64,    // surface potential (V)
+    /// The external drain and source terminals. The intrinsic channel is
+    /// stamped between `drain`/`source`, which are the *internal* nodes and alias
+    /// these when the matching series resistance is zero.
+    drain_ext: NodeId,
+    source_ext: NodeId,
+    /// `RD`/`RS` — drain and source ohmic series resistance (Ω). `0` means no
+    /// internal node, and the internal node then aliases the external terminal.
+    rd: f64,
+    rs: f64,
     /// Drain current at the current iterate, signed as the model computes it.
     ///
     /// Kept because flicker noise is driven by `|Id|` and `jeq` is a Norton
@@ -106,7 +115,7 @@ pub struct Mosfet1 {
     /// [`Device::resolve_cells`]. A ring oscillator's supply row carries a
     /// column per stage, so searching it eight times per transistor per Newton
     /// iteration was the single largest line in the assembly profile.
-    jac_cells: Option<(u64, [Option<Cell>; 8])>,
+    jac_cells: Option<(u64, [Option<Cell>; 16])>,
 
     // ── DC Newton-Raphson state ──────────────────────────────────────────────
     gm: f64,
@@ -152,8 +161,17 @@ impl Mosfet1 {
     /// of pairs — or the same pairs in a different order — than the values
     /// they are paired with. Two lists here would be two chances to disagree,
     /// and the disagreement would be a plausible number in the wrong cell.
-    fn jac_pairs(d: NodeId, g: NodeId, s: NodeId, bk: NodeId) -> [(NodeId, NodeId); 8] {
+    #[allow(clippy::too_many_arguments)]
+    fn jac_pairs(
+        d: NodeId,
+        g: NodeId,
+        s: NodeId,
+        bk: NodeId,
+        d_ext: NodeId,
+        s_ext: NodeId,
+    ) -> [(NodeId, NodeId); 16] {
         [
+            // The intrinsic channel, between the internal nodes.
             (d, g),
             (d, d),
             (d, s),
@@ -162,11 +180,23 @@ impl Mosfet1 {
             (s, d),
             (s, s),
             (s, bk),
+            // RD, between the external drain and the internal one.
+            (d_ext, d_ext),
+            (d_ext, d),
+            (d, d_ext),
+            (d, d),
+            // RS, likewise.
+            (s_ext, s_ext),
+            (s_ext, s),
+            (s, s_ext),
+            (s, s),
         ]
     }
 
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
+        let mut rd = 0.0_f64;
+        let mut rs = 0.0_f64;
         let mut kf = 0.0_f64;
         let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
@@ -196,6 +226,8 @@ impl Mosfet1 {
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
                 // Degrees Celsius on the card, like `.temp`.
+                "rd" => rd = *v,
+                "rs" => rs = *v,
                 "kf" => kf = *v,
                 "af" => af = *v,
                 "tnom" => tnom_c = *v,
@@ -227,6 +259,10 @@ impl Mosfet1 {
             gamma,
             phi,
             polarity: if is_pmos { -1.0 } else { 1.0 },
+            drain_ext: None,
+            source_ext: None,
+            rd,
+            rs,
             ids_eval: 0.0,
             kf,
             af,
@@ -440,10 +476,39 @@ impl Device for Mosfet1 {
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
         debug_assert_eq!(terminals.len(), 4, "MOSFET expects [D, G, S, B]");
-        self.drain = terminals[0];
+        self.drain_ext = terminals[0];
         self.gate = terminals[1];
-        self.source = terminals[2];
+        self.source_ext = terminals[2];
         self.bulk = terminals[3];
+        // The intrinsic channel runs between the *internal* nodes. With no series
+        // resistance those alias the external terminals, so a card without
+        // `RD`/`RS` allocates no extra rows and stamps no extra conductances.
+        self.drain = terminals[0];
+        self.source = terminals[2];
+    }
+
+    /// One internal node per non-zero ohmic series resistance.
+    ///
+    /// Real rows rather than an analytic elimination, deliberately. `diode.rs`'s
+    /// `RS` is the cautionary tale: eliminating a series resistance by iterating
+    /// on a junction voltage the outer Newton cannot see read 2.7% low against
+    /// ngspice, and the convergence test had no way to notice. A row costs one
+    /// unknown; a hidden state costs a silent wrong answer.
+    fn num_extra_nodes(&self) -> usize {
+        (self.rd > 0.0) as usize + (self.rs > 0.0) as usize
+    }
+
+    /// Bind internal drain'/source' nodes. Order is fixed (drain, source) so the
+    /// assignment is stable across rebuilds.
+    fn bind_extra_nodes(&mut self, first_idx: usize) {
+        let mut idx = first_idx;
+        if self.rd > 0.0 {
+            self.drain = Some(idx);
+            idx += 1;
+        }
+        if self.rs > 0.0 {
+            self.source = Some(idx);
+        }
     }
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
@@ -587,10 +652,20 @@ impl Device for Mosfet1 {
         let gds = self.gds;
         let gmbs = self.gmbs;
         let gms = gm + gds + gmbs;
-        // The eight values, in the one order `JAC_PAIRS` fixes. Both arms
-        // below consume this slice, so the fast path cannot drift from the
-        // slow one by reordering: there is only one order.
-        let vals = [gm, gds, -gms, gmbs, -gm, -gds, gms, -gmbs];
+        // Series conductances. Zero when the card gives no resistance, and then
+        // the internal node aliases the external one so these four cells land on
+        // channel cells that already exist — adding zero, which is cheaper than a
+        // branch and cannot get the aliasing wrong.
+        let g_d = if self.rd > 0.0 { 1.0 / self.rd } else { 0.0 };
+        let g_s = if self.rs > 0.0 { 1.0 / self.rs } else { 0.0 };
+        // The sixteen values, in the one order `jac_pairs` fixes. Both arms below
+        // consume this slice, so the fast path cannot drift from the slow one by
+        // reordering: there is only one order.
+        let vals = [
+            gm, gds, -gms, gmbs, -gm, -gds, gms, -gmbs, //
+            g_d, -g_d, -g_d, g_d, //
+            g_s, -g_s, -g_s, g_s,
+        ];
 
         // Resolved cells, but only if they belong to *this* matrix. A
         // patternless matrix reports id 0 and never matches, so the diagnostic
@@ -606,7 +681,10 @@ impl Device for Mosfet1 {
             }
         }
 
-        for (&(ri, ci), v) in Self::jac_pairs(d, g, s, bk).iter().zip(vals) {
+        for (&(ri, ci), v) in Self::jac_pairs(d, g, s, bk, self.drain_ext, self.source_ext)
+            .iter()
+            .zip(vals)
+        {
             if let (Some(r), Some(c)) = (ri, ci) {
                 mat.a[r][c] += v;
             }
@@ -614,8 +692,15 @@ impl Device for Mosfet1 {
     }
 
     fn resolve_cells(&mut self, pattern: &Pattern) {
-        let pairs = Self::jac_pairs(self.drain, self.gate, self.source, self.bulk);
-        let mut cells = [None; 8];
+        let pairs = Self::jac_pairs(
+            self.drain,
+            self.gate,
+            self.source,
+            self.bulk,
+            self.drain_ext,
+            self.source_ext,
+        );
+        let mut cells = [None; 16];
         for (cell, &(r, c)) in cells.iter_mut().zip(pairs.iter()) {
             // `None` here means ground, or a cell outside the pattern. Either
             // way the searching path handles it: ground is skipped, and an
