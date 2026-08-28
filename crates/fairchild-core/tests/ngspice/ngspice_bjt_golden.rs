@@ -439,3 +439,815 @@ fn bjt_area_scales_the_device_like_ngspice() {
     assert_close("i(vc) area=2", i2, ng["i(vc)"]);
     assert_close("i(vc2) area=1", i1, ng["i(vc2)"]);
 }
+
+// ---------------------------------------------------------------------------
+// Collector-substrate junction (#97 section 3)
+// ---------------------------------------------------------------------------
+
+/// A DC solve that honours the deck's `.options`, which `fairchild_op` does not.
+fn bjt_op(deck: &str) -> fairchild_core::newton::NrResult {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    fairchild_core::dc_op_nr_with_registry_opts(&net, &registry, &opts)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+}
+
+/// ngspice's `.op` answer for one printed quantity on `deck`, verbatim.
+///
+/// The deck is shared with fairchild exactly, so the two cannot be given
+/// different circuits. Only the `.control` block is appended.
+fn ngspice_one(deck: &str, query: &str) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    write!(tmp, "{deck}.control\nop\nprint {query}\n.endc\n.end\n").ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.to_lowercase().starts_with(&query.to_lowercase()) && t.contains('=') {
+            if let Ok(v) = t.split('=').nth(1)?.split_whitespace().next()?.parse() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// A reverse-biased BJT leaks **two** `gmin·V`, not one.
+///
+/// The headline for the substrate junction. ngspice hangs one `gmin` on the
+/// collector-substrate junction, and this model had no such junction — so a
+/// reverse-biased transistor read exactly half of ngspice's leakage at every
+/// `gmin`. The gap was recorded rather than faked, and this closes it.
+///
+/// The third case is the control that identifies *which* junction the second
+/// `gmin` belongs to: tying the substrate to the collector puts zero volts across
+/// it, which removes exactly one `gmin·V` and nothing else. If the second `gmin`
+/// came from somewhere other than the substrate junction, that case would still
+/// read 2.
+#[test]
+fn a_reverse_biased_bjt_leaks_two_gmin_one_per_junction() {
+    const MODEL: &str = ".model qn NPN (IS=1e-16 BF=100)\n";
+    for g in [1e-12, 1e-9, 1e-6] {
+        for (label, q_line, want_multiple) in [
+            ("substrate implicit", "Q1 c b 0 qn", 2.0),
+            ("substrate grounded", "Q1 c b 0 0 qn", 2.0),
+            ("substrate at the collector", "Q1 c b 0 c qn", 1.0),
+        ] {
+            let deck = format!(
+                "* reverse biased bjt\n.options gmin={g:e}\n{MODEL}\
+                 VC c 0 DC 1\nVB b 0 DC 0\n{q_line}\n"
+            );
+            let got = bjt_op(&deck).vsrc_current("vc").expect("i(vc)").abs();
+            // `gmin·1V` per junction; `IS = 1e-16` is at least four orders below
+            // the smallest `gmin` here, so this reads the conductance directly.
+            let want = want_multiple * g;
+            let rel = (got - want).abs() / want;
+            assert!(
+                rel < 2e-3,
+                "gmin={g:e}, {label}: collector leakage {got:.6e} A is \
+                 {:.4}·gmin·V, expected {want_multiple}. One means the substrate \
+                 junction is missing; three means it was added twice.",
+                got / g
+            );
+            if let Some(ng) = ngspice_one(&deck, "i(vc)") {
+                let rel = (got - ng.abs()).abs() / ng.abs();
+                assert!(
+                    rel < 2e-3,
+                    "gmin={g:e}, {label}: fairchild {got:.6e}, ngspice {:.6e}",
+                    ng.abs()
+                );
+            }
+        }
+    }
+}
+
+/// `ISS` gives the substrate junction a DC branch, and it is plain Shockley.
+///
+/// Not the flat reverse branch ngspice's MOS1 bulk diodes use. Measured, with
+/// `gmin = 0` so nothing else conducts: at -0.05 V ngspice reads 8.553040e-16
+/// where Shockley gives 8.553119e-16 and a flat `-ISS` would give 1e-15. Five
+/// orders of current are covered, so a wrong exponent fails this and not only a
+/// wrong prefactor.
+#[test]
+fn iss_gives_the_substrate_junction_a_shockley_branch() {
+    const MODEL: &str = ".model qn NPN (IS=1e-16 BF=100 ISS=1e-15)\n";
+    let mut compared = 0;
+    for vs in [-2.0, -0.5, -0.05, 0.2, 0.4, 0.5] {
+        let deck = format!(
+            "* substrate dc branch\n.options gmin=0\n{MODEL}\
+             VC c 0 DC 0\nVB b 0 DC 0\nVS s 0 DC {vs}\nQ1 c b 0 s qn\n"
+        );
+        let got = bjt_op(&deck).vsrc_current("vs").expect("i(vs)");
+        let Some(ng) = ngspice_one(&deck, "i(vs)") else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (got.abs() - ng.abs()).abs() / ng.abs().max(1e-30);
+        assert!(
+            rel < 2e-3,
+            "Vs={vs}: fairchild I(vs)={got:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             Exactly zero would mean ISS is not stamped; a flat -ISS in reverse \
+             would read 1e-15 at -0.05 V where Shockley reads 8.553e-16."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 6, "every bias point must have been compared");
+}
+
+/// The substrate junction is there with no `CJS` and no `ISS` on the card.
+///
+/// Measured: ngspice's leakage is `2·gmin·V` for a bare `IS`/`BF` card. So the
+/// junction is not conditional on being given a capacitance, and neither is this.
+#[test]
+fn the_substrate_junction_does_not_need_cjs_to_exist() {
+    for model in ["IS=1e-16 BF=100", "IS=1e-16 BF=100 CJS=2p"] {
+        let deck = format!(
+            "* bare card\n.options gmin=1e-9\n.model qn NPN ({model})\n\
+             VC c 0 DC 1\nVB b 0 DC 0\nVS s 0 DC 0\nQ1 c b 0 s qn\n"
+        );
+        let got = bjt_op(&deck).vsrc_current("vs").expect("i(vs)").abs();
+        assert!(
+            (got / 1e-9 - 1.0).abs() < 2e-3,
+            "{model}: the substrate carries {got:.6e} A, expected one gmin·V = \
+             1e-9. Zero would mean the junction only exists when CJS is given."
+        );
+    }
+}
+
+/// Series resistance and frequency of the capacitance probe.
+///
+/// `omega·R·C` lands near 1.26 for a 2 pF junction, which is where the divider is
+/// most sensitive to `C`. `AcResult` reports node voltages and not source
+/// currents, so the capacitance is read through the divider rather than by
+/// dividing a current by `omega` — and ngspice is probed the same way, on the same
+/// deck, so neither simulator gets a different circuit.
+const CAP_PROBE_R: f64 = 10e3;
+const CAP_PROBE_F: f64 = 1e7;
+
+/// The capacitance on `node`, from the RC divider formed with [`CAP_PROBE_R`].
+///
+/// `|V| = 1/sqrt(1 + (omega·R·C)²)`, so `C = sqrt(1/|V|² − 1)/(omega·R)`.
+fn cap_from_divider(mag: f64) -> f64 {
+    let w = 2.0 * std::f64::consts::PI * CAP_PROBE_F;
+    (1.0 / (mag * mag) - 1.0).max(0.0).sqrt() / (w * CAP_PROBE_R)
+}
+
+/// fairchild's `|V(node)|` for the divider deck.
+fn ac_mag(deck: &str, node: &str) -> f64 {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::ac_analysis_opts(&net, &[CAP_PROBE_F], Some("vs"), &registry, &opts)
+        .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+    r.magnitude(node, 0)
+        .unwrap_or_else(|| panic!("no node '{node}' in\n{deck}"))
+}
+
+/// The probe deck: the substrate driven through [`CAP_PROBE_R`], collector at
+/// `vc`, substrate DC bias `vs`.
+fn cap_probe_deck(model: &str, vc: f64, vs: f64) -> String {
+    format!(
+        "* substrate cap probe\n.options gmin=0\n.model qn NPN ({model})\n\
+         VS in 0 DC {vs} AC 1\nRS in s {CAP_PROBE_R:e}\n\
+         VC c 0 DC {vc}\nVB b 0 DC 0\nQ1 c b 0 s qn\n"
+    )
+}
+
+fn ngspice_ac_mag(deck: &str, query: &str, f: f64) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    write!(
+        tmp,
+        "{deck}.control\nac lin 1 {f:e} {f:e}\nprint {query}\n.endc\n.end\n"
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.to_lowercase().starts_with(&query.to_lowercase()) && t.contains('=') {
+            if let Ok(v) = t
+                .split('=')
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+            {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// `CJS`/`VJS`/`MJS` are the collector-substrate depletion capacitance.
+///
+/// Two laws, and the forward one is not the one `CJE`/`CJC` use. Measured against
+/// ngspice, matched to 5e-8 in reverse and 1.7e-7 forward:
+///
+/// ```text
+/// v <= 0   CJS·(1 − v/VJS)^−MJS      the depletion law
+/// v >  0   CJS·(1 + MJS·v/VJS)       a straight line from the ZERO-bias value
+/// ```
+///
+/// The forward points past `VJS` are the load-bearing ones: at 0.8, 1.0 and 2.0 V
+/// the depletion law is singular or complex, and ngspice is still exactly on the
+/// straight line. `FCS` has no part in it — see
+/// [`fcs_is_inert_in_ngspice_too`].
+#[test]
+fn cjs_follows_the_depletion_law_in_reverse_and_a_straight_line_forward() {
+    const MODEL: &str = "IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.33";
+    let mut compared = 0;
+    // `vsub` is the substrate potential minus the collector's. Negative is
+    // reverse for an NPN, because the substrate is p and the collector n.
+    for (vc, vs) in [
+        (3.0, 0.0),
+        (1.0, 0.0),
+        (0.5, 0.0),
+        (0.0, 0.0),
+        (0.0, 0.3),
+        (0.0, 0.5),
+        (0.0, 0.8),
+        (0.0, 2.0),
+    ] {
+        let vsub = vs - vc;
+        let deck = cap_probe_deck(MODEL, vc, vs);
+        let got = cap_from_divider(ac_mag(&deck, "s"));
+        let want = if vsub > 0.0 {
+            2e-12 * (1.0 + 0.33 * vsub / 0.75)
+        } else {
+            2e-12 * (1.0 - vsub / 0.75).powf(-0.33)
+        };
+        let rel = (got - want).abs() / want;
+        assert!(
+            rel < 5e-6,
+            "Vsub={vsub}: C={got:.6e} F, the law gives {want:.6e} (rel {rel:.2e}). \
+             Zero would mean CJS is not stamped. Using `cj_depl` instead would \
+             diverge forward, and go complex past VJS."
+        );
+        if let Some(m) = ngspice_ac_mag(&deck, "mag(v(s))", CAP_PROBE_F) {
+            let ng = cap_from_divider(m);
+            let rel = (got - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "Vsub={vsub}: fairchild {got:.6e}, ngspice {ng:.6e}"
+            );
+            compared += 1;
+        }
+    }
+    if compared > 0 {
+        assert_eq!(compared, 8, "every bias must have been compared to ngspice");
+    }
+}
+
+/// `FCS` is accepted and correctly does nothing, because ngspice ignores it too.
+///
+/// Normally the worthless test shape. It earns its place the same way the MOSFET's
+/// mobility-group test does: the claim is not "we accept it" but "the reference
+/// ignores it, so honouring it would be a divergence", and that claim is the only
+/// thing standing between `FCS` and someone re-opening it as a to-do.
+///
+/// Measured: the substrate capacitance at 0.5 V forward is bit-identical for `FCS`
+/// of 0.1, 0.5, 0.9 and absent. `FC` is the control — it is a real parameter on
+/// the *other* two junctions, so the probe would see it move if the mechanism
+/// worked.
+#[test]
+fn fcs_is_inert_in_ngspice_too() {
+    let mut values = Vec::new();
+    for fcs in ["", "FCS=0.1", "FCS=0.5", "FCS=0.9"] {
+        let model = format!("IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.33 {fcs}");
+        let deck = cap_probe_deck(&model, 0.0, 0.5);
+        let got = cap_from_divider(ac_mag(&deck, "s"));
+        values.push(got);
+        if let Some(m) = ngspice_ac_mag(&deck, "mag(v(s))", CAP_PROBE_F) {
+            let ng = cap_from_divider(m);
+            let rel = (got - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "FCS='{fcs}': fairchild {got:.6e}, ngspice {ng:.6e}"
+            );
+        }
+    }
+    for v in &values[1..] {
+        assert!(
+            (v - values[0]).abs() / values[0] < 1e-12,
+            "FCS moved the substrate capacitance: {values:?}. ngspice's is \
+             bit-identical across the same four cards, so honouring FCS here \
+             would be a divergence from the reference, not a fix."
+        );
+    }
+    // The control: `MJS` in the same position *does* move it, so the probe works.
+    let with_mjs = cap_from_divider(ac_mag(
+        &cap_probe_deck("IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.9", 0.0, 0.5),
+        "s",
+    ));
+    assert!(
+        (with_mjs - values[0]).abs() / values[0] > 0.1,
+        "the control failed: MJS must move the capacitance this probe reads, or \
+         the probe cannot tell an ignored parameter from a broken one"
+    );
+}
+
+/// A BJT's own capacitances reach `.ac`, which they did not.
+///
+/// The BJT stamps its transient companions itself and overrode neither
+/// `reactive_branches` nor `small_signal_reactances`, whose default is empty. So
+/// `.ac` and `.noise` saw a transistor with no capacitance at all. Measured before
+/// the fix, with `CJE = CJC = CJS = 100p` behind a 1 kOhm resistor into the base:
+/// `|V(b)| = 1.000000` at 1 kHz, 1 MHz, 10 MHz and 100 MHz, where the corner is
+/// 1.04 MHz.
+///
+/// Every transient test passed throughout, because transient takes the other path.
+/// The structural gate that stops this recurring for any device is
+/// `tests/circuit/reactances_reach_ac.rs`.
+///
+/// ngspice is the anchor, and it agrees to all six printed digits.
+#[test]
+fn a_bjts_own_capacitance_rolls_off_an_ac_sweep() {
+    let deck = "* bjt cap in ac\n\
+        .model qn NPN (IS=1e-16 BF=100 CJE=100p CJC=100p CJS=100p VJS=0.75 MJS=0.33)\n\
+        V1 in 0 DC 0 AC 1\n\
+        R1 in b 1k\n\
+        VC c 0 DC 5\n\
+        Q1 c b 0 0 qn\n";
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let freqs = [1e3, 1e6, 1e7];
+    let r =
+        fairchild_core::ac_analysis_opts(&net, &freqs, Some("v1"), &registry, &opts).expect("ac");
+    let mut compared = 0;
+    for (i, f) in freqs.iter().enumerate() {
+        let mag = r.magnitude("b", i).expect("v(b)");
+        // Flat at 1.0 is the bug: no capacitance anywhere in the sweep.
+        if *f >= 1e6 {
+            assert!(
+                mag < 0.9,
+                "f={f:e}: |V(b)|={mag:.6e}. With 100 pF on every junction behind \
+                 1 kOhm the corner is at 1.04 MHz, so a value at 1.0 means the \
+                 transistor's capacitance never reached the AC matrix."
+            );
+        }
+        if let Some(ng) = ngspice_ac_mag(deck, "mag(v(b))", *f) {
+            let rel = (mag - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "f={f:e}: fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel {rel:.2e})"
+            );
+            compared += 1;
+        }
+    }
+    if compared > 0 {
+        assert_eq!(compared, 3, "every frequency must have been compared");
+    }
+}
+
+/// `XCJC` splits `CJC` across the base resistance, and the split matters.
+///
+/// `XCJC·CJC` connects to the **internal** base node, so `RB` sits in series with
+/// it. The rest hangs off the external base pin, where it does not. A base driven
+/// through a source resistance therefore sees a different capacitance depending on
+/// the split, and at 100 MHz with `RB = 1k` and `CJC = 10p` ngspice moves by a
+/// factor of 1.74 across the range:
+///
+/// | card | ngspice `|V(b)|` | relative |
+/// |---|---|---|
+/// | absent | 5.174797e-01 | 1.0000 |
+/// | `XCJC=1.0` | 5.174797e-01 | 1.0000 |
+/// | `XCJC=0.5` | 3.733585e-01 | 0.7215 |
+/// | `XCJC=0.0` | 2.975813e-01 | 0.5751 |
+///
+/// Absent and `XCJC=1.0` are identical, which is how the default was read off
+/// rather than assumed. Five values are compared below, so a wrong split cannot
+/// pass by matching at one endpoint: putting all of `CJC` outside `RB`, which is
+/// what shipped before, is exactly the `XCJC=0` row and is 0.575 of the right
+/// answer at the default card.
+#[test]
+fn xcjc_splits_the_collector_capacitance_across_the_base_resistance() {
+    let mut compared = 0;
+    let mut mags = Vec::new();
+    for x in [
+        "",
+        "XCJC=1.0",
+        "XCJC=0.75",
+        "XCJC=0.5",
+        "XCJC=0.25",
+        "XCJC=0.0",
+    ] {
+        let deck = format!(
+            "* xcjc\n.model qn NPN (IS=1e-16 BF=100 RB=1k CJC=10p {x})\n\
+             V1 in 0 DC 0 AC 1\nR1 in b 1k\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+        );
+        let net = parse_spice(&deck).expect("parse");
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&net.models);
+        let opts = SimOptions::from_netlist(&net);
+        let r = fairchild_core::ac_analysis_opts(&net, &[1e8], Some("v1"), &registry, &opts)
+            .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+        let mag = r.magnitude("b", 0).expect("v(b)");
+        mags.push(mag);
+        if let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e8) {
+            let rel = (mag - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "XCJC='{x}': fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} \
+                 (rel {rel:.2e})"
+            );
+            compared += 1;
+        }
+    }
+    // The default is 1.0, so an absent card and `XCJC=1.0` must be identical.
+    assert!(
+        (mags[0] - mags[1]).abs() / mags[0] < 1e-12,
+        "an absent XCJC must equal XCJC=1.0: {:.6e} against {:.6e}",
+        mags[0],
+        mags[1]
+    );
+    // And the split must be monotonic in `XCJC`, which a wrong sign would break.
+    for w in mags[1..].windows(2) {
+        assert!(
+            w[1] < w[0],
+            "|V(b)| must fall as XCJC falls, because more of CJC moves outside \
+             RB and loads the base pin directly: got {mags:?}"
+        );
+    }
+    if compared > 0 {
+        assert_eq!(compared, 6, "every XCJC value must have been compared");
+    }
+}
+
+/// fairchild's AC magnitude at `node` on `deck`, at one frequency.
+fn fc_ac_mag(deck: &str, source: &str, node: &str, f: f64) -> f64 {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::ac_analysis_opts(&net, &[f], Some(source), &registry, &opts)
+        .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+    r.magnitude(node, 0)
+        .unwrap_or_else(|| panic!("no node '{node}' in\n{deck}"))
+}
+
+/// `XTF`/`VTF`/`ITF` modulate the forward transit time with bias.
+///
+/// `TF_eff = TF·(1 + XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF)))`. Without them the
+/// transit time is constant, so `fT` does not fall at high current and does not
+/// rise with `VCE` — the two things this group exists to describe, and the two
+/// things a card that sets them is asking for.
+///
+/// # Why this is an end-to-end comparison
+///
+/// The capacitance is **not** `TF_eff·gm`. It is the derivative of the charge, and
+/// the two differ: the charge takes `(1 + xf)` while the capacitance takes
+/// `(1 + xf·(3 − 2·tmp))`, because `IF·d(xf)/d(vbe) = 2·xf·(1−tmp)·gbe`. Extracting
+/// a capacitance from an ngspice divider to fit the law directly gave 9.70 where
+/// the derivative form predicts 9.93 and the charge form predicts 7.35 — enough to
+/// identify which form is right, not enough to pin it. So the assertion here is on
+/// the AC response of the whole deck, which needs no extraction and no assumption
+/// about what the probe loads.
+///
+/// `CJE` and `CJC` are zero on purpose, so the diffusion charge is the only
+/// capacitance in the circuit and a wrong transit time cannot hide behind a
+/// depletion capacitance that happens to dominate.
+#[test]
+fn the_transit_time_rises_with_bias_through_xtf_vtf_and_itf() {
+    let mut compared = 0;
+    let mut mags = Vec::new();
+    for extra in [
+        "",
+        "XTF=1",
+        "XTF=5",
+        "XTF=10",
+        "XTF=10 ITF=1e-4",
+        "XTF=10 ITF=1e-3",
+        "XTF=10 VTF=1",
+        "XTF=10 VTF=5",
+        "XTF=10 VTF=1 ITF=1e-3",
+    ] {
+        let deck = format!(
+            "* transit time\n\
+             .model qn NPN (IS=1e-16 BF=100 CJE=0 CJC=0 TF=1n {extra})\n\
+             VBB bb 0 DC 0.75 AC 1\nR1 bb b 1k\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+        );
+        let mag = fc_ac_mag(&deck, "vbb", "b", 1e7);
+        mags.push(mag);
+        let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e7) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (mag - ng).abs() / ng;
+        assert!(
+            rel < 2e-3,
+            "'{extra}': fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel \
+             {rel:.2e}). Ignoring the group entirely would give the '' row's \
+             {:.6e} for all nine cards.",
+            mags[0]
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 9, "every card must have been compared");
+    // The group must actually move the answer, or the comparison above is vacuous.
+    assert!(
+        (mags[3] / mags[0]) < 0.2,
+        "XTF=10 must load the base an order harder than a constant TF: {:.6e} \
+         against {:.6e}",
+        mags[3],
+        mags[0]
+    );
+}
+
+/// `VTF` makes the base-emitter charge depend on the base-collector voltage, and
+/// that transcapacitance has to reach `.ac` as well as transient.
+///
+/// This is the only asymmetric reactance in the device: the current flows base to
+/// emitter and the charge varies with `vbc`, so the stamp's rows and columns
+/// differ. A `ReactiveBranchSpec` is a two-terminal branch and cannot express it,
+/// so it goes through `load_reactive_jacobian` instead — and
+/// `tests/circuit/reactances_reach_ac.rs` is what makes forgetting that a failure
+/// rather than a quiet wrong bandwidth.
+///
+/// The probe is a `VCE` sweep. With `VTF` finite the transit time depends on
+/// `VBC`, so the base loading changes with the collector supply at a fixed base
+/// bias. Without the transcapacitance the DC operating point still moves, so the
+/// response is not flat — which is why this asserts agreement with ngspice rather
+/// than mere movement.
+#[test]
+fn the_vtf_transcapacitance_reaches_ac() {
+    let mut compared = 0;
+    for vc in [1.0, 2.0, 5.0, 10.0] {
+        let deck = format!(
+            "* vtf transcapacitance\n\
+             .model qn NPN (IS=1e-16 BF=100 VAF=50 CJE=0 CJC=0 TF=1n XTF=10 VTF=2)\n\
+             VBB bb 0 DC 0.75 AC 1\nR1 bb b 1k\nVC c 0 DC {vc}\nQ1 c b 0 qn\n"
+        );
+        let mag = fc_ac_mag(&deck, "vbb", "b", 1e7);
+        let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e7) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (mag - ng).abs() / ng;
+        assert!(
+            rel < 2e-3,
+            "VC={vc}: fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             `VAF=50` is on the card so the base charge is bias-dependent too, \
+             which means the transcapacitance is non-zero for a second reason and \
+             dropping either half fails here."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 4, "every VCE point must have been compared");
+}
+
+/// ngspice's transient value of `v(node)` at `at_time`.
+fn ngspice_tran_value(deck: &str, node: &str, at_time: f64, step: f64, stop: f64) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    let meas = format!("v_{node}_at");
+    write!(
+        tmp,
+        "{deck}.control\ntran {step:e} {stop:e}\n.endc\n\
+         .meas tran {meas} FIND v({node}) AT={at_time:.6e}\n.end\n"
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with(&meas.to_lowercase()) {
+            if let Some(rest) = t.split('=').nth(1) {
+                if let Ok(v) = rest.split_whitespace().next()?.parse::<f64>() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The transcapacitance has to be in the residual as well as the Jacobian.
+///
+/// `.ac` never touches the residual, so every AC test above passes with the
+/// transcapacitance stamped in `load_jacobian_tran` and left out of the
+/// companion's `cv`. That omission is not harmless. `cv` is the term the Jacobian
+/// stamp contributes at the linearisation point, and the history current cancels
+/// it — so leaving one contribution out leaves a spurious `scale·cbe_x·vbc` in the
+/// converged answer. A silent wrong answer, in transient only.
+///
+/// This deck makes the transcapacitance large. `XTF=10 VTF=2` puts a strong `VBC`
+/// dependence in the transit time, `VAF=50` puts a second one in through the base
+/// charge, and the collector swings 5 V through a 1 kΩ load, so `VBC` moves across
+/// the whole step. `CJE` and `CJC` are zero so no depletion capacitance can mask
+/// it.
+#[test]
+fn the_transcapacitance_is_in_the_transient_residual_too() {
+    let deck = "* transcapacitance in transient\n\
+        .model qn NPN (IS=1e-16 BF=100 VAF=50 CJE=0 CJC=0 TF=1n XTF=10 VTF=2)\n\
+        VIN bb 0 PULSE(0.6 0.8 1n 1n 1n 20n 40n)\n\
+        R1 bb b 1k\n\
+        VCC vcc 0 DC 5\n\
+        RC vcc c 1k\n\
+        Q1 c b 0 qn\n";
+    let step = 20e-12_f64;
+    let stop = 40e-9_f64;
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::tran_nr_with_registry_opts(&net, step, stop, &registry, &opts)
+        .expect("tran");
+
+    let mut compared = 0;
+    for at in [5e-9, 10e-9, 15e-9, 25e-9, 30e-9] {
+        let fc = r.voltage_at("c", at).expect("v(c)");
+        let Some(ng) = ngspice_tran_value(deck, "c", at, step, stop) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        // 1% — a transient comparison across two integrators at a switching
+        // edge, not an operating point. The fault this exists to catch is a
+        // spurious current proportional to `cbe_x·vbc`, which on this deck is
+        // orders larger than that.
+        let rel = (fc - ng).abs() / ng.abs().max(1e-3);
+        assert!(
+            rel < 1e-2,
+            "t={at:e}: fairchild V(c)={fc:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             Leaving the transcapacitance out of the companion's `cv` while \
+             stamping it in the Jacobian puts a spurious `scale·cbe_x·vbc` in the \
+             converged answer, and no AC test can see it."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 5, "every timepoint must have been compared");
+}
+
+/// `RBM` and `IRB` make the base resistance fall with base current.
+///
+/// Two laws, selected by `IRB` alone:
+///
+/// ```text
+/// IRB == 0   rb_eff = RBM + (RB − RBM)/qb
+/// IRB >  0   rb_eff = RBM + 3·(RB − RBM)·(tan z − z)/(z·tan²z)
+/// ```
+///
+/// A constant base resistance is the whole point of what this replaces: a real
+/// transistor's `RB` collapses under drive, and without it a hard-driven stage
+/// reads too little collector current. Measured by extracting ngspice's effective
+/// `rb` by binary search on a *fixed* `RB` that reproduces the same collector
+/// current, so the extraction assumes no law:
+///
+/// | `Vb` | `IRB` | `IB` | extracted `rb_eff` | the `tan z` law |
+/// |---|---|---|---|---|
+/// | 0.9 | 1e-6 | 7.0213e-05 | 973.3028 | 973.7307 |
+/// | 1.0 | 1e-5 | 6.5150e-05 | 2621.3721 | 2622.2215 |
+/// | 1.5 | 1e-4 | 1.4017e-04 | 4590.6510 | 4591.7263 |
+///
+/// The assertions below are on the collector current of the whole deck, which
+/// needs no extraction.
+#[test]
+fn rbm_and_irb_lower_the_base_resistance_under_drive() {
+    let mut compared = 0;
+    for extra in [
+        "",
+        "RBM=10k",
+        "RBM=100",
+        "RBM=1k",
+        "RBM=100 IRB=1e-6",
+        "RBM=100 IRB=1e-5",
+        "RBM=100 IRB=1e-4",
+        "RBM=1k IRB=1e-5",
+    ] {
+        for vb in [0.9, 1.5] {
+            let deck = format!(
+                "* variable base resistance\n\
+                 .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k {extra})\n\
+                 VB bb 0 DC {vb}\nR1 bb b 100\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+            );
+            let got = bjt_op(&deck).vsrc_current("vc").expect("i(vc)");
+            let Some(ng) = ngspice_one(&deck, "i(vc)") else {
+                eprintln!("ngspice not available — skipping");
+                return;
+            };
+            let rel = (got - ng).abs() / ng.abs();
+            assert!(
+                rel < 2e-3,
+                "'{extra}' at Vb={vb}: fairchild I(vc)={got:.6e}, ngspice \
+                 {ng:.6e} (rel {rel:.2e}). A constant RB gives the '' row for \
+                 every card here."
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 16, "every card and bias must have been compared");
+}
+
+/// `RBM` defaults to `RB`, so a card that does not ask gets no variation.
+///
+/// The default was read off rather than assumed: ngspice gives bit-identical
+/// currents for `RB=10k` and `RB=10k RBM=10k`. Any other default would silently
+/// change every existing card that sets `RB`.
+///
+/// `RBM=100` is the control, so the probe is known to be able to see a difference.
+#[test]
+fn rbm_defaults_to_rb_and_changes_nothing() {
+    let currents: Vec<f64> = ["", "RBM=10k", "RBM=100"]
+        .iter()
+        .map(|extra| {
+            let deck = format!(
+                "* rbm default\n\
+                 .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k {extra})\n\
+                 VB bb 0 DC 1.0\nR1 bb b 100\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+            );
+            bjt_op(&deck).vsrc_current("vc").expect("i(vc)")
+        })
+        .collect();
+    assert!(
+        (currents[0] - currents[1]).abs() / currents[0].abs() < 1e-12,
+        "an absent RBM must equal RBM=RB: {:.6e} against {:.6e}",
+        currents[0],
+        currents[1]
+    );
+    assert!(
+        (currents[2] / currents[0]).abs() > 1.05,
+        "the control failed: RBM=100 must raise the collector current, or this \
+         probe cannot tell a correct default from a broken law. Got {:.6e} \
+         against {:.6e}",
+        currents[2],
+        currents[0]
+    );
+}
+
+/// The `tan z` law's two limits, where it is `0/0` and `∞/∞`.
+///
+/// An absolute anchor, because ngspice cannot be driven to either limit exactly,
+/// and the limiting *values* are the claim rather than mere finiteness.
+///
+/// `z` is set by `IB/IRB`, so a huge `IRB` drives it towards zero and a tiny one
+/// towards `π/2`:
+///
+/// | limit | `z` | bracket | `rb_eff` |
+/// |---|---|---|---|
+/// | `IB/IRB → 0` | `→ 0` | `→ 1/3` | `→ RB` |
+/// | `IB/IRB → ∞` | `→ π/2` | `→ 0` | `→ RBM` |
+///
+/// Both are asymptotic, so the parameters are chosen to reach them rather than
+/// approach them. `z = π/2 − 1/(2.432·sqrt(x))`, so `IRB=1e-15` on this deck
+/// leaves `rb_eff` at 100.0068 and misses by 8.8e-6 — real, and the reason the
+/// exponent is 1e-24 instead.
+///
+/// Each is compared against the same model with that resistance fixed, so the
+/// assertion is on the limit and not on a second implementation of the law.
+///
+/// Both limits are numerically hostile. The bracket is written as
+/// `1/(z·tan z) − 1/tan²z`, a difference of two terms of size `z⁻²` whose
+/// difference is `1/3`, so the relative cancellation is `3z²`: at `z = 1e-4` that
+/// leaves eight digits, at `1e-6` four, and at `1e-8` none. Hence the series
+/// branch below `1e-4`. At the other end `tan z` overflows, and the same spelling
+/// makes both terms underflow to zero instead of forming `∞/∞`.
+#[test]
+fn the_variable_base_resistance_reaches_both_limits() {
+    // `IB/IRB → 0`: a weak drive and an enormous `IRB`. Must equal a fixed `RB`.
+    let small_z = "* small z\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k RBM=100 IRB=1e6)\n\
+        VB bb 0 DC 0.6\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let fixed_rb = "* fixed rb\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k)\n\
+        VB bb 0 DC 0.6\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let a = bjt_op(small_z).vsrc_current("vc").expect("i(vc)");
+    let b = bjt_op(fixed_rb).vsrc_current("vc").expect("i(vc)");
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "small-z limit is not finite: {a} against {b}"
+    );
+    assert!(
+        (a - b).abs() / b.abs() < 1e-6,
+        "as IB/IRB goes to zero the bracket tends to 1/3 and rb_eff to RB, so \
+         this must equal the fixed-RB card: {a:.9e} against {b:.9e}. Evaluating \
+         `1/(z·tan z) − 1/tan²z` there instead of its series loses every digit \
+         to cancellation."
+    );
+
+    // `IB/IRB → ∞`: a hard drive and a vanishing `IRB`. Must equal a fixed `RBM`.
+    let big_z = "* big z\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=10k RBM=100 IRB=1e-24)\n\
+        VB bb 0 DC 3.0\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let fixed_rbm = "* fixed rbm\n\
+        .model qn NPN (IS=1e-16 BF=100 IKF=1e-2 RB=100)\n\
+        VB bb 0 DC 3.0\nR1 bb b 1\nVC c 0 DC 5\nQ1 c b 0 qn\n";
+    let a = bjt_op(big_z).vsrc_current("vc").expect("i(vc)");
+    let b = bjt_op(fixed_rbm).vsrc_current("vc").expect("i(vc)");
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "large-z limit is not finite: {a} against {b}"
+    );
+    assert!(
+        (a - b).abs() / b.abs() < 1e-6,
+        "as IB/IRB goes to infinity z tends to pi/2 and rb_eff to RBM, so this \
+         must equal the fixed-RBM card: {a:.9e} against {b:.9e}. Forming the \
+         bracket as (tan z − z)/(z·tan²z) gives inf/inf here."
+    );
+}

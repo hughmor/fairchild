@@ -2,6 +2,16 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::{Cell, MnaMatrix, Pattern};
 use crate::reactive::ChargeHistory;
 
+/// `IS`'s default bulk junction saturation current, A — SPICE's value.
+const IS_BULK_DEFAULT: f64 = 1e-14;
+
+/// `UO`'s default carrier mobility, cm²/V·s — SPICE's value.
+const UO_DEFAULT: f64 = 600.0;
+
+/// `KP` when the card gives neither `KP` nor an oxide capacitance to derive it
+/// from. SPICE's fallback.
+const KP_FALLBACK: f64 = 2e-5;
+
 /// SPICE's default channel width and length, 100 um each.
 ///
 /// Public because [`crate::binning`] has to pick a bin using the geometry the
@@ -38,8 +48,23 @@ pub struct Mosfet1 {
     source_ext: NodeId,
     /// `RD`/`RS` — drain and source ohmic series resistance (Ω). `0` means no
     /// internal node, and the internal node then aliases the external terminal.
+    /// The drain and source series resistances actually stamped.
+    ///
+    /// Resolved in `set_instance_params` from the card's `RD`/`RS` if it gives
+    /// them, otherwise from `RSH·NRD` and `RSH·NRS`. Per terminal: a card with an
+    /// explicit `RD` and an `RSH` gets the explicit one on the drain and the sheet
+    /// one on the source, which is what ngspice does.
     rd: f64,
     rs: f64,
+    /// What the card said, so "given" is distinguishable from "defaulted to zero".
+    rd_card: Option<f64>,
+    rs_card: Option<f64>,
+    /// `RSH` — resistance per square of the drain and source diffusions.
+    rsh: f64,
+    /// `NRD`/`NRS` — squares of diffusion, instance parameters. Both default to 1,
+    /// so an `RSH` with no squares given is one square per terminal.
+    nrd: f64,
+    nrs: f64,
     /// Drain current at the current iterate, signed as the model computes it.
     ///
     /// Kept because flicker noise is driven by `|Id|` and `jeq` is a Norton
@@ -47,6 +72,35 @@ pub struct Mosfet1 {
     /// BJT carried exactly that bug once (see its `noise_sources`), so the
     /// current is stored rather than reconstructed.
     ids_eval: f64,
+    /// `IS` — bulk junction saturation current (A), and `JS` — its density
+    /// (A/m²). Per SPICE, `JS·area` wins when both `JS` and that junction's area
+    /// are given; otherwise `IS` applies to both junctions.
+    is_bulk: f64,
+    js: f64,
+    /// Saturation current of each bulk junction, resolved from `IS`/`JS` and the
+    /// areas in `set_instance_params` — the two can differ, because `AS` and `AD`
+    /// can.
+    isat_bs: f64,
+    isat_bd: f64,
+    /// Multiplier on both `isat_*` at the operating temperature. Applied where
+    /// they are used rather than folded into them, because `set_instance_params`
+    /// resolves them from `IS`/`JS` and the areas and may run either side of
+    /// `setup_model` — a factor folded in could be applied twice or not at all.
+    isat_t_factor: f64,
+    /// Bulk junction currents and conductances at the current iterate.
+    gbs: f64,
+    gbd: f64,
+    ibs_eq: f64,
+    ibd_eq: f64,
+    /// `PB` and the two bulk-capacitance factors at the operating temperature.
+    ///
+    /// Two factors because `CJ` grades by `MJ` and `CJSW` by `MJSW`, and SPICE
+    /// derives each correction from its own coefficient — one factor applied to
+    /// both would be wrong for any card where they differ, which is every card
+    /// that sets them.
+    pb_t: f64,
+    cj_t_factor: f64,
+    cjsw_t_factor: f64,
     /// `KF`/`AF` — flicker noise coefficient and exponent.
     kf: f64,
     af: f64,
@@ -115,7 +169,7 @@ pub struct Mosfet1 {
     /// [`Device::resolve_cells`]. A ring oscillator's supply row carries a
     /// column per stage, so searching it eight times per transistor per Newton
     /// iteration was the single largest line in the assembly profile.
-    jac_cells: Option<(u64, [Option<Cell>; 16])>,
+    jac_cells: Option<(u64, [Option<Cell>; 24])>,
 
     // ── DC Newton-Raphson state ──────────────────────────────────────────────
     gm: f64,
@@ -169,7 +223,7 @@ impl Mosfet1 {
         bk: NodeId,
         d_ext: NodeId,
         s_ext: NodeId,
-    ) -> [(NodeId, NodeId); 16] {
+    ) -> [(NodeId, NodeId); 24] {
         [
             // The intrinsic channel, between the internal nodes.
             (d, g),
@@ -190,18 +244,35 @@ impl Mosfet1 {
             (s_ext, s),
             (s, s_ext),
             (s, s),
+            // The bulk-source junction, between the bulk and the internal source.
+            (bk, bk),
+            (bk, s),
+            (s, bk),
+            (s, s),
+            // The bulk-drain junction.
+            (bk, bk),
+            (bk, d),
+            (d, bk),
+            (d, d),
         ]
     }
 
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
-        let mut rd = 0.0_f64;
-        let mut rs = 0.0_f64;
+        let mut rd: Option<f64> = None;
+        let mut rs: Option<f64> = None;
+        let mut rsh = 0.0_f64;
         let mut kf = 0.0_f64;
         let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut vto = if is_pmos { -0.7 } else { 0.7 };
-        let mut kp = 2e-5;
+        // `None` distinguishes "the card gave a KP" from "the card gave the
+        // default", which matters because `UO` only derives `KP` in the second
+        // case. SPICE's rule, and the reason it cannot be a bare `2e-5` here.
+        let mut kp: Option<f64> = None;
+        let mut uo = UO_DEFAULT;
+        let mut is_bulk = IS_BULK_DEFAULT;
+        let mut js = 0.0_f64;
         let mut lambda = 0.0;
         let mut gamma = 0.0;
         let mut phi = 0.6;
@@ -221,13 +292,18 @@ impl Mosfet1 {
         for (k, v) in params {
             match k.to_lowercase().as_str() {
                 "vto" | "vth0" | "vtho" => vto = *v,
-                "kp" => kp = *v,
+                "kp" => kp = Some(*v),
+                // Carrier mobility, cm²/V·s on the card as everywhere in SPICE.
+                "uo" | "u0" => uo = *v,
+                "is" => is_bulk = *v,
+                "js" => js = *v,
                 "lambda" => lambda = *v,
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
                 // Degrees Celsius on the card, like `.temp`.
-                "rd" => rd = *v,
-                "rs" => rs = *v,
+                "rd" => rd = Some(*v),
+                "rs" => rs = Some(*v),
+                "rsh" => rsh = *v,
                 "kf" => kf = *v,
                 "af" => af = *v,
                 "tnom" => tnom_c = *v,
@@ -252,6 +328,18 @@ impl Mosfet1 {
                 _ => unknown.push(k.clone()),
             }
         }
+        // `KP` given wins; otherwise derive it from the mobility and the oxide
+        // capacitance, which is what SPICE does. `UO` is cm²/V·s on the card and
+        // the expression wants m²/V·s, hence the 1e-4.
+        //
+        // With no `TOX`/`COX` there is no `COX` to multiply, and SPICE's fallback
+        // `KP` applies. That is a real card shape — a deck giving neither `KP` nor
+        // an oxide thickness — so it is a default rather than a refusal.
+        let kp = kp.unwrap_or(if cox > 0.0 {
+            uo * 1e-4 * cox
+        } else {
+            KP_FALLBACK
+        });
         let dev = Mosfet1 {
             vto,
             kp,
@@ -261,8 +349,29 @@ impl Mosfet1 {
             polarity: if is_pmos { -1.0 } else { 1.0 },
             drain_ext: None,
             source_ext: None,
-            rd,
-            rs,
+            // Both start at the card's value, or zero. `set_instance_params`
+            // re-resolves them once `NRD`/`NRS` are known, and `num_extra_nodes`
+            // is asked after that, so a card with only `RSH` still gets its
+            // internal nodes.
+            rd: rd.unwrap_or(0.0),
+            rs: rs.unwrap_or(0.0),
+            rd_card: rd,
+            rs_card: rs,
+            rsh,
+            nrd: 1.0,
+            nrs: 1.0,
+            is_bulk,
+            js,
+            isat_bs: IS_BULK_DEFAULT,
+            isat_bd: IS_BULK_DEFAULT,
+            isat_t_factor: 1.0,
+            gbs: 0.0,
+            gbd: 0.0,
+            ibs_eq: 0.0,
+            ibd_eq: 0.0,
+            pb_t: 0.8,
+            cj_t_factor: 1.0,
+            cjsw_t_factor: 1.0,
             ids_eval: 0.0,
             kf,
             af,
@@ -351,6 +460,8 @@ impl Mosfet1 {
             match k.to_lowercase().as_str() {
                 "w" => w = *v,
                 "l" => l = *v,
+                "nrd" => self.nrd = *v,
+                "nrs" => self.nrs = *v,
                 "as" => as_ = *v,
                 "ad" => ad = *v,
                 "ps" => ps = *v,
@@ -370,11 +481,73 @@ impl Mosfet1 {
         self.cgd_ov = self.cgdo * w;
         self.cgb_ov = self.cgbo * l;
         self.cox_wl = self.cox * w * l;
+        // `JS·area` when both are given, else `IS`. The two junctions resolve
+        // independently because `AS` and `AD` can differ.
+        // `RSH·NRD` and `RSH·NRS`, per terminal, with an explicit `RD`/`RS`
+        // winning on its own terminal. Measured: `RSH=50 NRD=2 NRS=2` is
+        // bit-identical to `RD=100 RS=100`, and `RSH=50 RD=1000 NRS=2` puts 1000
+        // on the drain and 100 on the source.
+        //
+        // Resolved here rather than in `from_params` because `NRD`/`NRS` are
+        // instance parameters, and asked for by `num_extra_nodes` only after this
+        // has run.
+        self.rd = self.rd_card.unwrap_or(self.rsh * self.nrd);
+        self.rs = self.rs_card.unwrap_or(self.rsh * self.nrs);
+        self.isat_bs = if self.js > 0.0 && as_ > 0.0 {
+            self.js * as_
+        } else {
+            self.is_bulk
+        };
+        self.isat_bd = if self.js > 0.0 && ad > 0.0 {
+            self.js * ad
+        } else {
+            self.is_bulk
+        };
         self.cbs_bot = self.cj * as_;
         self.cbs_sw = self.cjsw * ps;
         self.cbd_bot = self.cj * ad;
         self.cbd_sw = self.cjsw * pd;
         unknown
+    }
+
+    /// One bulk junction's current and slope: the Shockley law plus `gmin`.
+    ///
+    /// The same law [`crate::models::diode::ShockleyDiode::junction`] uses, and
+    /// deliberately the same shape — one law for "what is a pn junction" rather
+    /// than a second spelling that can drift from the first.
+    ///
+    /// # Why not ngspice's reverse branch
+    ///
+    /// ngspice's MOS1 is flat at exactly `-Isat` from `-3·vt` outward, and inside
+    /// `±3·vt` its *total* over the two junctions measures as one junction flat at
+    /// `-Isat` plus one plain Shockley — matched to seven digits at every bias
+    /// tried, and still present when the bulk-drain junction is held at -5 V. That
+    /// asymmetry is a numerical convenience in the reference, not physics.
+    ///
+    /// Both pure choices sit the same distance from it. Inside the band, at -0.01 V
+    /// with `IS = 1e-14`, ngspice reads 1.32e-14 A, Shockley-on-both 6.4e-15 and
+    /// flat-on-both 2.0e-14 — a 6.8e-15 A difference either way. Outside the band
+    /// they agree: Shockley is within 4e-4 relative at -0.2 V and exact by -0.5 V,
+    /// because `exp(v/vt)` underflows toward zero and leaves `-Isat`.
+    ///
+    /// So this takes the smooth one. Shockley is the junction law, it is C¹ at zero
+    /// where the flat branch has a kink, and it needs no second case to explain.
+    ///
+    /// # No step limiting
+    ///
+    /// The DC Newton already clamps every node update to `vmax + reltol·|x|`
+    /// (`crate::newton`), so the forward exponential cannot be jumped into from a
+    /// cold start. A bulk that *converges* forward past ~18 V overflows to a
+    /// non-finite the solver reports, and that is a broken deck rather than an
+    /// operating point. A limiter here would mean holding a previous junction
+    /// voltage — state the outer Newton cannot see, which is the shape that
+    /// produced the diode's `RS` error and two others in this tree.
+    fn bulk_junction(isat: f64, v: f64, vt: f64, gmin: f64) -> (f64, f64) {
+        if isat <= 0.0 {
+            return (gmin * v, gmin);
+        }
+        let e = (v / vt).exp();
+        (isat * (e - 1.0) + gmin * v, isat * e / vt + gmin)
     }
 
     // ── Depletion cap helpers (same model as ShockleyDiode::cj_depl / q_depl) ─
@@ -385,12 +558,12 @@ impl Mosfet1 {
         if c0 == 0.0 {
             return 0.0;
         }
-        let fc_pb = self.fc * self.pb;
+        let fc_pb = self.fc * self.pb_t;
         if v < fc_pb {
-            c0 * (1.0 - v / self.pb).powf(-m)
+            c0 * (1.0 - v / self.pb_t).powf(-m)
         } else {
             let k = (1.0 - self.fc).powf(1.0 + m);
-            c0 / k * (1.0 - self.fc * (1.0 + m) + m * v / self.pb)
+            c0 / k * (1.0 - self.fc * (1.0 + m) + m * v / self.pb_t)
         }
     }
 
@@ -398,27 +571,31 @@ impl Mosfet1 {
         if c0 == 0.0 {
             return 0.0;
         }
-        let fc_pb = self.fc * self.pb;
+        let fc_pb = self.fc * self.pb_t;
         if v < fc_pb {
-            let x = 1.0 - v / self.pb;
-            c0 * self.pb / (1.0 - m) * (1.0 - x.powf(1.0 - m))
+            let x = 1.0 - v / self.pb_t;
+            c0 * self.pb_t / (1.0 - m) * (1.0 - x.powf(1.0 - m))
         } else {
             let x_fc = 1.0 - self.fc;
-            let q_fc = c0 * self.pb / (1.0 - m) * (1.0 - x_fc.powf(1.0 - m));
+            let q_fc = c0 * self.pb_t / (1.0 - m) * (1.0 - x_fc.powf(1.0 - m));
             let k = x_fc.powf(1.0 + m);
             let f2 = 1.0 - self.fc * (1.0 + m);
             let dv = v - fc_pb;
-            q_fc + c0 / k * (f2 * dv + m / (2.0 * self.pb) * (v * v - fc_pb * fc_pb))
+            q_fc + c0 / k * (f2 * dv + m / (2.0 * self.pb_t) * (v * v - fc_pb * fc_pb))
         }
     }
 
     /// A whole bulk junction: bottom graded with `MJ`, sidewall with `MJSW`.
     fn cj_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
-        self.cj_depl_m(bot, v, self.mj) + self.cj_depl_m(sw, v, self.mjsw)
+        // Each area's own factor: `CJ` grades by `MJ` and `CJSW` by `MJSW`, and
+        // SPICE derives each correction from its own coefficient.
+        self.cj_depl_m(bot * self.cj_t_factor, v, self.mj)
+            + self.cj_depl_m(sw * self.cjsw_t_factor, v, self.mjsw)
     }
 
     fn q_depl(&self, bot: f64, sw: f64, v: f64) -> f64 {
-        self.q_depl_m(bot, v, self.mj) + self.q_depl_m(sw, v, self.mjsw)
+        self.q_depl_m(bot * self.cj_t_factor, v, self.mj)
+            + self.q_depl_m(sw * self.cjsw_t_factor, v, self.mjsw)
     }
 
     // ── Stamp helpers ────────────────────────────────────────────────────────
@@ -472,6 +649,17 @@ impl Device for Mosfet1 {
             self.tnom,
             self.polarity < 0.0,
         );
+        // The bulk junctions. `PB` moves by the same law as `PHI`; the two
+        // capacitance corrections each take their own grading coefficient.
+        self.pb_t = crate::temperature::scaled_junction_potential(self.pb, t, self.tnom);
+        self.cj_t_factor = crate::temperature::junction_cap_factor(self.pb, self.mj, t, self.tnom);
+        self.cjsw_t_factor =
+            crate::temperature::junction_cap_factor(self.pb, self.mjsw, t, self.tnom);
+        // The junction saturation currents take a third law, neither the diode's
+        // nor the BJT's - a MOSFET card has no `EG` and no `XTI`, so SPICE puts
+        // the temperature-dependent bandgap in the exponent. See
+        // `temperature::mos_junction_is_factor`.
+        self.isat_t_factor = crate::temperature::mos_junction_is_factor(t, self.tnom);
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
@@ -595,6 +783,26 @@ impl Device for Mosfet1 {
         self.gds = gds_total;
         self.gmbs = gmbs_eff;
         self.ids_eval = ids_real;
+
+        // The two bulk junctions. Real pn junctions, so `gmin` crosses them —
+        // which is what makes this family consistent with the diode and the BJT
+        // (see `SimContext::gmin`). Evaluated on every eval, not only in
+        // transient: they carry DC current.
+        //
+        // Polarity-flipped like the channel, so a PMOS's junctions read forward
+        // when its bulk is *below* its source.
+        let vbs_j = pol * (vb - vs);
+        let vbd_j = pol * (vb - vd);
+        let (ibs, gbs) =
+            Self::bulk_junction(self.isat_bs * self.isat_t_factor, vbs_j, ctx.vt(), ctx.gmin);
+        let (ibd, gbd) =
+            Self::bulk_junction(self.isat_bd * self.isat_t_factor, vbd_j, ctx.vt(), ctx.gmin);
+        self.gbs = gbs;
+        self.gbd = gbd;
+        // Norton offsets, back in real (unflipped) terms, so `load_residual` can
+        // add them without knowing the polarity.
+        self.ibs_eq = pol * (ibs - gbs * vbs_j);
+        self.ibd_eq = pol * (ibd - gbd * vbd_j);
         self.jeq = ids_real - gm_eff * vgs - gds_total * vds - gmbs_eff * vbs;
 
         // ── Capacitance evaluation ──────────────────────────────────────────
@@ -644,6 +852,16 @@ impl Device for Mosfet1 {
         if let Some(s) = self.source {
             b[s] += self.jeq;
         }
+        // The bulk junctions' Norton sources: current out of the bulk and into
+        // the internal drain / source.
+        for (node, eq) in [(self.source, self.ibs_eq), (self.drain, self.ibd_eq)] {
+            if let Some(bk) = self.bulk {
+                b[bk] -= eq;
+            }
+            if let Some(n) = node {
+                b[n] += eq;
+            }
+        }
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
@@ -661,10 +879,13 @@ impl Device for Mosfet1 {
         // The sixteen values, in the one order `jac_pairs` fixes. Both arms below
         // consume this slice, so the fast path cannot drift from the slow one by
         // reordering: there is only one order.
+        let (gbs, gbd) = (self.gbs, self.gbd);
         let vals = [
             gm, gds, -gms, gmbs, -gm, -gds, gms, -gmbs, //
             g_d, -g_d, -g_d, g_d, //
-            g_s, -g_s, -g_s, g_s,
+            g_s, -g_s, -g_s, g_s, //
+            gbs, -gbs, -gbs, gbs, //
+            gbd, -gbd, -gbd, gbd,
         ];
 
         // Resolved cells, but only if they belong to *this* matrix. A
@@ -700,7 +921,7 @@ impl Device for Mosfet1 {
             self.drain_ext,
             self.source_ext,
         );
-        let mut cells = [None; 16];
+        let mut cells = [None; 24];
         for (cell, &(r, c)) in cells.iter_mut().zip(pairs.iter()) {
             // `None` here means ground, or a cell outside the pattern. Either
             // way the searching path handles it: ground is skipped, and an

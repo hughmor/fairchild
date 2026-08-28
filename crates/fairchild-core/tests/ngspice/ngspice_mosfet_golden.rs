@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 
-use fairchild_core::{dc_op_nr, options::SimOptions, tran_nr_with_registry_opts, DeviceRegistry};
+use fairchild_core::{
+    dc_op_nr, dc_op_nr_with_registry_opts, options::SimOptions, tran_nr_with_registry_opts,
+    DeviceRegistry,
+};
 use fairchild_parser::parse_spice;
 
 const REL_TOL: f64 = 2e-3; // 0.2% — Level 1 has some param differences from ngspice
@@ -359,4 +362,505 @@ fn rd_and_rs_reduce_the_drain_current() {
          must cost more current than RD: RS gives V(d)={source_only:.6}, RD gives \
          {drain_only:.6}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// UO, and the LEVEL 2/3 group that correctly does nothing here (#97 §1)
+// ---------------------------------------------------------------------------
+
+/// Drain current from a MOSFET biased into saturation, with no load resistor —
+/// so `I(vd)` is the device's own current and nothing else.
+fn nmos_id(model: &str, w: &str, l: &str) -> f64 {
+    let deck = format!(
+        "* mos id\n.model nm NMOS ({model})\n\
+         VG g 0 DC 1.5\nVD d 0 DC 3\nM1 d g 0 0 nm W={w} L={l}\n.op\n"
+    );
+    let netlist = parse_spice(&deck).expect("parse");
+    dc_op_nr(&netlist)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+        .vsrc_current("vd")
+        .expect("I(vd)")
+        .abs()
+}
+
+/// `UO` derives `KP` when the card gives no `KP`.
+///
+/// The card shape this covers is common: a foundry-ish card gives an oxide
+/// thickness and a mobility and lets the simulator work out the transconductance.
+/// Before this, `KP` fell back to SPICE's 2e-5 and the drain current was wrong by
+/// whatever ratio the real `UO·COX` implied — a factor of 5 for the card below.
+///
+/// The anchor is the Level 1 closed form rather than a second simulator, because
+/// `UO·COX` is arithmetic and the measurement that established it is already
+/// recorded: ngspice returns 3.315020e-4 A for `TOX=20n` with no `KP`, and
+/// `UO=300` gives exactly half the 600 default. What can go wrong here is the unit
+/// conversion (`UO` is cm²/V·s) and the precedence of an explicit `KP`, and both
+/// are closed-form facts.
+#[test]
+fn uo_derives_kp_when_kp_is_absent() {
+    const EPS_OX: f64 = 3.9 * 8.854187817e-12;
+    let cox = EPS_OX / 20e-9;
+    for uo in [300.0_f64, 600.0, 900.0] {
+        let model = format!("VTO=0.7 TOX=20n UO={uo}");
+        let got = nmos_id(&model, "10u", "1u");
+        // 0.5·KP·(W/L)·(Vgs−VTO)², with KP = UO(cm²/V·s)·1e-4·COX.
+        let kp = uo * 1e-4 * cox;
+        let want = 0.5 * kp * 10.0 * (1.5 - 0.7_f64).powi(2);
+        let rel = (got - want).abs() / want;
+        assert!(
+            rel < 1e-5,
+            "UO={uo}: I(vd)={got:.6e} A, and KP=UO·COX={kp:.6e} gives \
+             {want:.6e} (rel {rel:.2e}). Falling back to SPICE's 2e-5 KP would \
+             give {:.6e}.",
+            0.5 * 2e-5 * 10.0 * 0.64
+        );
+    }
+
+    // 1e-6 and not tighter: `I(vd)` also carries the reverse-biased bulk-drain
+    // junction's leakage now, which at the default `gmin` is `IS + gmin·3V` ≈ 3 pA
+    // — 9e-9 of a 0.32 mA drain current. That leakage is the body-diode feature
+    // working, so the tolerance accommodates it rather than the deck avoiding it.
+    const CHANNEL_TOL: f64 = 1e-6;
+
+    // An explicit `KP` still wins over `UO`, which is SPICE's rule.
+    let explicit = nmos_id("VTO=0.7 TOX=20n UO=900 KP=100u", "10u", "1u");
+    let want = 0.5 * 100e-6 * 10.0 * (1.5 - 0.7_f64).powi(2);
+    assert!(
+        (explicit - want).abs() / want < CHANNEL_TOL,
+        "KP given must win over UO: got {explicit:.9e}, expected {want:.9e}"
+    );
+
+    // And with neither KP nor an oxide, SPICE's fallback KP applies.
+    let bare = nmos_id("VTO=0.7", "10u", "1u");
+    let want_bare = 0.5 * 2e-5 * 10.0 * (1.5 - 0.7_f64).powi(2);
+    assert!(
+        (bare - want_bare).abs() / want_bare < CHANNEL_TOL,
+        "no KP and no TOX must fall back to KP=2e-5: got {bare:.9e}"
+    );
+}
+
+/// The mobility-degradation group is **not** a Level 1 gap — it is a Level 2/3
+/// parameter set, and ngspice's Level 1 ignores it exactly as fairchild does.
+///
+/// # Why a test that asserts nothing happens
+///
+/// Normally this shape is worthless: `X_is_accepted` passes whether a parameter is
+/// implemented, dropped or deleted. This one earns its place because the claim is
+/// not "we accept it" but "the reference ignores it too, so implementing it would
+/// be a divergence" — and that claim is the only thing standing between this group
+/// and someone re-opening it as a to-do. It is checked both ways:
+///
+/// * at LEVEL 1, fairchild and ngspice must both be unmoved;
+/// * at LEVEL 3, ngspice must *move*, which is what proves the parameters reach
+///   its parser and that the first half is a modelling fact and not a typo.
+///
+/// `LAMBDA` is the control: a genuine Level 1 parameter, so it has to move both.
+#[test]
+fn the_mobility_group_is_level_2_or_3_and_correctly_does_nothing() {
+    const BASE: &str = "VTO=0.7 KP=200u TOX=20n";
+    let base = nmos_id(BASE, "10u", "1u");
+
+    for extra in [
+        "THETA=0.1",
+        "THETA=1.0",
+        "ETA=0.1",
+        "KAPPA=1.0",
+        "VMAX=1e5",
+        "UCRIT=1e4",
+        "UEXP=0.1",
+        "UTRA=0.5",
+        "NFS=1e12",
+    ] {
+        let got = nmos_id(&format!("{BASE} {extra}"), "10u", "1u");
+        assert!(
+            (got - base).abs() / base < 1e-12,
+            "{extra} is a LEVEL 2/3 parameter and must not move a LEVEL 1 drain              current: {got:.9e} against {base:.9e}. If this starts failing, either              someone implemented it here — which diverges from ngspice's LEVEL 1 —              or the parameter is being misread as one that is modelled."
+        );
+    }
+
+    // The control: a real Level 1 parameter has to move it.
+    let with_lambda = nmos_id(&format!("{BASE} LAMBDA=0.05"), "10u", "1u");
+    assert!(
+        with_lambda > base * 1.05,
+        "LAMBDA is a Level 1 parameter and must move the current, or this test is          measuring nothing: {with_lambda:.6e} against {base:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bulk-source / bulk-drain diodes (#97 §2)
+// ---------------------------------------------------------------------------
+
+/// Current out of a bulk-driving source, with the gate off so the channel
+/// contributes nothing and the two body junctions are all that conducts.
+fn bulk_current(model: &str, inst: &str, vb: f64, gmin: f64) -> f64 {
+    bulk_current_at(model, inst, vb, gmin, None)
+}
+
+/// The same, at `temp_c` when it is given.
+fn bulk_current_at(model: &str, inst: &str, vb: f64, gmin: f64, temp_c: Option<f64>) -> f64 {
+    let temp = temp_c.map(|t| format!(".temp {t}\n")).unwrap_or_default();
+    let deck = format!(
+        "* body diode\n.options gmin={gmin:e}\n{temp}.model nm NMOS ({model})\n\
+         VB bk 0 DC {vb}\nVG g 0 DC 0\nVD d 0 DC 0\n\
+         M1 d g 0 bk nm {inst}\n.op\n"
+    );
+    let net = parse_spice(&deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    // `from_netlist`, not `dc_op_nr`: the latter uses `SimOptions::default()` and
+    // ignores the deck's `.options`, so every point would run at the default gmin.
+    let opts = SimOptions::from_netlist(&net);
+    dc_op_nr_with_registry_opts(&net, &registry, &opts)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+        .vsrc_current("vb")
+        .expect("I(vb)")
+        .abs()
+}
+
+fn ngspice_bulk_current(model: &str, inst: &str, vb: f64, gmin: f64) -> Option<f64> {
+    ngspice_bulk_current_at(model, inst, vb, gmin, None)
+}
+
+fn ngspice_bulk_current_at(
+    model: &str,
+    inst: &str,
+    vb: f64,
+    gmin: f64,
+    temp_c: Option<f64>,
+) -> Option<f64> {
+    let temp = temp_c.map(|t| format!(".temp {t}\n")).unwrap_or_default();
+    let dir = std::env::temp_dir().join("fc_body_golden");
+    std::fs::create_dir_all(&dir).ok()?;
+    let tag: String = format!("{model}{inst}{vb}{gmin}{temp}")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(48)
+        .collect();
+    let path = dir.join(format!("body_{tag}.sp"));
+    std::fs::write(
+        &path,
+        format!(
+            "* body diode\n.options gmin={gmin:e}\n{temp}\
+             .model nm NMOS ({model})\n\
+             VB bk 0 DC {vb}\nVG g 0 DC 0\nVD d 0 DC 0\n\
+             M1 d g 0 bk nm {inst}\n\
+             .control\nop\nprint i(vb)\n.endc\n.end\n"
+        ),
+    )
+    .ok()?;
+    let out = std::process::Command::new("ngspice")
+        .arg("-b")
+        .arg(&path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("i(vb)") {
+            if let Ok(v) = t.split('=').nth(1)?.trim().parse::<f64>() {
+                return Some(v.abs());
+            }
+        }
+    }
+    None
+}
+
+/// A forward-biased bulk conducts, and matches ngspice.
+///
+/// Before this the bulk was an island: `IS`/`JS` were accepted and nothing was
+/// stamped, so latch-up and substrate injection could not be simulated at all and
+/// the current was exactly zero at any bias.
+///
+/// The forward points are the load-bearing ones. `exp(0.7/vt)` moves 2.7% for a
+/// 0.1% error in `vt`, so agreeing to 2e-3 at 0.4, 0.6 and 0.7 V pins the thermal
+/// voltage and the saturation current together.
+///
+/// # Why the reverse points stop at -0.2 V
+///
+/// **ngspice is not a usable anchor inside 3*vt of zero** (0.0776 V), so that band
+/// is excluded rather than the tolerance widened. Measured there, ngspice's total
+/// over the two junctions is one junction flat at `-IS` plus one plain Shockley:
+///
+/// | `Vb` | ngspice | `-IS + IS*(exp(V/vt)-1)` | `2*IS*(exp(V/vt)-1)` | `-2*IS` |
+/// |---|---|---|---|---|
+/// | -0.01 V | 1.320654e-14 | 1.320663e-14 | 6.413258e-15 | 2.0e-14 |
+/// | -0.05 V | 1.855304e-14 | 1.855314e-14 | 1.710628e-14 | 2.0e-14 |
+/// | -0.07 V | 1.933221e-14 | 1.933228e-14 | 1.866455e-14 | 2.0e-14 |
+///
+/// The middle column matches to seven digits, and it still does with the bulk-drain
+/// junction held five volts reverse, so the asymmetry is real and is ngspice's own
+/// numerical convenience. Outside the band ngspice is flat at exactly `-IS` and
+/// Shockley has converged onto it: 4.4e-4 relative at -0.2 V, exact by -0.5 V. So
+/// these points confirm the magnitude and cannot see the branch shape.
+/// [`the_bulk_junctions_follow_the_shockley_law`] pins the shape against the closed
+/// form instead.
+#[test]
+fn the_bulk_junctions_conduct_and_match_ngspice() {
+    const MODEL: &str = "VTO=0.7 KP=200u IS=1e-14";
+    for vb in [-20.0, -2.0, -0.5, -0.2, 0.4, 0.6, 0.7] {
+        let fc = bulk_current(MODEL, "W=10u L=1u", vb, 0.0);
+        let Some(ng) = ngspice_bulk_current(MODEL, "W=10u L=1u", vb, 0.0) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (fc - ng).abs() / ng;
+        assert!(
+            rel < 2e-3,
+            "Vb={vb}: fairchild |I(vb)|={fc:.6e} A, ngspice {ng:.6e} (rel              {rel:.2e}). Exactly zero would mean the junctions are not stamped."
+        );
+    }
+}
+
+/// The reverse branch is Shockley, not flat.
+///
+/// The absolute anchor for the branch *shape*, which the ngspice comparison cannot
+/// see: outside 3*vt the two forms agree to 4.4e-4, and inside it ngspice is
+/// asymmetric. So this compares against the closed form directly, at biases where a
+/// flat reverse branch would be 5% to 46% out.
+///
+/// `vt` comes from fairchild's own constants, which is only safe because
+/// [`the_bulk_junctions_conduct_and_match_ngspice`] anchors it externally through
+/// the forward exponential. What is under test here is the shape.
+#[test]
+fn the_bulk_junctions_follow_the_shockley_law() {
+    const IS: f64 = 1e-14;
+    let vt = fairchild_core::device::K_BOLTZMANN * 300.15 / fairchild_core::device::Q_ELECTRON;
+    for vb in [-0.15, -0.10, -0.05, -0.02] {
+        let got = bulk_current("VTO=0.7 KP=200u IS=1e-14", "W=10u L=1u", vb, 0.0);
+        // Two junctions, both at `vb` because the drain and the source are grounded.
+        let want = (2.0 * IS * ((vb / vt).exp() - 1.0)).abs();
+        let flat = 2.0 * IS;
+        let rel = (got - want).abs() / want;
+        assert!(
+            rel < 1e-6,
+            "Vb={vb}: got {got:.6e} A, Shockley gives {want:.6e} (rel {rel:.2e}). \
+             A flat reverse branch would give {flat:.6e}."
+        );
+    }
+}
+
+/// `gmin` crosses the bulk junctions, which is what makes this family consistent
+/// with the diode and the BJT.
+///
+/// This is the second symptom #97 §2 named: without body diodes a MOSFET had no pn
+/// junction at all, so its `gmin` stayed a Jacobian-only channel floor while the
+/// other two families carried it as a real conductance.
+#[test]
+fn gmin_crosses_the_bulk_junctions() {
+    const MODEL: &str = "VTO=0.7 KP=200u IS=1e-14";
+    for gmin in [1e-12, 1e-9, 1e-6] {
+        let fc = bulk_current(MODEL, "W=10u L=1u", -1.0, gmin);
+        // Two junctions, each reverse at −1 V: `2·(IS + gmin·1V)`.
+        let want = 2.0 * (1e-14 + gmin);
+        let rel = (fc - want).abs() / want;
+        assert!(
+            rel < 1e-3,
+            "gmin={gmin:e}: reverse bulk current is {fc:.6e} A and two junctions              give 2·(IS + gmin·1V) = {want:.6e} (rel {rel:.2e}). Leakage that does              not follow gmin means it is not crossing the junctions."
+        );
+        if let Some(ng) = ngspice_bulk_current(MODEL, "W=10u L=1u", -1.0, gmin) {
+            assert!(
+                (fc - ng).abs() / ng < 2e-3,
+                "gmin={gmin:e}: fairchild {fc:.6e}, ngspice {ng:.6e}"
+            );
+        }
+    }
+}
+
+/// `JS·area` wins over `IS` when the area is given, and each junction resolves
+/// independently because `AS` and `AD` can differ.
+#[test]
+fn js_and_the_areas_set_the_saturation_current() {
+    // `JS=1e-6` with `AS=AD=1p` is 1e-18 per junction, 1e-4 of the `IS` default.
+    let with_js = bulk_current(
+        "VTO=0.7 KP=200u JS=1e-6",
+        "W=10u L=1u AS=1p AD=1p",
+        0.6,
+        0.0,
+    );
+    let with_is = bulk_current("VTO=0.7 KP=200u IS=1e-14", "W=10u L=1u", 0.6, 0.0);
+    let ratio = with_is / with_js;
+    assert!(
+        (ratio / 1e4 - 1.0).abs() < 0.05,
+        "JS·AS = 1e-18 against IS = 1e-14 is a factor of 1e4 in saturation          current: got {ratio:.4e}"
+    );
+
+    // Doubling the areas doubles the current.
+    let doubled = bulk_current(
+        "VTO=0.7 KP=200u JS=1e-6",
+        "W=10u L=1u AS=2p AD=2p",
+        0.6,
+        0.0,
+    );
+    assert!(
+        (doubled / with_js / 2.0 - 1.0).abs() < 0.05,
+        "doubling AS and AD must double the junction current: {doubled:.6e}          against {with_js:.6e}"
+    );
+
+    // And `JS` with an area beats an explicit `IS`, which is SPICE's precedence.
+    let both = bulk_current(
+        "VTO=0.7 KP=200u IS=1e-14 JS=1e-6",
+        "W=10u L=1u AS=1p AD=1p",
+        0.6,
+        0.0,
+    );
+    assert!(
+        (both / with_js - 1.0).abs() < 1e-6,
+        "with both given and an area present, JS·area wins: {both:.6e} against          the JS-only {with_js:.6e}"
+    );
+
+    for (m, inst) in [
+        ("VTO=0.7 KP=200u JS=1e-6", "W=10u L=1u AS=1p AD=1p"),
+        ("VTO=0.7 KP=200u IS=1e-14 JS=1e-6", "W=10u L=1u AS=1p AD=2p"),
+    ] {
+        if let Some(ng) = ngspice_bulk_current(m, inst, 0.6, 0.0) {
+            let fc = bulk_current(m, inst, 0.6, 0.0);
+            assert!(
+                (fc - ng).abs() / ng < 2e-3,
+                "{m} / {inst}: fairchild {fc:.6e}, ngspice {ng:.6e}"
+            );
+        }
+    }
+}
+
+/// The bulk junctions' saturation current scales with temperature, by a **third**
+/// law that is neither the diode's nor the BJT's.
+///
+/// A MOSFET card carries no `EG` and no `XTI`, so SPICE cannot use the constant-`EG`
+/// form the other two families use. It puts the temperature-dependent bandgap in
+/// the exponent instead: `exp(Eg(TNOM)/vt(TNOM) − Eg(T)/vt(T))`.
+///
+/// This is the whole reason the law needed measuring rather than reusing. Applying
+/// the diode's law here would be out by up to 2.4× over −40 to 125 °C, which the
+/// tolerance below rejects — that is the sabotage this test is built to catch.
+///
+/// Read with the bulk one volt reverse and `gmin = 0`, so the current is exactly
+/// `2·Isat(T)` and nothing else. Five decades of `Isat` are covered, so the test
+/// fails on a wrong *exponent*, not only on a wrong prefactor.
+#[test]
+fn the_bulk_junction_saturation_current_scales_with_temperature() {
+    const MODEL: &str = "VTO=0.7 KP=200u IS=1e-14 TNOM=27";
+    let mut ran = 0;
+    for tc in [-40.0, 0.0, 27.0, 75.0, 125.0] {
+        let Some(ng) = ngspice_bulk_current_at(MODEL, "W=10u L=1u", -1.0, 0.0, Some(tc)) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let fc = bulk_current_at(MODEL, "W=10u L=1u", -1.0, 0.0, Some(tc));
+        let rel = (fc - ng).abs() / ng;
+        // 1e-3, not the file's 2e-3: the measured residual is 3.7e-4 worst case
+        // and its source is named in `temperature::mos_junction_is_factor`. The
+        // diode law would be 1.4 to 2.4 out here, so this has 3 orders of margin
+        // over the error it exists to reject.
+        assert!(
+            rel < 1e-3,
+            "{tc} °C: fairchild 2·Isat = {fc:.6e} A, ngspice {ng:.6e} (rel \
+             {rel:.2e}). No temperature scaling at all would read 2e-14 at every \
+             point; the diode's constant-EG law would be up to 2.4x out."
+        );
+        ran += 1;
+    }
+    assert_eq!(ran, 5, "every temperature point must have been compared");
+}
+
+/// `RSH` with `NRD`/`NRS` becomes the drain and source series resistances.
+///
+/// `RSH` is a resistance per square and `NRD`/`NRS` are the number of squares in
+/// each diffusion, so `RD = RSH·NRD` and `RS = RSH·NRS`. Before this `RSH` was
+/// accepted and dropped, and a card that gives sheet resistance instead of `RD`/`RS`
+/// got no series resistance at all.
+///
+/// Measured, and the equalities are exact rather than approximate. `RSH=50 NRD=2
+/// NRS=2` is bit-identical to `RD=100 RS=100` in ngspice, ratio 1.000000000, and
+/// `RSH=50` alone equals `RD=50 RS=50`, which is how the `NRD=NRS=1` default was
+/// read off.
+///
+/// # Precedence is per terminal
+///
+/// `RSH=50 RD=1000 NRD=2 NRS=2` reads 0.00147653 where `RD=1000` alone reads
+/// 0.00161661. So the explicit `RD` wins on the drain and `RSH·NRS` still applies
+/// to the source. Treating one explicit value as disabling `RSH` for both terminals
+/// gives the second number, and is the mistake this test exists to catch.
+///
+/// `NRD` maps to the drain and `NRS` to the source: `NRD=4 NRS=1` reads 0.00350969
+/// and `NRD=1 NRS=4` reads 0.00281955, because source degeneration costs more
+/// current than the same resistance in the drain. So swapping them fails too.
+#[test]
+fn rsh_times_the_squares_becomes_the_series_resistance() {
+    let mut compared = 0;
+    for (model, inst) in [
+        ("VTO=0.7 KP=200u", "W=10u L=1u"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=4 NRS=1"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=1 NRS=4"),
+        ("VTO=0.7 KP=200u RSH=50 RD=1000", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RSH=50 RS=1000", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RD=100 RS=100", "W=10u L=1u"),
+    ] {
+        let deck = format!(
+            "* rsh\n.model nm NMOS ({model})\n\
+             VG g 0 DC 3\nVD d 0 DC 2\nM1 d g 0 0 nm {inst}\n"
+        );
+        let net = parse_spice(&deck).expect("parse");
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&net.models);
+        let opts = SimOptions::from_netlist(&net);
+        let got = dc_op_nr_with_registry_opts(&net, &registry, &opts)
+            .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+            .vsrc_current("vd")
+            .expect("i(vd)")
+            .abs();
+        let Some(ng) = ngspice_bulk_i_vd(&deck) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        // `CHANNEL_TOL` is too tight here: the body-drain junction's leakage rides
+        // on `I(vd)` and the channel current is milliamps, so this is the file's
+        // ordinary golden tolerance.
+        let rel = (got - ng).abs() / ng;
+        assert!(
+            rel < REL_TOL,
+            "'{model}' / '{inst}': fairchild I(vd)={got:.6e}, ngspice {ng:.6e} \
+             (rel {rel:.2e}). Dropping RSH gives the no-resistance answer for \
+             five of these eight rows."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 8, "every card must have been compared");
+}
+
+/// ngspice's `i(vd)` for a `.op` deck.
+fn ngspice_bulk_i_vd(deck: &str) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let dir = std::env::temp_dir().join("fc_rsh_golden");
+    std::fs::create_dir_all(&dir).ok()?;
+    let tag: String = deck
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .skip(4)
+        .take(56)
+        .collect();
+    let path = dir.join(format!("rsh_{tag}.sp"));
+    std::fs::write(
+        &path,
+        format!("{deck}.control\nop\nprint i(vd)\n.endc\n.end\n"),
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(&path).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("i(vd)") && t.contains('=') {
+            if let Ok(v) = t
+                .split('=')
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+            {
+                return Some(v.abs());
+            }
+        }
+    }
+    None
 }

@@ -57,11 +57,49 @@ pub const XTB_DEFAULT: f64 = 0.0;
 
 /// Silicon's bandgap at `t` kelvin, the SPICE3 fit.
 ///
-/// `1.16 − 7.02e-4·T²/(T + 1108)`. Used by the MOSFET threshold shift and
-/// nowhere else — the junction saturation currents take `EG` from the card
-/// instead, because a card may describe a material this fit does not.
+/// `1.16 − 7.02e-4·T²/(T + 1108)`. Used by the MOSFET threshold shift and by
+/// [`mos_junction_is_factor`]. The diode's and the BJT's saturation currents take
+/// `EG` from the card instead, because a card may describe a material this fit
+/// does not. The MOSFET card has no `EG`, which is why it uses the fit.
 pub fn bandgap_ev(t: f64) -> f64 {
     1.16 - (7.02e-4 * t * t) / (t + 1108.0)
+}
+
+/// Multiplier on a **MOSFET's** bulk junction saturation current at `t`.
+///
+/// ```text
+/// Isat(T) = Isat · exp(Eg(TNOM)/vt(TNOM) − Eg(T)/vt(T))
+/// ```
+///
+/// A third law, not either of the two above, and measured to be so. The diode's
+/// and the BJT's use a **constant** `EG` from the card in `exp(EG·(T/TNOM −
+/// 1)/vt(T))` and multiply by `(T/TNOM)^XTI`. A MOSFET card carries neither `EG`
+/// nor `XTI`, and SPICE puts the temperature-dependent bandgap in the exponent
+/// instead.
+///
+/// The difference is not small. Against ngspice at `TNOM = 27 °C`, reading `Isat`
+/// off a bulk held one volt reverse with `gmin = 0`:
+///
+/// | T | ngspice | this law | the diode law at `EG = 1.11` |
+/// |---|---|---|---|
+/// | −40 °C | 1.835405e-20 | 1.834720e-20 | 4.404638e-20 |
+/// | 0 °C | 1.047853e-16 | 1.047717e-16 | 1.437655e-16 |
+/// | 75 °C | 5.986135e-12 | 5.987214e-12 | 3.712831e-12 |
+/// | 125 °C | 9.446510e-10 | 9.449566e-10 | 3.869226e-10 |
+///
+/// The last column is out by up to 2.4×. This one agrees to 3.7e-4 worst case,
+/// and the residual grows with `|T − TNOM|` in the exponent, which is where a
+/// small difference in `k/q` would show. Solving the measurements for `k/q` gives
+/// 8.61638e-5 against SPICE3's 8.617087e-5, so the remaining gap is a constant
+/// this tree deliberately does not copy, on a leakage current between 1e-20 and
+/// 1e-9 A.
+pub fn mos_junction_is_factor(t: f64, tnom: f64) -> f64 {
+    if t <= 0.0 || tnom <= 0.0 {
+        return 1.0;
+    }
+    let vt = t * BOLTZ / CHARGE;
+    let vtnom = tnom * BOLTZ / CHARGE;
+    (bandgap_ev(tnom) / vtnom - bandgap_ev(t) / vt).exp()
 }
 
 /// The built-in-potential temperature term SPICE calls `pbfact`.
@@ -145,6 +183,54 @@ pub fn scaled_phi(phi_nom: f64, t: f64, tnom: f64) -> f64 {
     (t / REFTEMP_K) * phio + pbfact(t)
 }
 
+/// A junction's built-in potential at `t`, from its nominal value.
+///
+/// The same law as [`scaled_phi`], because a MOSFET's surface potential and a
+/// diode's junction potential are the same quantity in SPICE and move by the same
+/// expression. Named separately so a reader of `diode.rs` finds it, and delegating
+/// so the two cannot drift.
+pub fn scaled_junction_potential(vj_nom: f64, t: f64, tnom: f64) -> f64 {
+    scaled_phi(vj_nom, t, tnom)
+}
+
+/// Multiplier on a zero-bias junction capacitance (`CJO`, `CJE`, `CJC`, `CJ`) at
+/// temperature `t`.
+///
+/// ```text
+/// pbo     = (VJ − pbfact(TNOM)) / (TNOM/300.15)
+/// gmaold  = (VJ    − pbo)/pbo      cjfact  = 1 / (1 + M·(4e-4·(TNOM−300.15) − gmaold))
+/// gmanew  = (VJ(T) − pbo)/pbo      cjfact1 =      1 + M·(4e-4·(T   −300.15) − gmanew)
+/// CJO(T)  = CJO · cjfact · cjfact1
+/// ```
+///
+/// The two halves are not redundant: `cjfact` un-references the card from its own
+/// `TNOM` and `cjfact1` re-references it to `T`, so a card extracted at `TNOM`
+/// and run at `TNOM` comes back unshifted. That identity is the one property a
+/// cross-simulator comparison cannot check — both would share an offset — and it
+/// is asserted directly in the tests.
+///
+/// Measured against ngspice to 1.2e-6…8.2e-5 across −40/27/75/125 °C at two
+/// values of `M`. `M` appears three times in the law, which is why it is swept.
+pub fn junction_cap_factor(vj_nom: f64, m: f64, t: f64, tnom: f64) -> f64 {
+    if t <= 0.0 || tnom <= 0.0 || vj_nom <= 0.0 {
+        return 1.0;
+    }
+    let fact1 = tnom / REFTEMP_K;
+    let pbo = (vj_nom - pbfact(tnom)) / fact1;
+    if pbo == 0.0 {
+        return 1.0;
+    }
+    let vj_t = scaled_junction_potential(vj_nom, t, tnom);
+    let gmaold = (vj_nom - pbo) / pbo;
+    let denom = 1.0 + m * (4e-4 * (tnom - REFTEMP_K) - gmaold);
+    if denom == 0.0 {
+        return 1.0;
+    }
+    let gmanew = (vj_t - pbo) / pbo;
+    let cjfact1 = 1.0 + m * (4e-4 * (t - REFTEMP_K) - gmanew);
+    cjfact1 / denom
+}
+
 /// A MOSFET's threshold at `t`.
 ///
 /// ```text
@@ -221,6 +307,66 @@ mod tests {
                 "VTO({t} K) is {got:.4} and ngspice fits {want:.4}"
             );
         }
+    }
+
+    /// The junction-capacitance law is the identity at `T = TNOM`, for every
+    /// `TNOM` and every `M`.
+    ///
+    /// This is the property no cross-simulator comparison can check: both would
+    /// share an offset. It is also the one that breaks every existing transient
+    /// golden at once if the two halves of the law disagree — `cjfact`
+    /// un-references the card and `cjfact1` re-references it, and they have to
+    /// cancel exactly.
+    #[test]
+    fn the_junction_cap_law_is_the_identity_at_nominal() {
+        for tnom in [300.15, 273.15, 398.15] {
+            for m in [0.0, 0.33, 0.5, 1.0] {
+                for vj in [0.6, 0.75, 1.0] {
+                    let f = junction_cap_factor(vj, m, tnom, tnom);
+                    assert!(
+                        (f - 1.0).abs() < 1e-12,
+                        "CJO factor at T = TNOM = {tnom}, M = {m}, VJ = {vj} is \
+                         {f}, not 1"
+                    );
+                    let p = scaled_junction_potential(vj, tnom, tnom);
+                    assert!(
+                        (p - vj).abs() < 1e-12,
+                        "VJ at T = TNOM = {tnom} is {p}, not {vj}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A junction gets *wider* capacitance as it heats, because the built-in
+    /// potential narrows with the bandgap. A sign error in either half of the
+    /// law reverses this while still passing the identity test above.
+    #[test]
+    fn a_hotter_junction_has_more_capacitance_and_less_potential() {
+        let (cold, hot, tnom) = (233.15, 398.15, 300.15);
+        let vj = 0.75;
+        assert!(
+            scaled_junction_potential(vj, hot, tnom) < vj,
+            "the built-in potential falls as the bandgap narrows"
+        );
+        assert!(
+            scaled_junction_potential(vj, cold, tnom) > vj,
+            "and rises when cold"
+        );
+        assert!(
+            junction_cap_factor(vj, 0.5, hot, tnom) > 1.0,
+            "less potential means a thinner depletion layer, so more capacitance"
+        );
+        assert!(
+            junction_cap_factor(vj, 0.5, cold, tnom) < 1.0,
+            "and less when cold"
+        );
+        // M scales the whole correction, so M = 0 leaves only the 4e-4 term.
+        let m0 = junction_cap_factor(vj, 0.0, hot, tnom);
+        assert!(
+            (m0 - 1.0).abs() < 1e-12,
+            "M = 0 removes the grading correction entirely: got {m0}"
+        );
     }
 
     /// The direction of each law, which a transposed exponent would break while

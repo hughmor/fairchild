@@ -27,84 +27,43 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
     (
-        "isr",
-        "the recombination current is not modelled, so the low-current \
-         ideality stays at N",
-    ),
-    (
-        "nr",
-        "the recombination current is not modelled (needs ISR)",
-    ),
-    (
-        "ikf",
-        "high-injection roll-off is not modelled, so the forward current keeps \
-         its exponential slope past the knee",
-    ),
-    (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
-    ),
-    ("trs1", "RS does not vary with temperature"),
-    ("trs2", "RS does not vary with temperature"),
-    (
         "cta",
-        "the junction capacitance does not vary with temperature",
+        "ngspice ignores it too: the capacitance at 1 V reverse is bit-identical \
+         for CTA of 1e-3, 1e-2 and absent, at 27, 75 and 125 C. The junction \
+         capacitance does move with temperature here, by SPICE's cjfact law \
+         (6.546536e-12 at 27 C, 6.866055e-12 at 125 C), which is the same \
+         movement ngspice makes",
     ),
-    ("vpt", "punch-through is not modelled"),
+    (
+        "vpt",
+        "ngspice ignores it too: the current past a BV=50 knee is bit-identical \
+         for VPT of 10, 40, 49 and absent, so there is no reference to match. \
+         Reverse breakdown itself is modelled, and a card relying on \
+         punch-through gets the plain BV knee",
+    ),
 ];
 
 /// BJT (`.model … NPN|PNP`).
 pub const BJT: Unmodelled = &[
     (
-        "cjs",
-        "the collector-substrate junction capacitance is not stamped, so the \
-         substrate terminal carries no charge",
-    ),
-    ("vjs", "the substrate junction is not stamped (needs CJS)"),
-    ("mjs", "the substrate junction is not stamped (needs CJS)"),
-    ("fcs", "the substrate junction is not stamped (needs CJS)"),
-    (
-        "xcjc",
-        "all of CJC sits outside the base resistance, so RB does not see its \
-         share of the collector charge",
+        "fcs",
+        "ngspice ignores it too: its substrate junction linearises about zero \
+         bias, not about FCS·VJS, and the forward capacitance is bit-identical \
+         for FCS of 0.1, 0.5, 0.9 and absent",
     ),
     (
-        "rbm",
-        "the base resistance is constant: it does not fall towards RBM at high \
-         current",
-    ),
-    ("irb", "the base resistance is constant (needs RBM)"),
-    (
-        "xtf",
-        "the forward transit time is constant: TF does not rise with bias, so \
-         fT is flat in current",
-    ),
-    ("vtf", "the forward transit time is constant (needs XTF)"),
-    ("itf", "the forward transit time is constant (needs XTF)"),
-    ("ptf", "excess phase is not modelled"),
-    (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
+        "ptf",
+        "excess phase is not modelled: the transport current carries no delay, so \
+         a stage past 1/(2·pi·TF) has the right gain and the wrong phase. \
+         Measured against ngspice at 1 GHz with TF=1n: PTF=30 moves the collector \
+         phase and leaves the magnitude bit-identical. Unlike a capacitance this \
+         is a frequency-dependent transconductance, which the G + jwC − L/w \
+         assembly cannot express",
     ),
 ];
 
 /// MOSFET (`.model … NMOS|PMOS`), Level 1.
 pub const MOSFET: Unmodelled = &[
-    (
-        "is",
-        "the bulk-source and bulk-drain diodes are not stamped, so a forward-biased \
-         bulk conducts nothing",
-    ),
-    ("js", "the bulk junction diodes are not stamped"),
-    (
-        "rsh",
-        "the sheet resistance needs NRD/NRS squares to become a resistance, and \
-         those instance parameters are not taken — give RD/RS directly",
-    ),
     ("nsub", "nothing is derived from the substrate doping"),
     (
         "nss",
@@ -112,28 +71,33 @@ pub const MOSFET: Unmodelled = &[
     ),
     (
         "nfs",
-        "there is no subthreshold conduction: below VTO the channel current is \
-         exactly zero",
+        "a LEVEL 2/3 parameter: there is no subthreshold conduction at LEVEL 1, \
+         so below VTO the channel current is exactly zero. ngspice's LEVEL 1 \
+         ignores it too",
     ),
     (
         "tpg",
         "the gate material does not shift the flat-band voltage",
     ),
     (
-        "uo",
-        "the mobility is not used to derive KP — give KP directly, or the \
-         default 2e-5 applies",
+        "ucrit",
+        "a LEVEL 2 parameter: field-dependent mobility is not part of LEVEL 1, \
+         and ngspice's LEVEL 1 ignores it too",
     ),
-    ("ucrit", "mobility degradation with field is not modelled"),
-    ("uexp", "mobility degradation with field is not modelled"),
+    (
+        "uexp",
+        "a LEVEL 2 parameter: field-dependent mobility is not part of LEVEL 1",
+    ),
     (
         "utra",
-        "transverse-field mobility degradation is not modelled",
+        "a LEVEL 2 parameter: transverse-field mobility degradation is not part \
+         of LEVEL 1",
     ),
     (
         "vmax",
-        "carrier velocity saturation is not modelled, so a short channel keeps \
-         the long-channel saturation current",
+        "a LEVEL 2/3 parameter: velocity saturation is not part of LEVEL 1, so a \
+         short channel keeps the long-channel saturation current. ngspice's \
+         LEVEL 1 ignores it too",
     ),
     (
         "xj",
@@ -150,15 +114,17 @@ pub const MOSFET: Unmodelled = &[
     ),
     (
         "theta",
-        "mobility degradation with gate field is not modelled",
+        "a LEVEL 3 parameter: gate-field mobility degradation is not part of \
+         LEVEL 1, and ngspice's LEVEL 1 ignores it too",
     ),
-    ("eta", "static feedback on the threshold is not modelled"),
-    ("kappa", "the saturation-field factor is not modelled"),
     (
-        "tnom",
-        "the junction potential and capacitance are not re-referenced to the \
-         extraction temperature (the saturation current, betas, transconductance \
-         and threshold are)",
+        "eta",
+        "a LEVEL 3 parameter: static feedback on the threshold is not part of \
+         LEVEL 1",
+    ),
+    (
+        "kappa",
+        "a LEVEL 3 parameter: the saturation-field factor is not part of LEVEL 1",
     ),
     ("php", "the sidewall junction uses PB as its potential"),
 ];

@@ -111,9 +111,12 @@ reveals.
 | `TT` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
 | `BV` | ✅ | ✅ reverse breakdown, knee adjusted so `I(-BV) = IBV` | ✅ ngspice across the knee, and a Zener shunt regulator |
 | `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
-| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, and at three (EG, XTI) pairs |
+| `TNOM`, `EG`, `XTI` | ✅ | ✅ `IS(T)`, `VJ(T)`, `CJO(T)` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, at three (EG, XTI) pairs, and `Cj` at two `M` |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / f` across the junction, in `.noise` and transient noise | ✅ ngspice at two `AF` values, slope and magnitude |
-| `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled — `TNOM` **partly**: it re-references `IS` and not the junction capacitance | ❌ | ✅ warning text pinned |
+| `ISR`, `NR` | ✅ | ✅ recombination current, with SPICE's generation factor | ✅ ngspice at four `VJ`/`M` pairs and three biases; `NR` is a **deliberate divergence**, see below |
+| `IKF` | ✅ | ✅ `Id/(1 + sqrt(Id/IKF))`, on the **total** forward current | ✅ ngspice at twelve points, residual 1e−6 |
+| `TRS1`, `TRS2` | ✅ | ✅ `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)` | ✅ ngspice at four temperatures and three cards, residual ~1e−6 |
+| `CTA`, `VPT` | ⚠️ accepted, not modelled — **and ngspice ignores both**, see below | ❌ | ✅ measured inert in the reference |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
@@ -182,6 +185,8 @@ carries several variants of each:
 | BJT `BF(T)` | `BF·(T/TNOM)^XTB` | `IC/IB`, which cancels `IS(T)`; 1.5278 measured against 1.5278 |
 | MOSFET `KP(T)` | `KP·(T/TNOM)^−1.5` | slope of `sqrt(Id)` against two `Vgs`, which separates it from the threshold |
 | MOSFET `PHI(T)`, `VTO(T)` | SPICE3's `pbfact`/bandgap form | the same fit's intercept; residual 0.04 mV |
+| junction potential `VJ(T)`, `PB(T)`, `VJE`/`VJC` | the same law as `PHI(T)` | reused, not rewritten |
+| junction capacitance `CJO(T)`, `CJ`/`CJSW`, `CJE`/`CJC` | `cjfact·cjfact1` about `pbo` | 1.2e−6…8.2e−5 across −40/27/75/125 °C at two `M` |
 
 Note the **`/N`**: the emission coefficient divides both temperature terms in the
 diode law and neither in the BJT's. The two coincide at `N = 1`, which is why
@@ -193,11 +198,41 @@ ones used elsewhere in this tree. The bandgap expressions are curve fits whose
 coefficients were published against those constants, and a better `k` moves
 `PHI(T)` in the fourth decimal and stops matching ngspice.
 
-**What is still not re-referenced to `TNOM`:** the junction potentials and
-capacitances (`VJ`/`CJO` on a diode, `VJE`/`VJC`/`CJE`/`CJC` on a BJT). So `TNOM`
-remains on the accepted-but-not-modelled list with a message naming exactly that
-boundary — a card carrying `CJO` and `TNOM` together still gets told. This affects
-transient and AC only; the DC operating point is fully re-referenced.
+### The junction potential and capacitance
+
+`VJ(T)` is **the same function** as `PHI(T)` — a MOSFET's surface potential and a
+diode's junction potential are the same quantity in SPICE — so
+`scaled_junction_potential` delegates to `scaled_phi` rather than restating it.
+
+The capacitance law has two halves and they are not redundant:
+
+```text
+pbo     = (VJ − pbfact(TNOM)) / (TNOM/300.15)
+cjfact  = 1 / (1 + M·(4e-4·(TNOM−300.15) − (VJ    − pbo)/pbo))
+cjfact1 =      1 + M·(4e-4·(T   −300.15) − (VJ(T) − pbo)/pbo)
+CJO(T)  = CJO · cjfact · cjfact1
+```
+
+`cjfact` un-references the card from its own `TNOM` and `cjfact1` re-references it
+to `T`, so a card extracted at `TNOM` and run at `TNOM` comes back unshifted. That
+identity is the property no cross-simulator comparison can check — both would
+share an offset — and it is what would move every existing transient golden at
+once if the two halves failed to cancel, so it is asserted directly.
+
+`M` appears three times (both corrections and the depletion exponent), which is
+why the tests sweep it. A MOSFET carries **two** factors rather than one, because
+`CJ` grades by `MJ` and `CJSW` by `MJSW` and SPICE derives each correction from
+its own coefficient.
+
+Measured by reading a reverse-biased diode's own `Cj` as the C of a 1 MΩ
+single-pole RC. The probe frequency sits near the pole deliberately: a first
+attempt at 1 kHz against a ~450 kHz pole attenuated by 6 ppm, where six printed
+digits carry no information about `C`.
+
+**`TNOM` is now honoured on all three families**, so it is off the
+accepted-but-not-modelled lists. What a card still cannot get is a *temperature
+coefficient of its own* — `TRS1`/`TRS2` for a diode's `RS`, and `CTA` — which are
+separate parameters and remain listed.
 
 ### `gmin`, `RS`, and step limiting
 
@@ -254,10 +289,16 @@ instead. What bounds a step into breakdown now is the trust region
 | `CJE`, `VJE`, `MJE` | ✅ | ✅ | ✅ ngspice transient (CE stage, 5 %) |
 | `CJC`, `VJC`, `MJC` | ✅ | ✅ | ✅ ngspice transient |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
-| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` | ✅ ngspice at −40/27/75/125 °C |
+| `TNOM`, `EG`, `XTI` | ✅ | ✅ `IS(T)`, and `VJE`/`VJC`/`CJE`/`CJC` at temperature | ✅ ngspice at −40/27/75/125 °C |
 | `XTB` | ✅ | ✅ `BF(T)`/`BR(T)` | ✅ ngspice, and `XTB=0` pinned as the control |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Ib|^AF / f` across base-emitter — the **base** current, as SPICE does | ✅ ngspice at two `AF` values |
-| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `TNOM` | ⚠️ accepted, not modelled — `TNOM` **partly**, as for the diode | ❌ | ✅ warning text pinned |
+| `ISS` | ✅ | ✅ substrate junction DC branch, Shockley | ✅ ngspice DC, six biases over five decades |
+| `CJS`, `VJS`, `MJS` | ✅ | ✅ collector-substrate depletion capacitance | ✅ ngspice AC at eight biases, including past `VJS` |
+| `FCS` | ⚠️ accepted, not modelled — **and ngspice ignores it too**, see below | ❌ | ✅ measured inert in the reference |
+| `XCJC` | ✅ | ✅ splits `CJC` across `RB`, internal share to the internal base | ✅ ngspice AC at six values, monotonic and matching |
+| `XTF`, `VTF`, `ITF` | ✅ | ✅ `TF_eff = TF·(1 + XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF)))`, with the capacitance as the charge's analytic derivative | ✅ ngspice AC at nine cards, plus a `VCE` sweep for the transcapacitance and a transient for its linearisation |
+| `RBM`, `IRB` | ✅ | ✅ the base resistance falls with base current, two laws selected by `IRB` | ✅ ngspice DC at 16 cards and biases, plus both closed-form limits |
+| `PTF` | ⚠️ accepted, not modelled — a frequency-dependent transconductance, see below | ❌ | ✅ measured real in the reference, phase only |
 
 ### Instance parameters
 
@@ -286,12 +327,232 @@ anything — and the Norton form then cancelled it out of the terminal currents
 entirely. A reverse-biased BJT carried `2·IS = 2e-16` where ngspice carries
 `gmin·V ≈ 1e-12`.
 
-**One junction short of ngspice.** `CJS`/`VJS`/`MJS`/`FCS` are on the unmodelled
-list above, so there is no collector-substrate junction here to hang `gmin` on,
-and a reverse-biased BJT reads `1·gmin·V` against ngspice's `2·gmin·V`. Measured
-by pinning the substrate at the collector potential in ngspice, which removes
-exactly one `gmin·V`. 1 pA at the default, on a device whose signal currents are
-milliamps.
+### `XCJC`, and why the split matters
+
+`XCJC·CJC` connects to the **internal** base node, so `RB` sits in series with it.
+The rest hangs off the external base pin, where it does not. All of `CJC` used to
+sit outside `RB`, which is the `XCJC = 0` case and 0.575 of the right answer on a
+default card. Measured against ngspice, AC `|V(b)|` at 100 MHz behind 1 kΩ with
+`RB = 1k` and `CJC = 10p`:
+
+| card | ngspice | relative |
+|---|---|---|
+| absent | 5.174797e−01 | 1.0000 |
+| `XCJC=1.0` | 5.174797e−01 | 1.0000 |
+| `XCJC=0.5` | 3.733585e−01 | 0.7215 |
+| `XCJC=0.0` | 2.975813e−01 | 0.5751 |
+
+Absent and `XCJC=1.0` being identical is how the default was read off rather than
+assumed. With `RB = 0` the two base nodes alias and the split is invisible, which
+is every card that gives no base resistance.
+
+### The transit time, and the only transcapacitance in the tree
+
+`TF` used to be constant, so `fT` did not fall at high current and did not rise
+with `VCE` — the two things `XTF`/`VTF`/`ITF` exist to describe.
+
+```text
+TF_eff = TF·(1 + xf),   xf = XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF))
+```
+
+`ITF = 0` and `VTF = 0` each disable their own factor, which is SPICE's convention
+and is why both default to zero rather than to infinity. Measured: `TF_eff/TF` is
+2.0000, 6.0000 and 11.0000 for `XTF` of 1, 5 and 10 with the other two absent.
+
+**The capacitance is not `TF_eff·gm`.** It is the derivative of the charge, and the
+two factors differ:
+
+```text
+q  = TF·(1 + xf)·IF/qb
+∂q/∂vbe = TF/qb·[gbe·(1 + xf·(3 − 2·tmp)) − (1 + xf)·i_diff·∂qb/∂vbe]
+∂q/∂vbc = TF·i_diff·[xf/(1.44·VTF) − (1 + xf)·∂qb/∂vbc/qb]
+```
+
+The `(3 − 2·tmp)` comes out of `IF·∂xf/∂vbe = 2·xf·(1−tmp)·gbe`. Extracting a
+capacitance from an ngspice divider gave 9.70 where the derivative form predicts
+9.93 and the charge form predicts 7.35 — enough to say which form is right, not
+enough to pin it, so the tests compare the AC response of a whole deck instead.
+
+`∂q/∂vbc` is a **transcapacitance**: the base-emitter charge varies with the
+base-collector voltage. It is the only asymmetric reactance in this tree, so it
+cannot be a `ReactiveBranchSpec` and goes through `load_reactive_jacobian`. The
+`qb` half of it was missing before, on any card with a finite `VAF` or `IKF`.
+
+It has to appear in three places, and leaving it out of any one of them is a
+different fault. Out of the transient Jacobian: a wrong Newton step. Out of the AC
+matrix: a wrong bandwidth. Out of the companion's `cv`: a spurious
+`scale·cbe_x·vbc` in the converged transient answer, which no AC test can see. The
+last one is worth 83% on a switching deck and has its own transient golden.
+
+### The diode's forward characteristic below and above the ideal region
+
+Three laws, all measured from ngspice rather than read.
+
+**Recombination.** Below about 0.4 V the depletion region's recombination current
+dominates, which is why a real diode's low-current ideality is nearer two than one.
+It was absent, so the low-bias current was the ideal exponential and nothing else.
+
+```text
+Irec = ISR·(exp(V/(NR·vt)) − 1)·((1 − V/VJ)² + 0.005)^(M/2)
+```
+
+Matched to 1.1e−4…2.7e−4 across `(VJ, M)` of (1.0, 0.5), (0.75, 0.33), (0.6, 0.5)
+and (1.0, 0.0), at 0.2, 0.35 and 0.5 V. The `0.005` is what keeps the generation
+factor finite at `V = VJ`, where the bare square is zero and its `M/2` power has an
+infinite slope.
+
+**High injection.** Above `IKF` the current bends from exponential towards `sqrt`,
+because the injected carrier density reaches the doping.
+
+```text
+Id = Id_total/(1 + sqrt(Id_total/IKF))
+```
+
+Matched to 1e−6 at twelve points. The knee applies to the **total** forward current,
+ideal plus recombination, not to the ideal alone: at 0.5 V with `ISR = 1e-8` and
+`IKF = 1e-3` ngspice reads 8.555990e−05, against 8.555977e−05 for knee-on-total and
+1.143950e−04 for knee-on-ideal. Forward only, because in reverse the square root is
+not real and there is no high injection to describe.
+
+**`RS` with temperature.** `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)`, matched to ~1e−6
+at −40, 0, 75 and 125 °C across three cards, extracted by binary search on a fixed
+`RS` at the same temperature.
+
+`ISR` scales with `AREA` like `IS` and takes `IS`'s temperature factor. Its own law
+would need its own `EG`/`XTI` pair, which the card does not carry.
+
+### `NR` is a deliberate divergence from ngspice
+
+**ngspice ignores `NR`.** Its answer is bit-identical with and without `NR=2`, so it
+hardcodes the default. `NR` is honoured here as a real parameter, which agrees with
+ngspice on every card ngspice can represent — `NR` absent or 2 — and honours one it
+cannot. A card that asks for `NR=1.5` gets `NR=1.5` rather than a silent 2.
+
+This is the same shape as the diode's `AREA` in reverse breakdown, where ngspice
+disagrees with its own parallel pair. Where the reference is self-inconsistent or
+drops a parameter it accepts, this simulator follows the parameter.
+
+### `CTA` and `VPT`, which ngspice ignores too
+
+`CTA` would be a linear temperature coefficient on `CJO`. The capacitance at 1 V
+reverse is bit-identical for `CTA` of 1e−3, 1e−2 and absent, at 27, 75 and 125 °C.
+The junction capacitance *does* move with temperature here, by SPICE's `cjfact`
+law — 6.546536e−12 at 27 °C against 6.866055e−12 at 125 °C — and that is the same
+movement ngspice makes. So `CTA` is inert in the reference, not a missing
+temperature dependence.
+
+`VPT` would be a punch-through voltage in reverse breakdown. The current past a
+`BV=50` knee is bit-identical for `VPT` of 10, 40, 49 and absent, so there is no
+reference to match. Breakdown itself is modelled, and a card relying on
+punch-through gets the plain `BV` knee.
+
+Both stay on the unmodelled list with those measurements as their reasons, the same
+call as the BJT's `FCS` and the MOSFET's LEVEL 2/3 mobility group.
+
+### The base resistance, which is not constant
+
+`RB` used to be a fixed resistance. A real transistor's base resistance collapses
+under drive, and without that a hard-driven stage reads too little collector
+current. Two laws, and `IRB` alone selects which:
+
+```text
+IRB == 0   rb_eff = RBM + (RB − RBM)/qb
+IRB >  0   rb_eff = RBM + 3·(RB − RBM)·(tan z − z)/(z·tan²z)
+           z = (sqrt(1 + 144/pi²·IB/IRB) − 1) / ((24/pi²)·sqrt(IB/IRB))
+```
+
+`RBM` defaults to `RB`, which makes both laws return `RB` exactly — measured, not
+assumed: ngspice gives bit-identical currents for `RB=10k` and `RB=10k RBM=10k`.
+Any other default would silently change every card that sets `RB`.
+
+Extracted from ngspice by binary search on a *fixed* `RB` that reproduces the same
+collector current, so the extraction assumes no law:
+
+| `Vb` | `IRB` | `IB` | extracted | the `tan z` law |
+|---|---|---|---|---|
+| 0.9 | 1e−6 | 7.0213e−05 | 973.3028 | 973.7307 |
+| 1.0 | 1e−5 | 6.5150e−05 | 2621.3721 | 2622.2215 |
+| 1.5 | 1e−4 | 1.4017e−04 | 4590.6510 | 4591.7263 |
+
+`rb_eff` is a function of the iterate's own node voltages, through `IB` and `qb`, so
+it is **not** lagged internal state and the convergence test sees it stop moving when
+`x` does. The Jacobian stamps `1/rb_eff` without differentiating it, which costs
+Newton steps and not correctness: the residual defines the answer and both read the
+same value.
+
+Both limits of the `tan z` form are numerically hostile and each has a test. The
+bracket is written as `1/(z·tan z) − 1/tan²z`, a difference of two terms of size
+`z⁻²` whose difference is `1/3`, so the relative cancellation is `3z²` — eight
+digits left at `z = 1e-4`, none at `1e-8`. Below `1e-4` the series limit `1/3` is
+used instead. At the other end `tan z` overflows, and the same spelling makes both
+terms underflow to zero rather than forming `∞/∞`.
+
+### `PTF`, and why it is not modelled
+
+Excess phase is real in ngspice rather than inert. At 1 GHz with `TF = 1n`, so
+`1/(2·pi·TF)` is 159 MHz:
+
+| card | `ph(v(c))` | `mag(v(c))` |
+|---|---|---|
+| absent | 1.678594e+00 | 1.582311e+00 |
+| `PTF=0` | 1.678594e+00 | 1.582311e+00 |
+| `PTF=30` | −1.611270e+00 | 1.582311e+00 |
+| `PTF=90` | −1.907830e+00 | 1.582311e+00 |
+
+Phase only, magnitude bit-identical, which is what excess phase should do. So this
+is a gap and not an *ngspice ignores it too* case like `FCS`.
+
+It is left out because it is different in kind from everything else here. A
+capacitance is `jw·C` and fits the `G + jwC − L/w` assembly; excess phase is a
+delay on the transport current, so its contribution is a frequency-dependent
+*transconductance*. Expressing it needs a hook the small-signal assembly does not
+have. A stage past `1/(2·pi·TF)` gets the right gain and the wrong phase, which the
+warning says.
+
+### The collector-substrate junction
+
+Three terminals used to be all this model had. `terminals[3]` was dropped, so a
+reverse-biased BJT read `1·gmin·V` against ngspice's `2·gmin·V` — the substrate
+junction was the missing one. Confirmed by pinning the substrate at the collector
+potential in ngspice, which removes exactly one `gmin·V` and nothing else. That is
+closed: the junction is stamped between the substrate and the **internal**
+collector, so a card with `RC` puts the series resistance between the two, which is
+where SPICE puts it.
+
+The junction exists whether or not the card gives it anything. ngspice's leakage is
+`2·gmin·V` for a bare `IS`/`BF` card, so `gmin` crosses it with no `CJS` and no
+`ISS`, and it does here too.
+
+| | law | measured against ngspice |
+|---|---|---|
+| DC branch | `ISS·(exp(V/vt) − 1) + gmin·V` | six biases over five decades |
+| reverse capacitance | `CJS·(1 − V/VJS)^−MJS` | 5e−8 at 0, −0.5, −1, −3 V |
+| forward capacitance | `CJS·(1 + MJS·V/VJS)` | 1.7e−7 at 0…2 V |
+
+Defaults measured, not read: `CJS = 0`, `MJS = 0`, `VJS = 0.75`, `ISS = 0`. So a
+card that names none of them gets the junction, its `gmin`, and nothing else.
+
+The DC branch is plain Shockley, **not** the flat reverse branch ngspice's MOS1
+bulk diodes use. At −0.05 V with `ISS = 1e-15` ngspice reads 8.553040e-16 where
+Shockley gives 8.553119e-16 and a flat `−ISS` would give 1e-15. The two junction
+families in SPICE genuinely differ, and each was measured rather than assumed.
+
+**`FCS` is inert in ngspice.** The forward capacitance is a straight line from the
+*zero-bias* value, not from `FCS·VJS`, so `FCS` never enters. The capacitance at
+0.5 V forward is bit-identical for `FCS` of 0.1, 0.5, 0.9 and absent. It stays on
+the unmodelled list with that as its reason, because honouring it would move away
+from the reference. The forward law holds out to 2 V, well past `VJS`, where the
+depletion law is singular — which is what the linearisation is for.
+
+The substrate junction contributes **no shot noise**. `noise_sources` reports one
+source across base-emitter and one across collector-emitter, and nothing across
+collector-substrate, so a `.noise` run does not see this junction's current. On a
+picoamp at the default `gmin` that is a completeness gap rather than an accuracy
+one, and it is recorded in #81 with the rest of the noise-source work.
+
+`CJS` takes no temperature factor. `TNOM` moves `CJE` and `CJC` here, and the
+substrate junction stays at its nominal value because nothing has measured the law
+for it.
 
 ---
 
@@ -314,7 +575,78 @@ milliamps.
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
 | `RD`, `RS` | ✅ | ✅ a real internal node each, `1/R` between the external terminal and it — not an analytic elimination, see below | ✅ ngspice DC, and equal to an external resistor of the same value |
-| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
+| `TNOM` | ✅ | ✅ `KP(T)`, `PHI(T)`, `VTO(T)`, `PB(T)`, `CJ`/`CJSW`, and the bulk junctions' `Isat(T)` | ✅ ngspice at −40/27/75/125 °C, threshold and mobility separated by a two-point fit |
+| `UO` | ✅ | ✅ derives `KP = UO·COX` when the card gives no `KP` | ✅ ngspice: `UO=300` gives exactly half the drain current of the 600 default |
+| `IS`, `JS` | ✅ | ✅ bulk-source and bulk-drain diodes, `JS·AS` / `JS·AD` when the area is given, else `IS` | ✅ ngspice DC forward and reverse, plus a closed-form anchor on the reverse branch |
+| `RSH` | ✅ | ✅ `RD = RSH·NRD`, `RS = RSH·NRS`, per terminal | ✅ ngspice at eight cards, including the mixed-precedence pair |
+| `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA`, `KAPPA` | ⚠️ accepted, not modelled — **and not part of LEVEL 1**, see below | ❌ | ✅ warning text pinned |
+
+### The body diodes, and where they differ from ngspice
+
+The bulk-source and bulk-drain junctions are real pn junctions, so `gmin` crosses
+them. That is what makes the three families consistent: before this a MOSFET had
+no junction at all, and its `gmin` was a Jacobian-only channel floor while the
+diode's and the BJT's were conductances. A reverse-biased MOSFET now leaks
+`2·(Isat + gmin·V)`, which is ngspice's answer at every `gmin` tried.
+
+The law is `Isat·(exp(V/vt) − 1) + gmin·V`, the same one
+`ShockleyDiode::junction` uses. **ngspice's is not, and the difference is worth
+naming.** ngspice's MOS1 reverse branch is flat at exactly `−Isat` from `−3·vt`
+outward, and inside `±3·vt` its total over the two junctions measures as one
+junction flat and one plain Shockley — matched to seven digits, and still there
+with the bulk-drain junction held five volts reverse. That asymmetry is a
+numerical convenience in the reference, not physics.
+
+Both pure choices sit the same distance from it. At −0.01 V with `IS = 1e-14`,
+ngspice reads 1.32e-14 A, Shockley-on-both 6.4e-15 and flat-on-both 2.0e-14 — a
+6.8e-15 A difference either way. Outside `±3·vt` the question disappears: `exp(V/vt)`
+underflows toward zero and Shockley *is* the flat answer, to 4.4e-4 relative at
+−0.2 V and exactly by −0.5 V. So this takes the smooth branch. It is the junction
+law, it is C¹ at zero where the flat form has a kink, and one law lives in one
+place.
+
+One consequence to know about: the junction current appears in a drain
+measurement. A reverse-biased bulk-drain junction adds `Isat + gmin·V` to
+`I(vd)`, about 3 pA at the default `gmin`, which is 9e-9 of a 0.3 mA drain
+current and is why the Level-1 channel tests carry a 1e-6 tolerance rather than
+1e-9.
+
+`Isat` also moves with temperature, by a **third** law — neither the diode's nor
+the BJT's:
+
+```text
+Isat(T) = Isat · exp(Eg(TNOM)/vt(TNOM) − Eg(T)/vt(T))
+```
+
+The other two families use a constant `EG` from the card in `exp(EG·(T/TNOM −
+1)/vt(T))`, times `(T/TNOM)^XTI`. A MOSFET card carries neither `EG` nor `XTI`,
+so SPICE puts the temperature-dependent bandgap in the exponent instead. Reusing
+the diode's law here would be out by up to 2.4× over −40 to 125 °C. Measured
+against ngspice at five temperatures spanning five decades of `Isat`, worst
+residual 3.7e-4.
+
+### `RSH` with `NRD`/`NRS`
+
+`RSH` is a resistance per square and `NRD`/`NRS` are the squares of diffusion at
+each terminal, so `RD = RSH·NRD` and `RS = RSH·NRS`. It was accepted and dropped, so
+a card that gives sheet resistance instead of `RD`/`RS` got no series resistance at
+all.
+
+The equalities are exact rather than approximate. In ngspice `RSH=50 NRD=2 NRS=2` is
+bit-identical to `RD=100 RS=100`, ratio 1.000000000, and `RSH=50` alone equals
+`RD=50 RS=50`, which is how the `NRD = NRS = 1` default was read off.
+
+**Precedence is per terminal.** `RSH=50 RD=1000 NRD=2 NRS=2` reads 0.00147653 where
+`RD=1000` alone reads 0.00161661, so an explicit `RD` wins on the drain and
+`RSH·NRS` still applies to the source. `NRD` maps to the drain and `NRS` to the
+source, checked by asymmetry: `NRD=4 NRS=1` reads 0.00350969 against `NRD=1 NRS=4`'s
+0.00281955, because source degeneration costs more current than the same resistance
+in the drain.
+
+Resolved in `set_instance_params` rather than at card-parse time, because `NRD`/`NRS`
+are instance parameters. `num_extra_nodes` is asked after that, so a card with only
+an `RSH` still allocates its internal nodes.
 
 ### `RD`/`RS`, and why they are rows rather than an elimination
 
@@ -335,6 +667,39 @@ model does not take. A card giving `RSH` without `RD`/`RS` is still told.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
+
+### The mobility-degradation group belongs to LEVEL 2/3, not here
+
+`UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA` and `KAPPA` are on the
+accepted-not-modelled list above, and that is not a gap in this Level 1
+implementation — **they are not Level 1 parameters.** `UCRIT`/`UEXP`/`UTRA`/`NFS`
+belong to SPICE's LEVEL 2 and `THETA`/`ETA`/`KAPPA` to LEVEL 3; `VMAX` to both.
+Shichman-Hodges has no field-dependent mobility and no subthreshold region.
+
+Measured, because the list read like a to-do: at LEVEL 1 ngspice's drain current
+is **bit-identical** with and without every one of them —
+
+| variation | ngspice LEVEL 1 | ngspice LEVEL 3 |
+|---|---|---|
+| `THETA=0.1` | 1.0000× | 0.9259× |
+| `ETA=0.1` | 1.0000× | 1.3854× |
+| `VMAX=1e5` | 1.0000× | 0.6917× |
+| `NFS`, `UCRIT`, `UEXP`, `UTRA`, `KAPPA` | 1.0000× | — |
+| `LAMBDA=0.05` *(control)* | **1.1500×** | — |
+
+`LAMBDA` is the control: a genuine Level 1 parameter, and it moves the current, so
+the probe works. At LEVEL 3 three of the group move it, which is where they live.
+
+So implementing them here would move *away* from the reference. fairchild's
+behaviour is already ngspice's, with the one difference that fairchild **says so**
+and ngspice is silent. A deck that needs them wants LEVEL 2/3 — which is a separate
+model, not a parameter — or the OSDI path (§9b), where BSIM and PSP carry the real
+short-channel physics.
+
+`UO` is the exception and is modelled: SPICE derives `KP = UO·COX` when the card
+gives no `KP`, which is real Level 1 behaviour. Measured — with `TOX=20n` and no
+`KP`, `UO=300` gives exactly half the current of the 600 default, and `UO·COX`
+reproduces ngspice's 3.315020e-4 A exactly.
 
 ### Flicker noise, and why ngspice is not the anchor for it
 

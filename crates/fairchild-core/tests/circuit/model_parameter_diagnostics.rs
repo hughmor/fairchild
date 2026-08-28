@@ -131,15 +131,17 @@ fn a_device_reports_the_instance_parameters_it_cannot_honour() {
 fn the_unmodelled_report_names_the_parameter_and_the_consequence() {
     let card = vec![
         ("is".to_string(), 1e-16),
-        ("ikf".to_string(), 1e-3), // modelled — must NOT be reported
-        ("kf".to_string(), 1e-15), // modelled now too — must NOT be reported
-        ("xcjc".to_string(), 0.5), // not modelled
-        ("cjs".to_string(), 1e-12),
+        ("ikf".to_string(), 1e-3),  // modelled — must NOT be reported
+        ("kf".to_string(), 1e-15),  // modelled now too — must NOT be reported
+        ("xcjc".to_string(), 0.5),  // modelled now too — must NOT be reported
+        ("cjs".to_string(), 1e-12), // modelled now too — must NOT be reported
+        ("ptf".to_string(), 30.0),  // not modelled
+        ("fcs".to_string(), 0.5),   // not modelled, and ngspice ignores it too
     ];
     let lines = unmodelled::report(unmodelled::BJT, &card);
-    assert_eq!(lines.len(), 2, "expected XCJC and CJS only, got {lines:?}");
-    assert!(lines.iter().any(|l| l.starts_with("XCJC ignored:")));
-    assert!(lines.iter().any(|l| l.starts_with("CJS ignored:")));
+    assert_eq!(lines.len(), 2, "expected PTF and FCS only, got {lines:?}");
+    assert!(lines.iter().any(|l| l.starts_with("PTF ignored:")));
+    assert!(lines.iter().any(|l| l.starts_with("FCS ignored:")));
     assert!(
         lines.iter().all(|l| l.len() > 30),
         "a diagnostic that does not say what was lost is not much better than \

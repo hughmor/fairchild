@@ -25,6 +25,22 @@ pub struct ShockleyDiode {
     is: f64, // saturation current (A)
     n: f64,  // ideality factor
     rs: f64, // series resistance (Ω)
+    /// `ISR` and `NR`: the recombination current, which dominates the forward
+    /// characteristic below about 0.4 V and is why a real diode's low-current
+    /// ideality is nearer 2 than 1.
+    isr: f64,
+    nr: f64,
+    /// `IKF`: the high-injection knee. Above it the current bends from
+    /// exponential towards `sqrt`, because the injected carrier density reaches
+    /// the doping.
+    ikf: f64,
+    /// `TRS1` and `TRS2`: `RS`'s linear and quadratic temperature coefficients.
+    trs1: f64,
+    trs2: f64,
+    /// `1 + TRS1·dT + TRS2·dT²` at the operating temperature, from
+    /// `setup_model`. A factor rather than a scaled `RS`, so a second
+    /// `setup_model` cannot apply it twice and `AREA` still divides on top.
+    rs_t_factor: f64,
     /// `KF`/`AF` — flicker noise coefficient and exponent. `KF = 0` is off,
     /// which is SPICE's default and means the density is exactly zero rather
     /// than small.
@@ -36,6 +52,14 @@ pub struct ShockleyDiode {
     eg: f64,
     /// `XTI` — the saturation current's temperature exponent.
     xti: f64,
+    /// `VJ` and `CJO/CJO_nom` at the operating temperature.
+    ///
+    /// `vj_t` is nominal and `cjo_t_factor` is 1.0 until `setup_model` runs,
+    /// which is before any eval. Held rather than recomputed because `PHI(T)`
+    /// costs two logs and an exponential and depends on nothing that moves inside
+    /// a solve.
+    vj_t: f64,
+    cjo_t_factor: f64,
     /// `IS(T)/IS`, from [`crate::temperature::diode_is_factor`].
     ///
     /// A factor rather than a scaled `IS`, so `setup_model` running more than
@@ -107,6 +131,15 @@ pub struct ShockleyDiode {
     disc: Option<Discretisation>,
 }
 
+/// `NR`'s default: the recombination current's emission coefficient.
+///
+/// Two, because recombination in the depletion region gives an ideality of two.
+/// **ngspice hardcodes this and ignores the `NR` on a card** — its answer is
+/// bit-identical with and without `NR=2`. Honoured here as a real parameter, which
+/// agrees with ngspice on every card ngspice can represent and honours one it
+/// cannot.
+const NR_DEFAULT: f64 = 2.0;
+
 impl ShockleyDiode {
     /// Construct with explicit model parameters. Call `setup_model` before first `eval`.
     pub fn new(is: f64, n: f64) -> Self {
@@ -114,11 +147,19 @@ impl ShockleyDiode {
             is,
             n,
             rs: 0.0,
+            isr: 0.0,
+            nr: NR_DEFAULT,
+            ikf: 0.0,
+            trs1: 0.0,
+            trs2: 0.0,
+            rs_t_factor: 1.0,
             kf: 0.0,
             af: 1.0,
             tnom: crate::temperature::TNOM_DEFAULT_K,
             eg: crate::temperature::EG_DEFAULT,
             xti: crate::temperature::XTI_DEFAULT,
+            vj_t: 1.0,
+            cjo_t_factor: 1.0,
             is_t_factor: 1.0,
             bv: None,
             ibv: 1e-3,
@@ -162,6 +203,11 @@ impl ShockleyDiode {
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut eg = crate::temperature::EG_DEFAULT;
         let mut xti = crate::temperature::XTI_DEFAULT;
+        let mut isr = 0.0_f64;
+        let mut nr = NR_DEFAULT;
+        let mut ikf = 0.0_f64;
+        let mut trs1 = 0.0_f64;
+        let mut trs2 = 0.0_f64;
         let mut bv: Option<f64> = None;
         let mut ibv = 1e-3_f64;
         let mut unknown = Vec::new();
@@ -170,6 +216,11 @@ impl ShockleyDiode {
                 "is" => is = *v,
                 "n" => n = *v,
                 "rs" => rs = *v,
+                "isr" => isr = *v,
+                "nr" => nr = *v,
+                "ikf" | "ik" => ikf = *v,
+                "trs1" | "trs" => trs1 = *v,
+                "trs2" => trs2 = *v,
                 "cjo" | "cj0" => cjo = *v,
                 "vj" => vj = *v,
                 "m" | "mj" => mj = *v,
@@ -195,6 +246,11 @@ impl ShockleyDiode {
         }
         let mut d = Self::new(is, n);
         d.rs = rs;
+        d.isr = isr;
+        d.nr = nr;
+        d.ikf = ikf;
+        d.trs1 = trs1;
+        d.trs2 = trs2;
         d.cjo = cjo;
         d.vj = vj;
         d.mj = mj;
@@ -216,14 +272,30 @@ impl ShockleyDiode {
     }
 
     /// Zero-bias junction capacitance of the whole instance: `CJO·AREA`.
+    /// Zero-bias junction capacitance of the whole instance:
+    /// `CJO(T)·AREA`.
     fn cjo_eff(&self) -> f64 {
-        self.cjo * self.area
+        self.cjo * self.cjo_t_factor * self.area
     }
 
-    /// Series resistance of the whole instance: `RS/AREA` — N junctions in
+    /// Series resistance of the whole instance: `RS(T)/AREA` — N junctions in
     /// parallel each carry their own RS.
     fn rs_eff(&self) -> f64 {
-        self.rs / self.area
+        self.rs * self.rs_t_factor / self.area
+    }
+
+    /// Recombination saturation current of the whole instance: `ISR·AREA`.
+    ///
+    /// Scaled by `AREA` like `IS`, and by the same temperature factor. `ISR`'s own
+    /// temperature law would need its own `EG`/`XTI` pair, which the card does not
+    /// carry, so `IS`'s factor applies — recorded in `docs/model_status.md`.
+    fn isr_eff(&self) -> f64 {
+        self.isr * self.is_t_factor * self.area
+    }
+
+    /// The high-injection knee current of the whole instance: `IKF·AREA`.
+    fn ikf_eff(&self) -> f64 {
+        self.ikf * self.area
     }
 
     /// SPICE pnjlim: logarithmically compress large voltage steps.
@@ -351,10 +423,57 @@ impl ShockleyDiode {
             }
         }
         let exp_term = (vd_j / nvt).exp();
-        (
-            is * (exp_term - 1.0) + gmin * vd_j,
-            is * exp_term / nvt + gmin,
-        )
+        let mut id = is * (exp_term - 1.0);
+        let mut gd = is * exp_term / nvt;
+
+        // Recombination in the depletion region, which dominates below about
+        // 0.4 V and is why a real diode's low-current ideality is nearer two than
+        // one. The generation factor is SPICE's, and both it and the `NR·vt`
+        // exponent were measured rather than read.
+        let isr = self.isr_eff();
+        if isr > 0.0 && self.nr > 0.0 {
+            let nrvt = self.nr * (nvt / self.n);
+            let e = (vd_j / nrvt).exp();
+            // `(1 − V/VJ)² + 0.005`, raised to `M/2`. The `0.005` is what keeps it
+            // finite at `V = VJ`, where the bare square is zero and its `M/2`
+            // power has an infinite slope.
+            let base = {
+                let x = 1.0 - vd_j / self.vj_t;
+                x * x + 0.005
+            };
+            let gen = base.powf(self.mj / 2.0);
+            let dgen = if base > 0.0 {
+                // d/dV of `base^(M/2)` = `(M/2)·base^(M/2−1)·(−2(1−V/VJ)/VJ)`.
+                let x = 1.0 - vd_j / self.vj_t;
+                (self.mj / 2.0) * base.powf(self.mj / 2.0 - 1.0) * (-2.0 * x / self.vj_t)
+            } else {
+                0.0
+            };
+            let irec = isr * (e - 1.0);
+            id += irec * gen;
+            gd += (isr * e / nrvt) * gen + irec * dgen;
+        }
+
+        // High injection. `Id_total/(1 + sqrt(Id_total/IKF))`, applied to the
+        // **total** forward current and not to the ideal part alone — measured:
+        // at 0.5 V with `ISR = 1e-8` and `IKF = 1e-3` ngspice reads 8.555990e-05
+        // against 8.555977e-05 for knee-on-total and 1.143950e-04 for
+        // knee-on-ideal.
+        //
+        // Only forward. In reverse `id` is negative and the square root is not
+        // real, and there is no high injection to describe there.
+        let ikf = self.ikf_eff();
+        if ikf > 0.0 && id > 0.0 {
+            let r = (id / ikf).sqrt();
+            let denom = 1.0 + r;
+            // d/dV of `id/(1+sqrt(id/IKF))`, with `dr/dV = gd/(2·IKF·r)`.
+            let dr = if r > 0.0 { gd / (2.0 * ikf * r) } else { 0.0 };
+            let id_new = id / denom;
+            gd = (gd * denom - id * dr) / (denom * denom);
+            id = id_new;
+        }
+
+        (id + gmin * vd_j, gd + gmin)
     }
 
     /// Solve `vd_j + RS·Id(vd_j) = vd_terminal` for the junction voltage.
@@ -417,12 +536,12 @@ impl ShockleyDiode {
         if cjo == 0.0 {
             return 0.0;
         }
-        let fc_vj = self.fc * self.vj;
+        let fc_vj = self.fc * self.vj_t;
         if v < fc_vj {
-            cjo * (1.0 - v / self.vj).powf(-self.mj)
+            cjo * (1.0 - v / self.vj_t).powf(-self.mj)
         } else {
             let k = (1.0 - self.fc).powf(1.0 + self.mj);
-            cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj)
+            cjo / k * (1.0 - self.fc * (1.0 + self.mj) + self.mj * v / self.vj_t)
         }
     }
 
@@ -432,18 +551,18 @@ impl ShockleyDiode {
         if cjo == 0.0 {
             return 0.0;
         }
-        let fc_vj = self.fc * self.vj;
+        let fc_vj = self.fc * self.vj_t;
         if v < fc_vj {
-            let x = 1.0 - v / self.vj;
-            cjo * self.vj / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
+            let x = 1.0 - v / self.vj_t;
+            cjo * self.vj_t / (1.0 - self.mj) * (1.0 - x.powf(1.0 - self.mj))
         } else {
             // Charge at the FC·VJ boundary
             let x_fc = 1.0 - self.fc;
-            let q_fc = cjo * self.vj / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
+            let q_fc = cjo * self.vj_t / (1.0 - self.mj) * (1.0 - x_fc.powf(1.0 - self.mj));
             let k = x_fc.powf(1.0 + self.mj);
             let f2 = 1.0 - self.fc * (1.0 + self.mj);
             let dv = v - fc_vj;
-            q_fc + cjo / k * (f2 * dv + self.mj / (2.0 * self.vj) * (v * v - fc_vj * fc_vj))
+            q_fc + cjo / k * (f2 * dv + self.mj / (2.0 * self.vj_t) * (v * v - fc_vj * fc_vj))
         }
     }
 
@@ -486,11 +605,51 @@ impl Device for ShockleyDiode {
             self.xti,
             self.n,
         );
+        // The junction potential and the zero-bias capacitance. Both idempotent,
+        // both derived from the nominal values rather than from the previous
+        // result.
+        self.vj_t =
+            crate::temperature::scaled_junction_potential(self.vj, ctx.temperature, self.tnom);
+        self.cjo_t_factor =
+            crate::temperature::junction_cap_factor(self.vj, self.mj, ctx.temperature, self.tnom);
+        // `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)`, with `dT` in kelvin from `TNOM`.
+        // Idempotent: derived from the nominal coefficients every time.
+        let dt = ctx.temperature - self.tnom;
+        self.rs_t_factor = 1.0 + self.trs1 * dt + self.trs2 * dt * dt;
         // Deliberately the unit-area IS: `AREA` arrives after `setup_model`
         // (and can arrive twice, through the alias path). `vcrit` only decides
         // when pnjlim starts compressing steps, and AREA moves it by
         // vt·ln(AREA) — 18 mV at AREA=2, which changes no answer.
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
+    }
+
+    /// Refuse a negative series resistance rather than stamp one.
+    ///
+    /// `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)` goes negative for a large enough
+    /// `|dT|` of the wrong sign, and a negative series resistance is unphysical: it
+    /// feeds the junction rather than dropping across it. Found by a temperature
+    /// sweep — `TNOM=75` with `TRS1=1e-2` at −40 °C gives `1 − 1.15 = −0.15`.
+    /// ngspice answers "DC solution failed" there, which is the right outcome and
+    /// the wrong message.
+    ///
+    /// Runs after `setup_model`, which is where `rs_t_factor` is derived, so the
+    /// temperature is known by the time this is checked.
+    fn validate(&mut self) -> Result<(), String> {
+        if self.rs > 0.0 && self.rs_t_factor <= 0.0 {
+            return Err(format!(
+                "RS={:e} with TRS1={:e} and TRS2={:e} gives RS(T) = {:e} at this \
+                 temperature, and a negative series resistance would feed the \
+                 junction rather than drop across it. The factor is \
+                 1 + TRS1·dT + TRS2·dT², with dT measured from TNOM={:.2} K. \
+                 Narrow the temperature range, or lower the coefficients.",
+                self.rs,
+                self.trs1,
+                self.trs2,
+                self.rs * self.rs_t_factor,
+                self.tnom
+            ));
+        }
+        Ok(())
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
