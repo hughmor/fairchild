@@ -2,6 +2,13 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::{Cell, MnaMatrix, Pattern};
 use crate::reactive::ChargeHistory;
 
+/// `UO`'s default carrier mobility, cm²/V·s — SPICE's value.
+const UO_DEFAULT: f64 = 600.0;
+
+/// `KP` when the card gives neither `KP` nor an oxide capacitance to derive it
+/// from. SPICE's fallback.
+const KP_FALLBACK: f64 = 2e-5;
+
 /// SPICE's default channel width and length, 100 um each.
 ///
 /// Public because [`crate::binning`] has to pick a bin using the geometry the
@@ -210,7 +217,11 @@ impl Mosfet1 {
         let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut vto = if is_pmos { -0.7 } else { 0.7 };
-        let mut kp = 2e-5;
+        // `None` distinguishes "the card gave a KP" from "the card gave the
+        // default", which matters because `UO` only derives `KP` in the second
+        // case. SPICE's rule, and the reason it cannot be a bare `2e-5` here.
+        let mut kp: Option<f64> = None;
+        let mut uo = UO_DEFAULT;
         let mut lambda = 0.0;
         let mut gamma = 0.0;
         let mut phi = 0.6;
@@ -230,7 +241,9 @@ impl Mosfet1 {
         for (k, v) in params {
             match k.to_lowercase().as_str() {
                 "vto" | "vth0" | "vtho" => vto = *v,
-                "kp" => kp = *v,
+                "kp" => kp = Some(*v),
+                // Carrier mobility, cm²/V·s on the card as everywhere in SPICE.
+                "uo" | "u0" => uo = *v,
                 "lambda" => lambda = *v,
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
@@ -261,6 +274,18 @@ impl Mosfet1 {
                 _ => unknown.push(k.clone()),
             }
         }
+        // `KP` given wins; otherwise derive it from the mobility and the oxide
+        // capacitance, which is what SPICE does. `UO` is cm²/V·s on the card and
+        // the expression wants m²/V·s, hence the 1e-4.
+        //
+        // With no `TOX`/`COX` there is no `COX` to multiply, and SPICE's fallback
+        // `KP` applies. That is a real card shape — a deck giving neither `KP` nor
+        // an oxide thickness — so it is a default rather than a refusal.
+        let kp = kp.unwrap_or(if cox > 0.0 {
+            uo * 1e-4 * cox
+        } else {
+            KP_FALLBACK
+        });
         let dev = Mosfet1 {
             vto,
             kp,

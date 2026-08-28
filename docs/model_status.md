@@ -347,7 +347,9 @@ milliamps.
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
 | `RD`, `RS` | ✅ | ✅ a real internal node each, `1/R` between the external terminal and it — not an analytic elimination, see below | ✅ ngspice DC, and equal to an external resistor of the same value |
 | `TNOM` | ✅ | ✅ `KP(T)`, `PHI(T)`, `VTO(T)`, `PB(T)`, and `CJ`/`CJSW` at temperature | ✅ ngspice at −40/27/75/125 °C, threshold and mobility separated by a two-point fit |
-| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `UO` | ✅ | ✅ derives `KP = UO·COX` when the card gives no `KP` | ✅ ngspice: `UO=300` gives exactly half the drain current of the 600 default |
+| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA`, `KAPPA` | ⚠️ accepted, not modelled — **and not part of LEVEL 1**, see below | ❌ | ✅ warning text pinned |
 
 ### `RD`/`RS`, and why they are rows rather than an elimination
 
@@ -368,6 +370,39 @@ model does not take. A card giving `RSH` without `RD`/`RS` is still told.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
+
+### The mobility-degradation group belongs to LEVEL 2/3, not here
+
+`UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA` and `KAPPA` are on the
+accepted-not-modelled list above, and that is not a gap in this Level 1
+implementation — **they are not Level 1 parameters.** `UCRIT`/`UEXP`/`UTRA`/`NFS`
+belong to SPICE's LEVEL 2 and `THETA`/`ETA`/`KAPPA` to LEVEL 3; `VMAX` to both.
+Shichman-Hodges has no field-dependent mobility and no subthreshold region.
+
+Measured, because the list read like a to-do: at LEVEL 1 ngspice's drain current
+is **bit-identical** with and without every one of them —
+
+| variation | ngspice LEVEL 1 | ngspice LEVEL 3 |
+|---|---|---|
+| `THETA=0.1` | 1.0000× | 0.9259× |
+| `ETA=0.1` | 1.0000× | 1.3854× |
+| `VMAX=1e5` | 1.0000× | 0.6917× |
+| `NFS`, `UCRIT`, `UEXP`, `UTRA`, `KAPPA` | 1.0000× | — |
+| `LAMBDA=0.05` *(control)* | **1.1500×** | — |
+
+`LAMBDA` is the control: a genuine Level 1 parameter, and it moves the current, so
+the probe works. At LEVEL 3 three of the group move it, which is where they live.
+
+So implementing them here would move *away* from the reference. fairchild's
+behaviour is already ngspice's, with the one difference that fairchild **says so**
+and ngspice is silent. A deck that needs them wants LEVEL 2/3 — which is a separate
+model, not a parameter — or the OSDI path (§9b), where BSIM and PSP carry the real
+short-channel physics.
+
+`UO` is the exception and is modelled: SPICE derives `KP = UO·COX` when the card
+gives no `KP`, which is real Level 1 behaviour. Measured — with `TOX=20n` and no
+`KP`, `UO=300` gives exactly half the current of the 600 default, and `UO·COX`
+reproduces ngspice's 3.315020e-4 A exactly.
 
 ### Flicker noise, and why ngspice is not the anchor for it
 

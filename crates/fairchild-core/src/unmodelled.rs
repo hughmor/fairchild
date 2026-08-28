@@ -100,28 +100,33 @@ pub const MOSFET: Unmodelled = &[
     ),
     (
         "nfs",
-        "there is no subthreshold conduction: below VTO the channel current is \
-         exactly zero",
+        "a LEVEL 2/3 parameter: there is no subthreshold conduction at LEVEL 1, \
+         so below VTO the channel current is exactly zero. ngspice's LEVEL 1 \
+         ignores it too",
     ),
     (
         "tpg",
         "the gate material does not shift the flat-band voltage",
     ),
     (
-        "uo",
-        "the mobility is not used to derive KP — give KP directly, or the \
-         default 2e-5 applies",
+        "ucrit",
+        "a LEVEL 2 parameter: field-dependent mobility is not part of LEVEL 1, \
+         and ngspice's LEVEL 1 ignores it too",
     ),
-    ("ucrit", "mobility degradation with field is not modelled"),
-    ("uexp", "mobility degradation with field is not modelled"),
+    (
+        "uexp",
+        "a LEVEL 2 parameter: field-dependent mobility is not part of LEVEL 1",
+    ),
     (
         "utra",
-        "transverse-field mobility degradation is not modelled",
+        "a LEVEL 2 parameter: transverse-field mobility degradation is not part \
+         of LEVEL 1",
     ),
     (
         "vmax",
-        "carrier velocity saturation is not modelled, so a short channel keeps \
-         the long-channel saturation current",
+        "a LEVEL 2/3 parameter: velocity saturation is not part of LEVEL 1, so a \
+         short channel keeps the long-channel saturation current. ngspice's \
+         LEVEL 1 ignores it too",
     ),
     (
         "xj",
@@ -138,10 +143,18 @@ pub const MOSFET: Unmodelled = &[
     ),
     (
         "theta",
-        "mobility degradation with gate field is not modelled",
+        "a LEVEL 3 parameter: gate-field mobility degradation is not part of \
+         LEVEL 1, and ngspice's LEVEL 1 ignores it too",
     ),
-    ("eta", "static feedback on the threshold is not modelled"),
-    ("kappa", "the saturation-field factor is not modelled"),
+    (
+        "eta",
+        "a LEVEL 3 parameter: static feedback on the threshold is not part of \
+         LEVEL 1",
+    ),
+    (
+        "kappa",
+        "a LEVEL 3 parameter: the saturation-field factor is not part of LEVEL 1",
+    ),
     ("php", "the sidewall junction uses PB as its potential"),
 ];
 

@@ -360,3 +360,119 @@ fn rd_and_rs_reduce_the_drain_current() {
          {drain_only:.6}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// UO, and the LEVEL 2/3 group that correctly does nothing here (#97 §1)
+// ---------------------------------------------------------------------------
+
+/// Drain current from a MOSFET biased into saturation, with no load resistor —
+/// so `I(vd)` is the device's own current and nothing else.
+fn nmos_id(model: &str, w: &str, l: &str) -> f64 {
+    let deck = format!(
+        "* mos id\n.model nm NMOS ({model})\n\
+         VG g 0 DC 1.5\nVD d 0 DC 3\nM1 d g 0 0 nm W={w} L={l}\n.op\n"
+    );
+    let netlist = parse_spice(&deck).expect("parse");
+    dc_op_nr(&netlist)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+        .vsrc_current("vd")
+        .expect("I(vd)")
+        .abs()
+}
+
+/// `UO` derives `KP` when the card gives no `KP`.
+///
+/// The card shape this covers is common: a foundry-ish card gives an oxide
+/// thickness and a mobility and lets the simulator work out the transconductance.
+/// Before this, `KP` fell back to SPICE's 2e-5 and the drain current was wrong by
+/// whatever ratio the real `UO·COX` implied — a factor of 5 for the card below.
+///
+/// The anchor is the Level 1 closed form rather than a second simulator, because
+/// `UO·COX` is arithmetic and the measurement that established it is already
+/// recorded: ngspice returns 3.315020e-4 A for `TOX=20n` with no `KP`, and
+/// `UO=300` gives exactly half the 600 default. What can go wrong here is the unit
+/// conversion (`UO` is cm²/V·s) and the precedence of an explicit `KP`, and both
+/// are closed-form facts.
+#[test]
+fn uo_derives_kp_when_kp_is_absent() {
+    const EPS_OX: f64 = 3.9 * 8.854187817e-12;
+    let cox = EPS_OX / 20e-9;
+    for uo in [300.0_f64, 600.0, 900.0] {
+        let model = format!("VTO=0.7 TOX=20n UO={uo}");
+        let got = nmos_id(&model, "10u", "1u");
+        // 0.5·KP·(W/L)·(Vgs−VTO)², with KP = UO(cm²/V·s)·1e-4·COX.
+        let kp = uo * 1e-4 * cox;
+        let want = 0.5 * kp * 10.0 * (1.5 - 0.7_f64).powi(2);
+        let rel = (got - want).abs() / want;
+        assert!(
+            rel < 1e-6,
+            "UO={uo}: I(vd)={got:.6e} A, and KP=UO·COX={kp:.6e} gives \
+             {want:.6e} (rel {rel:.2e}). Falling back to SPICE's 2e-5 KP would \
+             give {:.6e}.",
+            0.5 * 2e-5 * 10.0 * 0.64
+        );
+    }
+
+    // An explicit `KP` still wins over `UO`, which is SPICE's rule.
+    let explicit = nmos_id("VTO=0.7 TOX=20n UO=900 KP=100u", "10u", "1u");
+    let want = 0.5 * 100e-6 * 10.0 * (1.5 - 0.7_f64).powi(2);
+    assert!(
+        (explicit - want).abs() / want < 1e-9,
+        "KP given must win over UO: got {explicit:.6e}, expected {want:.6e}"
+    );
+
+    // And with neither KP nor an oxide, SPICE's fallback KP applies.
+    let bare = nmos_id("VTO=0.7", "10u", "1u");
+    let want_bare = 0.5 * 2e-5 * 10.0 * (1.5 - 0.7_f64).powi(2);
+    assert!(
+        (bare - want_bare).abs() / want_bare < 1e-9,
+        "no KP and no TOX must fall back to KP=2e-5: got {bare:.6e}"
+    );
+}
+
+/// The mobility-degradation group is **not** a Level 1 gap — it is a Level 2/3
+/// parameter set, and ngspice's Level 1 ignores it exactly as fairchild does.
+///
+/// # Why a test that asserts nothing happens
+///
+/// Normally this shape is worthless: `X_is_accepted` passes whether a parameter is
+/// implemented, dropped or deleted. This one earns its place because the claim is
+/// not "we accept it" but "the reference ignores it too, so implementing it would
+/// be a divergence" — and that claim is the only thing standing between this group
+/// and someone re-opening it as a to-do. It is checked both ways:
+///
+/// * at LEVEL 1, fairchild and ngspice must both be unmoved;
+/// * at LEVEL 3, ngspice must *move*, which is what proves the parameters reach
+///   its parser and that the first half is a modelling fact and not a typo.
+///
+/// `LAMBDA` is the control: a genuine Level 1 parameter, so it has to move both.
+#[test]
+fn the_mobility_group_is_level_2_or_3_and_correctly_does_nothing() {
+    const BASE: &str = "VTO=0.7 KP=200u TOX=20n";
+    let base = nmos_id(BASE, "10u", "1u");
+
+    for extra in [
+        "THETA=0.1",
+        "THETA=1.0",
+        "ETA=0.1",
+        "KAPPA=1.0",
+        "VMAX=1e5",
+        "UCRIT=1e4",
+        "UEXP=0.1",
+        "UTRA=0.5",
+        "NFS=1e12",
+    ] {
+        let got = nmos_id(&format!("{BASE} {extra}"), "10u", "1u");
+        assert!(
+            (got - base).abs() / base < 1e-12,
+            "{extra} is a LEVEL 2/3 parameter and must not move a LEVEL 1 drain              current: {got:.9e} against {base:.9e}. If this starts failing, either              someone implemented it here — which diverges from ngspice's LEVEL 1 —              or the parameter is being misread as one that is modelled."
+        );
+    }
+
+    // The control: a real Level 1 parameter has to move it.
+    let with_lambda = nmos_id(&format!("{BASE} LAMBDA=0.05"), "10u", "1u");
+    assert!(
+        with_lambda > base * 1.05,
+        "LAMBDA is a Level 1 parameter and must move the current, or this test is          measuring nothing: {with_lambda:.6e} against {base:.6e}"
+    );
+}
