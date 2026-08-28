@@ -289,7 +289,10 @@ instead. What bounds a step into breakdown now is the trust region
 | `TNOM`, `EG`, `XTI` | ✅ | ✅ `IS(T)`, and `VJE`/`VJC`/`CJE`/`CJC` at temperature | ✅ ngspice at −40/27/75/125 °C |
 | `XTB` | ✅ | ✅ `BF(T)`/`BR(T)` | ✅ ngspice, and `XTB=0` pinned as the control |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Ib|^AF / f` across base-emitter — the **base** current, as SPICE does | ✅ ngspice at two `AF` values |
-| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `ISS` | ✅ | ✅ substrate junction DC branch, Shockley | ✅ ngspice DC, six biases over five decades |
+| `CJS`, `VJS`, `MJS` | ✅ | ✅ collector-substrate depletion capacitance | ✅ ngspice AC at eight biases, including past `VJS` |
+| `FCS` | ⚠️ accepted, not modelled — **and ngspice ignores it too**, see below | ❌ | ✅ measured inert in the reference |
+| `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 
 ### Instance parameters
 
@@ -318,12 +321,44 @@ anything — and the Norton form then cancelled it out of the terminal currents
 entirely. A reverse-biased BJT carried `2·IS = 2e-16` where ngspice carries
 `gmin·V ≈ 1e-12`.
 
-**One junction short of ngspice.** `CJS`/`VJS`/`MJS`/`FCS` are on the unmodelled
-list above, so there is no collector-substrate junction here to hang `gmin` on,
-and a reverse-biased BJT reads `1·gmin·V` against ngspice's `2·gmin·V`. Measured
-by pinning the substrate at the collector potential in ngspice, which removes
-exactly one `gmin·V`. 1 pA at the default, on a device whose signal currents are
-milliamps.
+### The collector-substrate junction
+
+Three terminals used to be all this model had. `terminals[3]` was dropped, so a
+reverse-biased BJT read `1·gmin·V` against ngspice's `2·gmin·V` — the substrate
+junction was the missing one. Confirmed by pinning the substrate at the collector
+potential in ngspice, which removes exactly one `gmin·V` and nothing else. That is
+closed: the junction is stamped between the substrate and the **internal**
+collector, so a card with `RC` puts the series resistance between the two, which is
+where SPICE puts it.
+
+The junction exists whether or not the card gives it anything. ngspice's leakage is
+`2·gmin·V` for a bare `IS`/`BF` card, so `gmin` crosses it with no `CJS` and no
+`ISS`, and it does here too.
+
+| | law | measured against ngspice |
+|---|---|---|
+| DC branch | `ISS·(exp(V/vt) − 1) + gmin·V` | six biases over five decades |
+| reverse capacitance | `CJS·(1 − V/VJS)^−MJS` | 5e−8 at 0, −0.5, −1, −3 V |
+| forward capacitance | `CJS·(1 + MJS·V/VJS)` | 1.7e−7 at 0…2 V |
+
+Defaults measured, not read: `CJS = 0`, `MJS = 0`, `VJS = 0.75`, `ISS = 0`. So a
+card that names none of them gets the junction, its `gmin`, and nothing else.
+
+The DC branch is plain Shockley, **not** the flat reverse branch ngspice's MOS1
+bulk diodes use. At −0.05 V with `ISS = 1e-15` ngspice reads 8.553040e-16 where
+Shockley gives 8.553119e-16 and a flat `−ISS` would give 1e-15. The two junction
+families in SPICE genuinely differ, and each was measured rather than assumed.
+
+**`FCS` is inert in ngspice.** The forward capacitance is a straight line from the
+*zero-bias* value, not from `FCS·VJS`, so `FCS` never enters. The capacitance at
+0.5 V forward is bit-identical for `FCS` of 0.1, 0.5, 0.9 and absent. It stays on
+the unmodelled list with that as its reason, because honouring it would move away
+from the reference. The forward law holds out to 2 V, well past `VJS`, where the
+depletion law is singular — which is what the linearisation is for.
+
+`CJS` takes no temperature factor. `TNOM` moves `CJE` and `CJC` here, and the
+substrate junction stays at its nominal value because nothing has measured the law
+for it.
 
 ---
 

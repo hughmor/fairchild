@@ -439,3 +439,370 @@ fn bjt_area_scales_the_device_like_ngspice() {
     assert_close("i(vc) area=2", i2, ng["i(vc)"]);
     assert_close("i(vc2) area=1", i1, ng["i(vc2)"]);
 }
+
+// ---------------------------------------------------------------------------
+// Collector-substrate junction (#97 section 3)
+// ---------------------------------------------------------------------------
+
+/// A DC solve that honours the deck's `.options`, which `fairchild_op` does not.
+fn bjt_op(deck: &str) -> fairchild_core::newton::NrResult {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    fairchild_core::dc_op_nr_with_registry_opts(&net, &registry, &opts)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+}
+
+/// ngspice's `.op` answer for one printed quantity on `deck`, verbatim.
+///
+/// The deck is shared with fairchild exactly, so the two cannot be given
+/// different circuits. Only the `.control` block is appended.
+fn ngspice_one(deck: &str, query: &str) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    write!(tmp, "{deck}.control\nop\nprint {query}\n.endc\n.end\n").ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.to_lowercase().starts_with(&query.to_lowercase()) && t.contains('=') {
+            if let Ok(v) = t.split('=').nth(1)?.split_whitespace().next()?.parse() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// A reverse-biased BJT leaks **two** `gmin·V`, not one.
+///
+/// The headline for the substrate junction. ngspice hangs one `gmin` on the
+/// collector-substrate junction, and this model had no such junction — so a
+/// reverse-biased transistor read exactly half of ngspice's leakage at every
+/// `gmin`. The gap was recorded rather than faked, and this closes it.
+///
+/// The third case is the control that identifies *which* junction the second
+/// `gmin` belongs to: tying the substrate to the collector puts zero volts across
+/// it, which removes exactly one `gmin·V` and nothing else. If the second `gmin`
+/// came from somewhere other than the substrate junction, that case would still
+/// read 2.
+#[test]
+fn a_reverse_biased_bjt_leaks_two_gmin_one_per_junction() {
+    const MODEL: &str = ".model qn NPN (IS=1e-16 BF=100)\n";
+    for g in [1e-12, 1e-9, 1e-6] {
+        for (label, q_line, want_multiple) in [
+            ("substrate implicit", "Q1 c b 0 qn", 2.0),
+            ("substrate grounded", "Q1 c b 0 0 qn", 2.0),
+            ("substrate at the collector", "Q1 c b 0 c qn", 1.0),
+        ] {
+            let deck = format!(
+                "* reverse biased bjt\n.options gmin={g:e}\n{MODEL}\
+                 VC c 0 DC 1\nVB b 0 DC 0\n{q_line}\n"
+            );
+            let got = bjt_op(&deck).vsrc_current("vc").expect("i(vc)").abs();
+            // `gmin·1V` per junction; `IS = 1e-16` is at least four orders below
+            // the smallest `gmin` here, so this reads the conductance directly.
+            let want = want_multiple * g;
+            let rel = (got - want).abs() / want;
+            assert!(
+                rel < 2e-3,
+                "gmin={g:e}, {label}: collector leakage {got:.6e} A is \
+                 {:.4}·gmin·V, expected {want_multiple}. One means the substrate \
+                 junction is missing; three means it was added twice.",
+                got / g
+            );
+            if let Some(ng) = ngspice_one(&deck, "i(vc)") {
+                let rel = (got - ng.abs()).abs() / ng.abs();
+                assert!(
+                    rel < 2e-3,
+                    "gmin={g:e}, {label}: fairchild {got:.6e}, ngspice {:.6e}",
+                    ng.abs()
+                );
+            }
+        }
+    }
+}
+
+/// `ISS` gives the substrate junction a DC branch, and it is plain Shockley.
+///
+/// Not the flat reverse branch ngspice's MOS1 bulk diodes use. Measured, with
+/// `gmin = 0` so nothing else conducts: at -0.05 V ngspice reads 8.553040e-16
+/// where Shockley gives 8.553119e-16 and a flat `-ISS` would give 1e-15. Five
+/// orders of current are covered, so a wrong exponent fails this and not only a
+/// wrong prefactor.
+#[test]
+fn iss_gives_the_substrate_junction_a_shockley_branch() {
+    const MODEL: &str = ".model qn NPN (IS=1e-16 BF=100 ISS=1e-15)\n";
+    let mut compared = 0;
+    for vs in [-2.0, -0.5, -0.05, 0.2, 0.4, 0.5] {
+        let deck = format!(
+            "* substrate dc branch\n.options gmin=0\n{MODEL}\
+             VC c 0 DC 0\nVB b 0 DC 0\nVS s 0 DC {vs}\nQ1 c b 0 s qn\n"
+        );
+        let got = bjt_op(&deck).vsrc_current("vs").expect("i(vs)");
+        let Some(ng) = ngspice_one(&deck, "i(vs)") else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (got.abs() - ng.abs()).abs() / ng.abs().max(1e-30);
+        assert!(
+            rel < 2e-3,
+            "Vs={vs}: fairchild I(vs)={got:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             Exactly zero would mean ISS is not stamped; a flat -ISS in reverse \
+             would read 1e-15 at -0.05 V where Shockley reads 8.553e-16."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 6, "every bias point must have been compared");
+}
+
+/// The substrate junction is there with no `CJS` and no `ISS` on the card.
+///
+/// Measured: ngspice's leakage is `2·gmin·V` for a bare `IS`/`BF` card. So the
+/// junction is not conditional on being given a capacitance, and neither is this.
+#[test]
+fn the_substrate_junction_does_not_need_cjs_to_exist() {
+    for model in ["IS=1e-16 BF=100", "IS=1e-16 BF=100 CJS=2p"] {
+        let deck = format!(
+            "* bare card\n.options gmin=1e-9\n.model qn NPN ({model})\n\
+             VC c 0 DC 1\nVB b 0 DC 0\nVS s 0 DC 0\nQ1 c b 0 s qn\n"
+        );
+        let got = bjt_op(&deck).vsrc_current("vs").expect("i(vs)").abs();
+        assert!(
+            (got / 1e-9 - 1.0).abs() < 2e-3,
+            "{model}: the substrate carries {got:.6e} A, expected one gmin·V = \
+             1e-9. Zero would mean the junction only exists when CJS is given."
+        );
+    }
+}
+
+/// Series resistance and frequency of the capacitance probe.
+///
+/// `omega·R·C` lands near 1.26 for a 2 pF junction, which is where the divider is
+/// most sensitive to `C`. `AcResult` reports node voltages and not source
+/// currents, so the capacitance is read through the divider rather than by
+/// dividing a current by `omega` — and ngspice is probed the same way, on the same
+/// deck, so neither simulator gets a different circuit.
+const CAP_PROBE_R: f64 = 10e3;
+const CAP_PROBE_F: f64 = 1e7;
+
+/// The capacitance on `node`, from the RC divider formed with [`CAP_PROBE_R`].
+///
+/// `|V| = 1/sqrt(1 + (omega·R·C)²)`, so `C = sqrt(1/|V|² − 1)/(omega·R)`.
+fn cap_from_divider(mag: f64) -> f64 {
+    let w = 2.0 * std::f64::consts::PI * CAP_PROBE_F;
+    (1.0 / (mag * mag) - 1.0).max(0.0).sqrt() / (w * CAP_PROBE_R)
+}
+
+/// fairchild's `|V(node)|` for the divider deck.
+fn ac_mag(deck: &str, node: &str) -> f64 {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::ac_analysis_opts(&net, &[CAP_PROBE_F], Some("vs"), &registry, &opts)
+        .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+    r.magnitude(node, 0)
+        .unwrap_or_else(|| panic!("no node '{node}' in\n{deck}"))
+}
+
+/// The probe deck: the substrate driven through [`CAP_PROBE_R`], collector at
+/// `vc`, substrate DC bias `vs`.
+fn cap_probe_deck(model: &str, vc: f64, vs: f64) -> String {
+    format!(
+        "* substrate cap probe\n.options gmin=0\n.model qn NPN ({model})\n\
+         VS in 0 DC {vs} AC 1\nRS in s {CAP_PROBE_R:e}\n\
+         VC c 0 DC {vc}\nVB b 0 DC 0\nQ1 c b 0 s qn\n"
+    )
+}
+
+fn ngspice_ac_mag(deck: &str, query: &str, f: f64) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    write!(
+        tmp,
+        "{deck}.control\nac lin 1 {f:e} {f:e}\nprint {query}\n.endc\n.end\n"
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.to_lowercase().starts_with(&query.to_lowercase()) && t.contains('=') {
+            if let Ok(v) = t
+                .split('=')
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+            {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// `CJS`/`VJS`/`MJS` are the collector-substrate depletion capacitance.
+///
+/// Two laws, and the forward one is not the one `CJE`/`CJC` use. Measured against
+/// ngspice, matched to 5e-8 in reverse and 1.7e-7 forward:
+///
+/// ```text
+/// v <= 0   CJS·(1 − v/VJS)^−MJS      the depletion law
+/// v >  0   CJS·(1 + MJS·v/VJS)       a straight line from the ZERO-bias value
+/// ```
+///
+/// The forward points past `VJS` are the load-bearing ones: at 0.8, 1.0 and 2.0 V
+/// the depletion law is singular or complex, and ngspice is still exactly on the
+/// straight line. `FCS` has no part in it — see
+/// [`fcs_is_inert_in_ngspice_too`].
+#[test]
+fn cjs_follows_the_depletion_law_in_reverse_and_a_straight_line_forward() {
+    const MODEL: &str = "IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.33";
+    let mut compared = 0;
+    // `vsub` is the substrate potential minus the collector's. Negative is
+    // reverse for an NPN, because the substrate is p and the collector n.
+    for (vc, vs) in [
+        (3.0, 0.0),
+        (1.0, 0.0),
+        (0.5, 0.0),
+        (0.0, 0.0),
+        (0.0, 0.3),
+        (0.0, 0.5),
+        (0.0, 0.8),
+        (0.0, 2.0),
+    ] {
+        let vsub = vs - vc;
+        let deck = cap_probe_deck(MODEL, vc, vs);
+        let got = cap_from_divider(ac_mag(&deck, "s"));
+        let want = if vsub > 0.0 {
+            2e-12 * (1.0 + 0.33 * vsub / 0.75)
+        } else {
+            2e-12 * (1.0 - vsub / 0.75).powf(-0.33)
+        };
+        let rel = (got - want).abs() / want;
+        assert!(
+            rel < 5e-6,
+            "Vsub={vsub}: C={got:.6e} F, the law gives {want:.6e} (rel {rel:.2e}). \
+             Zero would mean CJS is not stamped. Using `cj_depl` instead would \
+             diverge forward, and go complex past VJS."
+        );
+        if let Some(m) = ngspice_ac_mag(&deck, "mag(v(s))", CAP_PROBE_F) {
+            let ng = cap_from_divider(m);
+            let rel = (got - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "Vsub={vsub}: fairchild {got:.6e}, ngspice {ng:.6e}"
+            );
+            compared += 1;
+        }
+    }
+    if compared > 0 {
+        assert_eq!(compared, 8, "every bias must have been compared to ngspice");
+    }
+}
+
+/// `FCS` is accepted and correctly does nothing, because ngspice ignores it too.
+///
+/// Normally the worthless test shape. It earns its place the same way the MOSFET's
+/// mobility-group test does: the claim is not "we accept it" but "the reference
+/// ignores it, so honouring it would be a divergence", and that claim is the only
+/// thing standing between `FCS` and someone re-opening it as a to-do.
+///
+/// Measured: the substrate capacitance at 0.5 V forward is bit-identical for `FCS`
+/// of 0.1, 0.5, 0.9 and absent. `FC` is the control — it is a real parameter on
+/// the *other* two junctions, so the probe would see it move if the mechanism
+/// worked.
+#[test]
+fn fcs_is_inert_in_ngspice_too() {
+    let mut values = Vec::new();
+    for fcs in ["", "FCS=0.1", "FCS=0.5", "FCS=0.9"] {
+        let model = format!("IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.33 {fcs}");
+        let deck = cap_probe_deck(&model, 0.0, 0.5);
+        let got = cap_from_divider(ac_mag(&deck, "s"));
+        values.push(got);
+        if let Some(m) = ngspice_ac_mag(&deck, "mag(v(s))", CAP_PROBE_F) {
+            let ng = cap_from_divider(m);
+            let rel = (got - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "FCS='{fcs}': fairchild {got:.6e}, ngspice {ng:.6e}"
+            );
+        }
+    }
+    for v in &values[1..] {
+        assert!(
+            (v - values[0]).abs() / values[0] < 1e-12,
+            "FCS moved the substrate capacitance: {values:?}. ngspice's is \
+             bit-identical across the same four cards, so honouring FCS here \
+             would be a divergence from the reference, not a fix."
+        );
+    }
+    // The control: `MJS` in the same position *does* move it, so the probe works.
+    let with_mjs = cap_from_divider(ac_mag(
+        &cap_probe_deck("IS=1e-16 BF=100 CJS=2p VJS=0.75 MJS=0.9", 0.0, 0.5),
+        "s",
+    ));
+    assert!(
+        (with_mjs - values[0]).abs() / values[0] > 0.1,
+        "the control failed: MJS must move the capacitance this probe reads, or \
+         the probe cannot tell an ignored parameter from a broken one"
+    );
+}
+
+/// A BJT's own capacitances reach `.ac`, which they did not.
+///
+/// The BJT stamps its transient companions itself and overrode neither
+/// `reactive_branches` nor `small_signal_reactances`, whose default is empty. So
+/// `.ac` and `.noise` saw a transistor with no capacitance at all. Measured before
+/// the fix, with `CJE = CJC = CJS = 100p` behind a 1 kOhm resistor into the base:
+/// `|V(b)| = 1.000000` at 1 kHz, 1 MHz, 10 MHz and 100 MHz, where the corner is
+/// 1.04 MHz.
+///
+/// Every transient test passed throughout, because transient takes the other path.
+/// The structural gate that stops this recurring for any device is
+/// `tests/circuit/reactances_reach_ac.rs`.
+///
+/// ngspice is the anchor, and it agrees to all six printed digits.
+#[test]
+fn a_bjts_own_capacitance_rolls_off_an_ac_sweep() {
+    let deck = "* bjt cap in ac\n\
+        .model qn NPN (IS=1e-16 BF=100 CJE=100p CJC=100p CJS=100p VJS=0.75 MJS=0.33)\n\
+        V1 in 0 DC 0 AC 1\n\
+        R1 in b 1k\n\
+        VC c 0 DC 5\n\
+        Q1 c b 0 0 qn\n";
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let freqs = [1e3, 1e6, 1e7];
+    let r =
+        fairchild_core::ac_analysis_opts(&net, &freqs, Some("v1"), &registry, &opts).expect("ac");
+    let mut compared = 0;
+    for (i, f) in freqs.iter().enumerate() {
+        let mag = r.magnitude("b", i).expect("v(b)");
+        // Flat at 1.0 is the bug: no capacitance anywhere in the sweep.
+        if *f >= 1e6 {
+            assert!(
+                mag < 0.9,
+                "f={f:e}: |V(b)|={mag:.6e}. With 100 pF on every junction behind \
+                 1 kOhm the corner is at 1.04 MHz, so a value at 1.0 means the \
+                 transistor's capacitance never reached the AC matrix."
+            );
+        }
+        if let Some(ng) = ngspice_ac_mag(deck, "mag(v(b))", *f) {
+            let rel = (mag - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "f={f:e}: fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel {rel:.2e})"
+            );
+            compared += 1;
+        }
+    }
+    if compared > 0 {
+        assert_eq!(compared, 3, "every frequency must have been compared");
+    }
+}

@@ -208,18 +208,18 @@ conductance, so no reachable node's answer moves. The small-signal analyses pin
 a row only when `G`, `C` and `1/L` are all empty for it, since a node reachable
 only through a capacitor is reachable.
 
-#### The one remaining divergence: a BJT's collector-substrate junction
+#### A BJT's collector-substrate junction, which used to be the one divergence
 
-ngspice puts `gmin` across four junctions on a BJT; fairchild models three.
-Base-collector and base-emitter agree. The collector-substrate junction is not
-modelled here at all — `docs/model_status.md` lists `CJS`/`VJS`/`MJS`/`FCS` as
-absent — so a reverse-biased BJT reads `1·gmin·V` where ngspice reads `2·gmin·V`.
-Measured, not inferred: pinning the substrate at the collector potential in
-ngspice with a four-terminal `Q1 c 0 0 s qm` removes exactly one `gmin·V`.
+ngspice puts `gmin` across the collector-substrate junction as well as
+base-collector and base-emitter. This simulator had no such junction, so a
+reverse-biased BJT read `1·gmin·V` where ngspice read `2·gmin·V`. Measured, not
+inferred: pinning the substrate at the collector potential in ngspice with a
+four-terminal `Q1 c 0 0 s qm` removes exactly one `gmin·V`.
 
-At the default `gmin` that is a 1 pA difference on a device whose signal currents
-are milliamps. It is recorded rather than faked, because asserting ngspice's
-total would mean asserting a junction this simulator does not have.
+That junction is modelled now, so the leakage agrees at every `gmin` tried. See
+*The collector-substrate junction* in `docs/model_status.md` for its DC branch and
+capacitance laws. The `gmin` on it is unconditional, matching the reference: it is
+there for a card that gives neither `CJS` nor `ISS`.
 
 ---
 

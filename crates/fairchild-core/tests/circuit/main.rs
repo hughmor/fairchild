@@ -22,6 +22,7 @@ mod no_false_convergence_on_stalled_line_search;
 mod options_take_effect;
 mod passive_parasitics;
 mod pcell_subckt;
+mod reactances_reach_ac;
 mod reactive_history_seeding;
 mod singular_is_not_nonconvergence;
 mod small_signal_analyses;

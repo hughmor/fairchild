@@ -84,6 +84,59 @@ fn q_depl(c0: f64, v: f64, vj: f64, mj: f64, fc: f64) -> f64 {
     }
 }
 
+/// The substrate junction's capacitance at `v`, polarity-flipped so forward is
+/// positive.
+///
+/// Not `cj_depl`, and the difference is measured rather than assumed. `cj_depl`
+/// takes an `FC` and switches to a straight line at `FC·VJ`. **`FCS` is inert in
+/// ngspice** — the capacitance at 0.5 V forward is bit-identical for `FCS` of 0.1,
+/// 0.5, 0.9 and absent — and the forward branch is a linearisation about *zero*
+/// bias instead:
+///
+/// ```text
+/// v <= 0   CJS·(1 − v/VJS)^−MJS      the depletion law, matched to 5e-8
+/// v >  0   CJS·(1 + MJS·v/VJS)       matched to 1.7e-7, and past VJS
+/// ```
+///
+/// The forward form holds out to 2 V, well past `VJS`, where the depletion law is
+/// singular. That is what the linearisation is for.
+fn cjs_cap(cjs: f64, v: f64, vjs: f64, mjs: f64) -> f64 {
+    if cjs <= 0.0 || vjs <= 0.0 {
+        return 0.0;
+    }
+    if v > 0.0 {
+        cjs * (1.0 + mjs * v / vjs)
+    } else {
+        cjs * (1.0 - v / vjs).powf(-mjs)
+    }
+}
+
+/// The charge whose derivative is [`cjs_cap`], zero at zero bias.
+///
+/// ```text
+/// v <= 0   −CJS·VJS/(1 − MJS)·((1 − v/VJS)^(1 − MJS) − 1)
+/// v >  0   CJS·(v + MJS·v²/(2·VJS))
+/// ```
+///
+/// Integrated in closed form rather than accumulated, so a transient's charge
+/// cannot drift from the capacitance the same eval reported. `MJS = 1` makes the
+/// reverse antiderivative a logarithm, which is a real card value for an abrupt
+/// junction, so it is handled rather than divided by zero.
+fn q_js_charge(cjs: f64, v: f64, vjs: f64, mjs: f64) -> f64 {
+    if cjs <= 0.0 || vjs <= 0.0 {
+        return 0.0;
+    }
+    if v > 0.0 {
+        cjs * (v + mjs * v * v / (2.0 * vjs))
+    } else if (mjs - 1.0).abs() < 1e-12 {
+        -cjs * vjs * (1.0 - v / vjs).ln()
+    } else {
+        // Spelled the way `q_depl` spells the same antiderivative, so the two can
+        // be read against each other.
+        cjs * vjs / (1.0 - mjs) * (1.0 - (1.0 - v / vjs).powf(1.0 - mjs))
+    }
+}
+
 /// The constitutive equations evaluated at one bias point.
 ///
 /// One place computes this and both `eval` and `commit_timestep` read it.  They
@@ -176,6 +229,11 @@ pub struct GummelPoonBjt {
     collector_ext: NodeId,
     base_ext: NodeId,
     emitter_ext: NodeId,
+    /// The substrate. `Q c b e model` leaves it at ground, `Q c b e s model`
+    /// binds it. The junction hangs off the *internal* collector, so a card with
+    /// `RC` puts the series resistance between the substrate junction and the
+    /// collector pin, which is where SPICE puts it.
+    substrate: NodeId,
 
     // ── Cached per-NR-iteration quantities (set by eval) ─────────────────────
     vbe_eff: f64, // effective junction voltage B-E (after pnjlim, polarity-corrected)
@@ -214,6 +272,23 @@ pub struct GummelPoonBjt {
     vjc: f64, // B-C junction potential (V)
     mjc: f64, // B-C grading coefficient
     fc: f64,  // forward-bias cap linearisation coefficient
+
+    // ── Collector-substrate junction ─────────────────────────────────────────
+    iss: f64, // substrate saturation current (A) — default 0, no DC branch
+    cjs: f64, // zero-bias collector-substrate capacitance (F) — default 0
+    vjs: f64, // substrate junction potential (V) — default 0.75
+    mjs: f64, // substrate grading coefficient — default 0, a constant cap
+    /// Conductance and Norton offset of the substrate junction at this iterate.
+    gsub: f64,
+    isub_eq: f64,
+    /// Substrate junction voltage at this iterate, polarity-flipped so forward
+    /// is positive for both an NPN and a PNP.
+    vsub_eff: f64,
+    /// Substrate depletion capacitance and charge at this iterate, and the charge
+    /// at the last committed timestep.
+    cjs_eval: f64,
+    q_js_eval: f64,
+    q_js_hist: ChargeHistory,
 
     /// Instance `AREA`, already folded into the parameters it scales.  Kept only
     /// so the value can be read back; nothing in the physics consults it.
@@ -263,6 +338,13 @@ impl GummelPoonBjt {
         let mut vjc = 0.75;
         let mut mjc = 0.33;
         let mut fc = 0.5;
+        // Substrate junction. ngspice's defaults, measured: no capacitance and no
+        // DC branch unless the card asks, a 0.75 V potential, and a grading
+        // coefficient of zero, which makes `CJS` alone a constant capacitance.
+        let mut iss = 0.0_f64;
+        let mut cjs = 0.0_f64;
+        let mut vjs = 0.75_f64;
+        let mut mjs = 0.0_f64;
         let mut kf = 0.0_f64;
         let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
@@ -304,6 +386,10 @@ impl GummelPoonBjt {
                 "vjc" => vjc = *v,
                 "mjc" => mjc = *v,
                 "fc" => fc = *v,
+                "iss" => iss = *v,
+                "cjs" | "ccs" => cjs = *v,
+                "vjs" | "pjs" => vjs = *v,
+                "mjs" | "ms" => mjs = *v,
                 // Accepted and NOT modelled.  The list lives in
                 // `crate::unmodelled`, which is what warns about them — keeping
                 // a second copy here is how the two drifted apart before.
@@ -346,6 +432,7 @@ impl GummelPoonBjt {
             collector_ext: None,
             base_ext: None,
             emitter_ext: None,
+            substrate: None,
             vbe_eff: 0.0,
             vbc_eff: 0.0,
             gf: GMIN_SEED,
@@ -371,6 +458,16 @@ impl GummelPoonBjt {
             vjc,
             mjc,
             fc,
+            iss,
+            cjs,
+            vjs,
+            mjs,
+            gsub: GMIN_SEED,
+            isub_eq: 0.0,
+            vsub_eff: 0.0,
+            cjs_eval: 0.0,
+            q_js_eval: 0.0,
+            q_js_hist: ChargeHistory::default(),
             kf,
             af,
             tnom: tnom_c + 273.15,
@@ -607,7 +704,10 @@ impl Device for GummelPoonBjt {
         self.collector = terminals[0];
         self.base = terminals[1];
         self.emitter = terminals[2];
-        // terminals[3] = substrate — tied to ground by caller; not stamped separately.
+        // The substrate. `Q c b e model` leaves this at ground, `Q c b e s model`
+        // binds the named net. It used to be dropped, which cost one `gmin·V` of
+        // leakage against ngspice on every reverse-biased BJT.
+        self.substrate = terminals.get(3).copied().flatten();
     }
 
     /// One internal node per non-zero ohmic series resistance (RB, RC, RE).
@@ -679,6 +779,36 @@ impl Device for GummelPoonBjt {
         self.jeq_c = pol * op.ic - (self.gf - self.gce) * vb - self.gce * vc + self.gf * ve;
         self.jeq_b = pol * op.ib - (self.gpi + self.gmu) * vb + self.gmu * vc + self.gpi * ve;
 
+        // ── Collector-substrate junction ─────────────────────────────────
+        //
+        // Real, and unconditional. ngspice puts one `gmin` across it whether or
+        // not the card gives a `CJS` or an `ISS` — measured, and it is the whole
+        // reason a reverse-biased BJT here used to read `1·gmin·V` against
+        // ngspice's `2·gmin·V`.
+        //
+        // Polarity-flipped like the other two junctions: for an NPN the substrate
+        // is p and the collector n, so a substrate *above* the collector is
+        // forward. `pol` inverts that for a PNP.
+        //
+        // Plain Shockley, not the flat reverse branch MOS1 uses. Measured: at
+        // −0.05 V with `ISS = 1e-15` ngspice reads 8.553040e-16 against
+        // Shockley's 8.553119e-16, where a flat `−ISS` would read 1e-15.
+        let vsub = pol * (self.substrate.map_or(0.0, |i| x[i]) - vc);
+        self.vsub_eff = vsub;
+        let (isub, gsub) = if self.iss > 0.0 {
+            let e = (vsub / vt).exp();
+            (
+                self.iss * (e - 1.0) + ctx.gmin * vsub,
+                self.iss * e / vt + ctx.gmin,
+            )
+        } else {
+            (ctx.gmin * vsub, ctx.gmin)
+        };
+        self.gsub = gsub;
+        // Norton offset back in the real frame, so `load_residual` needs no
+        // polarity of its own.
+        self.isub_eq = pol * (isub - gsub * vsub);
+
         self.disc = ctx.discretisation;
 
         if flags.transient {
@@ -714,6 +844,12 @@ impl Device for GummelPoonBjt {
                 self.mjc,
                 self.fc,
             );
+            // No temperature factor on `CJS`: `TNOM` moves `CJE` and `CJC` here
+            // through `cje_t_factor`/`cjc_t_factor`, and the substrate junction
+            // is left at its nominal value because nothing has measured the law
+            // for it. Recorded in `docs/model_status.md` rather than guessed.
+            self.cjs_eval = cjs_cap(self.cjs, vsub, self.vjs, self.mjs);
+            self.q_js_eval = q_js_charge(self.cjs, vsub, self.vjs, self.mjs);
         } else {
             self.cbe_eff = 0.0;
             self.cbc_eff = 0.0;
@@ -723,6 +859,8 @@ impl Device for GummelPoonBjt {
             self.cjc_eval = 0.0;
             self.q_je_eval = 0.0;
             self.q_jc_eval = 0.0;
+            self.cjs_eval = 0.0;
+            self.q_js_eval = 0.0;
         }
     }
 
@@ -735,6 +873,14 @@ impl Device for GummelPoonBjt {
         }
         if let Some(e) = self.emitter {
             b[e] += self.jeq_c + self.jeq_b;
+        }
+        // The substrate junction's Norton source: current out of the substrate
+        // and into the internal collector.
+        if let Some(sb) = self.substrate {
+            b[sb] -= self.isub_eq;
+        }
+        if let Some(c) = self.collector {
+            b[c] += self.isub_eq;
         }
     }
 
@@ -767,6 +913,15 @@ impl Device for GummelPoonBjt {
         stamp!(e, bk, -(gf - gce) - (gpi + gmu));
         stamp!(e, c, -gce - (-gmu));
         stamp!(e, e, gf + gpi);
+
+        // Collector-substrate junction, between the substrate and the *internal*
+        // collector. `stamp!` drops the grounded rows, which is what makes a
+        // grounded substrate a conductance to ground rather than a missing one.
+        let gsub = self.gsub;
+        stamp!(self.substrate, self.substrate, gsub);
+        stamp!(self.substrate, c, -gsub);
+        stamp!(c, self.substrate, -gsub);
+        stamp!(c, c, gsub);
 
         // Series ohmic resistances: a conductance 1/R between each external
         // terminal and its internal node.  When R = 0 the internal node aliases
@@ -832,6 +987,19 @@ impl Device for GummelPoonBjt {
             let cv = self.cjc_eval * self.vbc_eff;
             cap(&self.q_jc_hist, self.collector, self.q_jc_eval, cv);
         }
+        // Substrate depletion charge: CJS, between the substrate and the internal
+        // collector. `cap` above is hard-wired to the base, so this one is spelled
+        // out rather than routed through it.
+        if self.cjs_eval != 0.0 {
+            let cv = self.cjs_eval * self.vsub_eff;
+            let (i_hist, _) = self.q_js_hist.companion(disc, alpha, self.q_js_eval, cv);
+            if let Some(sb) = self.substrate {
+                b[sb] += pol * i_hist;
+            }
+            if let Some(c) = self.collector {
+                b[c] -= pol * i_hist;
+            }
+        }
     }
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, alpha: f64) {
@@ -880,6 +1048,15 @@ impl Device for GummelPoonBjt {
             stamp!(c, bk, -g_jc);
             stamp!(c, c, g_jc);
         }
+        // Collector-substrate depletion cap: CJS
+        if self.cjs_eval != 0.0 {
+            let g_js = scale * self.cjs_eval;
+            let sb = self.substrate;
+            stamp!(sb, sb, g_js);
+            stamp!(sb, c, -g_js);
+            stamp!(c, sb, -g_js);
+            stamp!(c, c, g_js);
+        }
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
@@ -920,6 +1097,49 @@ impl Device for GummelPoonBjt {
                 self.fc,
             ),
         );
+        let vsub_eff = pol * (self.substrate.map_or(0.0, |i| x[i]) - vc);
+        self.q_js_hist
+            .advance(disc, q_js_charge(self.cjs, vsub_eff, self.vjs, self.mjs));
+    }
+
+    /// Every reactance this device stamps in transient, for `.ac` and `.noise`.
+    ///
+    /// This used to be absent. The BJT builds its own companions in
+    /// `load_jacobian_tran` and overrode neither this nor `reactive_branches`,
+    /// whose default is an empty list — so `.ac` and `.noise` saw a transistor
+    /// with no capacitance. Measured before the fix: a 1 kΩ resistor into the base
+    /// of a device with `CJE = CJC = CJS = 100p` read `|V(b)| = 1.000000` at 1 kHz,
+    /// 1 MHz, 10 MHz and 100 MHz, with the corner at 1.59 MHz. Flat, silently.
+    ///
+    /// All five reactances, and they must stay all five: the same list
+    /// `load_jacobian_tran` stamps, read from the same cached values, so the two
+    /// paths cannot disagree about what the device contains.
+    fn small_signal_reactances(&self) -> Vec<crate::device::ReactiveBranchSpec> {
+        use crate::device::{ReactiveBranchSpec, ReactiveKind};
+        let cap = |pos, neg, value| ReactiveBranchSpec {
+            kind: ReactiveKind::Capacitor,
+            pos,
+            neg,
+            value,
+            // `.ac`/`.noise` want the small-signal C itself, not a charge
+            // branch's `∂q/∂v`, so zero is correct rather than conservative.
+            dvalue_dstate: 0.0,
+        };
+        let mut v = Vec::new();
+        for (pos, neg, value) in [
+            // Transit-time diffusion capacitance: TF on B-E, TR on B-C.
+            (self.base, self.emitter, self.cbe_eff),
+            (self.base, self.collector, self.cbc_eff),
+            // Depletion capacitance: CJE, CJC, and CJS on collector-substrate.
+            (self.base, self.emitter, self.cje_eval),
+            (self.base, self.collector, self.cjc_eval),
+            (self.substrate, self.collector, self.cjs_eval),
+        ] {
+            if value != 0.0 {
+                v.push(cap(pos, neg, value));
+            }
+        }
+        v
     }
 
     fn noise_sources(&self, ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {

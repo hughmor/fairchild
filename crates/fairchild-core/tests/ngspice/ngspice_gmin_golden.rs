@@ -32,8 +32,11 @@
 //! the current exactly, so it conditioned the matrix and carried nothing. That
 //! is a defensible technique and it is not what SPICE's `GMIN` is.
 //!
-//! One divergence remains and is deliberate: see
-//! `a_reverse_biased_bjt_junction_leaks_one_gmin_per_modelled_junction`.
+//! One divergence used to remain: ngspice put a second `gmin` across the
+//! collector-substrate junction and this simulator had no such junction, so a
+//! reverse-biased BJT read half of ngspice's leakage. That is closed (#97 §3), and
+//! `a_reverse_biased_bjt_junction_leaks_one_gmin_per_junction` now compares
+//! against ngspice instead of documenting why it could not.
 //!
 //! Every case here is a *runtime* comparison rather than a stored number, so it
 //! cannot go stale against a new ngspice, and so the reference is visible in the
@@ -204,48 +207,58 @@ fn a_reverse_junction_between_two_non_ground_nodes_leaks_gmin() {
     );
 }
 
-/// A BJT's junctions get `gmin` too — one per junction fairchild models.
+/// A BJT's junctions get `gmin` too — one per junction, and it agrees with
+/// ngspice.
 ///
-/// Base and emitter grounded, collector at 1 V: the collector current is the
-/// reverse-biased base-collector junction, so it is `gmin`-dominated
-/// (`gmin·1 V = 1e-12` against `IS = 1e-16`).
+/// Base and emitter grounded, collector at 1 V. The collector current is the two
+/// reverse-biased junctions on that node, base-collector and collector-substrate,
+/// so it is `gmin`-dominated (`gmin·1 V = 1e-12` against `IS = 1e-16`).
 ///
-/// # Why this is not compared against ngspice
+/// # This test used to assert half of ngspice's answer
 ///
-/// ngspice reads **twice** this, because it also puts `gmin` across the
-/// collector-substrate junction, whose node defaults to ground. Measured
-/// directly: pinning the substrate at the collector potential with a 4-terminal
-/// `Q1 c 0 0 s qm` drops ngspice from `-2.0002e-12` to `-1.0002e-12`, removing
-/// exactly one `gmin·V`.
+/// It read `1·gmin·V` and said so, with a comment explaining why agreement was not
+/// available: the collector-substrate junction was not modelled, so there was
+/// nothing for the second `gmin` to cross. Asserting ngspice's total would have
+/// meant asserting a junction this simulator did not have.
 ///
-/// fairchild does not model that junction at all — `docs/model_status.md` lists
-/// `CJS`/`VJS`/`MJS`/`FCS` as absent — so agreement here is not available, and
-/// asserting ngspice's total would mean asserting a junction this simulator does
-/// not have. What *is* assertable is that the junction fairchild does model
-/// carries `gmin`, which is the thing that was broken: before this, a
-/// reverse-biased BJT leaked `2·IS = 2e-16` and nothing else, because the `gmin`
-/// in `gbe`/`gbc` was divided by `BF` and then cancelled out of the terminal
-/// current.
+/// The junction exists now (#97 §3), so the comparison is available and is made.
+/// Which junction the second `gmin` belongs to is identified in
+/// `ngspice_bjt_golden::a_reverse_biased_bjt_leaks_two_gmin_one_per_junction`, by
+/// pinning the substrate at the collector potential and watching exactly one
+/// `gmin·V` disappear.
 #[test]
-fn a_reverse_biased_bjt_junction_leaks_one_gmin_per_modelled_junction() {
-    for (g, want) in [(1e-12, 1e-12), (1e-9, 1e-9), (1e-6, 1e-6)] {
+fn a_reverse_biased_bjt_junction_leaks_one_gmin_per_junction() {
+    for g in [1e-12, 1e-9, 1e-6] {
         let deck = format!(
             "* bjt leakage
 .options gmin={g:e}
 .model qm NPN (IS=1e-16 BF=100)
-             V1 c 0 DC 1
+V1 c 0 DC 1
 Q1 c 0 0 qm
 .op
 "
         );
+        // Two junctions on the collector node, each `gmin·1V`.
+        let want = 2.0 * g;
         let got = fairchild(&deck, &Probe::I("v1")).abs();
         let rel = (got - want).abs() / want;
         assert!(
             rel < 1e-3,
-            "gmin={g:e}: collector leakage {got:.6e}, expected one gmin·1V = \
-             {want:.6e} (rel {rel:.2e}). Twice this would mean a substrate \
-             junction appeared; `2·IS` would mean the junction gmin is back to \
+            "gmin={g:e}: collector leakage {got:.6e}, expected two gmin·1V = \
+             {want:.6e} (rel {rel:.2e}). Half this means the substrate junction \
+             went away again; `2·IS` would mean the junction gmin is back to \
              being Jacobian-only."
+        );
+        let Some(ng) = ngspice(&deck, &Probe::I("v1")) else {
+            continue;
+        };
+        let rel = (got - ng.abs()).abs() / ng.abs();
+        assert!(
+            rel < 1e-3,
+            "gmin={g:e}: fairchild {got:.6e}, ngspice {:.6e} (rel {rel:.2e}). \
+             This comparison was unavailable before the substrate junction \
+             existed, and closing that gap is what made it assertable.",
+            ng.abs()
         );
     }
 }

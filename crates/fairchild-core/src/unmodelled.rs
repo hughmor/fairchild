@@ -52,13 +52,11 @@ pub const DIODE: Unmodelled = &[
 /// BJT (`.model … NPN|PNP`).
 pub const BJT: Unmodelled = &[
     (
-        "cjs",
-        "the collector-substrate junction capacitance is not stamped, so the \
-         substrate terminal carries no charge",
+        "fcs",
+        "ngspice ignores it too: its substrate junction linearises about zero \
+         bias, not about FCS·VJS, and the forward capacitance is bit-identical \
+         for FCS of 0.1, 0.5, 0.9 and absent",
     ),
-    ("vjs", "the substrate junction is not stamped (needs CJS)"),
-    ("mjs", "the substrate junction is not stamped (needs CJS)"),
-    ("fcs", "the substrate junction is not stamped (needs CJS)"),
     (
         "xcjc",
         "all of CJC sits outside the base resistance, so RB does not see its \
