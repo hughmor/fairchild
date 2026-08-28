@@ -348,8 +348,11 @@ pub fn build_devices_with_footprints(
                 let g: NodeId = topo.node_index.get(gate).copied();
                 let s: NodeId = topo.node_index.get(source).copied();
                 let b: NodeId = topo.node_index.get(bulk).copied();
+                // `?` on purpose: a binned card whose geometry matches no bin
+                // is a hard error and must not fall through to the generic
+                // factory lookup, which would report it as `unknown model`.
                 if let Some(dev) =
-                    registry.build_mosfet(model_name, name, params, &[d, g, s, b], ctx)
+                    registry.build_mosfet(model_name, name, params, &[d, g, s, b], ctx)?
                 {
                     push_device(&mut devices, &mut foot, topo, &[d, g, s, b], dev);
                 } else {

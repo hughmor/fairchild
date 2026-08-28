@@ -687,7 +687,7 @@ Failure modes, same three as above:
 
 | construct | mode |
 |---|---|
-| A **binned** `model` (a braced body of numbered sections) | **error** — bin selection by geometry is not implemented, and guessing a bin is a wrong answer with nothing to read |
+| A **binned** `model` (a braced body of numbered sections) | ✅ each section becomes a `.model <name>.<n>` card and the instance's W/L selects one — see *Binned model cards* below |
 | A function body that is not a single `return <expr>;` | **error** — local variables and control flow have no `.func` equivalent, and translating half of one would drop the rest in silence |
 | Any other unreadable statement | **error** with the line and the two forms it accepts |
 | `save`, `assert`, `statistics`, `montecarlo`, `sweep`, `alter`, `altergroup`, `check`, `info`, `shell` | **warn**, skipped — they do not change a single solve |
@@ -796,13 +796,65 @@ derivatives from every device, and Monte Carlo. Both are in issue #78.
 1. **Accept `{…}` on a `B` line** — let the B-element claim its own braces before
    `.param` substitution runs. Small, and it is the difference between an
    ngspice behavioural deck loading and not.
-2. **Model binning and `level=` routing** — what actually stands between this and
-   a foundry deck; neither is implemented, and picking a wrong W/L bin would be a
-   silent wrong answer, so geometry outside every bin must be a hard error.
+2. **`level=` routing** — a card that asks for a level fairchild does not
+   implement warns loudly and is simulated as Level 1. For a foundry MOSFET the
+   answer is the OSDI/Verilog-A path, which is measured against ngspice on the
+   same compiled `.osdi` (`docs/model_status.md` §9b). Binning is done.
 3. **`m=` on the elements that refuse it** — a MOSFET wants `nf`-style finger
    semantics and a junction device wants area, so each needs a decision rather
    than a factor.
 4. Everything else in §1–§2 is a clean error and can wait for a use case.
+
+## Binned model cards
+
+A binned card is one model name with several parameter sets, where the
+instance's geometry picks which one. Both spellings work and reach the same
+selection:
+
+```spice
+* HSPICE / ngspice: the bin index is a suffix on the card name
+.model nch.1 nmos (LMIN=0.18u LMAX=0.30u WMIN=0.22u WMAX=1u  VTO=0.40 …)
+.model nch.2 nmos (LMIN=0.30u LMAX=1.00u WMIN=0.22u WMAX=1u  VTO=0.45 …)
+M1 d g s b nch W=0.5u L=0.25u        $ takes bin 1
+```
+
+```
+// Spectre: a braced body of numbered sections
+model nch bsim4 {
+  1: lmin=0.18u lmax=0.30u wmin=0.22u wmax=1u vto=0.40
+  2: lmin=0.30u lmax=1.00u wmin=0.22u wmax=1u vto=0.45
+}
+```
+
+The Spectre form is rewritten into the first one, so binning has one
+representation in this simulator rather than one per dialect.
+
+### The selection rule
+
+A bin matches when `LMIN ≤ L ≤ LMAX` and `WMIN ≤ W ≤ WMAX`, **closed on both
+ends**. Real PDKs write contiguous windows, so half-open intervals would drop a
+geometry sitting exactly on a boundary into a gap and refuse a deck that is not
+wrong.
+
+Closed intervals let two bins share a boundary. There the **tightest window
+wins**, then the lowest bin index. That is arbitrary, and it is deterministic,
+and it is safe because a PDK's parameters are continuous across a boundary it
+chose to write twice.
+
+Two things are not resolved silently:
+
+- **Geometry outside every window is a hard error** naming the geometry and every
+  bin's window. Picking the nearest bin is a wrong answer with nothing to read.
+- **Bins whose interiors overlap** — a malformed card set, where the choice
+  really does change the answer — are named on stderr once at registration.
+
+`LMIN`/`LMAX`/`WMIN`/`WMAX` select a bin and are not model parameters, so they do
+not appear in the unmodelled-parameter warnings. A model name containing a dot
+but **no** geometry selector stays one model: dots are legal in model names, and
+`my.nmos` is not bin `nmos` of `my`.
+
+Missing `W` or `L` on the instance selects with SPICE's defaults (100 µm each),
+which for a binned PDK will usually land outside every window and say so.
 
 ## How to update this document
 

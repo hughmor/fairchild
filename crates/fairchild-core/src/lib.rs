@@ -3,6 +3,7 @@ pub mod adjoint;
 pub mod adjoint_ac;
 pub mod adjoint_tran;
 pub mod behavioral;
+pub mod binning;
 pub mod connectivity;
 pub mod corner;
 pub mod dc_sweep;

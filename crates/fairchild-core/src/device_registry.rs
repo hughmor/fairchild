@@ -364,7 +364,9 @@ pub struct DeviceRegistry {
     /// exactly as long as it took to write a test for the warning.
     card_defaults: HashMap<String, Arc<Vec<(String, f64)>>>,
     /// MOSFET model cards stored for W/L instance-param injection in build_devices.
-    pub(crate) mosfet_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
+    /// One entry per model *name*, which for a binned PDK card is the name
+    /// without its `.N` suffix. See [`crate::binning`] for the selection rule.
+    pub(crate) mosfet_cards: HashMap<String, (bool, crate::binning::BinGroup)>,
     /// BJT model cards: model_name → (is_pnp, params).
     pub(crate) bjt_cards: HashMap<String, (bool, Vec<(String, f64)>)>,
     /// Switch model cards: model_name → (is_current_controlled, params).
@@ -716,11 +718,13 @@ impl DeviceRegistry {
                     );
                 }
             }
-            // Warn once per model card about unrecognised params.
+            // Warn once per model card about unrecognised params. The four
+            // geometry selectors are not model parameters — they choose a bin —
+            // so a binned card would otherwise warn about all four.
             let (_, unknown) = Mosfet1::from_model_params(is_pmos, &card.params);
             let unknown: Vec<_> = unknown
                 .into_iter()
-                .filter(|k| !k.eq_ignore_ascii_case("level"))
+                .filter(|k| !k.eq_ignore_ascii_case("level") && !crate::binning::IS_SELECTOR(k))
                 .collect();
             if !unknown.is_empty() {
                 warn_user!(
@@ -735,8 +739,28 @@ impl DeviceRegistry {
                 crate::unmodelled::MOSFET,
                 &card.params,
             );
+            // `nch.1` is bin 1 of `nch`, and the element line asks for `nch`.
+            // An unbinned card is a group of one with an unbounded window, so
+            // both take the same path out of `build_mosfet`.
+            let (base, bin) = crate::binning::classify(&card.name, &card.params);
             self.mosfet_cards
-                .insert(card.name.clone(), (is_pmos, card.params.clone()));
+                .entry(base)
+                .or_insert_with(|| (is_pmos, crate::binning::BinGroup::default()))
+                .1
+                .push(bin);
+        }
+        // Once per name, after every card is in: a set whose windows overlap in
+        // their interiors is malformed, and there the choice of bin really does
+        // change the answer.
+        for (name, (_, group)) in &self.mosfet_cards {
+            for (a, b) in group.interior_overlaps() {
+                warn_user!(
+                    "MOSFET model '{name}': bins {a} and {b} overlap in their \
+                     interiors, not merely at an edge. One geometry matches both, \
+                     and the tighter window wins — check LMIN/LMAX/WMIN/WMAX on \
+                     those two cards."
+                );
+            }
         }
     }
 
@@ -1049,6 +1073,11 @@ impl DeviceRegistry {
     }
 
     /// Build a `Mosfet1` for `model_name` with specific instance params (W, L).
+    ///
+    /// `Ok(None)` means this name is not a MOSFET card, so the caller falls
+    /// through to the generic factory lookup. `Err` means it *is* one and the
+    /// instance cannot be built — today only because its geometry falls outside
+    /// every bin, which is a hard error rather than a nearest-bin guess.
     pub(crate) fn build_mosfet(
         &self,
         model_name: &str,
@@ -1056,8 +1085,21 @@ impl DeviceRegistry {
         instance_params: &[(String, f64)],
         terminals: &[NodeId],
         ctx: &SimContext,
-    ) -> Option<Box<dyn Device>> {
-        let (is_pmos, model_params) = self.mosfet_cards.get(model_name)?;
+    ) -> Result<Option<Box<dyn Device>>, crate::SimError> {
+        let Some((is_pmos, group)) = self.mosfet_cards.get(model_name) else {
+            return Ok(None);
+        };
+        // The same defaults the device itself applies, from the same constants,
+        // so bin selection and model evaluation cannot disagree about geometry.
+        let geom = |key: &str, default: f64| {
+            instance_params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map_or(default, |(_, v)| *v)
+        };
+        let l = geom("l", crate::models::mosfet1::DEFAULT_L_M);
+        let w = geom("w", crate::models::mosfet1::DEFAULT_W_M);
+        let model_params = group.select(model_name, l, w)?;
         let (mut dev, _) = Mosfet1::from_model_params(*is_pmos, model_params);
         // The return used to be discarded, so `M1 … banana=3` was accepted in
         // silence on the one device family whose instance params do work.
@@ -1068,7 +1110,7 @@ impl DeviceRegistry {
         );
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
-        Some(Box::new(dev))
+        Ok(Some(Box::new(dev)))
     }
 
     /// Look up a factory by model name, case-insensitively — see `register`.

@@ -111,8 +111,12 @@ pub fn to_spice(input: &str) -> Result<String, ParseError> {
                 statement(st, &mut globals, hoisted.get(&i).map_or("", String::as_str))?
             }
         };
+        // A statement may render to more than one line — a binned model becomes
+        // one card per bin — and those lines come out of its own span, so every
+        // statement after it keeps its source line number.
+        let spent = 1 + rendered.matches('\n').count();
         out.push(rendered);
-        for _ in 1..st.span {
+        for _ in spent..st.span {
             out.push(String::new());
         }
     }
@@ -497,16 +501,13 @@ fn model(text: &str, lineno: usize) -> Result<String, ParseError> {
             msg: format!("cannot read '{text}' as a Spectre model: expected `model <name> <master> [params]`"),
         });
     }
-    // A braced `model` body is binning — `model nch bsim4 { 1: lmin=… }` — where
-    // geometry picks one card of several. Picking the wrong bin is a wrong answer
-    // with nothing to read, and nothing here implements the selection.
+    // A braced `model` body is binning — `model nch bsim4 { 1: lmin=… 2: … }` —
+    // where geometry picks one card of several. Each section becomes its own
+    // `.model <name>.<n>` card, the form HSPICE writes and the form
+    // `fairchild_core::binning` selects from, so binning has one representation
+    // rather than one per dialect.
     if text.contains('{') && !text.contains("={") {
-        return Err(ParseError::Syntax {
-            line: lineno,
-            msg: format!(
-                "model '{name}' is binned (a braced body of numbered sections).                  Bin selection by geometry is not implemented, and guessing a bin                  would be a wrong answer with nothing to read: split the bins into                  separate models, or instantiate the one you want"
-            ),
-        });
+        return binned_model(&name, kind, text, lineno);
     }
     let params = braced_assignments(text);
     Ok(if params.is_empty() {
@@ -514,6 +515,76 @@ fn model(text: &str, lineno: usize) -> Result<String, ParseError> {
     } else {
         format!(".model {name} {kind} ({params})")
     })
+}
+
+/// Spectre binning → one `.model <name>.<n>` card per section.
+///
+/// ```text
+/// model nch bsim4 {
+///   1: lmin=0.18u lmax=0.30u wmin=0.22u wmax=1u  vth0=0.42
+///   2: lmin=0.30u lmax=1.00u wmin=0.22u wmax=1u  vth0=0.45
+/// }
+/// ```
+///
+/// Selection happens in the core at instantiation time, where the instance's
+/// `W`/`L` are known. A body this cannot read as numbered sections is refused,
+/// because guessing which card a geometry gets is the wrong answer this exists
+/// to avoid.
+fn binned_model(name: &str, kind: &str, text: &str, lineno: usize) -> Result<String, ParseError> {
+    let open = text.find('{').expect("caller checked for a brace");
+    let close = text.rfind('}').ok_or_else(|| ParseError::Syntax {
+        line: lineno,
+        msg: format!("model '{name}' opens a braced body that is never closed"),
+    })?;
+
+    // `tokenise` and not `split_whitespace`: a parameter value may be a braced
+    // expression containing a colon (a ternary), and a naive scan would read
+    // that as a section header and synthesise a bin nobody wrote.
+    let mut sections: Vec<(u32, Vec<String>)> = Vec::new();
+    for tok in tokenise(&text[open + 1..close]) {
+        // `1:` or `1:lmin=…` opens a section.
+        let header = tok
+            .split_once(':')
+            .and_then(|(d, rest)| d.parse::<u32>().ok().map(|i| (i, rest.to_string())));
+        match header {
+            Some((i, rest)) => {
+                let mut acc = Vec::new();
+                if !rest.is_empty() {
+                    acc.push(rest);
+                }
+                sections.push((i, acc));
+            }
+            None => {
+                if let Some((_, acc)) = sections.last_mut() {
+                    acc.push(tok);
+                }
+            }
+        }
+    }
+    if sections.is_empty() {
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "model '{name}' has a braced body with no numbered sections in it. \
+                 A binned model reads as `model {name} {kind} {{ 1: lmin=… 2: lmin=… }}`. \
+                 Guessing which card an instance gets would be a wrong answer with \
+                 nothing to read, so this is refused rather than approximated."
+            ),
+        });
+    }
+
+    let mut out = Vec::with_capacity(sections.len());
+    for (i, toks) in sections {
+        // The same renderer every other statement kind uses, so a braced
+        // expression inside a bin is quoted the way it is everywhere else.
+        let params = braced_assignments(&toks.join(" "));
+        out.push(if params.is_empty() {
+            format!(".model {name}.{i} {kind}")
+        } else {
+            format!(".model {name}.{i} {kind} ({params})")
+        });
+    }
+    Ok(out.join("\n"))
 }
 
 /// `real f(real a, real b) { return expr; }` → `.func f(a,b)={expr}`.
@@ -830,6 +901,40 @@ fn spice_name(letter: char, name: &str) -> String {
 /// Shares its rule with the SPICE side: a value may contain spaces only inside
 /// a bracket or quote, because `a = 1 + 2 b = 3` has no unambiguous reading.
 fn assignments(text: &str) -> Vec<(String, String)> {
+    let toks = tokenise(text);
+    // Re-glue `name = value`, `name= value`, `name =value`.
+    let mut glued: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let mut t = toks[i].clone();
+        if t == "=" {
+            if let Some(prev) = glued.pop() {
+                t = format!("{prev}=");
+            }
+        }
+        while t.ends_with('=') && i + 1 < toks.len() {
+            i += 1;
+            t.push_str(&toks[i]);
+        }
+        glued.push(t);
+        i += 1;
+    }
+
+    glued
+        .into_iter()
+        .filter_map(|t| {
+            t.split_once('=')
+                .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Whitespace-split, but a braced, quoted or parenthesised run stays one token.
+///
+/// One tokeniser, because [`assignments`] and [`binned_model`] must agree on
+/// where a value ends. A second scan that did not know about braces would read a
+/// colon inside `{a ? b : c}` as a bin header.
+fn tokenise(text: &str) -> Vec<String> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut span: Option<char> = None;
@@ -871,32 +976,7 @@ fn assignments(text: &str) -> Vec<(String, String)> {
     if !cur.is_empty() {
         toks.push(cur);
     }
-
-    // Re-glue `name = value`, `name= value`, `name =value`.
-    let mut glued: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < toks.len() {
-        let mut t = toks[i].clone();
-        if t == "=" {
-            if let Some(prev) = glued.pop() {
-                t = format!("{prev}=");
-            }
-        }
-        while t.ends_with('=') && i + 1 < toks.len() {
-            i += 1;
-            t.push_str(&toks[i]);
-        }
-        glued.push(t);
-        i += 1;
-    }
-
-    glued
-        .into_iter()
-        .filter_map(|t| {
-            t.split_once('=')
-                .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
-        })
-        .collect()
+    toks
 }
 
 #[cfg(test)]
@@ -1273,15 +1353,37 @@ tr1 tran stop=1u step=1n
         );
     }
 
-    /// Binning picks one card of several by geometry. Nothing here implements the
-    /// selection, and guessing a bin is a wrong answer with nothing to read.
+    /// Binning picks one card of several by geometry, and each section becomes
+    /// its own `.model <name>.<n>` card — the form the core selects from, so both
+    /// dialects reach one representation. Selection itself is tested end to end
+    /// in `circuit/binned_model_cards.rs`, where an instance's W/L exists.
     #[test]
-    fn a_binned_model_is_refused() {
-        let err =
-            to_spice("simulator lang=spectre\nmodel nch bsim4 {\n1: lmin=1n lmax=2n vth0=0.4\n}\n")
-                .unwrap_err();
+    fn a_binned_model_becomes_one_card_per_section() {
+        let spice = to_spice(
+            "simulator lang=spectre\nmodel nch bsim4 {\n\
+             1: lmin=1n lmax=2n vth0=0.4\n\
+             2: lmin=2n lmax=3n vth0=0.5\n}\n",
+        )
+        .expect("binning translates rather than refusing");
+        assert!(spice.contains(".model nch.1 bsim4 ("), "{spice}");
+        assert!(spice.contains(".model nch.2 bsim4 ("), "{spice}");
+        assert!(spice.contains("vth0=0.4"), "{spice}");
+        assert!(spice.contains("vth0=0.5"), "{spice}");
+        // The window travels with its own card and not the other one.
+        let bin1 = spice.lines().find(|l| l.contains("nch.1")).unwrap();
+        assert!(
+            bin1.contains("lmax=2n") && !bin1.contains("lmax=3n"),
+            "{bin1}"
+        );
+    }
+
+    /// A braced body with no numbered sections is not binning and is still
+    /// refused. Reading it as a plain card would drop every parameter in it.
+    #[test]
+    fn a_braced_body_without_sections_is_refused() {
+        let err = to_spice("simulator lang=spectre\nmodel nch bsim4 { vth0=0.4 }\n").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("binned"), "{msg}");
+        assert!(msg.contains("numbered sections"), "{msg}");
         assert!(msg.contains("nch"), "{msg}");
     }
 

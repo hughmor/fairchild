@@ -2,6 +2,15 @@ use crate::device::{Device, Discretisation, EvalFlags, NodeId, SimContext};
 use crate::mna::{Cell, MnaMatrix, Pattern};
 use crate::reactive::ChargeHistory;
 
+/// SPICE's default channel width and length, 100 um each.
+///
+/// Public because [`crate::binning`] has to pick a bin using the geometry the
+/// device will actually evaluate at. Two spellings of one default is two chances
+/// for the bin and the model to disagree about which device this is.
+pub const DEFAULT_W_M: f64 = 1e-4;
+/// See [`DEFAULT_W_M`].
+pub const DEFAULT_L_M: f64 = 1e-4;
+
 /// Seed floor before the first `eval`. The operating value is
 /// [`SimContext::gmin`] — see the note beside `gds_total` in `eval`.
 const GMIN_SEED: f64 = 1e-12;
@@ -256,8 +265,8 @@ impl Mosfet1 {
 
     /// Apply instance parameters (W, L, AS, AD, PS, PD).
     pub fn set_instance_params(&mut self, params: &[(String, f64)]) -> Vec<String> {
-        let mut w = 1e-4_f64;
-        let mut l = 1e-4_f64;
+        let mut w = DEFAULT_W_M;
+        let mut l = DEFAULT_L_M;
         let mut as_ = 0.0_f64;
         let mut ad = 0.0_f64;
         let mut ps = 0.0_f64;
