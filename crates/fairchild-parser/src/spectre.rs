@@ -95,6 +95,7 @@ pub fn to_spice(input: &str) -> Result<String, ParseError> {
     let mut globals: Vec<String> = Vec::new();
 
     let (hoisted, consumed) = hoist_parameters(&stmts);
+    let letters = model_letters(&stmts);
 
     for (i, st) in stmts.iter().enumerate() {
         // Pad to the statement's own line so error messages keep their numbers.
@@ -107,9 +108,12 @@ pub fn to_spice(input: &str) -> Result<String, ParseError> {
             Lang::Spectre if consumed.contains(&i) => {
                 format!("* hoisted to the .subckt header: {}", st.text)
             }
-            Lang::Spectre => {
-                statement(st, &mut globals, hoisted.get(&i).map_or("", String::as_str))?
-            }
+            Lang::Spectre => statement(
+                st,
+                &mut globals,
+                hoisted.get(&i).map_or("", String::as_str),
+                &letters,
+            )?,
         };
         // A statement may render to more than one line — a binned model becomes
         // one card per bin — and those lines come out of its own span, so every
@@ -131,6 +135,65 @@ pub fn to_spice(input: &str) -> Result<String, ParseError> {
         out.push(format!(".global {}", globals.join(" ")));
     }
     Ok(out.join("\n") + "\n")
+}
+
+/// Device-model masters, and the SPICE element letter an instance of one takes.
+///
+/// Spectre spells every instantiation `name (nodes) master params`, whether the
+/// master is a subcircuit or a device model. SPICE spells a diode `D…`, a MOSFET
+/// `M…`, a BJT `Q…` and a subcircuit `X…`. So the letter cannot come from the
+/// instance line alone — it comes from what the master *is*, which the `model`
+/// statements in the same file say.
+///
+/// Both spellings are here because a deck may declare its models in either
+/// dialect: `model dm diode` in a Spectre region and `.model dm D` in a
+/// `simulator lang=spice` one are the same card.
+const MODEL_LETTERS: &[(&str, char)] = &[
+    ("diode", 'D'),
+    ("d", 'D'),
+    ("nmos", 'M'),
+    ("pmos", 'M'),
+    ("mos1", 'M'),
+    ("mos2", 'M'),
+    ("mos3", 'M'),
+    ("npn", 'Q'),
+    ("pnp", 'Q'),
+    ("bjt", 'Q'),
+];
+
+/// Model name → element letter, from every `model` / `.model` statement in the
+/// deck.
+///
+/// A whole-file pre-pass rather than a running map, because Spectre does not
+/// require a model to be declared before it is used and a running map would build
+/// a subcircuit call for an instance that appears first.
+fn model_letters(stmts: &[Stmt]) -> HashMap<String, char> {
+    let mut out = HashMap::new();
+    for st in stmts {
+        let t = st.text.trim();
+        let (name, master) = match st.lang {
+            Lang::Spectre if t.split_whitespace().next() == Some("model") => {
+                let mut w = t.split_whitespace().skip(1);
+                (w.next(), w.next())
+            }
+            Lang::Spice if t.to_lowercase().starts_with(".model") => {
+                let mut w = t.split_whitespace().skip(1);
+                (w.next(), w.next())
+            }
+            _ => continue,
+        };
+        let (Some(name), Some(master)) = (name, master) else {
+            continue;
+        };
+        // A binned card is `name.1`, `name.2`, … on the SPICE side; the instance
+        // still names the group.
+        let name = name.split('.').next().unwrap_or(name);
+        let master = master.trim_start_matches('(').to_lowercase();
+        if let Some((_, letter)) = MODEL_LETTERS.iter().find(|(m, _)| *m == master) {
+            out.insert(name.to_lowercase(), *letter);
+        }
+    }
+    out
 }
 
 /// Find each `subckt` block's `parameters` statements, so they can be hoisted onto
@@ -397,7 +460,12 @@ const IGNORED_KINDS: &[&str] = &[
     "altergroup",
 ];
 
-fn statement(st: &Stmt, globals: &mut Vec<String>, hoisted: &str) -> Result<String, ParseError> {
+fn statement(
+    st: &Stmt,
+    globals: &mut Vec<String>,
+    hoisted: &str,
+    letters: &HashMap<String, char>,
+) -> Result<String, ParseError> {
     let text = st.text.trim();
     let head_lc = first_word(text).to_lowercase();
 
@@ -457,7 +525,7 @@ fn statement(st: &Stmt, globals: &mut Vec<String>, hoisted: &str) -> Result<Stri
     if IGNORED_KINDS.contains(&kind.as_str()) {
         return Ok(skipped(st, text, &kind));
     }
-    instance_or_analysis(st, text, globals)
+    instance_or_analysis(st, text, globals, letters)
 }
 
 /// `subckt div (in out)` → `.subckt div in out`, with the body's `parameters`
@@ -491,7 +559,40 @@ fn subckt_header(text: &str, hoisted: &str, lineno: usize) -> Result<String, Par
     Ok(line.trim_end().to_string())
 }
 
-/// `model nch bsim4 type=n version=4.5` → `.model nch bsim4 (type=n version=4.5)`.
+/// Spectre masters whose SPICE spelling puts the polarity in the master name.
+///
+/// Spectre says `model nm mos1 type=n` and SPICE says `.model nm NMOS`. The
+/// polarity is a *parameter* in one dialect and part of the *master* in the other,
+/// so this is the one transliteration that cannot be done by passing the token
+/// through. Left unmapped, `type=n` reached the expression evaluator and the deck
+/// failed with "undefined parameter(s) 'n'" — a message about a parameter
+/// expression, on a line that contains no expression (#103).
+///
+/// `(master, type-value, SPICE master, LEVEL)`. `level` is the digit in the Spectre
+/// name: `mos2` and `mos3` are Level 2 and 3, which this simulator warns about and
+/// simulates as Level 1 rather than approximating silently.
+const POLARITY_MASTERS: &[(&str, &str, &str, Option<u8>)] = &[
+    ("mos1", "n", "NMOS", Some(1)),
+    ("mos1", "p", "PMOS", Some(1)),
+    ("mos2", "n", "NMOS", Some(2)),
+    ("mos2", "p", "PMOS", Some(2)),
+    ("mos3", "n", "NMOS", Some(3)),
+    ("mos3", "p", "PMOS", Some(3)),
+    ("bjt", "npn", "NPN", None),
+    ("bjt", "pnp", "PNP", None),
+];
+
+/// The `type=` default for a master that omits it, which Spectre allows.
+fn default_type(master: &str) -> &'static str {
+    if master == "bjt" {
+        "npn"
+    } else {
+        "n"
+    }
+}
+
+/// `model nch bsim4 type=n version=4.5` → `.model nch bsim4 (type=n version=4.5)`,
+/// and `model nm mos1 type=n vto=0.7` → `.model nm NMOS (level=1 vto=0.7)`.
 fn model(text: &str, lineno: usize) -> Result<String, ParseError> {
     let name = second_word(text);
     let kind = text.split_whitespace().nth(2).unwrap_or("");
@@ -500,6 +601,10 @@ fn model(text: &str, lineno: usize) -> Result<String, ParseError> {
             line: lineno,
             msg: format!("cannot read '{text}' as a Spectre model: expected `model <name> <master> [params]`"),
         });
+    }
+    let kind_lc = kind.to_lowercase();
+    if POLARITY_MASTERS.iter().any(|(m, ..)| *m == kind_lc) {
+        return polarity_model(&name, &kind_lc, text, lineno);
     }
     // A braced `model` body is binning — `model nch bsim4 { 1: lmin=… 2: … }` —
     // where geometry picks one card of several. Each section becomes its own
@@ -514,6 +619,67 @@ fn model(text: &str, lineno: usize) -> Result<String, ParseError> {
         format!(".model {name} {kind}")
     } else {
         format!(".model {name} {kind} ({params})")
+    })
+}
+
+/// A Spectre master whose polarity is a `type=` parameter → the SPICE master that
+/// carries the polarity in its name.
+///
+/// `type` is consumed rather than passed through, because SPICE has no such model
+/// parameter and every consumer would have to know to ignore it. An unrecognised
+/// `type` is refused by name: guessing `n` for a card that says something else
+/// would silently simulate the wrong device, and this is a front end whose job is
+/// to preserve meaning.
+fn polarity_model(
+    name: &str,
+    master: &str,
+    text: &str,
+    lineno: usize,
+) -> Result<String, ParseError> {
+    let pairs = assignments(text);
+    let ty = pairs
+        .iter()
+        .find(|(k, _)| k == "type")
+        .map(|(_, v)| strip_quotes(v).to_lowercase())
+        .unwrap_or_else(|| default_type(master).to_string());
+
+    let Some((_, _, spice_master, level)) = POLARITY_MASTERS
+        .iter()
+        .find(|(m, t, ..)| *m == master && *t == ty)
+    else {
+        let allowed: Vec<&str> = POLARITY_MASTERS
+            .iter()
+            .filter(|(m, ..)| *m == master)
+            .map(|(_, t, ..)| *t)
+            .collect();
+        return Err(ParseError::Syntax {
+            line: lineno,
+            msg: format!(
+                "model '{name}': a Spectre '{master}' takes type={}, and this card \
+                 says type='{ty}'. The polarity decides which device is built, so \
+                 it is not guessed.",
+                allowed.join(" or ")
+            ),
+        });
+    };
+
+    // Everything except `type`, which has no SPICE spelling and is now in the
+    // master. `level` goes first so a card that also carries one overrides it —
+    // last-wins is the SPICE rule, and a card that spells its own level means it.
+    let mut params: Vec<String> = Vec::new();
+    if let Some(l) = level {
+        params.push(format!("level={l}"));
+    }
+    for (k, v) in pairs {
+        if k == "type" || v.is_empty() {
+            continue;
+        }
+        params.push(format!("{k}={}", braced_value(&v)));
+    }
+    Ok(if params.is_empty() {
+        format!(".model {name} {spice_master}")
+    } else {
+        format!(".model {name} {spice_master} ({})", params.join(" "))
     })
 }
 
@@ -721,6 +887,7 @@ fn instance_or_analysis(
     st: &Stmt,
     text: &str,
     globals: &mut Vec<String>,
+    letters: &HashMap<String, char>,
 ) -> Result<String, ParseError> {
     let name = first_word(text);
     let rest = text[name.len()..].trim();
@@ -787,13 +954,25 @@ fn instance_or_analysis(
         return Ok(primitive(&name, *letter, value_param, &nodes, &params));
     }
 
-    // Anything else is a subcircuit or model instance: SPICE's X line, which
-    // also carries `k=v` parameters unchanged.
-    Ok(
-        format!("{} {} {} {}", spice_name('X', &name), nodes, kind, params)
-            .trim_end()
-            .to_string(),
+    // A device model gets its own element letter; anything else is a subcircuit
+    // call. Both carry `k=v` parameters unchanged.
+    //
+    // The letter cannot be read off the instance line, because Spectre spells a
+    // diode instance and a subcircuit call identically. It comes from the `model`
+    // statements, collected by `model_letters` before this runs. Left as `X`, a
+    // MOSFET or BJT instance reached the subcircuit path and failed as
+    // `unknown model` — the diode happened to work only because a diode card also
+    // registers a factory under its own name (#103).
+    let letter = letters.get(&kind.to_lowercase()).copied().unwrap_or('X');
+    Ok(format!(
+        "{} {} {} {}",
+        spice_name(letter, &name),
+        nodes,
+        kind,
+        params
     )
+    .trim_end()
+    .to_string())
 }
 
 /// `R1 (a b) resistor r=1k` → `R1 a b 1k`, with an expression braced.
@@ -812,13 +991,35 @@ fn primitive(name: &str, letter: char, value_param: &str, nodes: &str, params: &
         'V' | 'I' => format!("{head} DC {value}"),
         _ => format!("{head} {value}"),
     };
+    // The AC excitation. Spectre spells it `mag=`/`phase=` on the source (and
+    // `ac=` in older decks); SPICE spells it `AC <mag> [phase]` positionally.
+    //
+    // This used to `continue` past all three with a comment saying the spec was
+    // "handled below" — and there was no below, so it was dropped. A deck whose
+    // only source carried `mag=` then failed with "no AC source", which is the
+    // lucky outcome: with two sources it would have run the sweep against the
+    // wrong one and returned a number (#103).
+    if matches!(letter, 'V' | 'I') {
+        let find = |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| braced_value(v))
+        };
+        if let Some(mag) = find("mag").or_else(|| find("ac")) {
+            line.push_str(&format!(" AC {mag}"));
+            if let Some(phase) = find("phase") {
+                line.push_str(&format!(" {phase}"));
+            }
+        }
+    }
     // Extra parameters SPICE understands on the same element keep their form.
     for (k, v) in pairs {
         if k == value_param {
             continue;
         }
         if matches!(k.as_str(), "ac" | "mag" | "phase") {
-            continue; // AC spec is handled below, not as a k=v
+            continue; // emitted above as the positional AC spec
         }
         line.push_str(&format!(" {k}={}", braced_value(&v)));
     }
@@ -983,6 +1184,188 @@ fn tokenise(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::{Analysis, Element};
+
+    /// Spectre puts a MOSFET's polarity in a `type=` parameter and SPICE puts it
+    /// in the master name, so this is the one transliteration that cannot pass the
+    /// token through.
+    ///
+    /// Left unmapped it did not merely fail to build the device: `type=n` reached
+    /// the expression evaluator and the deck died with "undefined parameter(s)
+    /// 'n'", a message about a parameter expression on a line that contains none.
+    /// Measured against PrimeSim, which accepts every card here (#103).
+    #[test]
+    fn spectre_device_masters_become_spice_ones() {
+        for (spectre, spice, level) in [
+            ("mos1 type=n", "NMOS", Some(1)),
+            ("mos1 type=p", "PMOS", Some(1)),
+            ("mos2 type=n", "NMOS", Some(2)),
+            ("mos3 type=p", "PMOS", Some(3)),
+            ("bjt type=npn", "NPN", None),
+            ("bjt type=pnp", "PNP", None),
+            // `type` is optional in Spectre; the defaults are n and npn.
+            ("mos1", "NMOS", Some(1)),
+            ("bjt", "NPN", None),
+        ] {
+            let src = format!("simulator lang=spectre\nmodel mm {spectre} vto=0.7\n");
+            let out = to_spice(&src).unwrap_or_else(|e| panic!("{spectre}: {e:?}"));
+            assert!(
+                out.contains(&format!(".model mm {spice} ")),
+                "'{spectre}' must become a {spice} card: {out}"
+            );
+            assert!(
+                !out.to_lowercase().contains("type="),
+                "`type` has no SPICE spelling and must be consumed, not passed \
+                 through where every consumer has to know to ignore it: {out}"
+            );
+            match level {
+                Some(l) => assert!(
+                    out.contains(&format!("level={l}")),
+                    "the digit in the Spectre master is the SPICE LEVEL: {out}"
+                ),
+                None => assert!(!out.contains("level="), "a BJT has no LEVEL: {out}"),
+            }
+        }
+    }
+
+    /// A `type=` the master does not have is refused by name rather than guessed.
+    ///
+    /// Guessing `n` would silently simulate the wrong device, which is the failure
+    /// mode this front end exists to prevent.
+    #[test]
+    fn an_unknown_polarity_is_refused_rather_than_guessed() {
+        let err = to_spice("simulator lang=spectre\nmodel mm mos1 type=q vto=0.7\n")
+            .expect_err("type=q is not a MOSFET polarity");
+        let msg = format!("{err:?}");
+        for needle in ["mm", "mos1", "type", "q"] {
+            assert!(
+                msg.contains(needle),
+                "the refusal must name {needle}: {msg}"
+            );
+        }
+    }
+
+    /// An instance takes its element letter from what its master *is*.
+    ///
+    /// Spectre spells a diode instance and a subcircuit call identically, so the
+    /// letter cannot be read off the instance line. Every device instance used to
+    /// become an `X` line; the diode happened to work anyway, because a diode card
+    /// also registers a factory under its own name, and the MOSFET and BJT failed
+    /// as `unknown model`.
+    #[test]
+    fn a_device_instance_takes_its_own_element_letter() {
+        // Instance names deliberately do **not** start with their SPICE letter, so
+        // the letter has to be added rather than merely preserved. `d1` would pass
+        // by accident, because `spice_name` leaves a name that already carries the
+        // right letter alone.
+        let netlist = parse_spectre(
+            "simulator lang=spectre\n\
+             model dm diode is=1e-14\n\
+             model nm mos1 type=n vto=0.7\n\
+             model qn bjt type=npn is=1e-16\n\
+             subckt cell (a b)\n\
+             r9 (a b) resistor r=1k\n\
+             ends cell\n\
+             anode1 (a 0) dm\n\
+             fet1 (d g 0 0) nm w=1u l=1u\n\
+             tran1 (c b 0) qn\n\
+             cell1 (a 0) cell\n",
+        )
+        .expect("parse");
+        let kinds: Vec<&str> = netlist
+            .elements
+            .iter()
+            .map(|e| match e {
+                Element::Diode { .. } => "diode",
+                Element::Mosfet { .. } => "mosfet",
+                Element::Bjt { .. } => "bjt",
+                Element::Resistor { .. } => "resistor",
+                _ => "other",
+            })
+            .collect();
+        for want in ["diode", "mosfet", "bjt"] {
+            assert!(
+                kinds.contains(&want),
+                "a {want} instance must become a {want} element, not a subcircuit \
+                 call: {kinds:?}"
+            );
+        }
+        // The subcircuit call still flattens to its contents, which is how a
+        // wrongly-lettered subcircuit would show up.
+        assert!(
+            kinds.contains(&"resistor"),
+            "the subcircuit call must still flatten: {kinds:?}"
+        );
+    }
+
+    /// The map is built from the whole file, not from what has been seen so far.
+    ///
+    /// Spectre does not require a model to be declared before it is used, and a
+    /// running map would build a subcircuit call for the instance that comes first.
+    #[test]
+    fn a_model_declared_after_its_instance_still_maps() {
+        let netlist =
+            parse_spectre("simulator lang=spectre\nanode1 (a 0) dm\nmodel dm diode is=1e-14\n")
+                .expect("parse");
+        assert!(
+            netlist
+                .elements
+                .iter()
+                .any(|e| matches!(e, Element::Diode { .. })),
+            "a running map would have built a subcircuit call here: {:?}",
+            netlist.elements
+        );
+    }
+
+    /// A source's AC excitation survives the transliteration.
+    ///
+    /// `primitive()` skipped `ac`, `mag` and `phase` with a comment saying the spec
+    /// was "handled below", and there was no below. An `.ac` run then failed with
+    /// "no AC source" — the lucky outcome, because a deck with a second source
+    /// would have swept against the wrong one and returned a number.
+    #[test]
+    fn a_sources_ac_spec_is_not_dropped() {
+        for (spec, want) in [
+            ("mag=1", "AC 1"),
+            ("mag=2 phase=90", "AC 2 90"),
+            ("ac=1", "AC 1"),
+        ] {
+            let out = to_spice(&format!(
+                "simulator lang=spectre\nv1 (a 0) vsource dc=0 {spec}\n"
+            ))
+            .unwrap_or_else(|e| panic!("{spec}: {e:?}"));
+            assert!(out.contains(want), "'{spec}' must become '{want}': {out}");
+        }
+    }
+
+    /// And the whole path works end to end: a Spectre deck runs an AC sweep.
+    #[test]
+    fn a_spectre_deck_can_drive_an_ac_analysis() {
+        let netlist = parse_spectre(
+            "simulator lang=spectre\n\
+             v1 (a 0) vsource dc=0 mag=1\n\
+             r1 (a b) resistor r=1k\n\
+             c1 (b 0) capacitor c=1n\n\
+             acs ac start=1e3 stop=1e3 lin=1\n",
+        )
+        .expect("parse");
+        assert!(
+            netlist
+                .analyses
+                .iter()
+                .any(|a| matches!(a, Analysis::Ac { .. })),
+            "the ac statement must survive: {:?}",
+            netlist.analyses
+        );
+        let has_ac = netlist
+            .elements
+            .iter()
+            .any(|e| matches!(e, Element::VoltageSource { ac: Some(a), .. } if a.mag == 1.0));
+        assert!(
+            has_ac,
+            "the source must carry its AC magnitude: {:?}",
+            netlist.elements
+        );
+    }
 
     /// Every fixture here is hand-written to mimic a construct seen in a foundry
     /// library. **No foundry text appears in this repository** — the PDK is
