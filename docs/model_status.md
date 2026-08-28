@@ -109,13 +109,48 @@ reveals.
 | `M` / `MJ` | ✅ | ✅ | ⚠️ transitively; `M=0` is exercised directly by the integrator equivalence test |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `TT` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
-| `BV`, `IBV`, `EG`, `XTI`, `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `BV` | ✅ | ✅ reverse breakdown, knee adjusted so `I(-BV) = IBV` | ✅ ngspice across the knee, and a Zener shunt regulator |
+| `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
+| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, and at three (EG, XTI) pairs |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / f` across the junction, in `.noise` and transient noise | ✅ ngspice at two `AF` values, slope and magnitude |
+| `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled — `TNOM` **partly**: it re-references `IS` and not the junction capacitance | ❌ | ✅ warning text pinned |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
-**Reverse breakdown is not modelled.** A Zener or an ESD clamp will simulate as
-an ordinary diode with no breakdown knee. The parameters are accepted so a
-foundry card loads, and a warning names them.
+### Reverse breakdown
+
+`BV` and `IBV` are modelled. Past `-BV` the current is the Shockley exponential
+mirrored about an adjusted knee voltage, so a Zener or an ESD clamp clamps instead
+of blocking. Every constant was back-solved from ngspice rather than read from the
+SPICE source, and the tests compare at runtime
+(`ngspice_diode_breakdown_golden.rs`).
+
+The knee is **adjusted**: the card gives a voltage *and* a current at that
+voltage, and both hold at once only if the exponential's offset solves
+`IS·(exp((BV − bv_adj)/vte) − 1 + bv_adj/vte) = IBV`. With `BV=5, IBV=1 mA,
+IS=10 fA` that is 4.3449 V, which predicts ngspice's current at 4.5 V
+(−4.02313e−12) exactly. The exponential's slope is `1/(N·vt)`, fitted from
+ngspice rather than assumed. When `IBV` falls below the leakage the card already
+has at `-BV` there is no offset to solve for, and `bv_adj` is `BV` unshifted —
+ngspice does the same.
+
+**One divergence, on purpose.** `AREA` scales the breakdown current here, so
+`area=N` equals N diodes in parallel. ngspice's breakdown branch is *exactly
+independent* of `area` — measured at 4.8, 5.0, 5.1 and 5.3 V, ratio 1.0000, while
+its forward current doubles correctly — because deriving the knee offset from
+`IS·AREA` doubles the prefactor and lifts the offset by `vte·ln 2`, and the two
+cancel. ngspice then disagrees with itself: two diodes in parallel give exactly
+twice the breakdown current of one `area=2` diode. This tree's rule is already
+written down in `area_scales_the_diode_exactly` — "AREA=2 *is* two devices" — and
+an `area=10` Zener silently carrying a tenth of its knee current is the failure
+this codebase refuses.
+
+**Mild reverse also diverges, and here fairchild is the exact one.** ngspice
+smooths its reverse saturation with a cubic fit, `-IS·(1 + (3·vte/(vd·e))³)`,
+which reads 1.86e-4 low against the Shockley law it is fitting at −0.5 V.
+fairchild evaluates the law. The test asserts both halves — fairchild against the
+closed form, and the gap to ngspice against ngspice's own fit — so the difference
+stays the one term we know about.
 
 ### Instance parameters
 
@@ -129,7 +164,42 @@ be discarded, which read as "this simulator ignores AREA".
 
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
 
-### `gmin` and `RS`
+### Temperature
+
+`crate::temperature` owns every temperature law, because the same bandgap
+expression appears in the diode's saturation current, the BJT's, and the MOSFET's
+threshold, and three copies are three chances to disagree. Devices hold a
+*factor* derived once per solve, derived idempotently from the nominal value so a
+second `setup_model` cannot compound it and so `AREA` still multiplies on top.
+
+Every law was **back-solved from ngspice**, not read from the SPICE source, which
+carries several variants of each:
+
+| law | form | how it was measured |
+|---|---|---|
+| diode `IS(T)` | `IS·exp((T/TNOM−1)·EG/(N·vt))·(T/TNOM)^(XTI/N)` | reverse saturation at −1 V *is* `−IS(T)`; fitted `XTI` 2.9999, `EG` 1.1100 against defaults of 3 and 1.11 |
+| BJT `IS(T)` | `IS·(T/TNOM)^XTI·exp(EG·(T/TNOM−1)/vt)` | `IC` at fixed `V_BE`, dividing out `exp(V_BE/vt(T))`; residual 1.6e−6 |
+| BJT `BF(T)` | `BF·(T/TNOM)^XTB` | `IC/IB`, which cancels `IS(T)`; 1.5278 measured against 1.5278 |
+| MOSFET `KP(T)` | `KP·(T/TNOM)^−1.5` | slope of `sqrt(Id)` against two `Vgs`, which separates it from the threshold |
+| MOSFET `PHI(T)`, `VTO(T)` | SPICE3's `pbfact`/bandgap form | the same fit's intercept; residual 0.04 mV |
+
+Note the **`/N`**: the emission coefficient divides both temperature terms in the
+diode law and neither in the BJT's. The two coincide at `N = 1`, which is why
+`the_diode_law_divides_by_n` exists — it is the only test that separates them, and
+sabotage confirms it is the only one that catches the difference.
+
+`k` and `q` in `temperature.rs` are SPICE3's values rather than the more accurate
+ones used elsewhere in this tree. The bandgap expressions are curve fits whose
+coefficients were published against those constants, and a better `k` moves
+`PHI(T)` in the fourth decimal and stops matching ngspice.
+
+**What is still not re-referenced to `TNOM`:** the junction potentials and
+capacitances (`VJ`/`CJO` on a diode, `VJE`/`VJC`/`CJE`/`CJC` on a BJT). So `TNOM`
+remains on the accepted-but-not-modelled list with a message naming exactly that
+boundary — a card carrying `CJO` and `TNOM` together still gets told. This affects
+transient and AC only; the DC operating point is fully re-referenced.
+
+### `gmin`, `RS`, and step limiting
 
 `.options gmin` is a real conductance across the junction — it is in `Id` as well
 as in `∂Id/∂V`, so a reverse-biased diode carries `IS + gmin·V` and the leakage
@@ -148,6 +218,25 @@ ngspice, which gives the junction a real internal node: 2.7% low at 0.7 V, and
 onto. `RS = 0` skips the solve entirely, which is every diode that does not set
 the parameter.
 
+**There is no mirrored `pnjlim` for the breakdown exponential**, and that is a
+decision rather than an omission. Mirroring the forward limiter about `-bv_adj`
+looks obviously right — the knee is as steep as forward conduction — and it was
+written and then removed, because it produced a silent wrong answer. `vd_prev` is
+state the outer Newton cannot see: the mirror compressed the walk into the knee
+while a free node jumped straight to the supply, so the stamp kept reading "barely
+conducting", and in that region the terminal current is under `abstol`, so the
+visible unknowns stopped moving and Newton reported success. Measured at
+`.options vmax=1e6`: a 12 V / 1 kΩ Zener regulator read `out = 12 V` with the
+mirror and the correct 5.0501 V without it. At the default `vmax` it changed no
+answer on any deck, including 1 kV into 10 Ω, which is why it took a non-default
+setting to find.
+
+The forward `pnjlim` is safe for the reason the mirror was not: while it is active
+the current changes by orders of magnitude per iteration, so a stalled walk cannot
+pass the convergence test. Reverse breakdown has a flat plateau under `abstol`
+instead. What bounds a step into breakdown now is the trust region
+(`vmax + reltol·|v|`, #90), which covers both exponentials and keeps no state.
+
 ---
 
 ## 4. BJT (`Q` / `.model … NPN|PNP`) — Gummel-Poon Level 1
@@ -165,7 +254,10 @@ the parameter.
 | `CJE`, `VJE`, `MJE` | ✅ | ✅ | ✅ ngspice transient (CE stage, 5 %) |
 | `CJC`, `VJC`, `MJC` | ✅ | ✅ | ✅ ngspice transient |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
-| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `XTB`, `EG`, `XTI`, `KF`, `AF`, `TNOM` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` | ✅ ngspice at −40/27/75/125 °C |
+| `XTB` | ✅ | ✅ `BF(T)`/`BR(T)` | ✅ ngspice, and `XTB=0` pinned as the control |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Ib|^AF / f` across base-emitter — the **base** current, as SPICE does | ✅ ngspice at two `AF` values |
+| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `TNOM` | ⚠️ accepted, not modelled — `TNOM` **partly**, as for the diode | ❌ | ✅ warning text pinned |
 
 ### Instance parameters
 
@@ -220,14 +312,53 @@ milliamps.
 | `PB`, `MJ` | ✅ | ✅ bottom of the junction | ⚠️ transitively |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
-| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `KF`, `AF`, `TNOM`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
+| `RD`, `RS` | ✅ | ✅ a real internal node each, `1/R` between the external terminal and it — not an analytic elimination, see below | ✅ ngspice DC, and equal to an external resistor of the same value |
+| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
 
-Note `RD`/`RS`/`RSH` in that list: a MOSFET card's series resistances are
-**not** stamped, unlike the BJT's. A card that models its access resistance
-there gets none of it, and now says so.
+### `RD`/`RS`, and why they are rows rather than an elimination
+
+Each non-zero series resistance allocates an **internal node**, exactly as the
+BJT's `RB`/`RC`/`RE` do, and stamps `1/R` between the external terminal and it.
+With no resistance the internal node aliases the external one, so a card without
+them allocates no extra rows and stamps no extra conductances.
+
+Not an analytic elimination, deliberately, and the diode's `RS` is why: it
+eliminated the series drop by iterating on a junction voltage the outer Newton
+could not see, read 2.7% low against ngspice, and the convergence test had no way
+to notice — see *`gmin`, `RS`, and step limiting* under the diode. A row costs one
+unknown. A hidden state costs a silent wrong answer.
+
+`RSH` stays unmodelled: it is a *sheet* resistance and needs `NRD`/`NRS` (numbers
+of squares) to become a resistance at all, and those are instance parameters this
+model does not take. A card giving `RSH` without `RD`/`RS` is still told.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
+
+### Flicker noise, and why ngspice is not the anchor for it
+
+`KF`/`AF` give `KF·|Id|^AF / (f·W·L·COX)`, the documented SPICE3 form, with `Id`
+stored at eval time rather than reconstructed from the Norton offset (`bjt.rs`
+carried exactly that bug once). `LD` is unmodelled, so `Leff` is the drawn `L`.
+
+A card with `KF` and no `TOX` or `COX` is a **hard error naming both**: the
+density's denominator is `W·L·COX`, and `COX` is zero unless the card gives one,
+so the alternative is a non-finite noise density reaching the matrix.
+
+ngspice's MOS1 flicker density could not be used as the reference. Measured at
+`KF=1e-24, W=10u, L=1u, TOX=20n`, it returns **3.706770e-11 V²/Hz at every one
+of `AF` = 0.5, 1.0, 1.2 and 2.0** — bit-identical, so its `AF` does nothing. Over
+the same sweep the *diode's* `AF` moves as a clean power law, so this is a
+property of ngspice's MOS1 rather than of the deck or the card syntax. It also
+scales as `W¹·L⁻³` where the documented form gives `W⁰·L⁻²` (`W⁰` because
+`Id ∝ W/L` cancels the `W` in the denominator).
+
+Asserting ngspice's number would mean asserting a density that ignores a
+parameter the card sets. So `mosfet_flicker_matches_the_closed_form` checks the
+closed form, and `the_mosfet_normalisation_is_read` checks that `W`, `L` and `TOX`
+each move the answer. The diode and the BJT *are* anchored on ngspice, which
+agrees with both to 5e-3.
 
 ### `gmin`
 
@@ -395,12 +526,12 @@ job and the answer is wrong anyway. This is the per-field audit.
 | noise sources (`load_noise`) | ✅ `white_noise` / `flicker_noise` | ⚠️ see §10 `.noise` |
 | `thermal` nodes (via `units == "K"`) | ✅ | ✅ `thermal_discipline.rs` |
 | operating-point variables (`num_opvars`) | ⚠️ readable through `OsdiDevice::read_opvar`, and nothing surfaces them to a deck or a probe |  |
-| `OsdiSimParas` | ❌ a null table is passed, so a model's `$simparam("gmin")` and friends take the default written into the call rather than this simulator's value |  |
-| `eval`'s return flags | ❌ discarded — `EVAL_RET_FLAG_FATAL` means the model is telling us this evaluation is invalid, and it is not heard |  |
+| `OsdiSimParas` | ✅ `gmin`, `scale`, `shrink`, `simulatorSubversion`. A name not in the table falls back to the model's own default, as every name did before, so the list is monotone. `iteration`/`sourceScaleFactor` are left out deliberately — they change per Newton iteration and would cost an allocation on the hottest path for something no model in the sweep reads; `imax`/`imelt` are left out because fairchild does not enforce them and answering would be a claim it does not keep | ✅ `abi_simparam.va` makes two lookups the *only* conductance on separate branches, with absurd fallbacks, so a missing table is orders of magnitude and not a tolerance |
+| `eval`'s return flags | ✅ `EVAL_RET_FLAG_FATAL` reaches the Newton loop through `Device::eval_status`, and joins a clamped step and a stalled line search as a reason this iterate cannot be the converged one. If a device is still saying so when the budget runs out, its message is the error rather than a bare non-convergence. `EVAL_RET_FLAG_LIM` is routine and ignored |  |
 | `ANALYSIS_IC` / `ANALYSIS_STATIC` / `ANALYSIS_NODESET` | ❌ never set; a model that branches on them behaves as if none applied |  |
 | `given_flag_model` / `given_flag_instance` | ❌ unused; "was this parameter given" is inferred from the deck instead |  |
 | init errors (`OsdiInitInfo`) | ⚠️ surfaced, but only `INIT_ERR_OUT_OF_BOUNDS` is decoded; any other code is reported as a bare number |  |
-| `bound_step_offset` | ❌ unused — a model cannot limit the timestep |  |
+| `bound_step_offset` | ✅ read on the variable-step transient path, where `h` is bounded by the smallest request across devices. Not on the fixed-step path: there the step is what the deck asked for. The sentinel is `u32::MAX`, **not** zero — measured across every fixture, which all report 0xffffffff against a valid 8-aligned 104 for one that calls `$bound_step`. Guarding on zero dereferences 0xffffffff and aborts | ✅ `abi_bound_step.va`, binding and not binding |
 | `load_jacobian_resist` (the aliasing path) | ❌ the copy path is used instead, deliberately |  |
 
 ### What has been run through it

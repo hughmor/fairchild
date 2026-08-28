@@ -13,14 +13,17 @@
 mod ac_filter_golden;
 mod ngspice_bjt_golden;
 mod ngspice_coupled_inductors_golden;
+mod ngspice_diode_breakdown_golden;
 mod ngspice_diode_golden;
 mod ngspice_diode_tran_golden;
+mod ngspice_flicker_golden;
 mod ngspice_gmin_golden;
 mod ngspice_golden;
 mod ngspice_method_golden;
 mod ngspice_mosfet_golden;
 mod ngspice_noise_golden;
 mod ngspice_switch_golden;
+mod ngspice_temperature_golden;
 mod ngspice_tf_pz_golden;
 mod ngspice_tline_golden;
 mod ngspice_tran_golden;

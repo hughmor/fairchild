@@ -24,6 +24,19 @@ pub enum SimError {
     #[error("parameter error: {0}")]
     ParameterError(String),
     #[error(
+        "model '{model}' is binned and no bin covers L={l:.4e} W={w:.4e}.\n\
+         Bins:\n{windows}\n\
+         Picking the nearest bin would be a wrong answer with nothing to read. \
+         Either the instance geometry is outside what the PDK characterised, or a \
+         bin card is missing from the deck."
+    )]
+    NoMatchingBin {
+        model: String,
+        l: f64,
+        w: f64,
+        windows: String,
+    },
+    #[error(
         "no AC source: .ac needs at least one source with an `AC <mag> [phase]` spec, \
          e.g. `V1 in 0 DC 0 AC 1`. Without one there is nothing to excite the circuit."
     )]

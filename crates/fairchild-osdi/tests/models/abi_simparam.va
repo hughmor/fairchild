@@ -1,0 +1,28 @@
+// A model whose two conductances *are* two `$simparam` lookups.
+//
+// `OsdiSimParas` was passed as an empty list, so every `$simparam` in a foundry
+// model took the default written into its own call rather than the simulator's
+// value. That is the same fault the native models had with `const GMIN`: the
+// option exists, the deck sets it, and nothing reads it. It is invisible in a
+// real model, where `gmin` is one term among many and worth a picoamp.
+//
+// So each lookup is the *only* term on its own branch, and the branches are on
+// separate node pairs so neither can swamp the other. A first attempt put both on
+// one node, and `scale = 1` buried `gmin = 1e-6` under a 1e-6 perturbation — the
+// test passed with the table sabotaged away entirely.
+//
+// The fallbacks are deliberately nothing like the real values, so "table missing"
+// and "table present" differ by orders of magnitude rather than by a tolerance.
+`include "disciplines.vams"
+
+module abi_simparam(a, b, c, d);
+    inout a, b, c, d;
+    electrical a, b, c, d;
+    analog begin
+        // Fallback 1.0 S against a real gmin of 1e-3…1e-5 S: three to five
+        // orders of magnitude on V(a) = I/g.
+        I(a, b) <+ $simparam("gmin", 1.0) * V(a, b);
+        // Fallback 1e-9 S against a real `scale` of 1.0: nine orders on V(c).
+        I(c, d) <+ $simparam("scale", 1e-9) * V(c, d);
+    end
+endmodule

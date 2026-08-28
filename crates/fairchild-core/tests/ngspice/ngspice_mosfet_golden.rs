@@ -259,3 +259,104 @@ fn cmos_inverter_caps_switching_time() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RD / RS — the ohmic series resistances (#77 §2)
+// ---------------------------------------------------------------------------
+
+/// The drain node of an NMOS with a load resistor. `V(d)` reads the drain
+/// current directly through the load, so it is the observable for `RD`/`RS`.
+fn nmos_drain_v(model_extra: &str, instances: &str) -> f64 {
+    let deck = format!(
+        "* rd/rs\n.model nm NMOS (VTO=0.7 KP=500u {model_extra})\n\
+         VDD vdd 0 DC 3\nVG g 0 DC 1.5\nRL vdd d 1k\n{instances}.op\n"
+    );
+    let netlist = parse_spice(&deck).expect("parse");
+    dc_op_nr(&netlist)
+        .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+        .node_voltage("d")
+        .expect("V(d)")
+}
+
+/// `RD`/`RS` in the model card are series resistances, so they must equal
+/// explicit resistors of the same value — and match ngspice.
+///
+/// # Why the self-consistency half as well as the anchor
+///
+/// Two forms of one circuit agreeing cannot detect a fault common to both, so
+/// ngspice anchors one side. But the internal-node form is the *interesting* one:
+/// it is the shape the diode's `RS` got wrong by eliminating the internal node
+/// instead of allocating it, which read 2.7% low with the convergence test unable
+/// to notice. Drawing the same circuit twice is how that class of fault surfaces.
+#[test]
+fn rd_and_rs_equal_explicit_resistors() {
+    // 500 Ω, not 50: at ~2.7 mA that is over a volt of series drop, so the
+    // effect being tested is far larger than the noise between two solves.
+    for (rd, rs) in [(500.0_f64, 0.0_f64), (0.0, 500.0), (500.0, 500.0)] {
+        let internal = nmos_drain_v(&format!("RD={rd} RS={rs}"), "M1 d g 0 0 nm W=100u L=1u\n");
+        // The same circuit drawn. A zero resistance becomes a tiny one rather
+        // than a removed element, so the topology matches in every case.
+        let external = nmos_drain_v(
+            "",
+            &format!(
+                "RDx d dp {:e}\nRSx sp 0 {:e}\nM1 dp g sp 0 nm W=100u L=1u\n",
+                rd.max(1e-9),
+                rs.max(1e-9),
+            ),
+        );
+        // The solver's own convergence bound, not a tighter number: the two
+        // decks have different topologies and so take different Newton paths, and
+        // anything below this bound is where each stopped rather than what the
+        // circuit is. The first version used 1e-6 and measured 3.4e-6 of exactly
+        // that. The series drop being tested is over a volt, so this stays
+        // thousands of times discriminating.
+        let opts = SimOptions::default();
+        let same = opts.vntol + opts.reltol * internal.abs();
+        assert!(
+            (internal - external).abs() < same,
+            "RD={rd} RS={rs}: in the model V(d)={internal:.9} V, drawn as \
+             resistors V(d)={external:.9} V — the same circuit, and they differ by \
+             more than the convergence bound {same:.2e}."
+        );
+
+        let with_print = format!(
+            "* rd/rs\n.model nm NMOS (VTO=0.7 KP=500u RD={rd} RS={rs})\n\
+             VDD vdd 0 DC 3\nVG g 0 DC 1.5\nRL vdd d 1k\n\
+             M1 d g 0 0 nm W=100u L=1u\n\
+             .control\nop\nprint v(d)\n.endc\n.end\n"
+        );
+        if let Some(ng) = ngspice_op_node(&with_print, "d") {
+            let rel_ng = (internal - ng).abs() / ng.abs().max(ABS_TOL_V);
+            assert!(
+                rel_ng < REL_TOL,
+                "RD={rd} RS={rs}: fairchild V(d)={internal:.9}, ngspice {ng:.9} \
+                 (rel {rel_ng:.2e})"
+            );
+        }
+    }
+}
+
+/// The series resistance has to *do* something, which the comparison above
+/// cannot show: two forms that both ignored the parameter would still agree.
+#[test]
+fn rd_and_rs_reduce_the_drain_current() {
+    let bare = nmos_drain_v("", "M1 d g 0 0 nm W=100u L=1u\n");
+    let with_r = nmos_drain_v("RD=50 RS=50", "M1 d g 0 0 nm W=100u L=1u\n");
+    // Less current through the load means a *higher* drain node voltage.
+    assert!(
+        with_r > bare + 1e-3,
+        "100 Ω in series must cost current, so V(d) must rise above the bare \
+         {bare:.6} V: got {with_r:.6} V. An equal voltage means RD/RS reached the \
+         card and stopped there."
+    );
+    // Source degeneration is the stronger of the two: its drop subtracts from
+    // Vgs as well as from Vds.
+    let drain_only = nmos_drain_v("RD=100", "M1 d g 0 0 nm W=100u L=1u\n");
+    let source_only = nmos_drain_v("RS=100", "M1 d g 0 0 nm W=100u L=1u\n");
+    assert!(
+        source_only > drain_only,
+        "RS degenerates the gate drive as well as the drain, so the same value \
+         must cost more current than RD: RS gives V(d)={source_only:.6}, RD gives \
+         {drain_only:.6}"
+    );
+}

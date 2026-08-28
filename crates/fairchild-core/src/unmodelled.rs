@@ -27,22 +27,6 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
     (
-        "bv",
-        "reverse breakdown is not modelled — a Zener or an ESD clamp \
-         simulates as an ordinary diode with no knee",
-    ),
-    ("ibv", "the current at the breakdown knee is not modelled"),
-    ("eg", "IS does not vary with temperature"),
-    ("xti", "IS does not vary with temperature"),
-    (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
         "isr",
         "the recombination current is not modelled, so the low-current \
          ideality stays at N",
@@ -58,7 +42,9 @@ pub const DIODE: Unmodelled = &[
     ),
     (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
     ("trs1", "RS does not vary with temperature"),
     ("trs2", "RS does not vary with temperature"),
@@ -98,20 +84,11 @@ pub const BJT: Unmodelled = &[
     ("vtf", "the forward transit time is constant (needs XTF)"),
     ("itf", "the forward transit time is constant (needs XTF)"),
     ("ptf", "excess phase is not modelled"),
-    ("xtb", "the betas do not vary with temperature"),
-    ("eg", "IS does not vary with temperature"),
-    ("xti", "IS does not vary with temperature"),
-    (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
     (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
 ];
 
@@ -123,9 +100,11 @@ pub const MOSFET: Unmodelled = &[
          bulk conducts nothing",
     ),
     ("js", "the bulk junction diodes are not stamped"),
-    ("rd", "the drain ohmic series resistance is not stamped"),
-    ("rs", "the source ohmic series resistance is not stamped"),
-    ("rsh", "the ohmic series resistances are not stamped"),
+    (
+        "rsh",
+        "the sheet resistance needs NRD/NRS squares to become a resistance, and \
+         those instance parameters are not taken — give RD/RS directly",
+    ),
     ("nsub", "nothing is derived from the substrate doping"),
     (
         "nss",
@@ -176,16 +155,10 @@ pub const MOSFET: Unmodelled = &[
     ("eta", "static feedback on the threshold is not modelled"),
     ("kappa", "the saturation-field factor is not modelled"),
     (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
     ("php", "the sidewall junction uses PB as its potential"),
 ];
