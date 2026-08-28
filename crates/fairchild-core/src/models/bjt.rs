@@ -132,6 +132,9 @@ pub struct GummelPoonBjt {
     /// error in an exponent — enough to advance a charge the evaluation never
     /// produced.  Cached here so both read the same number.
     vt: f64,
+    /// `KF`/`AF` — flicker noise coefficient and exponent.
+    kf: f64,
+    af: f64,
     /// `TNOM` — the temperature this card's parameters were extracted at.
     tnom: f64,
     /// `EG` — activation energy, eV.
@@ -250,6 +253,8 @@ impl GummelPoonBjt {
         let mut vjc = 0.75;
         let mut mjc = 0.33;
         let mut fc = 0.5;
+        let mut kf = 0.0_f64;
+        let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut eg = crate::temperature::EG_DEFAULT;
         let mut xti = crate::temperature::XTI_DEFAULT;
@@ -259,6 +264,8 @@ impl GummelPoonBjt {
             match k.to_lowercase().as_str() {
                 "is" => is = *v,
                 // Degrees Celsius on the card, like `.temp`.
+                "kf" => kf = *v,
+                "af" => af = *v,
                 "tnom" => tnom_c = *v,
                 "eg" => eg = *v,
                 "xti" => xti = *v,
@@ -350,6 +357,8 @@ impl GummelPoonBjt {
             vjc,
             mjc,
             fc,
+            kf,
+            af,
             tnom: tnom_c + 273.15,
             eg,
             xti,
@@ -852,7 +861,7 @@ impl Device for GummelPoonBjt {
             .advance(disc, q_depl(self.cjc, vbc_eff, self.vjc, self.mjc, self.fc));
     }
 
-    fn noise_sources(&self, ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         // Shot noise on B-E and B-C junctions.
         // i_n_be² = 2q|IB|, flows base→emitter.
         // i_n_ce² = 2q|IC| (collector shot noise), flows collector→emitter.
@@ -867,7 +876,16 @@ impl Device for GummelPoonBjt {
             sources.push((self.collector, self.emitter, 2.0 * Q_E * self.ic_eval.abs()));
         }
         if self.ib_eval.abs() > 1e-20 {
-            sources.push((self.base, self.emitter, 2.0 * Q_E * self.ib_eval.abs()));
+            // Flicker rides with the base shot noise: SPICE drives 1/f from the
+            // *base* current, not the collector's, and both sit across the same
+            // terminal pair. Uncorrelated, so the densities add.
+            let ib_mag = self.ib_eval.abs();
+            let flicker = if self.kf > 0.0 && freq > 0.0 {
+                self.kf * ib_mag.powf(self.af) / freq
+            } else {
+                0.0
+            };
+            sources.push((self.base, self.emitter, 2.0 * Q_E * ib_mag + flicker));
         }
         sources
     }

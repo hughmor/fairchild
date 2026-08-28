@@ -112,7 +112,8 @@ reveals.
 | `BV` | ✅ | ✅ reverse breakdown, knee adjusted so `I(-BV) = IBV` | ✅ ngspice across the knee, and a Zener shunt regulator |
 | `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
 | `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, and at three (EG, XTI) pairs |
-| `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled — `TNOM` **partly**: it re-references `IS` and not the junction capacitance | ❌ | ✅ warning text pinned |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / f` across the junction, in `.noise` and transient noise | ✅ ngspice at two `AF` values, slope and magnitude |
+| `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled — `TNOM` **partly**: it re-references `IS` and not the junction capacitance | ❌ | ✅ warning text pinned |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
@@ -255,7 +256,8 @@ instead. What bounds a step into breakdown now is the trust region
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` | ✅ ngspice at −40/27/75/125 °C |
 | `XTB` | ✅ | ✅ `BF(T)`/`BR(T)` | ✅ ngspice, and `XTB=0` pinned as the control |
-| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `KF`, `AF`, `TNOM` | ⚠️ accepted, not modelled — `TNOM` **partly**, as for the diode | ❌ | ✅ warning text pinned |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Ib|^AF / f` across base-emitter — the **base** current, as SPICE does | ✅ ngspice at two `AF` values |
+| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `TNOM` | ⚠️ accepted, not modelled — `TNOM` **partly**, as for the diode | ❌ | ✅ warning text pinned |
 
 ### Instance parameters
 
@@ -310,7 +312,8 @@ milliamps.
 | `PB`, `MJ` | ✅ | ✅ bottom of the junction | ⚠️ transitively |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
-| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `KF`, `AF`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
+| `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
+| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
 
 Note `RD`/`RS`/`RSH` in that list: a MOSFET card's series resistances are
 **not** stamped, unlike the BJT's. A card that models its access resistance
@@ -318,6 +321,30 @@ there gets none of it, and now says so.
 
 Only Level 1 exists. There is no `LEVEL` parameter and no BSIM — for foundry
 PDKs the answer is the OSDI/Verilog-A path (see user guide §14).
+
+### Flicker noise, and why ngspice is not the anchor for it
+
+`KF`/`AF` give `KF·|Id|^AF / (f·W·L·COX)`, the documented SPICE3 form, with `Id`
+stored at eval time rather than reconstructed from the Norton offset (`bjt.rs`
+carried exactly that bug once). `LD` is unmodelled, so `Leff` is the drawn `L`.
+
+A card with `KF` and no `TOX` or `COX` is a **hard error naming both**: the
+density's denominator is `W·L·COX`, and `COX` is zero unless the card gives one,
+so the alternative is a non-finite noise density reaching the matrix.
+
+ngspice's MOS1 flicker density could not be used as the reference. Measured at
+`KF=1e-24, W=10u, L=1u, TOX=20n`, it returns **3.706770e-11 V²/Hz at every one
+of `AF` = 0.5, 1.0, 1.2 and 2.0** — bit-identical, so its `AF` does nothing. Over
+the same sweep the *diode's* `AF` moves as a clean power law, so this is a
+property of ngspice's MOS1 rather than of the deck or the card syntax. It also
+scales as `W¹·L⁻³` where the documented form gives `W⁰·L⁻²` (`W⁰` because
+`Id ∝ W/L` cancels the `W` in the denominator).
+
+Asserting ngspice's number would mean asserting a density that ignores a
+parameter the card sets. So `mosfet_flicker_matches_the_closed_form` checks the
+closed form, and `the_mosfet_normalisation_is_read` checks that `W`, `L` and `TOX`
+each move the answer. The diode and the BJT *are* anchored on ngspice, which
+agrees with both to 5e-3.
 
 ### `gmin`
 

@@ -25,6 +25,11 @@ pub struct ShockleyDiode {
     is: f64, // saturation current (A)
     n: f64,  // ideality factor
     rs: f64, // series resistance (Ω)
+    /// `KF`/`AF` — flicker noise coefficient and exponent. `KF = 0` is off,
+    /// which is SPICE's default and means the density is exactly zero rather
+    /// than small.
+    kf: f64,
+    af: f64,
     /// `TNOM` — the temperature the card's parameters were extracted at.
     tnom: f64,
     /// `EG` — activation energy, eV. Silicon's 1.11 by default.
@@ -109,6 +114,8 @@ impl ShockleyDiode {
             is,
             n,
             rs: 0.0,
+            kf: 0.0,
+            af: 1.0,
             tnom: crate::temperature::TNOM_DEFAULT_K,
             eg: crate::temperature::EG_DEFAULT,
             xti: crate::temperature::XTI_DEFAULT,
@@ -150,6 +157,8 @@ impl ShockleyDiode {
         let mut mj = 0.5_f64;
         let mut fc = 0.5_f64;
         let mut tt = 0.0_f64;
+        let mut kf = 0.0_f64;
+        let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut eg = crate::temperature::EG_DEFAULT;
         let mut xti = crate::temperature::XTI_DEFAULT;
@@ -171,6 +180,8 @@ impl ShockleyDiode {
                 // `BV=-5` is unambiguous, and erroring on it would reject cards
                 // ngspice reads.
                 // `TNOM` is degrees Celsius on the card, like `.temp`.
+                "kf" => kf = *v,
+                "af" => af = *v,
                 "tnom" => tnom_c = *v,
                 "eg" => eg = *v,
                 "xti" => xti = *v,
@@ -189,6 +200,8 @@ impl ShockleyDiode {
         d.mj = mj;
         d.fc = fc;
         d.tt = tt;
+        d.kf = kf;
+        d.af = af;
         d.tnom = tnom_c + 273.15;
         d.eg = eg;
         d.xti = xti;
@@ -297,6 +310,18 @@ impl ShockleyDiode {
             }
         }
         xbv
+    }
+
+    /// `KF·|Id|^AF / f`, the SPICE flicker density. Zero when `KF` is unset.
+    ///
+    /// `freq <= 0` returns zero rather than an infinity: `.noise` never asks for
+    /// DC, and the transient-noise path probes mid-band, but a caller that did
+    /// would otherwise get a non-finite matrix instead of an error.
+    fn flicker_density(&self, id_mag: f64, freq: f64) -> f64 {
+        if self.kf <= 0.0 || freq <= 0.0 {
+            return 0.0;
+        }
+        self.kf * id_mag.powf(self.af) / freq
     }
 
     /// Derive `bv_adj` when the inputs it depends on have moved. See `bv_key`.
@@ -647,13 +672,17 @@ impl Device for ShockleyDiode {
     /// Uses the bias-point Id cached by the most recent `eval()`.  Returns
     /// nothing when the junction is essentially off (|Id| < 1e-18 A) so the
     /// matrix doesn't pick up vanishing entries from leakage.
-    fn noise_sources(&self, _ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
+    fn noise_sources(&self, _ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {
         let id_mag = self.id_junction.abs();
         if id_mag < 1e-18 {
             return Vec::new();
         }
         const Q: f64 = 1.602176634e-19;
-        let s_i = 2.0 * Q * id_mag;
+        // Shot noise, plus flicker if the card asked for it. Both sit across the
+        // junction, so they are one generator: they are uncorrelated, and adding
+        // uncorrelated densities is what a single density means.
+        let mut s_i = 2.0 * Q * id_mag;
+        s_i += self.flicker_density(id_mag, freq);
         vec![(self.anode, self.cathode, s_i)]
     }
 }

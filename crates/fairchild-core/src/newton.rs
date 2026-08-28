@@ -380,8 +380,10 @@ pub fn build_devices_with_footprints(
                 let b: NodeId = topo.node_index.get(base).copied();
                 let e: NodeId = topo.node_index.get(emitter).copied();
                 let s: NodeId = topo.node_index.get(substrate).copied(); // typically ground
+                                                                         // `?` first: a card that exists but fails validation is a
+                                                                         // named error, not a missing model.
                 let dev = registry
-                    .build_bjt(model_name, name, params, &[c, b, e, s], ctx)
+                    .build_bjt(model_name, name, params, &[c, b, e, s], ctx)?
                     .ok_or_else(|| SimError::UnknownModel(model_name.clone()))?;
                 // RB/RC/RE series resistances declare internal nodes (one per
                 // non-zero resistance); push_device allocates and binds them.

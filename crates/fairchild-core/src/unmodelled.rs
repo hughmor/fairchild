@@ -27,14 +27,6 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
     (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
         "isr",
         "the recombination current is not modelled, so the low-current \
          ideality stays at N",
@@ -92,14 +84,6 @@ pub const BJT: Unmodelled = &[
     ("vtf", "the forward transit time is constant (needs XTF)"),
     ("itf", "the forward transit time is constant (needs XTF)"),
     ("ptf", "excess phase is not modelled"),
-    (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
     (
         "tnom",
         "the junction potential and capacitance are not re-referenced to the \
@@ -168,14 +152,6 @@ pub const MOSFET: Unmodelled = &[
     ),
     ("eta", "static feedback on the threshold is not modelled"),
     ("kappa", "the saturation-field factor is not modelled"),
-    (
-        "kf",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
-    (
-        "af",
-        "flicker (1/f) noise is not modelled, in .noise or in .tran",
-    ),
     (
         "tnom",
         "the junction potential and capacitance are not re-referenced to the \

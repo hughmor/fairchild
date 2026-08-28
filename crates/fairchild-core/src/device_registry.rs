@@ -971,8 +971,10 @@ impl DeviceRegistry {
         instance_params: &[(String, f64)],
         terminals: &[NodeId],
         ctx: &SimContext,
-    ) -> Option<Box<dyn Device>> {
-        let (is_pnp, model_params) = self.bjt_cards.get(model_name)?;
+    ) -> Result<Option<Box<dyn Device>>, crate::SimError> {
+        let Some((is_pnp, model_params)) = self.bjt_cards.get(model_name) else {
+            return Ok(None);
+        };
         let (mut dev, _) = GummelPoonBjt::from_model_params(*is_pnp, model_params);
         warn_dropped_instance_params(
             element,
@@ -983,7 +985,10 @@ impl DeviceRegistry {
         // `setup_model` derives from it — has to see the scaled value.
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
-        Some(Box::new(dev))
+        dev.validate().map_err(|why| {
+            crate::SimError::ParameterError(format!("{element} ('{model_name}'): {why}"))
+        })?;
+        Ok(Some(Box::new(dev)))
     }
 
     /// Register the always-available native photonic devices.
@@ -1110,6 +1115,12 @@ impl DeviceRegistry {
         );
         dev.setup_model(ctx);
         dev.setup_instance(terminals, ctx);
+        // `validate` ran only on the factory path (`finish`), so the MOSFET and
+        // the BJT — which have builders of their own — never reached it. A hook
+        // two device families bypass is a hook that does not exist for them.
+        dev.validate().map_err(|why| {
+            crate::SimError::ParameterError(format!("{element} ('{model_name}'): {why}"))
+        })?;
         Ok(Some(Box::new(dev)))
     }
 

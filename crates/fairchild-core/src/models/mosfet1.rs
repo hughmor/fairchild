@@ -31,6 +31,16 @@ pub struct Mosfet1 {
     lambda: f64, // channel-length modulation (1/V)
     gamma: f64,  // body-effect coefficient (V^0.5)
     phi: f64,    // surface potential (V)
+    /// Drain current at the current iterate, signed as the model computes it.
+    ///
+    /// Kept because flicker noise is driven by `|Id|` and `jeq` is a Norton
+    /// *offset* — equal to the current only when every terminal sits at 0 V. The
+    /// BJT carried exactly that bug once (see its `noise_sources`), so the
+    /// current is stored rather than reconstructed.
+    ids_eval: f64,
+    /// `KF`/`AF` — flicker noise coefficient and exponent.
+    kf: f64,
+    af: f64,
     /// `TNOM` — the temperature this card's parameters were extracted at.
     tnom: f64,
     /// The three temperature-shifted values, derived in `setup_model` from the
@@ -157,6 +167,8 @@ impl Mosfet1 {
 
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
+        let mut kf = 0.0_f64;
+        let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut vto = if is_pmos { -0.7 } else { 0.7 };
         let mut kp = 2e-5;
@@ -184,6 +196,8 @@ impl Mosfet1 {
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
                 // Degrees Celsius on the card, like `.temp`.
+                "kf" => kf = *v,
+                "af" => af = *v,
                 "tnom" => tnom_c = *v,
                 "cgso" => cgso = *v,
                 "cgdo" => cgdo = *v,
@@ -213,6 +227,9 @@ impl Mosfet1 {
             gamma,
             phi,
             polarity: if is_pmos { -1.0 } else { 1.0 },
+            ids_eval: 0.0,
+            kf,
+            af,
             tnom: tnom_c + 273.15,
             // Nominal until `setup_model` runs, which is before any eval.
             vto_t: vto,
@@ -512,6 +529,7 @@ impl Device for Mosfet1 {
         self.gm = gm_eff;
         self.gds = gds_total;
         self.gmbs = gmbs_eff;
+        self.ids_eval = ids_real;
         self.jeq = ids_real - gm_eff * vgs - gds_total * vds - gmbs_eff * vbs;
 
         // ── Capacitance evaluation ──────────────────────────────────────────
@@ -729,13 +747,53 @@ impl Device for Mosfet1 {
         self.vds_eff_prev = self.polarity * (vd - vs);
     }
 
-    fn noise_sources(&self, ctx: &SimContext, _freq: f64) -> Vec<(NodeId, NodeId, f64)> {
-        if self.gm.abs() < 1e-18 {
+    fn noise_sources(&self, ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {
+        const K_BOLTZMANN: f64 = 1.380649e-23;
+        // Channel thermal noise, and flicker if the card asked for it. Both sit
+        // drain-to-source and are uncorrelated, so they are one density.
+        let thermal = if self.gm.abs() < 1e-18 {
+            0.0
+        } else {
+            8.0 / 3.0 * K_BOLTZMANN * ctx.temperature * self.gm.abs()
+        };
+        // `KF·|Id|^AF / (f·W·Leff·Cox)`. `Leff` is the drawn `L`: lateral
+        // diffusion (`LD`) is on the unmodelled list, so there is nothing to
+        // subtract. `validate` has already refused a card with `KF` and no oxide
+        // capacitance, so the denominator here is positive whenever `kf > 0`.
+        let flicker = if self.kf > 0.0 && freq > 0.0 {
+            let norm = self.w * self.l * self.cox;
+            self.kf * self.ids_eval.abs().powf(self.af) / (freq * norm)
+        } else {
+            0.0
+        };
+        let s_i = thermal + flicker;
+        if s_i <= 0.0 {
             return Vec::new();
         }
-        const K_BOLTZMANN: f64 = 1.380649e-23;
-        let s_i = 8.0 / 3.0 * K_BOLTZMANN * ctx.temperature * self.gm.abs();
         vec![(self.drain, self.source, s_i)]
+    }
+
+    /// Refuse a card that asks for flicker noise without an oxide capacitance.
+    ///
+    /// SPICE normalises the flicker density by `W·Leff·Cox`, and `Cox` is zero
+    /// unless the card gives `TOX` or `COX`. So `KF` with neither is a division
+    /// by zero — which would reach the noise matrix as a non-finite density and
+    /// come back as a garbage spectrum rather than as a complaint.
+    fn validate(&mut self) -> Result<(), String> {
+        // `<=` rather than `!(> 0.0)`: NaN would fall through either way, and a
+        // NaN product means the card is broken in a way the message still fits.
+        let norm = self.w * self.l * self.cox;
+        if self.kf > 0.0 && !norm.is_finite() || (self.kf > 0.0 && norm <= 0.0) {
+            return Err(format!(
+                "KF={:e} asks for flicker noise, and its density is normalised by \
+                 W·L·COX, which is {:e} here. Give the model card a `TOX` (oxide \
+                 thickness, m) or a `COX` (capacitance per unit area, F/m²), or \
+                 drop `KF`. Dividing by zero would return a non-finite noise \
+                 density rather than an error.",
+                self.kf, norm
+            ));
+        }
+        Ok(())
     }
 }
 
