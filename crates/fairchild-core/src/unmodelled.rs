@@ -64,11 +64,6 @@ pub const BJT: Unmodelled = &[
 
 /// MOSFET (`.model … NMOS|PMOS`), Level 1.
 pub const MOSFET: Unmodelled = &[
-    (
-        "rsh",
-        "the sheet resistance needs NRD/NRS squares to become a resistance, and \
-         those instance parameters are not taken — give RD/RS directly",
-    ),
     ("nsub", "nothing is derived from the substrate doping"),
     (
         "nss",

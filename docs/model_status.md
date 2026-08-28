@@ -572,7 +572,8 @@ for it.
 | `TNOM` | ✅ | ✅ `KP(T)`, `PHI(T)`, `VTO(T)`, `PB(T)`, `CJ`/`CJSW`, and the bulk junctions' `Isat(T)` | ✅ ngspice at −40/27/75/125 °C, threshold and mobility separated by a two-point fit |
 | `UO` | ✅ | ✅ derives `KP = UO·COX` when the card gives no `KP` | ✅ ngspice: `UO=300` gives exactly half the drain current of the 600 default |
 | `IS`, `JS` | ✅ | ✅ bulk-source and bulk-drain diodes, `JS·AS` / `JS·AD` when the area is given, else `IS` | ✅ ngspice DC forward and reverse, plus a closed-form anchor on the reverse branch |
-| `RSH`, `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `RSH` | ✅ | ✅ `RD = RSH·NRD`, `RS = RSH·NRS`, per terminal | ✅ ngspice at eight cards, including the mixed-precedence pair |
+| `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 | `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA`, `KAPPA` | ⚠️ accepted, not modelled — **and not part of LEVEL 1**, see below | ❌ | ✅ warning text pinned |
 
 ### The body diodes, and where they differ from ngspice
@@ -618,6 +619,28 @@ so SPICE puts the temperature-dependent bandgap in the exponent instead. Reusing
 the diode's law here would be out by up to 2.4× over −40 to 125 °C. Measured
 against ngspice at five temperatures spanning five decades of `Isat`, worst
 residual 3.7e-4.
+
+### `RSH` with `NRD`/`NRS`
+
+`RSH` is a resistance per square and `NRD`/`NRS` are the squares of diffusion at
+each terminal, so `RD = RSH·NRD` and `RS = RSH·NRS`. It was accepted and dropped, so
+a card that gives sheet resistance instead of `RD`/`RS` got no series resistance at
+all.
+
+The equalities are exact rather than approximate. In ngspice `RSH=50 NRD=2 NRS=2` is
+bit-identical to `RD=100 RS=100`, ratio 1.000000000, and `RSH=50` alone equals
+`RD=50 RS=50`, which is how the `NRD = NRS = 1` default was read off.
+
+**Precedence is per terminal.** `RSH=50 RD=1000 NRD=2 NRS=2` reads 0.00147653 where
+`RD=1000` alone reads 0.00161661, so an explicit `RD` wins on the drain and
+`RSH·NRS` still applies to the source. `NRD` maps to the drain and `NRS` to the
+source, checked by asymmetry: `NRD=4 NRS=1` reads 0.00350969 against `NRD=1 NRS=4`'s
+0.00281955, because source degeneration costs more current than the same resistance
+in the drain.
+
+Resolved in `set_instance_params` rather than at card-parse time, because `NRD`/`NRS`
+are instance parameters. `num_extra_nodes` is asked after that, so a card with only
+an `RSH` still allocates its internal nodes.
 
 ### `RD`/`RS`, and why they are rows rather than an elimination
 

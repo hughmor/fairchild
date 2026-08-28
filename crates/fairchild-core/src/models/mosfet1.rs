@@ -48,8 +48,23 @@ pub struct Mosfet1 {
     source_ext: NodeId,
     /// `RD`/`RS` — drain and source ohmic series resistance (Ω). `0` means no
     /// internal node, and the internal node then aliases the external terminal.
+    /// The drain and source series resistances actually stamped.
+    ///
+    /// Resolved in `set_instance_params` from the card's `RD`/`RS` if it gives
+    /// them, otherwise from `RSH·NRD` and `RSH·NRS`. Per terminal: a card with an
+    /// explicit `RD` and an `RSH` gets the explicit one on the drain and the sheet
+    /// one on the source, which is what ngspice does.
     rd: f64,
     rs: f64,
+    /// What the card said, so "given" is distinguishable from "defaulted to zero".
+    rd_card: Option<f64>,
+    rs_card: Option<f64>,
+    /// `RSH` — resistance per square of the drain and source diffusions.
+    rsh: f64,
+    /// `NRD`/`NRS` — squares of diffusion, instance parameters. Both default to 1,
+    /// so an `RSH` with no squares given is one square per terminal.
+    nrd: f64,
+    nrs: f64,
     /// Drain current at the current iterate, signed as the model computes it.
     ///
     /// Kept because flicker noise is driven by `|Id|` and `jeq` is a Norton
@@ -244,8 +259,9 @@ impl Mosfet1 {
 
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
-        let mut rd = 0.0_f64;
-        let mut rs = 0.0_f64;
+        let mut rd: Option<f64> = None;
+        let mut rs: Option<f64> = None;
+        let mut rsh = 0.0_f64;
         let mut kf = 0.0_f64;
         let mut af = 1.0_f64;
         let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
@@ -285,8 +301,9 @@ impl Mosfet1 {
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
                 // Degrees Celsius on the card, like `.temp`.
-                "rd" => rd = *v,
-                "rs" => rs = *v,
+                "rd" => rd = Some(*v),
+                "rs" => rs = Some(*v),
+                "rsh" => rsh = *v,
                 "kf" => kf = *v,
                 "af" => af = *v,
                 "tnom" => tnom_c = *v,
@@ -332,8 +349,17 @@ impl Mosfet1 {
             polarity: if is_pmos { -1.0 } else { 1.0 },
             drain_ext: None,
             source_ext: None,
-            rd,
-            rs,
+            // Both start at the card's value, or zero. `set_instance_params`
+            // re-resolves them once `NRD`/`NRS` are known, and `num_extra_nodes`
+            // is asked after that, so a card with only `RSH` still gets its
+            // internal nodes.
+            rd: rd.unwrap_or(0.0),
+            rs: rs.unwrap_or(0.0),
+            rd_card: rd,
+            rs_card: rs,
+            rsh,
+            nrd: 1.0,
+            nrs: 1.0,
             is_bulk,
             js,
             isat_bs: IS_BULK_DEFAULT,
@@ -434,6 +460,8 @@ impl Mosfet1 {
             match k.to_lowercase().as_str() {
                 "w" => w = *v,
                 "l" => l = *v,
+                "nrd" => self.nrd = *v,
+                "nrs" => self.nrs = *v,
                 "as" => as_ = *v,
                 "ad" => ad = *v,
                 "ps" => ps = *v,
@@ -455,6 +483,16 @@ impl Mosfet1 {
         self.cox_wl = self.cox * w * l;
         // `JS·area` when both are given, else `IS`. The two junctions resolve
         // independently because `AS` and `AD` can differ.
+        // `RSH·NRD` and `RSH·NRS`, per terminal, with an explicit `RD`/`RS`
+        // winning on its own terminal. Measured: `RSH=50 NRD=2 NRS=2` is
+        // bit-identical to `RD=100 RS=100`, and `RSH=50 RD=1000 NRS=2` puts 1000
+        // on the drain and 100 on the source.
+        //
+        // Resolved here rather than in `from_params` because `NRD`/`NRS` are
+        // instance parameters, and asked for by `num_extra_nodes` only after this
+        // has run.
+        self.rd = self.rd_card.unwrap_or(self.rsh * self.nrd);
+        self.rs = self.rs_card.unwrap_or(self.rsh * self.nrs);
         self.isat_bs = if self.js > 0.0 && as_ > 0.0 {
             self.js * as_
         } else {

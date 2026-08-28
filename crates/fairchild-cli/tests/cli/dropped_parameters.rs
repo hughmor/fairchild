@@ -15,7 +15,7 @@ const DECK: &str = "\
 * dropped-parameter diagnostics
 .model dm D (IS=1e-14 N=1 BV=50 IBV=1e-3 ISR=1e-12 CTA=1e-3)
 .model qm NPN (IS=1e-16 BF=100 VAF=50 IKF=1e-3 XCJC=0.5 PTF=30)
-.model nm NMOS (VTO=0.7 KP=100u CJ=0.5m CJSW=1n MJ=0.5 MJSW=0.33 RD=20 RSH=50)
+.model nm NMOS (VTO=0.7 KP=100u CJ=0.5m CJSW=1n MJ=0.5 MJSW=0.33 RD=20 RSH=50 NSUB=1e16)
 V1 a 0 DC 1.5
 R1 a d 1k
 D1 d 0 dm area=2 banana=3
@@ -48,7 +48,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
     for (key, phrase) in [
         ("CTA ignored", "ngspice ignores it too"),
         ("PTF ignored", "excess phase"),
-        ("RSH ignored", "NRD/NRS"),
+        ("NSUB ignored", "substrate doping"),
     ] {
         assert!(err.contains(key), "no diagnostic for {key}:\n{err}");
         let line = err
@@ -88,6 +88,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
         "VAF ignored",
         "XCJC ignored",
         "ISR ignored",
+        "RSH ignored",
         "'area'",
     ] {
         assert!(

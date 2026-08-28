@@ -761,3 +761,106 @@ fn the_bulk_junction_saturation_current_scales_with_temperature() {
     }
     assert_eq!(ran, 5, "every temperature point must have been compared");
 }
+
+/// `RSH` with `NRD`/`NRS` becomes the drain and source series resistances.
+///
+/// `RSH` is a resistance per square and `NRD`/`NRS` are the number of squares in
+/// each diffusion, so `RD = RSH·NRD` and `RS = RSH·NRS`. Before this `RSH` was
+/// accepted and dropped, and a card that gives sheet resistance instead of `RD`/`RS`
+/// got no series resistance at all.
+///
+/// Measured, and the equalities are exact rather than approximate. `RSH=50 NRD=2
+/// NRS=2` is bit-identical to `RD=100 RS=100` in ngspice, ratio 1.000000000, and
+/// `RSH=50` alone equals `RD=50 RS=50`, which is how the `NRD=NRS=1` default was
+/// read off.
+///
+/// # Precedence is per terminal
+///
+/// `RSH=50 RD=1000 NRD=2 NRS=2` reads 0.00147653 where `RD=1000` alone reads
+/// 0.00161661. So the explicit `RD` wins on the drain and `RSH·NRS` still applies
+/// to the source. Treating one explicit value as disabling `RSH` for both terminals
+/// gives the second number, and is the mistake this test exists to catch.
+///
+/// `NRD` maps to the drain and `NRS` to the source: `NRD=4 NRS=1` reads 0.00350969
+/// and `NRD=1 NRS=4` reads 0.00281955, because source degeneration costs more
+/// current than the same resistance in the drain. So swapping them fails too.
+#[test]
+fn rsh_times_the_squares_becomes_the_series_resistance() {
+    let mut compared = 0;
+    for (model, inst) in [
+        ("VTO=0.7 KP=200u", "W=10u L=1u"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=4 NRS=1"),
+        ("VTO=0.7 KP=200u RSH=50", "W=10u L=1u NRD=1 NRS=4"),
+        ("VTO=0.7 KP=200u RSH=50 RD=1000", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RSH=50 RS=1000", "W=10u L=1u NRD=2 NRS=2"),
+        ("VTO=0.7 KP=200u RD=100 RS=100", "W=10u L=1u"),
+    ] {
+        let deck = format!(
+            "* rsh\n.model nm NMOS ({model})\n\
+             VG g 0 DC 3\nVD d 0 DC 2\nM1 d g 0 0 nm {inst}\n"
+        );
+        let net = parse_spice(&deck).expect("parse");
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&net.models);
+        let opts = SimOptions::from_netlist(&net);
+        let got = dc_op_nr_with_registry_opts(&net, &registry, &opts)
+            .unwrap_or_else(|e| panic!("solve failed on\n{deck}\n{e:?}"))
+            .vsrc_current("vd")
+            .expect("i(vd)")
+            .abs();
+        let Some(ng) = ngspice_bulk_i_vd(&deck) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        // `CHANNEL_TOL` is too tight here: the body-drain junction's leakage rides
+        // on `I(vd)` and the channel current is milliamps, so this is the file's
+        // ordinary golden tolerance.
+        let rel = (got - ng).abs() / ng;
+        assert!(
+            rel < REL_TOL,
+            "'{model}' / '{inst}': fairchild I(vd)={got:.6e}, ngspice {ng:.6e} \
+             (rel {rel:.2e}). Dropping RSH gives the no-resistance answer for \
+             five of these eight rows."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 8, "every card must have been compared");
+}
+
+/// ngspice's `i(vd)` for a `.op` deck.
+fn ngspice_bulk_i_vd(deck: &str) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let dir = std::env::temp_dir().join("fc_rsh_golden");
+    std::fs::create_dir_all(&dir).ok()?;
+    let tag: String = deck
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .skip(4)
+        .take(56)
+        .collect();
+    let path = dir.join(format!("rsh_{tag}.sp"));
+    std::fs::write(
+        &path,
+        format!("{deck}.control\nop\nprint i(vd)\n.endc\n.end\n"),
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(&path).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("i(vd)") && t.contains('=') {
+            if let Ok(v) = t
+                .split('=')
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+            {
+                return Some(v.abs());
+            }
+        }
+    }
+    None
+}
