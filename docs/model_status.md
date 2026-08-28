@@ -111,7 +111,8 @@ reveals.
 | `TT` | ✅ | ✅ | ⚠️ transitively (transit-time charge) |
 | `BV` | ✅ | ✅ reverse breakdown, knee adjusted so `I(-BV) = IBV` | ✅ ngspice across the knee, and a Zener shunt regulator |
 | `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
-| `EG`, `XTI`, `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, and at three (EG, XTI) pairs |
+| `KF`, `AF`, `ISR`, `NR`, `IKF`, `TNOM`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled — `TNOM` **partly**: it re-references `IS` and not the junction capacitance | ❌ | ✅ warning text pinned |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
@@ -161,6 +162,41 @@ dropped. A value that cannot be read (`area=2x`) is a parse error — it used to
 be discarded, which read as "this simulator ignores AREA".
 
 Shot noise (`2q·|Id|`) is stamped for `.noise`.
+
+### Temperature
+
+`crate::temperature` owns every temperature law, because the same bandgap
+expression appears in the diode's saturation current, the BJT's, and the MOSFET's
+threshold, and three copies are three chances to disagree. Devices hold a
+*factor* derived once per solve, derived idempotently from the nominal value so a
+second `setup_model` cannot compound it and so `AREA` still multiplies on top.
+
+Every law was **back-solved from ngspice**, not read from the SPICE source, which
+carries several variants of each:
+
+| law | form | how it was measured |
+|---|---|---|
+| diode `IS(T)` | `IS·exp((T/TNOM−1)·EG/(N·vt))·(T/TNOM)^(XTI/N)` | reverse saturation at −1 V *is* `−IS(T)`; fitted `XTI` 2.9999, `EG` 1.1100 against defaults of 3 and 1.11 |
+| BJT `IS(T)` | `IS·(T/TNOM)^XTI·exp(EG·(T/TNOM−1)/vt)` | `IC` at fixed `V_BE`, dividing out `exp(V_BE/vt(T))`; residual 1.6e−6 |
+| BJT `BF(T)` | `BF·(T/TNOM)^XTB` | `IC/IB`, which cancels `IS(T)`; 1.5278 measured against 1.5278 |
+| MOSFET `KP(T)` | `KP·(T/TNOM)^−1.5` | slope of `sqrt(Id)` against two `Vgs`, which separates it from the threshold |
+| MOSFET `PHI(T)`, `VTO(T)` | SPICE3's `pbfact`/bandgap form | the same fit's intercept; residual 0.04 mV |
+
+Note the **`/N`**: the emission coefficient divides both temperature terms in the
+diode law and neither in the BJT's. The two coincide at `N = 1`, which is why
+`the_diode_law_divides_by_n` exists — it is the only test that separates them, and
+sabotage confirms it is the only one that catches the difference.
+
+`k` and `q` in `temperature.rs` are SPICE3's values rather than the more accurate
+ones used elsewhere in this tree. The bandgap expressions are curve fits whose
+coefficients were published against those constants, and a better `k` moves
+`PHI(T)` in the fourth decimal and stops matching ngspice.
+
+**What is still not re-referenced to `TNOM`:** the junction potentials and
+capacitances (`VJ`/`CJO` on a diode, `VJE`/`VJC`/`CJE`/`CJC` on a BJT). So `TNOM`
+remains on the accepted-but-not-modelled list with a message naming exactly that
+boundary — a card carrying `CJO` and `TNOM` together still gets told. This affects
+transient and AC only; the DC operating point is fully re-referenced.
 
 ### `gmin`, `RS`, and step limiting
 
@@ -217,7 +253,9 @@ instead. What bounds a step into breakdown now is the trust region
 | `CJE`, `VJE`, `MJE` | ✅ | ✅ | ✅ ngspice transient (CE stage, 5 %) |
 | `CJC`, `VJC`, `MJC` | ✅ | ✅ | ✅ ngspice transient |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
-| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `XTB`, `EG`, `XTI`, `KF`, `AF`, `TNOM` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `EG`, `XTI` | ✅ | ✅ `IS(T)`, re-referenced to the card's `TNOM` | ✅ ngspice at −40/27/75/125 °C |
+| `XTB` | ✅ | ✅ `BF(T)`/`BR(T)` | ✅ ngspice, and `XTB=0` pinned as the control |
+| `CJS`, `VJS`, `MJS`, `FCS`, `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF`, `KF`, `AF`, `TNOM` | ⚠️ accepted, not modelled — `TNOM` **partly**, as for the diode | ❌ | ✅ warning text pinned |
 
 ### Instance parameters
 
@@ -272,7 +310,7 @@ milliamps.
 | `PB`, `MJ` | ✅ | ✅ bottom of the junction | ⚠️ transitively |
 | `FC` | ✅ | ✅ | ⚠️ transitively |
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
-| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `KF`, `AF`, `TNOM`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `IS`, `JS`, `RD`, `RS`, `RSH`, `NSUB`, `NSS`, `NFS`, `TPG`, `UO`, `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `XJ`, `LD`, `DELTA`, `THETA`, `ETA`, `KAPPA`, `KF`, `AF`, `TNOM`, `PHP` | ⚠️ accepted, not modelled — `TNOM` **partly**: `KP(T)`, `PHI(T)` and `VTO(T)` are re-referenced to it (see *Temperature* under the diode), the junction capacitances are not | ❌ | ✅ warning text pinned |
 
 Note `RD`/`RS`/`RSH` in that list: a MOSFET card's series resistances are
 **not** stamped, unlike the BJT's. A card that models its access resistance

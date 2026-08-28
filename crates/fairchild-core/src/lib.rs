@@ -24,6 +24,7 @@ pub mod reactive;
 pub mod sanity;
 pub mod sens;
 pub mod solver;
+pub mod temperature;
 pub mod tf;
 pub mod tolerance;
 pub mod tran;

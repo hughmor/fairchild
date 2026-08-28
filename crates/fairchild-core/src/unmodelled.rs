@@ -26,8 +26,6 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
-    ("eg", "IS does not vary with temperature"),
-    ("xti", "IS does not vary with temperature"),
     (
         "kf",
         "flicker (1/f) noise is not modelled, in .noise or in .tran",
@@ -52,7 +50,9 @@ pub const DIODE: Unmodelled = &[
     ),
     (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
     ("trs1", "RS does not vary with temperature"),
     ("trs2", "RS does not vary with temperature"),
@@ -92,9 +92,6 @@ pub const BJT: Unmodelled = &[
     ("vtf", "the forward transit time is constant (needs XTF)"),
     ("itf", "the forward transit time is constant (needs XTF)"),
     ("ptf", "excess phase is not modelled"),
-    ("xtb", "the betas do not vary with temperature"),
-    ("eg", "IS does not vary with temperature"),
-    ("xti", "IS does not vary with temperature"),
     (
         "kf",
         "flicker (1/f) noise is not modelled, in .noise or in .tran",
@@ -105,7 +102,9 @@ pub const BJT: Unmodelled = &[
     ),
     (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
 ];
 
@@ -179,7 +178,9 @@ pub const MOSFET: Unmodelled = &[
     ),
     (
         "tnom",
-        "no parameter is re-referenced to the extraction temperature",
+        "the junction potential and capacitance are not re-referenced to the \
+         extraction temperature (the saturation current, betas, transconductance \
+         and threshold are)",
     ),
     ("php", "the sidewall junction uses PB as its potential"),
 ];

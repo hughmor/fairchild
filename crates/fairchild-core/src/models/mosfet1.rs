@@ -26,11 +26,25 @@ const GMIN_SEED: f64 = 1e-12;
 /// Junction capacitances use the same depletion-cap model as the diode.
 pub struct Mosfet1 {
     // ── DC model parameters ──────────────────────────────────────────────────
-    vto: f64,      // threshold voltage (V)
-    kp: f64,       // process transconductance (A/V²)
-    lambda: f64,   // channel-length modulation (1/V)
-    gamma: f64,    // body-effect coefficient (V^0.5)
-    phi: f64,      // surface potential (V)
+    vto: f64,    // threshold voltage (V)
+    kp: f64,     // process transconductance (A/V²)
+    lambda: f64, // channel-length modulation (1/V)
+    gamma: f64,  // body-effect coefficient (V^0.5)
+    phi: f64,    // surface potential (V)
+    /// `TNOM` — the temperature this card's parameters were extracted at.
+    tnom: f64,
+    /// The three temperature-shifted values, derived in `setup_model` from the
+    /// nominal ones and `crate::temperature`.
+    ///
+    /// Held rather than recomputed per eval: `PHI(T)` costs two logs and an
+    /// exponential and depends on nothing that moves inside a solve. Derived
+    /// idempotently, so a second `setup_model` cannot compound the shift.
+    ///
+    /// `GAMMA` does not shift — it is a doping/oxide ratio — but it multiplies
+    /// `sqrt(PHI(T))`, so the body effect moves with temperature anyway.
+    vto_t: f64,
+    kp_t: f64,
+    phi_t: f64,
     polarity: f64, // +1 for NMOS, −1 for PMOS
 
     // ── Gate cap model parameters (Meyer model) ──────────────────────────────
@@ -143,6 +157,7 @@ impl Mosfet1 {
 
     /// Construct from model-card parameters.
     pub fn from_model_params(is_pmos: bool, params: &[(String, f64)]) -> (Self, Vec<String>) {
+        let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
         let mut vto = if is_pmos { -0.7 } else { 0.7 };
         let mut kp = 2e-5;
         let mut lambda = 0.0;
@@ -168,6 +183,8 @@ impl Mosfet1 {
                 "lambda" => lambda = *v,
                 "gamma" => gamma = *v,
                 "phi" => phi = *v,
+                // Degrees Celsius on the card, like `.temp`.
+                "tnom" => tnom_c = *v,
                 "cgso" => cgso = *v,
                 "cgdo" => cgdo = *v,
                 "cgbo" => cgbo = *v,
@@ -196,6 +213,11 @@ impl Mosfet1 {
             gamma,
             phi,
             polarity: if is_pmos { -1.0 } else { 1.0 },
+            tnom: tnom_c + 273.15,
+            // Nominal until `setup_model` runs, which is before any eval.
+            vto_t: vto,
+            kp_t: kp,
+            phi_t: phi,
             cgso,
             cgdo,
             cgbo,
@@ -378,7 +400,26 @@ impl Device for Mosfet1 {
         4
     }
 
-    fn setup_model(&mut self, _ctx: &SimContext) {}
+    fn setup_model(&mut self, ctx: &SimContext) {
+        // The mobility law and the threshold shift. `.temp` used to reach this
+        // model only through `vt`, which Level 1's DC current does not even use —
+        // so a 125 C run returned the 27 C drain current to the last bit.
+        //
+        // Idempotent: derived from the nominal values every time, never from the
+        // previous result.
+        let t = ctx.temperature;
+        self.kp_t = self.kp * crate::temperature::mobility_factor(t, self.tnom);
+        self.phi_t = crate::temperature::scaled_phi(self.phi, t, self.tnom);
+        self.vto_t = crate::temperature::scaled_vto(
+            self.vto,
+            self.gamma,
+            self.phi,
+            self.phi_t,
+            t,
+            self.tnom,
+            self.polarity < 0.0,
+        );
+    }
 
     fn setup_instance(&mut self, terminals: &[NodeId], _ctx: &SimContext) {
         debug_assert_eq!(terminals.len(), 4, "MOSFET expects [D, G, S, B]");
@@ -405,7 +446,7 @@ impl Device for Mosfet1 {
         // with diodes/BJTs).  Also clamp Vds sign-changes to keep NR out of
         // the triode/saturation ping-pong basin.
         if ctx.jlim_enabled {
-            let vto_eff = pol * self.vto;
+            let vto_eff = pol * self.vto_t;
             let dvg = vgs_eff - self.vgs_eff_prev;
             if vgs_eff > vto_eff && dvg.abs() > 1.0 {
                 vgs_eff = self.vgs_eff_prev + dvg.signum() * (1.0 + (dvg.abs() - 1.0).ln_1p());
@@ -418,15 +459,15 @@ impl Device for Mosfet1 {
         self.vds_eff_prev = vds_eff;
 
         // Threshold voltage with body effect.
-        let phi_m_vbs = (self.phi - vbs_eff).max(1e-10);
-        let vto_eff = pol * self.vto;
-        let vth = vto_eff + self.gamma * (phi_m_vbs.sqrt() - self.phi.sqrt());
+        let phi_m_vbs = (self.phi_t - vbs_eff).max(1e-10);
+        let vto_eff = pol * self.vto_t;
+        let vth = vto_eff + self.gamma * (phi_m_vbs.sqrt() - self.phi_t.sqrt());
 
         let (ids_eff, gm_eff, gds_eff, gmbs_eff) = if vgs_eff < vth {
             (0.0, 0.0, 0.0, 0.0)
         } else {
             let vdsat = vgs_eff - vth;
-            let beta = self.kp * self.w_over_l;
+            let beta = self.kp_t * self.w_over_l;
             let clm = 1.0 + self.lambda * vds_eff;
             let dvth_dvbs = if self.gamma > 0.0 {
                 -self.gamma / (2.0 * phi_m_vbs.sqrt())

@@ -22,6 +22,7 @@ mod ngspice_method_golden;
 mod ngspice_mosfet_golden;
 mod ngspice_noise_golden;
 mod ngspice_switch_golden;
+mod ngspice_temperature_golden;
 mod ngspice_tf_pz_golden;
 mod ngspice_tline_golden;
 mod ngspice_tran_golden;

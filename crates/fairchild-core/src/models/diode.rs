@@ -25,6 +25,18 @@ pub struct ShockleyDiode {
     is: f64, // saturation current (A)
     n: f64,  // ideality factor
     rs: f64, // series resistance (Ω)
+    /// `TNOM` — the temperature the card's parameters were extracted at.
+    tnom: f64,
+    /// `EG` — activation energy, eV. Silicon's 1.11 by default.
+    eg: f64,
+    /// `XTI` — the saturation current's temperature exponent.
+    xti: f64,
+    /// `IS(T)/IS`, from [`crate::temperature::diode_is_factor`].
+    ///
+    /// A factor rather than a scaled `IS`, so `setup_model` running more than
+    /// once cannot apply it twice — and so `AREA`, which arrives afterwards, still
+    /// multiplies cleanly on top.
+    is_t_factor: f64,
     /// `BV` — reverse breakdown voltage as a positive magnitude. `None` when the
     /// card gives none, which is not the same as `0.0`: a card with `BV=0` breaks
     /// down immediately and a card without one never does.
@@ -97,6 +109,10 @@ impl ShockleyDiode {
             is,
             n,
             rs: 0.0,
+            tnom: crate::temperature::TNOM_DEFAULT_K,
+            eg: crate::temperature::EG_DEFAULT,
+            xti: crate::temperature::XTI_DEFAULT,
+            is_t_factor: 1.0,
             bv: None,
             ibv: 1e-3,
             bv_adj: None,
@@ -134,6 +150,9 @@ impl ShockleyDiode {
         let mut mj = 0.5_f64;
         let mut fc = 0.5_f64;
         let mut tt = 0.0_f64;
+        let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
+        let mut eg = crate::temperature::EG_DEFAULT;
+        let mut xti = crate::temperature::XTI_DEFAULT;
         let mut bv: Option<f64> = None;
         let mut ibv = 1e-3_f64;
         let mut unknown = Vec::new();
@@ -151,6 +170,10 @@ impl ShockleyDiode {
                 // it negative means the same diode. `abs` rather than a refusal:
                 // `BV=-5` is unambiguous, and erroring on it would reject cards
                 // ngspice reads.
+                // `TNOM` is degrees Celsius on the card, like `.temp`.
+                "tnom" => tnom_c = *v,
+                "eg" => eg = *v,
+                "xti" => xti = *v,
                 "bv" => bv = Some(v.abs()),
                 "ibv" => ibv = v.abs(),
                 // Accepted and NOT modelled: `crate::unmodelled` owns that list
@@ -166,14 +189,17 @@ impl ShockleyDiode {
         d.mj = mj;
         d.fc = fc;
         d.tt = tt;
+        d.tnom = tnom_c + 273.15;
+        d.eg = eg;
+        d.xti = xti;
         d.bv = bv;
         d.ibv = ibv;
         (d, unknown)
     }
 
-    /// Saturation current of the whole instance: `IS·AREA`.
+    /// Saturation current of the whole instance: `IS(T)·AREA`.
     fn is_eff(&self) -> f64 {
-        self.is * self.area
+        self.is * self.is_t_factor * self.area
     }
 
     /// Zero-bias junction capacitance of the whole instance: `CJO·AREA`.
@@ -425,6 +451,16 @@ impl Device for ShockleyDiode {
 
     fn setup_model(&mut self, ctx: &SimContext) {
         let vt = ctx.vt();
+        // `IS` moves with temperature far more than `vt` does: at 125 C a silicon
+        // junction leaks ~9e4 times its 27 C value, and `.temp` used to change
+        // only the exponent. Idempotent, so a second `setup_model` is harmless.
+        self.is_t_factor = crate::temperature::diode_is_factor(
+            ctx.temperature,
+            self.tnom,
+            self.eg,
+            self.xti,
+            self.n,
+        );
         // Deliberately the unit-area IS: `AREA` arrives after `setup_model`
         // (and can arrive twice, through the alias path). `vcrit` only decides
         // when pnjlim starts compressing steps, and AREA moves it by

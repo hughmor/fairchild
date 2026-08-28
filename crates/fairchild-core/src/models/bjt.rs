@@ -132,6 +132,20 @@ pub struct GummelPoonBjt {
     /// error in an exponent — enough to advance a charge the evaluation never
     /// produced.  Cached here so both read the same number.
     vt: f64,
+    /// `TNOM` — the temperature this card's parameters were extracted at.
+    tnom: f64,
+    /// `EG` — activation energy, eV.
+    eg: f64,
+    /// `XTI` — the saturation current's temperature exponent.
+    xti: f64,
+    /// `XTB` — the betas' temperature exponent.
+    xtb: f64,
+    /// `IS(T)/IS` and `BF(T)/BF`, from `crate::temperature`.
+    ///
+    /// Factors rather than scaled parameters, so `setup_model` running twice
+    /// cannot apply them twice, and so `AREA` still multiplies on top.
+    is_t_factor: f64,
+    beta_t_factor: f64,
     /// `SimContext::gmin` from the last `eval`, for the same reason `vt` is
     /// stored: `commit_timestep` recomputes `op` from the converged solution and
     /// must do it with the same solve-level constants the eval used.
@@ -236,10 +250,19 @@ impl GummelPoonBjt {
         let mut vjc = 0.75;
         let mut mjc = 0.33;
         let mut fc = 0.5;
+        let mut tnom_c = crate::temperature::TNOM_DEFAULT_K - 273.15;
+        let mut eg = crate::temperature::EG_DEFAULT;
+        let mut xti = crate::temperature::XTI_DEFAULT;
+        let mut xtb = crate::temperature::XTB_DEFAULT;
         let mut unknown = Vec::new();
         for (k, v) in params {
             match k.to_lowercase().as_str() {
                 "is" => is = *v,
+                // Degrees Celsius on the card, like `.temp`.
+                "tnom" => tnom_c = *v,
+                "eg" => eg = *v,
+                "xti" => xti = *v,
+                "xtb" => xtb = *v,
                 "bf" | "hfe" => bf = *v,
                 "br" | "hrc" => br = *v,
                 "nf" => nf = *v,
@@ -293,6 +316,8 @@ impl GummelPoonBjt {
             polarity: if is_pnp { -1.0 } else { 1.0 },
             vcrit: 0.0,
             vt: 0.025864,
+            is_t_factor: 1.0,
+            beta_t_factor: 1.0,
             gmin: GMIN_SEED,
             collector: None,
             base: None,
@@ -325,6 +350,10 @@ impl GummelPoonBjt {
             vjc,
             mjc,
             fc,
+            tnom: tnom_c + 273.15,
+            eg,
+            xti,
+            xtb,
             area: 1.0,
             cje_eval: 0.0,
             cjc_eval: 0.0,
@@ -386,6 +415,12 @@ impl GummelPoonBjt {
     /// bias point — SPICE3 `BJTload`, minus excess phase and the TF bias
     /// modulation (`XTF`/`VTF`/`ITF`), which are not parsed.
     fn op(&self, vbe: f64, vbc: f64, vt: f64, gmin: f64) -> Op {
+        // Temperature-scaled, once, at the top: `op` reads these ten times and a
+        // scaling applied at each read is ten chances to miss one. The factors
+        // come from `setup_model`; see `crate::temperature`.
+        let is_t = self.is * self.is_t_factor;
+        let bf_t = self.bf * self.beta_t_factor;
+        let br_t = self.br * self.beta_t_factor;
         // Transport currents.  These are the ones the base charge divides, and
         // the ones the high-injection knee is measured against — not the
         // base currents, which is why IKF is compared with IF and not with IB.
@@ -393,10 +428,10 @@ impl GummelPoonBjt {
         let nr_vt = self.nr * vt;
         let e_be = (vbe / nf_vt).exp();
         let e_bc = (vbc / nr_vt).exp();
-        let i_f = self.is * (e_be - 1.0);
-        let i_r = self.is * (e_bc - 1.0);
-        let gbe = self.is * e_be / nf_vt;
-        let gbc = self.is * e_bc / nr_vt;
+        let i_f = is_t * (e_be - 1.0);
+        let i_r = is_t * (e_bc - 1.0);
+        let gbe = is_t * e_be / nf_vt;
+        let gbc = is_t * e_bc / nr_vt;
 
         // Non-ideal (recombination) leakage: a second, softer exponential in
         // parallel with each junction, and the reason a real beta falls off at
@@ -456,13 +491,13 @@ impl GummelPoonBjt {
         // `gmin·V` on each junction, matching the conductances added to
         // `gpi`/`gmu` below. A conductance that carries no current would only
         // condition the matrix, which is what this used to do.
-        let ic = it - i_r / self.br - i_bcn - gmin * vbc;
-        let ib = i_f / self.bf + i_ben + i_r / self.br + i_bcn + gmin * vbe + gmin * vbc;
+        let ic = it - i_r / br_t - i_bcn - gmin * vbc;
+        let ib = i_f / bf_t + i_ben + i_r / br_t + i_bcn + gmin * vbe + gmin * vbc;
 
         // ∂IC/∂V: the `it·∂qb/∂V / qb` terms ARE the output conductance.  Drop
         // the ∂qb/∂VBC one and the small-signal ro stops matching the DC slope.
         let gf = (gbe - it * dqb_dvbe) / qb;
-        let gce = (gbc + it * dqb_dvbc) / qb + gbc / self.br + gbcn;
+        let gce = (gbc + it * dqb_dvbc) / qb + gbc / br_t + gbcn;
         // `gmin` across each junction, at the *terminal* pair.
         //
         // Not folded into `gbe`/`gbc`: those are transport quantities and are
@@ -478,8 +513,8 @@ impl GummelPoonBjt {
         // removes exactly one `gmin·V`. That junction is not modelled here at all
         // (`docs/model_status.md` — `CJS`/`VJS`/`MJS`/`FCS`), so it is recorded
         // rather than faked.
-        let gpi = gbe / self.bf + gben + gmin;
-        let gmu = gbc / self.br + gbcn + gmin;
+        let gpi = gbe / bf_t + gben + gmin;
+        let gmu = gbc / br_t + gbcn + gmin;
 
         // Diffusion charge.  Forward carries the base-charge factor (it is the
         // stored minority charge of the transport current); reverse does not,
@@ -522,6 +557,11 @@ impl Device for GummelPoonBjt {
         let vt = ctx.vt();
         self.vt = vt;
         self.gmin = ctx.gmin;
+        // Idempotent factors, so a second `setup_model` cannot double-apply and
+        // `AREA` — which arrives afterwards — still multiplies on top.
+        self.is_t_factor =
+            crate::temperature::bjt_is_factor(ctx.temperature, self.tnom, self.eg, self.xti);
+        self.beta_t_factor = crate::temperature::beta_factor(ctx.temperature, self.tnom, self.xtb);
         self.vcrit = vt * (vt / (std::f64::consts::SQRT_2 * self.is)).ln();
     }
 

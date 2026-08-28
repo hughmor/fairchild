@@ -904,6 +904,25 @@ and every analysis in the deck runs at each of them.
 A single `.temp 75` is not a sweep — it just sets the temperature, so the deck
 still has one corner.
 
+**What temperature actually changes.** `kT/q`, and the device parameters that
+SPICE re-references to a card's `TNOM`:
+
+| model | re-referenced | not |
+|---|---|---|
+| diode | `IS` via `EG`/`XTI` | `VJ`, `CJO` |
+| BJT | `IS` via `EG`/`XTI`, `BF`/`BR` via `XTB` | `VJE`, `VJC`, `CJE`, `CJC` |
+| MOSFET Level 1 | `KP` (mobility), `PHI`, `VTO` | the junction capacitances |
+| compiled (OSDI) | whatever the model does with the temperature it is handed | — |
+
+So a DC operating point is fully temperature-corrected, and a transient or AC
+answer still uses nominal junction capacitances. A card carrying both `TNOM` and a
+junction capacitance says so on stderr. Every law is measured against ngspice at
+−40, 27, 75 and 125 °C (`docs/model_status.md`, *Temperature*).
+
+`RS` on a diode does not vary with temperature (`TRS1`/`TRS2` are accepted and
+not modelled), and neither do a MOSFET's series resistances, which are not
+stamped at all.
+
 The CLI runs the whole grid, one output file per corner (see
 [§8](#8-cli-reference)). From Python it is the same grid, expanded by the same
 code, reachable two ways:
@@ -1172,7 +1191,7 @@ circuit.run("tran", step=1e-9, stop=100e-9,
 Convergence aids that don't appear as fields but always run:
 
 - **GMIN stepping**: starts at `gminmax`, ramps to zero. It puts a large
-  conductance on every node and takes it away again; `gmin` itself is not a nodal
+  conductance on every node and takes it away again. `gmin` itself is not a nodal
   quantity, so the endpoint is 0 and the answer does not depend on the homotopy.
 - **Source stepping**: ramps sources 0 → final in `srcsteps` steps.
 - **Pseudo-transient continuation**: not yet implemented.
