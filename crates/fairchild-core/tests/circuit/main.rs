@@ -26,6 +26,7 @@ mod reactive_history_seeding;
 mod singular_is_not_nonconvergence;
 mod small_signal_analyses;
 mod solver_klu;
+mod sparse_factorisation;
 mod spectre_wrapper;
 mod transient_noise;
 mod trust_region_does_not_end_the_solve;

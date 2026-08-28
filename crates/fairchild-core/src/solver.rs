@@ -400,14 +400,42 @@ struct FaerSparseFactorisation {
     /// the refill walk visits them: row-major over `pattern.cols`.
     slot: Vec<u32>,
     values: Vec<f64>,
-    symbolic: Option<faer::sparse::linalg::solvers::SymbolicLu<usize>>,
+    /// The symbolic factorisation, from the `linalg::lu` API rather than the
+    /// `solvers::Lu` wrapper — see [`SUPERNODAL_THRESHOLD`].
+    symbolic: Option<faer::sparse::linalg::lu::SymbolicLu<usize>>,
     /// Numeric factors of the matrix currently in `values`.  `None` means they
     /// are stale (or never computed) and the next solve must factorise.
-    numeric: Option<faer::sparse::linalg::solvers::Lu<usize, f64>>,
+    numeric: Option<faer::sparse::linalg::lu::NumericLu<usize, f64>>,
 }
 
 /// `slot` entry for a structural cell that is not in the active set.
 const NO_SLOT: u32 = u32::MAX;
+
+/// Always take faer's **simplicial** sparse LU, never its supernodal one.
+///
+/// faer's default picks between them on an estimated flop ratio, and a device
+/// with an internal node flips the choice. Its supernodal path then runs a dense
+/// LU on each supernode, which for a circuit matrix is the wrong shape of work.
+///
+/// Measured on one MOSFET ladder, differing only by `RD=50 RS=50`:
+///
+/// | | factorisation | dense-LU frames | ladder cost |
+/// |---|---|---|---|
+/// | no internal nodes | simplicial | 0 | — |
+/// | with, faer default | **supernodal** | **471** | 10× |
+/// | with, KLU | (never dense) | 0 | 1.2× |
+/// | with, forced simplicial | simplicial | 0 | see `#99` |
+///
+/// The same shape on a BJT ladder via `RB`/`RC`/`RE`, at 5× — and those internal
+/// nodes are years old, so this predates the MOSFET gaining any (#98 exposed it
+/// for a second device family rather than introducing it).
+///
+/// A circuit matrix is what simplicial is for: a handful of entries per row and
+/// no dense block worth forming. Nothing here should ever want the supernodal
+/// path, so the choice is pinned rather than left to a heuristic that was tuned
+/// for a different population of matrices.
+const SUPERNODAL_THRESHOLD: faer::sparse::linalg::SupernodalThreshold =
+    faer::sparse::linalg::SupernodalThreshold::FORCE_SIMPLICIAL;
 
 /// What a [`FaerSparseFactorisation::refill`] pass found, and therefore how much
 /// of the cache survives.
@@ -439,7 +467,6 @@ impl FaerSparseFactorisation {
     /// currently non-zero.  Runs on the first solve and again only if a new
     /// cell inside the structural pattern turns non-zero.
     fn rebuild(&mut self, a: &[SparseRow]) -> Result<(), SimError> {
-        use faer::sparse::linalg::solvers::SymbolicLu;
         use faer::sparse::SymbolicSparseColMatRef;
 
         let n = a.len();
@@ -478,7 +505,14 @@ impl FaerSparseFactorisation {
             }
         }
         let sym = SymbolicSparseColMatRef::new_checked(n, n, &col_ptr, None, &row_idx);
-        self.symbolic = Some(SymbolicLu::try_new(sym).map_err(|_| SimError::SingularMatrix)?);
+        let params = faer::sparse::linalg::lu::LuSymbolicParams {
+            supernodal_flop_ratio_threshold: SUPERNODAL_THRESHOLD,
+            ..Default::default()
+        };
+        self.symbolic = Some(
+            faer::sparse::linalg::lu::factorize_symbolic_lu(sym, params)
+                .map_err(|_| SimError::SingularMatrix)?,
+        );
         self.col_ptr = col_ptr;
         self.row_idx = row_idx;
         self.slot = slot;
@@ -533,24 +567,56 @@ impl FaerSparseFactorisation {
     }
 
     /// Solve with the cached factors, computing them first if they are absent.
+    ///
+    /// Against faer's `linalg::lu` API rather than its `solvers::Lu` wrapper,
+    /// because the wrapper's symbolic type cannot be handed parameters — see
+    /// [`SUPERNODAL_THRESHOLD`]. The scratch buffers are sized by faer's own
+    /// `*_scratch` queries, so they cannot drift from what the call needs.
     fn solve_cached(&mut self, b: &[f64]) -> Result<Vec<f64>, SimError> {
-        use faer::sparse::linalg::solvers::Lu;
+        use faer::sparse::linalg::lu::{LuRef, NumericLu};
         use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
+        // `dyn_stack` is faer's own re-export; the scratch types are not in its
+        // root.
+        use faer::dyn_stack::{MemBuffer, MemStack};
+        use faer::{Conj, Par, Spec};
 
         let n = b.len();
+        let symbolic = self.symbolic.as_ref().ok_or(SimError::SingularMatrix)?;
+        let par = Par::Seq;
+
         if self.numeric.is_none() {
-            let symbolic = self.symbolic.clone().ok_or(SimError::SingularMatrix)?;
             let sym =
                 SymbolicSparseColMatRef::new_checked(n, n, &self.col_ptr, None, &self.row_idx);
             let mat = SparseColMatRef::<usize, f64>::new(sym, &self.values);
-            self.numeric = Some(
-                Lu::try_new_with_symbolic(symbolic, mat).map_err(|_| SimError::SingularMatrix)?,
-            );
+            let mut numeric = NumericLu::<usize, f64>::new();
+            let mut buf =
+                MemBuffer::new(symbolic.factorize_numeric_lu_scratch::<f64>(par, Spec::default()));
+            symbolic
+                .factorize_numeric_lu(
+                    &mut numeric,
+                    mat,
+                    par,
+                    MemStack::new(&mut buf),
+                    Spec::default(),
+                )
+                .map_err(|_| SimError::SingularMatrix)?;
+            self.numeric = Some(numeric);
         }
-        let lu = self.numeric.as_ref().expect("just populated");
-        let b_col = Col::<f64>::from_fn(n, |i| b[i]);
-        let x_col = lu.solve(b_col.as_ref());
-        let x: Vec<f64> = (0..n).map(|i| x_col[i]).collect();
+        let numeric = self.numeric.as_ref().expect("just populated");
+
+        let mut rhs = faer::Mat::<f64>::from_fn(n, 1, |i, _| b[i]);
+        let mut buf = MemBuffer::new(symbolic.solve_in_place_scratch::<f64>(1, par));
+        // SAFETY-equivalent: `numeric` was produced by *this* `symbolic`, which is
+        // the pairing `new_unchecked` requires. Both are invalidated together —
+        // `refill` clears `numeric` whenever the pattern moves.
+        LuRef::<'_, usize, f64>::new_unchecked(symbolic, numeric).solve_in_place_with_conj(
+            Conj::No,
+            rhs.as_mut(),
+            par,
+            MemStack::new(&mut buf),
+        );
+
+        let x: Vec<f64> = (0..n).map(|i| rhs[(i, 0)]).collect();
         if x.iter().any(|v| !v.is_finite()) {
             return Err(SimError::SingularMatrix);
         }

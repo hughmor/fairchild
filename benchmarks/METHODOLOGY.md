@@ -114,4 +114,65 @@ model plus one `ddt()`, and a Shockley diode with an `exp`.
 * **Unexplained, and a lead rather than a conclusion:** the per-device overhead
   *rises* with device count instead of flattening. From 512 to 2048 the OSDI side
   grows as N^1.5–1.7 where the native side grows as N^0.7–0.9. Something in the
-  OSDI path scales with more than the device's own footprint.
+  OSDI path scales with more than the device's own footprint. Probably *not* the
+  same cause as the internal-node pathology below — those OSDI fixtures are
+  two-terminal and allocate no internal nodes.
+
+## What a device's internal node costs (#99, fixed)
+
+Worth recording because the first three measurements were all wrong, and each was
+wrong in a way that looked convincing.
+
+The question came out of #77 §2's `RD`/`RS` work: internal unknowns belong in the
+matrix rather than being eliminated (three separate silent wrong answers say so),
+so what does a row cost? Measured on 256 MOSFETs with a 2 kΩ load each,
+`.tran 5n 2u`, the only change being `RD=50 RS=50`:
+
+| | before | after |
+|---|---|---|
+| `.op` | 1.37× | 1.37× |
+| `.tran` | **10.3×** | **1.7×** |
+
+### The eliminations, in order
+
+Each of these looked like the answer and was not:
+
+1. **"It is the step controller."** No — the timepoint count is *identical*, 402
+   with and without, at every device count.
+2. **"It is solver scaling with row count."** No — a plain linear RC ladder at
+   fixed step is linear: 86–105 µs per node from 256 to 4096 nodes.
+3. **"It is the O(rows²) clique footprint."** No — nnz tracks rows
+   proportionally, 2.9 per row either way.
+4. **"It is stiffness."** No — sweeping the series resistance over a 100× range
+   of conductance ratio gives 13.52, 14.06, 14.04, 14.06. Flat.
+5. **"It is the reactive path."** No — present with no capacitors in the deck.
+
+### What it actually was
+
+Profiling, not reasoning. Two `sample` runs of the same circuit differing only by
+`RD=50 RS=50`:
+
+```
+no internal nodes   ->  20 `simplicial` frames,  0 dense-LU frames
+with internal nodes ->  18 `supernodal` frames, 471 `lu_in_place_recursion`
+```
+
+An internal node changed the sparsity structure enough to flip faer's flop-ratio
+heuristic from simplicial to **supernodal**, whose dense-block kernel is the wrong
+shape of work for a circuit matrix. KLU — which never takes a dense path — showed
+1.2–1.6× on the same decks, which is what said the work was fill-in and not the
+rows. `SUPERNODAL_THRESHOLD` in `solver.rs` now pins the choice.
+
+### Confirming the fix did not cost anything
+
+Every deck in `benchmarks/circuits/` plus four photonic examples, interleaved A/B,
+5 reps: worst ratio **1.010×** (`rc_step`, which is noise — 4.9 → 5.0 ms), and
+most are 0.93–0.98×, i.e. *faster*. Output **byte-identical** on all 16.
+
+### And it predates the change that exposed it
+
+The BJT's `RB`/`RC`/`RE` internal nodes are years old and #98 did not touch the
+BJT's stamping. Against the pre-#98 binary the BJT ladder is **4.98×**; against
+the post-#98 one, **5.05×**. So #98 exposed the pathology for a second device
+family rather than introducing it — worth stating because the issue was filed
+before that was known.
