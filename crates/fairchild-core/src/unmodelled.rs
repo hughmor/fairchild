@@ -27,26 +27,20 @@ pub type Unmodelled = &'static [(&'static str, &'static str)];
 /// Diode (`.model … D`).
 pub const DIODE: Unmodelled = &[
     (
-        "isr",
-        "the recombination current is not modelled, so the low-current \
-         ideality stays at N",
-    ),
-    (
-        "nr",
-        "the recombination current is not modelled (needs ISR)",
-    ),
-    (
-        "ikf",
-        "high-injection roll-off is not modelled, so the forward current keeps \
-         its exponential slope past the knee",
-    ),
-    ("trs1", "RS does not vary with temperature"),
-    ("trs2", "RS does not vary with temperature"),
-    (
         "cta",
-        "the junction capacitance does not vary with temperature",
+        "ngspice ignores it too: the capacitance at 1 V reverse is bit-identical \
+         for CTA of 1e-3, 1e-2 and absent, at 27, 75 and 125 C. The junction \
+         capacitance does move with temperature here, by SPICE's cjfact law \
+         (6.546536e-12 at 27 C, 6.866055e-12 at 125 C), which is the same \
+         movement ngspice makes",
     ),
-    ("vpt", "punch-through is not modelled"),
+    (
+        "vpt",
+        "ngspice ignores it too: the current past a BV=50 knee is bit-identical \
+         for VPT of 10, 40, 49 and absent, so there is no reference to match. \
+         Reverse breakdown itself is modelled, and a card relying on \
+         punch-through gets the plain BV knee",
+    ),
 ];
 
 /// BJT (`.model … NPN|PNP`).

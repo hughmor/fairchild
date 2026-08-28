@@ -13,7 +13,7 @@ use std::process::Command;
 /// dropped ones.
 const DECK: &str = "\
 * dropped-parameter diagnostics
-.model dm D (IS=1e-14 N=1 BV=50 IBV=1e-3 ISR=1e-12)
+.model dm D (IS=1e-14 N=1 BV=50 IBV=1e-3 ISR=1e-12 CTA=1e-3)
 .model qm NPN (IS=1e-16 BF=100 VAF=50 IKF=1e-3 XCJC=0.5 PTF=30)
 .model nm NMOS (VTO=0.7 KP=100u CJ=0.5m CJSW=1n MJ=0.5 MJSW=0.33 RD=20 RSH=50)
 V1 a 0 DC 1.5
@@ -46,7 +46,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
     // Model-card parameters that are accepted and do nothing: named once, with
     // what the deck loses rather than just the key.
     for (key, phrase) in [
-        ("ISR ignored", "recombination"),
+        ("CTA ignored", "ngspice ignores it too"),
         ("PTF ignored", "excess phase"),
         ("RSH ignored", "NRD/NRS"),
     ] {
@@ -87,6 +87,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
         "MJSW ignored",
         "VAF ignored",
         "XCJC ignored",
+        "ISR ignored",
         "'area'",
     ] {
         assert!(
@@ -97,7 +98,7 @@ fn dropped_parameters_are_named_and_honoured_ones_are_not() {
 
     // One line per card, not one per instance.
     assert_eq!(
-        err.matches("ISR ignored").count(),
+        err.matches("CTA ignored").count(),
         1,
         "a card's diagnostic must not repeat per instance:\n{err}"
     );

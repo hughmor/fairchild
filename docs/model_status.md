@@ -113,7 +113,10 @@ reveals.
 | `IBV` | ✅ | ✅ default 1 mA | ✅ ngspice at three values, plus the clamp below the leakage floor |
 | `TNOM`, `EG`, `XTI` | ✅ | ✅ `IS(T)`, `VJ(T)`, `CJO(T)` — see *Temperature* below | ✅ ngspice at −40/27/75/125 °C, at three (EG, XTI) pairs, and `Cj` at two `M` |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / f` across the junction, in `.noise` and transient noise | ✅ ngspice at two `AF` values, slope and magnitude |
-| `ISR`, `NR`, `IKF`, `TRS1`, `TRS2`, `CTA`, `VPT` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `ISR`, `NR` | ✅ | ✅ recombination current, with SPICE's generation factor | ✅ ngspice at four `VJ`/`M` pairs and three biases; `NR` is a **deliberate divergence**, see below |
+| `IKF` | ✅ | ✅ `Id/(1 + sqrt(Id/IKF))`, on the **total** forward current | ✅ ngspice at twelve points, residual 1e−6 |
+| `TRS1`, `TRS2` | ✅ | ✅ `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)` | ✅ ngspice at four temperatures and three cards, residual ~1e−6 |
+| `CTA`, `VPT` | ⚠️ accepted, not modelled — **and ngspice ignores both**, see below | ❌ | ✅ measured inert in the reference |
 
 Anything not on either list is an unknown parameter and is warned about as one.
 
@@ -380,6 +383,71 @@ different fault. Out of the transient Jacobian: a wrong Newton step. Out of the 
 matrix: a wrong bandwidth. Out of the companion's `cv`: a spurious
 `scale·cbe_x·vbc` in the converged transient answer, which no AC test can see. The
 last one is worth 83% on a switching deck and has its own transient golden.
+
+### The diode's forward characteristic below and above the ideal region
+
+Three laws, all measured from ngspice rather than read.
+
+**Recombination.** Below about 0.4 V the depletion region's recombination current
+dominates, which is why a real diode's low-current ideality is nearer two than one.
+It was absent, so the low-bias current was the ideal exponential and nothing else.
+
+```text
+Irec = ISR·(exp(V/(NR·vt)) − 1)·((1 − V/VJ)² + 0.005)^(M/2)
+```
+
+Matched to 1.1e−4…2.7e−4 across `(VJ, M)` of (1.0, 0.5), (0.75, 0.33), (0.6, 0.5)
+and (1.0, 0.0), at 0.2, 0.35 and 0.5 V. The `0.005` is what keeps the generation
+factor finite at `V = VJ`, where the bare square is zero and its `M/2` power has an
+infinite slope.
+
+**High injection.** Above `IKF` the current bends from exponential towards `sqrt`,
+because the injected carrier density reaches the doping.
+
+```text
+Id = Id_total/(1 + sqrt(Id_total/IKF))
+```
+
+Matched to 1e−6 at twelve points. The knee applies to the **total** forward current,
+ideal plus recombination, not to the ideal alone: at 0.5 V with `ISR = 1e-8` and
+`IKF = 1e-3` ngspice reads 8.555990e−05, against 8.555977e−05 for knee-on-total and
+1.143950e−04 for knee-on-ideal. Forward only, because in reverse the square root is
+not real and there is no high injection to describe.
+
+**`RS` with temperature.** `RS(T) = RS·(1 + TRS1·dT + TRS2·dT²)`, matched to ~1e−6
+at −40, 0, 75 and 125 °C across three cards, extracted by binary search on a fixed
+`RS` at the same temperature.
+
+`ISR` scales with `AREA` like `IS` and takes `IS`'s temperature factor. Its own law
+would need its own `EG`/`XTI` pair, which the card does not carry.
+
+### `NR` is a deliberate divergence from ngspice
+
+**ngspice ignores `NR`.** Its answer is bit-identical with and without `NR=2`, so it
+hardcodes the default. `NR` is honoured here as a real parameter, which agrees with
+ngspice on every card ngspice can represent — `NR` absent or 2 — and honours one it
+cannot. A card that asks for `NR=1.5` gets `NR=1.5` rather than a silent 2.
+
+This is the same shape as the diode's `AREA` in reverse breakdown, where ngspice
+disagrees with its own parallel pair. Where the reference is self-inconsistent or
+drops a parameter it accepts, this simulator follows the parameter.
+
+### `CTA` and `VPT`, which ngspice ignores too
+
+`CTA` would be a linear temperature coefficient on `CJO`. The capacitance at 1 V
+reverse is bit-identical for `CTA` of 1e−3, 1e−2 and absent, at 27, 75 and 125 °C.
+The junction capacitance *does* move with temperature here, by SPICE's `cjfact`
+law — 6.546536e−12 at 27 °C against 6.866055e−12 at 125 °C — and that is the same
+movement ngspice makes. So `CTA` is inert in the reference, not a missing
+temperature dependence.
+
+`VPT` would be a punch-through voltage in reverse breakdown. The current past a
+`BV=50` knee is bit-identical for `VPT` of 10, 40, 49 and absent, so there is no
+reference to match. Breakdown itself is modelled, and a card relying on
+punch-through gets the plain `BV` knee.
+
+Both stay on the unmodelled list with those measurements as their reasons, the same
+call as the BJT's `FCS` and the MOSFET's LEVEL 2/3 mobility group.
 
 ### The base resistance, which is not constant
 
