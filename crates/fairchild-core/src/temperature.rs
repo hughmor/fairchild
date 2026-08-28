@@ -57,11 +57,49 @@ pub const XTB_DEFAULT: f64 = 0.0;
 
 /// Silicon's bandgap at `t` kelvin, the SPICE3 fit.
 ///
-/// `1.16 − 7.02e-4·T²/(T + 1108)`. Used by the MOSFET threshold shift and
-/// nowhere else — the junction saturation currents take `EG` from the card
-/// instead, because a card may describe a material this fit does not.
+/// `1.16 − 7.02e-4·T²/(T + 1108)`. Used by the MOSFET threshold shift and by
+/// [`mos_junction_is_factor`]. The diode's and the BJT's saturation currents take
+/// `EG` from the card instead, because a card may describe a material this fit
+/// does not. The MOSFET card has no `EG`, which is why it uses the fit.
 pub fn bandgap_ev(t: f64) -> f64 {
     1.16 - (7.02e-4 * t * t) / (t + 1108.0)
+}
+
+/// Multiplier on a **MOSFET's** bulk junction saturation current at `t`.
+///
+/// ```text
+/// Isat(T) = Isat · exp(Eg(TNOM)/vt(TNOM) − Eg(T)/vt(T))
+/// ```
+///
+/// A third law, not either of the two above, and measured to be so. The diode's
+/// and the BJT's use a **constant** `EG` from the card in `exp(EG·(T/TNOM −
+/// 1)/vt(T))` and multiply by `(T/TNOM)^XTI`. A MOSFET card carries neither `EG`
+/// nor `XTI`, and SPICE puts the temperature-dependent bandgap in the exponent
+/// instead.
+///
+/// The difference is not small. Against ngspice at `TNOM = 27 °C`, reading `Isat`
+/// off a bulk held one volt reverse with `gmin = 0`:
+///
+/// | T | ngspice | this law | the diode law at `EG = 1.11` |
+/// |---|---|---|---|
+/// | −40 °C | 1.835405e-20 | 1.834720e-20 | 4.404638e-20 |
+/// | 0 °C | 1.047853e-16 | 1.047717e-16 | 1.437655e-16 |
+/// | 75 °C | 5.986135e-12 | 5.987214e-12 | 3.712831e-12 |
+/// | 125 °C | 9.446510e-10 | 9.449566e-10 | 3.869226e-10 |
+///
+/// The last column is out by up to 2.4×. This one agrees to 3.7e-4 worst case,
+/// and the residual grows with `|T − TNOM|` in the exponent, which is where a
+/// small difference in `k/q` would show. Solving the measurements for `k/q` gives
+/// 8.61638e-5 against SPICE3's 8.617087e-5, so the remaining gap is a constant
+/// this tree deliberately does not copy, on a leakage current between 1e-20 and
+/// 1e-9 A.
+pub fn mos_junction_is_factor(t: f64, tnom: f64) -> f64 {
+    if t <= 0.0 || tnom <= 0.0 {
+        return 1.0;
+    }
+    let vt = t * BOLTZ / CHARGE;
+    let vtnom = tnom * BOLTZ / CHARGE;
+    (bandgap_ev(tnom) / vtnom - bandgap_ev(t) / vt).exp()
 }
 
 /// The built-in-potential temperature term SPICE calls `pbfact`.

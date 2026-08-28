@@ -83,12 +83,6 @@ pub const BJT: Unmodelled = &[
 /// MOSFET (`.model … NMOS|PMOS`), Level 1.
 pub const MOSFET: Unmodelled = &[
     (
-        "is",
-        "the bulk-source and bulk-drain diodes are not stamped, so a forward-biased \
-         bulk conducts nothing",
-    ),
-    ("js", "the bulk junction diodes are not stamped"),
-    (
         "rsh",
         "the sheet resistance needs NRD/NRS squares to become a resistance, and \
          those instance parameters are not taken — give RD/RS directly",

@@ -346,10 +346,55 @@ milliamps.
 | `MJSW` | ✅ | ✅ sidewall, graded separately from `MJ` | ✅ closed form with `CJ=0`, where `MJ` cannot substitute |
 | `KF`, `AF` | ✅ | ✅ flicker noise, `KF·|Id|^AF / (f·W·L·COX)`. A card with `KF` and no `TOX`/`COX` is refused by name — the density's denominator would be zero | ✅ closed form and structure; ngspice is **not** an anchor here, see below |
 | `RD`, `RS` | ✅ | ✅ a real internal node each, `1/R` between the external terminal and it — not an analytic elimination, see below | ✅ ngspice DC, and equal to an external resistor of the same value |
-| `TNOM` | ✅ | ✅ `KP(T)`, `PHI(T)`, `VTO(T)`, `PB(T)`, and `CJ`/`CJSW` at temperature | ✅ ngspice at −40/27/75/125 °C, threshold and mobility separated by a two-point fit |
+| `TNOM` | ✅ | ✅ `KP(T)`, `PHI(T)`, `VTO(T)`, `PB(T)`, `CJ`/`CJSW`, and the bulk junctions' `Isat(T)` | ✅ ngspice at −40/27/75/125 °C, threshold and mobility separated by a two-point fit |
 | `UO` | ✅ | ✅ derives `KP = UO·COX` when the card gives no `KP` | ✅ ngspice: `UO=300` gives exactly half the drain current of the 600 default |
-| `IS`, `JS`, `RSH`, `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `IS`, `JS` | ✅ | ✅ bulk-source and bulk-drain diodes, `JS·AS` / `JS·AD` when the area is given, else `IS` | ✅ ngspice DC forward and reverse, plus a closed-form anchor on the reverse branch |
+| `RSH`, `NSUB`, `NSS`, `TPG`, `XJ`, `LD`, `DELTA`, `PHP` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 | `UCRIT`, `UEXP`, `UTRA`, `VMAX`, `NFS`, `THETA`, `ETA`, `KAPPA` | ⚠️ accepted, not modelled — **and not part of LEVEL 1**, see below | ❌ | ✅ warning text pinned |
+
+### The body diodes, and where they differ from ngspice
+
+The bulk-source and bulk-drain junctions are real pn junctions, so `gmin` crosses
+them. That is what makes the three families consistent: before this a MOSFET had
+no junction at all, and its `gmin` was a Jacobian-only channel floor while the
+diode's and the BJT's were conductances. A reverse-biased MOSFET now leaks
+`2·(Isat + gmin·V)`, which is ngspice's answer at every `gmin` tried.
+
+The law is `Isat·(exp(V/vt) − 1) + gmin·V`, the same one
+`ShockleyDiode::junction` uses. **ngspice's is not, and the difference is worth
+naming.** ngspice's MOS1 reverse branch is flat at exactly `−Isat` from `−3·vt`
+outward, and inside `±3·vt` its total over the two junctions measures as one
+junction flat and one plain Shockley — matched to seven digits, and still there
+with the bulk-drain junction held five volts reverse. That asymmetry is a
+numerical convenience in the reference, not physics.
+
+Both pure choices sit the same distance from it. At −0.01 V with `IS = 1e-14`,
+ngspice reads 1.32e-14 A, Shockley-on-both 6.4e-15 and flat-on-both 2.0e-14 — a
+6.8e-15 A difference either way. Outside `±3·vt` the question disappears: `exp(V/vt)`
+underflows toward zero and Shockley *is* the flat answer, to 4.4e-4 relative at
+−0.2 V and exactly by −0.5 V. So this takes the smooth branch. It is the junction
+law, it is C¹ at zero where the flat form has a kink, and one law lives in one
+place.
+
+One consequence to know about: the junction current appears in a drain
+measurement. A reverse-biased bulk-drain junction adds `Isat + gmin·V` to
+`I(vd)`, about 3 pA at the default `gmin`, which is 9e-9 of a 0.3 mA drain
+current and is why the Level-1 channel tests carry a 1e-6 tolerance rather than
+1e-9.
+
+`Isat` also moves with temperature, by a **third** law — neither the diode's nor
+the BJT's:
+
+```text
+Isat(T) = Isat · exp(Eg(TNOM)/vt(TNOM) − Eg(T)/vt(T))
+```
+
+The other two families use a constant `EG` from the card in `exp(EG·(T/TNOM −
+1)/vt(T))`, times `(T/TNOM)^XTI`. A MOSFET card carries neither `EG` nor `XTI`,
+so SPICE puts the temperature-dependent bandgap in the exponent instead. Reusing
+the diode's law here would be out by up to 2.4× over −40 to 125 °C. Measured
+against ngspice at five temperatures spanning five decades of `Isat`, worst
+residual 3.7e-4.
 
 ### `RD`/`RS`, and why they are rows rather than an elimination
 
