@@ -784,6 +784,17 @@ pub fn tran_nr_with_registry_var_opts(
                 h_actual * (0.9 / lte_norm).sqrt()
             };
             h = h.clamp(h_actual * 0.1, h_actual * 4.0).min(step);
+            // A compiled model may have asked for a smaller next step through
+            // Verilog-A's `$bound_step`. LTE cannot cover that on its own: it
+            // measures the error of a step already taken, and the model is saying
+            // the *next* one will miss something. Native devices return `None`.
+            if let Some(bound) = devices
+                .iter()
+                .filter_map(|d| d.requested_max_timestep())
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                h = h.min(bound);
+            }
         } else {
             consecutive_rejects += 1;
             if consecutive_rejects > opts.max_rejections {

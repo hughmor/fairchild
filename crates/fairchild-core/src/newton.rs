@@ -1263,6 +1263,8 @@ fn nr_inner(
     let mut trial: Option<crate::mna::MnaMatrix> = None;
     let mut first_stamp = true;
     let mut warned_clamp = false;
+    // The last device complaint seen, so the failure can name it.
+    let mut disowned: Option<String> = None;
 
     for _iter in 0..opts.itl1 {
         crate::mna::stamp_netlist_scaled_in_place(
@@ -1276,11 +1278,19 @@ fn nr_inner(
             crate::mna::InductorDc::Short,
         );
 
+        disowned = None;
         for dev in devices.iter_mut() {
             // Independent-source devices (lasers) ramp with the homotopy too;
             // no-op for everything else.
             dev.set_source_scale(source_scale);
             dev.eval(&x, EvalFlags::dc(), ctx);
+            // A compiled model can tell us the bias point it was just handed is
+            // one it cannot evaluate. Its stamp still goes in — walking away with
+            // no matrix is worse than walking away with a step — but this iterate
+            // is not allowed to be the converged one.
+            if let Err(why) = dev.eval_status() {
+                disowned = Some(why);
+            }
             dev.load_residual(&mut mat.b);
             dev.load_jacobian(&mut mat);
         }
@@ -1551,7 +1561,8 @@ fn nr_inner(
         // tenth of it, both reported as converged. It is affordable only because
         // the allowance is relative — see the block above — since otherwise the
         // iterate has to walk `vmax` at a time to wherever it is going.
-        let converged = tol.converged(&x_next, &x) && !armijo_fell_back && !clamped;
+        let converged =
+            tol.converged(&x_next, &x) && !armijo_fell_back && !clamped && disowned.is_none();
 
         x = x_next;
         if converged {
@@ -1571,6 +1582,12 @@ fn nr_inner(
             source_scale,
             gmin_extra,
         );
+    }
+    // A model that disowned its own evaluation is the diagnosis, not the symptom.
+    // Reporting "did not converge" here would send the user hunting for a bias
+    // point when the model already said what was wrong with the one it got.
+    if let Some(why) = disowned {
+        return Err(SimError::ParameterError(why));
     }
     Err(SimError::NoConvergence { iters: opts.itl1 })
 }

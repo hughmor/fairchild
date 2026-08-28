@@ -1,0 +1,30 @@
+// A model that asks the simulator to limit its timestep.
+//
+// Verilog-A's `$bound_step(dt)` is a model saying "do not step past this or you
+// will miss something". OpenVAF writes the request into the instance data at the
+// descriptor's `bound_step_offset`, and fairchild used to ignore it — leaving the
+// LTE controller as the only thing watching the step size, and LTE only sees the
+// error of a step already taken.
+//
+// The device is a plain conductance so nothing else in the deck has an opinion
+// about the step. `dtmax` is an instance parameter so one fixture covers several
+// requested bounds, and a run with `dtmax` large enough not to bind is the
+// control.
+//
+// Reading the request is a raw `f64` load at an offset a shared library supplied,
+// and the sentinel for "this model never calls `$bound_step`" is `u32::MAX` — not
+// zero. Measured: every other fixture in this tree reports 0xffffffff, and this
+// one reports a valid 8-aligned offset. Guarding on zero instead dereferences
+// 0xffffffff and aborts the process.
+`include "disciplines.vams"
+
+module abi_bound_step(a, b);
+    inout a, b;
+    electrical a, b;
+    parameter real g = 1e-3 from (0:inf);
+    parameter real dtmax = 1e-9 from (0:inf);
+    analog begin
+        $bound_step(dtmax);
+        I(a, b) <+ g * V(a, b);
+    end
+endmodule

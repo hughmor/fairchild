@@ -370,6 +370,37 @@ pub trait Device: Send + Sync {
     ///
     /// Returning `Ok` is always safe: a device with nothing to check does not
     /// implement this.
+    /// The largest timestep this device will accept for the *next* step, if it
+    /// has an opinion.
+    ///
+    /// Defaults to `None`. Native models have no way to ask: their reactive
+    /// branches are declared, so the integrator already knows their time
+    /// constants and the LTE controller handles the rest.
+    ///
+    /// It exists for compiled models, where Verilog-A's `$bound_step` is the
+    /// model saying "do not step past this or you will miss something". LTE alone
+    /// cannot cover that, because it measures the error of a step already taken.
+    fn requested_max_timestep(&self) -> Option<f64> {
+        None
+    }
+
+    /// Whether the *last* `eval` produced a result the model itself considers
+    /// valid.
+    ///
+    /// Defaults to `Ok(())`, which is right for every native model: they evaluate
+    /// a closed form and have no way to disown the answer.
+    ///
+    /// It exists for compiled models. OSDI's `eval` returns a flag word, and
+    /// `EVAL_RET_FLAG_FATAL` means "this bias point is not one I can evaluate".
+    /// Stamping the result anyway invents an answer out of numbers the model
+    /// disowned. The Newton loop treats a device reporting `Err` here the way it
+    /// treats a clamped step: this iterate cannot be the converged one, and if a
+    /// device is still saying so when the iteration budget runs out, the message
+    /// becomes the diagnosis rather than a bare non-convergence.
+    fn eval_status(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn validate(&mut self) -> Result<(), String> {
         Ok(())
     }

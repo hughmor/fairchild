@@ -133,3 +133,147 @@ fn a_mixed_case_module_name_is_reachable_from_a_deck() {
         "card",
     );
 }
+
+/// `$simparam` reaches the model, and carries this simulator's values.
+///
+/// # What this catches
+///
+/// `OsdiSimParas` was passed as an empty (if terminated) list, so every
+/// `$simparam("gmin", <default>)` in a foundry model took the default written
+/// into its own call. Same fault the native models had with a `const GMIN`: the
+/// option exists, the deck sets it, and nothing reads it.
+///
+/// It is invisible in a real model, where `gmin` is one term among many and worth
+/// a picoamp. So the fixture makes each lookup the *only* term on its own branch,
+/// with a fallback nothing like the real value, and the probe reads the
+/// conductance straight off `V = I/g`. "Table missing" and "table present" then
+/// differ by orders of magnitude instead of by a tolerance.
+///
+/// # How the first version of this test failed
+///
+/// Both branches were on one node, so the total conductance was
+/// `simparam(gmin) + simparam(scale)` and `scale = 1` buried `gmin = 1e-6` under
+/// a 1e-6 perturbation. It passed with the table sabotaged out of *both* the eval
+/// path and the setup path. Separate node pairs, one probe each.
+///
+/// Two names rather than one, because a table with a broken terminator or a
+/// mismatched `vals` array can still answer the first lookup correctly.
+#[test]
+fn simparam_carries_the_simulators_own_values() {
+    let Some(osdi) = compiled("abi_simparam") else {
+        return;
+    };
+    for gmin in [1e-3, 1e-5] {
+        let deck = format!(
+            "* simparam\n.options gmin={gmin:e}\n\
+             Ib 0 a 1m\nIc 0 c 1m\n\
+             Xs a 0 c 0 abi_simparam\n.op\n"
+        );
+        let netlist = parse_spice(&deck).expect("parse");
+        let lib = Arc::new(unsafe { OsdiLibrary::open(&osdi) }.expect("dlopen"));
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&netlist.models);
+        lib.register_into(&mut registry);
+        registry.register_loaded_model_cards(&netlist.models);
+        let r = dc_op_nr_with_registry(&netlist, &registry).expect("DC OP failed");
+
+        // V(a) = 1 mA / simparam("gmin"). The 1.0 S fallback would read 1 mV.
+        let va = r.node_voltage("a").expect("node a");
+        let want_a = 1e-3 / gmin;
+        let rel_a = (va - want_a).abs() / want_a;
+        assert!(
+            rel_a < 1e-6,
+            "gmin={gmin:e}: V(a) is {va:.6e} V and 1 mA into simparam(\"gmin\") is \
+             {want_a:.6e} V (rel {rel_a:.2e}). 1e-3 V here is the model's own 1.0 S \
+             fallback, which is what an empty sim-para table produces."
+        );
+
+        // V(c) = 1 mA / simparam("scale"), and `scale` is 1.0. The 1e-9 fallback
+        // would read 1e6 V.
+        let vc = r.node_voltage("c").expect("node c");
+        let rel_c = (vc - 1e-3).abs() / 1e-3;
+        assert!(
+            rel_c < 1e-6,
+            "V(c) is {vc:.6e} V and 1 mA into simparam(\"scale\") = 1.0 S is 1e-3 V \
+             (rel {rel_c:.2e}). 1e6 V is the 1e-9 fallback, which means the table \
+             answered the first name and not the second — a terminator or a `vals` \
+             length that does not match `names`."
+        );
+    }
+}
+
+/// `$bound_step` limits the timestep, and only when it binds.
+///
+/// # What this catches
+///
+/// The request was ignored outright, which left the LTE controller as the only
+/// thing watching the step size — and LTE measures the error of a step already
+/// taken, so a model saying "the *next* step will miss something" had no way to
+/// be heard.
+///
+/// Reading it is a raw `f64` load at an offset a shared library hands over, and
+/// the sentinel for "never calls `$bound_step`" is `u32::MAX` rather than zero.
+/// Measured: every other fixture here reports 0xffffffff, this one reports a
+/// valid 8-aligned 104 in a 112-byte instance. The first version guarded on zero,
+/// dereferenced 0xffffffff, and aborted the process on an unrelated test.
+///
+/// # Why two runs
+///
+/// A bound that binds and a bound that does not. Asserting only the first cannot
+/// tell "the request is honoured" from "the step is always this small", which is
+/// the same shape as testing a feature only in its on state.
+#[test]
+fn bound_step_limits_the_timestep_when_it_binds() {
+    let Some(osdi) = compiled("abi_bound_step") else {
+        return;
+    };
+
+    let spacings = |dtmax: f64| -> (f64, usize) {
+        // An RC whose own time constant is 1 us, run for 20 us with a print step
+        // far larger than the bound, on the variable-step path where the model's
+        // request is consulted.
+        let deck = format!(
+            "* bound_step\n.options variable_step=1\n\
+             V1 in 0 PULSE(0 1 0 1n 1n 1m 2m)\n\
+             R1 in n 1k\nC1 n 0 1n\n\
+             Xb n 0 abi_bound_step g=1m dtmax={dtmax:e}\n\
+             .tran 5u 20u\n"
+        );
+        let netlist = parse_spice(&deck).expect("parse");
+        let lib = Arc::new(unsafe { OsdiLibrary::open(&osdi) }.expect("dlopen"));
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&netlist.models);
+        lib.register_into(&mut registry);
+        registry.register_loaded_model_cards(&netlist.models);
+        let r = fairchild_core::tran_nr_with_registry_var(&netlist, 5e-6, 20e-6, &registry)
+            .expect("transient");
+        let t = &r.time;
+        let worst = t.windows(2).map(|w| w[1] - w[0]).fold(0.0_f64, f64::max);
+        (worst, t.len())
+    };
+
+    // Binding: 100 ns is well inside what a 1 us RC over 20 us would otherwise
+    // take, so the largest gap has to come down to it.
+    let (bound_gap, bound_n) = spacings(1e-7);
+    assert!(
+        bound_gap <= 1.02e-7,
+        "with $bound_step(100n) the largest gap between timepoints is \
+         {bound_gap:.4e} s. The model asked for 1e-7 and was not heard."
+    );
+
+    // Not binding: 1 ms is larger than the whole run, so it must change nothing —
+    // otherwise this test is measuring "steps are small" and not "the request is
+    // honoured".
+    let (loose_gap, loose_n) = spacings(1e-3);
+    assert!(
+        loose_gap > 2e-7,
+        "with $bound_step(1m) — larger than the 20 us run — the step should be \
+         set by LTE alone, but the largest gap is {loose_gap:.4e} s. If this is \
+         also ~1e-7 the bound is not what produced the first result."
+    );
+    assert!(
+        bound_n > loose_n,
+        "a binding bound must cost timepoints: {bound_n} with it against \
+         {loose_n} without"
+    );
+}

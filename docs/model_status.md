@@ -447,12 +447,12 @@ job and the answer is wrong anyway. This is the per-field audit.
 | noise sources (`load_noise`) | ✅ `white_noise` / `flicker_noise` | ⚠️ see §10 `.noise` |
 | `thermal` nodes (via `units == "K"`) | ✅ | ✅ `thermal_discipline.rs` |
 | operating-point variables (`num_opvars`) | ⚠️ readable through `OsdiDevice::read_opvar`, and nothing surfaces them to a deck or a probe |  |
-| `OsdiSimParas` | ❌ a null table is passed, so a model's `$simparam("gmin")` and friends take the default written into the call rather than this simulator's value |  |
-| `eval`'s return flags | ❌ discarded — `EVAL_RET_FLAG_FATAL` means the model is telling us this evaluation is invalid, and it is not heard |  |
+| `OsdiSimParas` | ✅ `gmin`, `scale`, `shrink`, `simulatorSubversion`. A name not in the table falls back to the model's own default, as every name did before, so the list is monotone. `iteration`/`sourceScaleFactor` are left out deliberately — they change per Newton iteration and would cost an allocation on the hottest path for something no model in the sweep reads; `imax`/`imelt` are left out because fairchild does not enforce them and answering would be a claim it does not keep | ✅ `abi_simparam.va` makes two lookups the *only* conductance on separate branches, with absurd fallbacks, so a missing table is orders of magnitude and not a tolerance |
+| `eval`'s return flags | ✅ `EVAL_RET_FLAG_FATAL` reaches the Newton loop through `Device::eval_status`, and joins a clamped step and a stalled line search as a reason this iterate cannot be the converged one. If a device is still saying so when the budget runs out, its message is the error rather than a bare non-convergence. `EVAL_RET_FLAG_LIM` is routine and ignored |  |
 | `ANALYSIS_IC` / `ANALYSIS_STATIC` / `ANALYSIS_NODESET` | ❌ never set; a model that branches on them behaves as if none applied |  |
 | `given_flag_model` / `given_flag_instance` | ❌ unused; "was this parameter given" is inferred from the deck instead |  |
 | init errors (`OsdiInitInfo`) | ⚠️ surfaced, but only `INIT_ERR_OUT_OF_BOUNDS` is decoded; any other code is reported as a bare number |  |
-| `bound_step_offset` | ❌ unused — a model cannot limit the timestep |  |
+| `bound_step_offset` | ✅ read on the variable-step transient path, where `h` is bounded by the smallest request across devices. Not on the fixed-step path: there the step is what the deck asked for. The sentinel is `u32::MAX`, **not** zero — measured across every fixture, which all report 0xffffffff against a valid 8-aligned 104 for one that calls `$bound_step`. Guarding on zero dereferences 0xffffffff and aborts | ✅ `abi_bound_step.va`, binding and not binding |
 | `load_jacobian_resist` (the aliasing path) | ❌ the copy path is used instead, deliberately |  |
 
 ### What has been run through it

@@ -2270,6 +2270,18 @@ subset it is, and a module name with any upper case in it — `PSP102VA`,
 `DIODE_CMC`, `JUNCAP200`, `hicumL2va` — loading successfully and then failing as
 `unknown model` at the element that used it.
 
+Three more have since been closed, and each was the same shape — the model says
+something and nothing listens. `$simparam` now carries this simulator's `gmin`
+rather than whatever default the model's own call site wrote. `eval`'s
+`EVAL_RET_FLAG_FATAL` now reaches the Newton loop, so a bias point the model
+disowns cannot be reported as the converged answer. And `$bound_step` now bounds
+the variable-step transient, so a model that knows the next step will miss
+something can say so — LTE alone could not cover that, because it measures the
+error of a step already taken.
+
+What is left is operating-point variables: readable through
+`OsdiDevice::read_opvar`, and not surfaced to a deck or a probe.
+
 ### 14.6 Implementation notes
 
 Reactive Jacobian contributions are stamped through the

@@ -70,6 +70,14 @@ pub struct OsdiDevice {
     /// Cleared until the first `eval`, which runs with `INIT_LIM` to seed the
     /// state rather than limit against uninitialised memory.
     lim_initialised: bool,
+    /// The `$simparam` table, built once in `setup_model`. See [`SimParaTable`].
+    sim_paras: Option<SimParaTable>,
+    /// Whether the model's last `eval` returned `EVAL_RET_FLAG_FATAL`.
+    ///
+    /// The flags used to be discarded. `FATAL` is a model saying "this evaluation
+    /// is not valid", and stamping the result anyway invents an answer out of
+    /// numbers the model disowned. Reported through `Device::eval_status`.
+    eval_fatal: bool,
     /// Reactive charge `q` at the last accepted timepoint, one slot per OSDI
     /// node. Read back through `load_residual_react`, which is the only
     /// sanctioned way to see a Verilog-A `ddt` contribution as a charge rather
@@ -172,6 +180,8 @@ impl OsdiDevice {
             lim_state_prev: vec![0.0; desc.num_states as usize],
             lim_state_next: vec![0.0; desc.num_states as usize],
             lim_initialised: false,
+            sim_paras: None,
+            eval_fatal: false,
             q_prev: vec![0.0; desc.num_nodes as usize],
             q_prev2: None,
             i_react_prev: vec![0.0; desc.num_nodes as usize],
@@ -211,6 +221,8 @@ impl OsdiDevice {
             lim_state_prev: vec![0.0; desc.num_states as usize],
             lim_state_next: vec![0.0; desc.num_states as usize],
             lim_initialised: false,
+            sim_paras: None,
+            eval_fatal: false,
             q_prev: vec![0.0; desc.num_nodes as usize],
             q_prev2: None,
             i_react_prev: vec![0.0; desc.num_nodes as usize],
@@ -735,8 +747,11 @@ impl Device for OsdiDevice {
     }
 
     fn setup_model(&mut self, ctx: &SimContext) {
+        // The table the model's `$simparam` calls read. Held on the device so
+        // `call_setup_instance` and `refresh_instance` pass the same one, and so
+        // `eval` does not rebuild it per iteration.
+        self.sim_paras = Some(SimParaTable::new(ctx));
         self.call_setup_model();
-        let _ = ctx; // temperature injection deferred — will go into OsdiSimParas
     }
 
     fn setup_instance(&mut self, terminals: &[NodeId], ctx: &SimContext) {
@@ -816,8 +831,13 @@ impl Device for OsdiDevice {
                     osdi_flags |= INIT_LIM;
                 }
             }
+            // The real table whenever `setup_model` has run, which is every
+            // path that reaches an eval. `null_sim_paras` stays the fallback so a
+            // device built without setup cannot pass a dangling pointer.
+            let mut table = self.sim_paras.take();
+            let paras = table.as_mut().map_or_else(null_sim_paras, |t| t.paras());
             let mut info = OsdiSimInfo {
-                paras: null_sim_paras(),
+                paras,
                 // `$abstime`.  SimContext::time_s is the transient clock the
                 // solver advances; it stays 0 for DC/AC, which is what
                 // Verilog-A expects there.
@@ -829,19 +849,74 @@ impl Device for OsdiDevice {
                 next_state: self.lim_state_next.as_mut_ptr(),
                 flags: osdi_flags,
             };
-            unsafe {
+            let ret = unsafe {
                 f(
                     std::ptr::null_mut(),
                     self.inst_ptr(),
                     self.model_ptr(),
                     &mut info,
-                );
-            }
+                )
+            };
+            self.sim_paras = table;
+            // `EVAL_RET_FLAG_LIM` is routine — it says `$limit` moved a voltage,
+            // which is what limiting is for. `FATAL` is not.
+            self.eval_fatal = ret & crate::ffi::EVAL_RET_FLAG_FATAL != 0;
             // What this eval limited to becomes what the next one limits
             // against.
             std::mem::swap(&mut self.lim_state_prev, &mut self.lim_state_next);
             self.lim_initialised = true;
         }
+    }
+
+    /// The timestep the model asked for through `$bound_step`, if any.
+    ///
+    /// OpenVAF writes the bound into the instance at `bound_step_offset`, as an
+    /// `f64`, and initialises it to infinity — so "no request" and "a request"
+    /// are the same read with different values, and a finite positive value is
+    /// the only thing worth reporting.
+    ///
+    /// A model asks for this when it knows the solution is about to move faster
+    /// than the current step can follow. Ignoring it left the LTE controller as
+    /// the only thing watching, and LTE only sees the error after the step that
+    /// caused it.
+    fn requested_max_timestep(&self) -> Option<f64> {
+        let off = self.desc().bound_step_offset;
+        // `u32::MAX` is how a descriptor spells "this model never calls
+        // `$bound_step`" — measured across every fixture in this tree, which all
+        // report 0xffffffff, against 104 for one that does call it. Reading it as
+        // a byte offset regardless is a misaligned dereference, and that is what
+        // the first version of this did.
+        //
+        // The alignment and range checks are belt and braces: an `f64` read from
+        // a raw offset supplied by a shared library is worth two comparisons.
+        let size = self.desc().instance_size as usize;
+        let off = off as usize;
+        if off == u32::MAX as usize
+            || !self.setup_done
+            || !off.is_multiple_of(std::mem::align_of::<f64>())
+            || off + std::mem::size_of::<f64>() > size
+        {
+            return None;
+        }
+        let dt = unsafe { *((self.instance.as_ptr() as *const u8).add(off) as *const f64) };
+        // OpenVAF seeds the slot with infinity, so "no request this eval" and "a
+        // request" are the same read with different values.
+        (dt.is_finite() && dt > 0.0).then_some(dt)
+    }
+
+    /// `EVAL_RET_FLAG_FATAL` from the last eval — see [`Device::eval_status`].
+    fn eval_status(&self) -> Result<(), String> {
+        if self.eval_fatal {
+            return Err(format!(
+                "model '{}' returned EVAL_RET_FLAG_FATAL: it is telling this \
+                 simulator that the bias point it was handed is not one it can \
+                 evaluate. Common causes are a parameter outside the range the \
+                 model checks, or a node voltage far enough outside normal \
+                 operation that an internal expression went non-finite.",
+                self.handle.to_string_lossy()
+            ));
+        }
+        Ok(())
     }
 
     fn load_residual(&self, b: &mut [f64]) {
@@ -1261,7 +1336,11 @@ impl OsdiDevice {
     fn call_setup_model(&mut self) {
         let setup_fn = self.desc().setup_model;
         if let Some(f) = setup_fn {
-            let mut paras = null_sim_paras();
+            // The device's own `$simparam` table. Taken and put back so the
+            // storage it points into outlives the call without a second
+            // mutable borrow of `self`.
+            let mut table = self.sim_paras.take();
+            let mut paras = table.as_mut().map_or_else(null_sim_paras, |t| t.paras());
             let mut res = OsdiInitInfo {
                 flags: 0,
                 num_errors: 0,
@@ -1275,6 +1354,7 @@ impl OsdiDevice {
                     &mut res,
                 );
             }
+            self.sim_paras = table;
             self.report_init(&res, "model setup");
         }
     }
@@ -1291,7 +1371,11 @@ impl OsdiDevice {
         let num_terminals = self.desc().num_terminals;
         let temperature = self.temperature;
         if let Some(f) = setup_fn {
-            let mut paras = null_sim_paras();
+            // The device's own `$simparam` table. Taken and put back so the
+            // storage it points into outlives the call without a second
+            // mutable borrow of `self`.
+            let mut table = self.sim_paras.take();
+            let mut paras = table.as_mut().map_or_else(null_sim_paras, |t| t.paras());
             let mut res = OsdiInitInfo {
                 flags: 0,
                 num_errors: 0,
@@ -1308,6 +1392,7 @@ impl OsdiDevice {
                     &mut res,
                 );
             }
+            self.sim_paras = table;
             self.report_init(&res, "instance setup");
         }
     }
@@ -1376,6 +1461,75 @@ fn null_sim_paras() -> OsdiSimParas {
         vals: std::ptr::null_mut(),
         names_str: empty_name_list(),
         vals_str: std::ptr::null_mut(),
+    }
+}
+
+/// The `$simparam` table a model sees, with the storage it points into.
+///
+/// `OsdiSimParas` is four raw pointers, so the `CString`s and the pointer arrays
+/// have to outlive the call. Keeping them in one struct beside the paras makes
+/// that a borrow-checker fact rather than a comment.
+///
+/// # What is in it, and what is deliberately not
+///
+/// `gmin` is the one that matters: a foundry model asks for it, and until this
+/// existed it got whatever default the model's own call site wrote — so
+/// `.options gmin=` reached the native models and not the compiled ones. The same
+/// fault the `const GMIN` in each native model had.
+///
+/// A name this table does not carry falls back to the model's own default, which
+/// is what every name did before, so adding names is monotone and leaving one out
+/// cannot break a model. Left out on purpose:
+///
+/// * `iteration` / `sourceScaleFactor` — these change per Newton iteration, and
+///   building a table per eval to carry them would cost an allocation on the
+///   hottest path for something no model in the OpenVAF-Reloaded suite reads.
+/// * `imax` / `imelt` — current limits fairchild does not enforce, so answering
+///   would be a claim it does not keep.
+struct SimParaTable {
+    _names: Vec<std::ffi::CString>,
+    name_ptrs: Vec<*mut std::os::raw::c_char>,
+    vals: Vec<f64>,
+}
+
+impl SimParaTable {
+    fn new(ctx: &SimContext) -> Self {
+        // `scale` and `shrink` are geometry multipliers a PDK may read; fairchild
+        // applies neither, and 1.0 is what "neither" means rather than a claim.
+        let entries: &[(&str, f64)] = &[
+            ("gmin", ctx.gmin),
+            ("scale", 1.0),
+            ("shrink", 0.0),
+            ("simulatorSubversion", 0.0),
+        ];
+        let names: Vec<std::ffi::CString> = entries
+            .iter()
+            .map(|(n, _)| std::ffi::CString::new(*n).expect("no interior NUL"))
+            .collect();
+        let mut name_ptrs: Vec<*mut std::os::raw::c_char> = names
+            .iter()
+            .map(|c| c.as_ptr() as *mut std::os::raw::c_char)
+            .collect();
+        // NUL-terminated: a model walks this list until it hits a null entry.
+        name_ptrs.push(std::ptr::null_mut());
+        let vals = entries.iter().map(|(_, v)| *v).collect();
+        Self {
+            _names: names,
+            name_ptrs,
+            vals,
+        }
+    }
+
+    /// Borrows this table's storage. The result must not outlive `self`.
+    fn paras(&mut self) -> OsdiSimParas {
+        OsdiSimParas {
+            names: self.name_ptrs.as_mut_ptr(),
+            vals: self.vals.as_mut_ptr(),
+            // No string-valued parameters. Terminated, not null — the same
+            // reason `null_sim_paras` uses `empty_name_list`.
+            names_str: empty_name_list(),
+            vals_str: std::ptr::null_mut(),
+        }
     }
 }
 
