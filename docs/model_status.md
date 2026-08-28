@@ -292,7 +292,9 @@ instead. What bounds a step into breakdown now is the trust region
 | `ISS` | ✅ | ✅ substrate junction DC branch, Shockley | ✅ ngspice DC, six biases over five decades |
 | `CJS`, `VJS`, `MJS` | ✅ | ✅ collector-substrate depletion capacitance | ✅ ngspice AC at eight biases, including past `VJS` |
 | `FCS` | ⚠️ accepted, not modelled — **and ngspice ignores it too**, see below | ❌ | ✅ measured inert in the reference |
-| `XCJC`, `RBM`, `IRB`, `XTF`, `VTF`, `ITF`, `PTF` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
+| `XCJC` | ✅ | ✅ splits `CJC` across `RB`, internal share to the internal base | ✅ ngspice AC at six values, monotonic and matching |
+| `XTF`, `VTF`, `ITF` | ✅ | ✅ `TF_eff = TF·(1 + XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF)))`, with the capacitance as the charge's analytic derivative | ✅ ngspice AC at nine cards, plus a `VCE` sweep for the transcapacitance and a transient for its linearisation |
+| `RBM`, `IRB`, `PTF` | ⚠️ accepted, not modelled | ❌ | ✅ warning text pinned |
 
 ### Instance parameters
 
@@ -320,6 +322,63 @@ the way out — so it arrived as `gmin/100` and was not a conductance across
 anything — and the Norton form then cancelled it out of the terminal currents
 entirely. A reverse-biased BJT carried `2·IS = 2e-16` where ngspice carries
 `gmin·V ≈ 1e-12`.
+
+### `XCJC`, and why the split matters
+
+`XCJC·CJC` connects to the **internal** base node, so `RB` sits in series with it.
+The rest hangs off the external base pin, where it does not. All of `CJC` used to
+sit outside `RB`, which is the `XCJC = 0` case and 0.575 of the right answer on a
+default card. Measured against ngspice, AC `|V(b)|` at 100 MHz behind 1 kΩ with
+`RB = 1k` and `CJC = 10p`:
+
+| card | ngspice | relative |
+|---|---|---|
+| absent | 5.174797e−01 | 1.0000 |
+| `XCJC=1.0` | 5.174797e−01 | 1.0000 |
+| `XCJC=0.5` | 3.733585e−01 | 0.7215 |
+| `XCJC=0.0` | 2.975813e−01 | 0.5751 |
+
+Absent and `XCJC=1.0` being identical is how the default was read off rather than
+assumed. With `RB = 0` the two base nodes alias and the split is invisible, which
+is every card that gives no base resistance.
+
+### The transit time, and the only transcapacitance in the tree
+
+`TF` used to be constant, so `fT` did not fall at high current and did not rise
+with `VCE` — the two things `XTF`/`VTF`/`ITF` exist to describe.
+
+```text
+TF_eff = TF·(1 + xf),   xf = XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF))
+```
+
+`ITF = 0` and `VTF = 0` each disable their own factor, which is SPICE's convention
+and is why both default to zero rather than to infinity. Measured: `TF_eff/TF` is
+2.0000, 6.0000 and 11.0000 for `XTF` of 1, 5 and 10 with the other two absent.
+
+**The capacitance is not `TF_eff·gm`.** It is the derivative of the charge, and the
+two factors differ:
+
+```text
+q  = TF·(1 + xf)·IF/qb
+∂q/∂vbe = TF/qb·[gbe·(1 + xf·(3 − 2·tmp)) − (1 + xf)·i_diff·∂qb/∂vbe]
+∂q/∂vbc = TF·i_diff·[xf/(1.44·VTF) − (1 + xf)·∂qb/∂vbc/qb]
+```
+
+The `(3 − 2·tmp)` comes out of `IF·∂xf/∂vbe = 2·xf·(1−tmp)·gbe`. Extracting a
+capacitance from an ngspice divider gave 9.70 where the derivative form predicts
+9.93 and the charge form predicts 7.35 — enough to say which form is right, not
+enough to pin it, so the tests compare the AC response of a whole deck instead.
+
+`∂q/∂vbc` is a **transcapacitance**: the base-emitter charge varies with the
+base-collector voltage. It is the only asymmetric reactance in this tree, so it
+cannot be a `ReactiveBranchSpec` and goes through `load_reactive_jacobian`. The
+`qb` half of it was missing before, on any card with a finite `VAF` or `IKF`.
+
+It has to appear in three places, and leaving it out of any one of them is a
+different fault. Out of the transient Jacobian: a wrong Newton step. Out of the AC
+matrix: a wrong bandwidth. Out of the companion's `cv`: a spurious
+`scale·cbe_x·vbc` in the converged transient answer, which no AC test can see. The
+last one is worth 83% on a switching deck and has its own transient golden.
 
 ### The collector-substrate junction
 

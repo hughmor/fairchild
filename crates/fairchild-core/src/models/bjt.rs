@@ -151,9 +151,15 @@ struct Op {
     gce: f64, // −∂IC/∂VBC
     gpi: f64, // ∂IB/∂VBE
     gmu: f64, // ∂IB/∂VBC
-    qbe: f64, // B-E diffusion charge TF·IF/qb
+    qbe: f64, // B-E diffusion charge TF·(1+xf)·IF/qb
     qbc: f64, // B-C diffusion charge TR·IR
     cbe: f64, // ∂QBE/∂VBE
+    /// `dQBE/dVBC_eff` — a **transcapacitance**. The base-emitter diffusion
+    /// charge depends on the base-collector voltage twice over: through `VTF`'s
+    /// modulation of the transit time, and through the base charge `qb`, which
+    /// `VAF` and `IKF` make bias-dependent. Zero for a card that sets none of
+    /// those, which is why nothing needed it before.
+    cbe_x: f64,
     cbc: f64, // ∂QBC/∂VBC
 }
 
@@ -174,6 +180,9 @@ pub struct GummelPoonBjt {
     isc: f64,      // B-C leakage saturation current (A)
     nc: f64,       // B-C leakage emission coefficient
     tf: f64,       // forward transit time (s) — B-E diffusion charge
+    xtf: f64,      // TF bias-modulation coefficient
+    vtf: f64,      // the VBC scale in TF's modulation; 0 disables that term
+    itf: f64,      // the high-current knee in TF's modulation; 0 disables it
     tr: f64,       // reverse transit time (s) — B-C diffusion charge
     rb: f64,       // base ohmic series resistance (Ω); 0 = no internal node
     rc: f64,       // collector ohmic series resistance (Ω)
@@ -261,8 +270,9 @@ pub struct GummelPoonBjt {
     // Current-iterate charges (set by eval when transient flag is set)
     qbe_now: f64,
     qbc_now: f64,
-    cbe_eff: f64, // dQBE/dVBE_eff = TF*gf (capacitive conductance)
-    cbc_eff: f64, // dQBC/dVBC_eff = TR*gr
+    cbe_eff: f64,   // dQBE/dVBE_eff (capacitive conductance)
+    cbe_x_eff: f64, // dQBE/dVBC_eff, the transcapacitance
+    cbc_eff: f64,   // dQBC/dVBC_eff = TR*gr
 
     // ── Depletion junction cap model parameters ───────────────────────────────
     cje: f64, // zero-bias B-E depletion capacitance (F)
@@ -272,6 +282,17 @@ pub struct GummelPoonBjt {
     vjc: f64, // B-C junction potential (V)
     mjc: f64, // B-C grading coefficient
     fc: f64,  // forward-bias cap linearisation coefficient
+    /// The fraction of `CJC` that connects to the **internal** base node, so `RB`
+    /// sits in series with it. The rest hangs off the external base pin. Default
+    /// 1.0, which is SPICE's and which puts all of it inside `RB`.
+    xcjc: f64,
+    /// The two halves of the split at this iterate, and the external half's
+    /// charge history. The internal half keeps `q_jc_hist`.
+    cjcx_eval: f64,
+    q_jcx_eval: f64,
+    q_jcx_hist: ChargeHistory,
+    /// `pol·(V(base_ext) − V(collector))`, the external half's junction voltage.
+    vbcx_eff: f64,
 
     // ── Collector-substrate junction ─────────────────────────────────────────
     iss: f64, // substrate saturation current (A) — default 0, no DC branch
@@ -338,6 +359,10 @@ impl GummelPoonBjt {
         let mut vjc = 0.75;
         let mut mjc = 0.33;
         let mut fc = 0.5;
+        let mut xcjc = 1.0_f64;
+        let mut xtf = 0.0_f64;
+        let mut vtf = 0.0_f64;
+        let mut itf = 0.0_f64;
         // Substrate junction. ngspice's defaults, measured: no capacitance and no
         // DC branch unless the card asks, a 0.75 V potential, and a grading
         // coefficient of zero, which makes `CJS` alone a constant capacitance.
@@ -375,6 +400,9 @@ impl GummelPoonBjt {
                 "isc" | "c4" => isc = *v,
                 "nc" => nc = *v,
                 "tf" => tf = *v,
+                "xtf" => xtf = *v,
+                "vtf" => vtf = *v,
+                "itf" | "jtf" => itf = *v,
                 "tr" => tr = *v,
                 "rb" => rb = *v,
                 "rc" => rc = *v,
@@ -386,6 +414,7 @@ impl GummelPoonBjt {
                 "vjc" => vjc = *v,
                 "mjc" => mjc = *v,
                 "fc" => fc = *v,
+                "xcjc" | "cdis" => xcjc = *v,
                 "iss" => iss = *v,
                 "cjs" | "ccs" => cjs = *v,
                 "vjs" | "pjs" => vjs = *v,
@@ -412,6 +441,9 @@ impl GummelPoonBjt {
             isc,
             nc,
             tf,
+            xtf,
+            vtf,
+            itf,
             tr,
             rb,
             rc,
@@ -450,6 +482,7 @@ impl GummelPoonBjt {
             qbe_now: 0.0,
             qbc_now: 0.0,
             cbe_eff: 0.0,
+            cbe_x_eff: 0.0,
             cbc_eff: 0.0,
             cje,
             vje,
@@ -458,6 +491,11 @@ impl GummelPoonBjt {
             vjc,
             mjc,
             fc,
+            xcjc,
+            cjcx_eval: 0.0,
+            q_jcx_eval: 0.0,
+            q_jcx_hist: ChargeHistory::default(),
+            vbcx_eff: 0.0,
             iss,
             cjs,
             vjs,
@@ -640,6 +678,46 @@ impl GummelPoonBjt {
         // stored minority charge of the transport current); reverse does not,
         // matching SPICE.
         let i_diff = i_f / qb;
+
+        // TF's bias modulation. `xf` is the *excess* factor: `TF_eff =
+        // TF·(1 + xf)`. `XTF = 0` leaves both terms out, which is the default and
+        // every card that does not ask.
+        //
+        // `ITF = 0` and `VTF = 0` each disable their own factor rather than
+        // dividing by zero, which is SPICE's convention for both and is why they
+        // default to zero rather than to infinity.
+        let (xf, tmp) = if self.xtf != 0.0 && i_f > 0.0 {
+            let tmp = if self.itf > 0.0 {
+                i_f / (i_f + self.itf)
+            } else {
+                1.0
+            };
+            let vbc_term = if self.vtf > 0.0 {
+                (vbc / (1.44 * self.vtf)).exp()
+            } else {
+                1.0
+            };
+            (self.xtf * tmp * tmp * vbc_term, tmp)
+        } else {
+            (0.0, 1.0)
+        };
+
+        // The charge takes `(1 + xf)`; the capacitance takes
+        // `(1 + xf·(3 − 2·tmp))`, because `IF·d(xf)/d(vbe) = 2·xf·(1−tmp)·gbe`.
+        // Two different factors from one law, which is why the derivative is
+        // written out rather than formed as `TF_eff·gbe`.
+        let q_factor = 1.0 + xf;
+        let c_factor = 1.0 + xf * (3.0 - 2.0 * tmp);
+        let cbe = self.tf * (gbe * c_factor - q_factor * i_diff * dqb_dvbe) / qb;
+        // The transcapacitance. `VTF`'s term is `xf/(1.44·VTF)`; the `qb` term is
+        // there whenever `VAF` or `IKF` is finite and was missing before.
+        let dxf_dvbc = if self.vtf > 0.0 {
+            xf / (1.44 * self.vtf)
+        } else {
+            0.0
+        };
+        let cbe_x = self.tf * i_diff * (dxf_dvbc - q_factor * dqb_dvbc / qb);
+
         Op {
             ic,
             ib,
@@ -647,9 +725,10 @@ impl GummelPoonBjt {
             gce,
             gpi,
             gmu,
-            qbe: self.tf * i_diff,
+            qbe: self.tf * q_factor * i_diff,
             qbc: self.tr * i_r,
-            cbe: self.tf * (gbe - i_diff * dqb_dvbe) / qb,
+            cbe,
+            cbe_x,
             cbc: self.tr * gbc,
         }
     }
@@ -813,6 +892,7 @@ impl Device for GummelPoonBjt {
 
         if flags.transient {
             self.cbe_eff = op.cbe;
+            self.cbe_x_eff = op.cbe_x;
             self.cbc_eff = op.cbc;
             self.qbe_now = op.qbe;
             self.qbc_now = op.qbc;
@@ -850,8 +930,25 @@ impl Device for GummelPoonBjt {
             // for it. Recorded in `docs/model_status.md` rather than guessed.
             self.cjs_eval = cjs_cap(self.cjs, vsub, self.vjs, self.mjs);
             self.q_js_eval = q_js_charge(self.cjs, vsub, self.vjs, self.mjs);
+
+            // `XCJC` splits the base-collector depletion capacitance across the
+            // base resistance: the internal fraction keeps `cjc_eval` and sees
+            // `RB` in series, the rest hangs off the external base pin where it
+            // does not. Both halves are evaluated at the *internal* junction
+            // voltage, which is the split SPICE makes and which the ngspice
+            // agreement at five values of `XCJC` confirms.
+            //
+            // With `RB = 0` the two base nodes alias, so the split is invisible
+            // and a card without a base resistance is unaffected.
+            let xcjc = self.xcjc.clamp(0.0, 1.0);
+            self.cjcx_eval = (1.0 - xcjc) * self.cjc_eval;
+            self.q_jcx_eval = (1.0 - xcjc) * self.q_jc_eval;
+            self.cjc_eval *= xcjc;
+            self.q_jc_eval *= xcjc;
+            self.vbcx_eff = pol * (self.base_ext.map_or(0.0, |i| x[i]) - vc);
         } else {
             self.cbe_eff = 0.0;
+            self.cbe_x_eff = 0.0;
             self.cbc_eff = 0.0;
             self.qbe_now = 0.0;
             self.qbc_now = 0.0;
@@ -861,6 +958,8 @@ impl Device for GummelPoonBjt {
             self.q_jc_eval = 0.0;
             self.cjs_eval = 0.0;
             self.q_js_eval = 0.0;
+            self.cjcx_eval = 0.0;
+            self.q_jcx_eval = 0.0;
         }
     }
 
@@ -969,9 +1068,16 @@ impl Device for GummelPoonBjt {
             }
         };
 
-        // Transit-time diffusion charge: TF·IF (B-E) and TR·IR (B-C).
-        if self.cbe_eff != 0.0 {
-            let cv = self.cbe_eff * self.vbe_eff;
+        // Transit-time diffusion charge: TF·(1+xf)·IF (B-E) and TR·IR (B-C).
+        //
+        // `cv` is the term the Jacobian stamp contributes at the linearisation
+        // point, which the history current has to cancel. The B-E charge depends
+        // on *two* voltages once `VTF`, `VAF` or `IKF` is finite, so `cv` sums
+        // both contributions — otherwise the residual and the Jacobian would be
+        // linearised about different points and the Newton step would be wrong
+        // by the transcapacitance.
+        if self.cbe_eff != 0.0 || self.cbe_x_eff != 0.0 {
+            let cv = self.cbe_eff * self.vbe_eff + self.cbe_x_eff * self.vbc_eff;
             cap(&self.qbe_hist, self.emitter, self.qbe_now, cv);
         }
         if self.cbc_eff != 0.0 {
@@ -986,6 +1092,19 @@ impl Device for GummelPoonBjt {
         if self.cjc_eval != 0.0 {
             let cv = self.cjc_eval * self.vbc_eff;
             cap(&self.q_jc_hist, self.collector, self.q_jc_eval, cv);
+        }
+        // The external share of CJC, between the base *pin* and the internal
+        // collector. Spelled out rather than routed through `cap`, which is
+        // hard-wired to the internal base.
+        if self.cjcx_eval != 0.0 {
+            let cv = self.cjcx_eval * self.vbcx_eff;
+            let (i_hist, _) = self.q_jcx_hist.companion(disc, alpha, self.q_jcx_eval, cv);
+            if let Some(bx) = self.base_ext {
+                b[bx] += pol * i_hist;
+            }
+            if let Some(c) = self.collector {
+                b[c] -= pol * i_hist;
+            }
         }
         // Substrate depletion charge: CJS, between the substrate and the internal
         // collector. `cap` above is hard-wired to the base, so this one is spelled
@@ -1024,6 +1143,17 @@ impl Device for GummelPoonBjt {
             stamp!(e, bk, -c_be);
             stamp!(e, e, c_be);
         }
+        // The transcapacitance: the B-E charge's current flows base to emitter,
+        // so the *rows* are base and emitter, and it varies with `vbc`, so the
+        // *columns* are base and collector. Asymmetric, unlike every other stamp
+        // in this device.
+        if self.cbe_x_eff != 0.0 {
+            let c_x = scale * self.cbe_x_eff;
+            stamp!(bk, bk, c_x);
+            stamp!(bk, c, -c_x);
+            stamp!(e, bk, -c_x);
+            stamp!(e, c, c_x);
+        }
         // B-C capacitive companion: cbc_eff between base and collector.
         if self.cbc_eff != 0.0 {
             let c_bc = scale * self.cbc_eff;
@@ -1047,6 +1177,15 @@ impl Device for GummelPoonBjt {
             stamp!(bk, c, -g_jc);
             stamp!(c, bk, -g_jc);
             stamp!(c, c, g_jc);
+        }
+        // The external share of CJC: base pin to internal collector.
+        if self.cjcx_eval != 0.0 {
+            let g = scale * self.cjcx_eval;
+            let bx = self.base_ext;
+            stamp!(bx, bx, g);
+            stamp!(bx, c, -g);
+            stamp!(c, bx, -g);
+            stamp!(c, c, g);
         }
         // Collector-substrate depletion cap: CJS
         if self.cjs_eval != 0.0 {
@@ -1097,6 +1236,19 @@ impl Device for GummelPoonBjt {
                 self.fc,
             ),
         );
+        let xcjc = self.xcjc.clamp(0.0, 1.0);
+        let vbcx_eff = pol * (self.base_ext.map_or(0.0, |i| x[i]) - vc);
+        self.q_jcx_hist.advance(
+            disc,
+            (1.0 - xcjc)
+                * q_depl(
+                    self.cjc * self.cjc_t_factor,
+                    vbcx_eff,
+                    self.vjc_t,
+                    self.mjc,
+                    self.fc,
+                ),
+        );
         let vsub_eff = pol * (self.substrate.map_or(0.0, |i| x[i]) - vc);
         self.q_js_hist
             .advance(disc, q_js_charge(self.cjs, vsub_eff, self.vjs, self.mjs));
@@ -1126,6 +1278,10 @@ impl Device for GummelPoonBjt {
             dvalue_dstate: 0.0,
         };
         let mut v = Vec::new();
+        // The transcapacitance is deliberately absent from this list and is
+        // stamped by `load_reactive_jacobian` instead. A `ReactiveBranchSpec` is a
+        // two-terminal branch and cannot express a charge whose rows and columns
+        // differ.
         for (pos, neg, value) in [
             // Transit-time diffusion capacitance: TF on B-E, TR on B-C.
             (self.base, self.emitter, self.cbe_eff),
@@ -1133,6 +1289,7 @@ impl Device for GummelPoonBjt {
             // Depletion capacitance: CJE, CJC, and CJS on collector-substrate.
             (self.base, self.emitter, self.cje_eval),
             (self.base, self.collector, self.cjc_eval),
+            (self.base_ext, self.collector, self.cjcx_eval),
             (self.substrate, self.collector, self.cjs_eval),
         ] {
             if value != 0.0 {
@@ -1140,6 +1297,28 @@ impl Device for GummelPoonBjt {
             }
         }
         v
+    }
+
+    /// The one reactance that is not a two-terminal branch: `dQBE/dVBC`.
+    ///
+    /// `.ac` and `.noise` form their susceptance block as `jw·C`, so what lands
+    /// here is the frequency-domain twin of the `scale·cbe_x_eff` that
+    /// `load_jacobian_tran` stamps — the same four cells, the same asymmetry.
+    fn load_reactive_jacobian(&self, c_mat: &mut [crate::mna::SparseRow]) {
+        if self.cbe_x_eff == 0.0 {
+            return;
+        }
+        let c = self.cbe_x_eff;
+        for (row, col, val) in [
+            (self.base, self.base, c),
+            (self.base, self.collector, -c),
+            (self.emitter, self.base, -c),
+            (self.emitter, self.collector, c),
+        ] {
+            if let (Some(r), Some(cc)) = (row, col) {
+                c_mat[r][cc] += val;
+            }
+        }
     }
 
     fn noise_sources(&self, ctx: &SimContext, freq: f64) -> Vec<(NodeId, NodeId, f64)> {

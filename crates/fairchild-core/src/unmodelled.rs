@@ -58,23 +58,11 @@ pub const BJT: Unmodelled = &[
          for FCS of 0.1, 0.5, 0.9 and absent",
     ),
     (
-        "xcjc",
-        "all of CJC sits outside the base resistance, so RB does not see its \
-         share of the collector charge",
-    ),
-    (
         "rbm",
         "the base resistance is constant: it does not fall towards RBM at high \
          current",
     ),
     ("irb", "the base resistance is constant (needs RBM)"),
-    (
-        "xtf",
-        "the forward transit time is constant: TF does not rise with bias, so \
-         fT is flat in current",
-    ),
-    ("vtf", "the forward transit time is constant (needs XTF)"),
-    ("itf", "the forward transit time is constant (needs XTF)"),
     ("ptf", "excess phase is not modelled"),
 ];
 

@@ -806,3 +806,281 @@ fn a_bjts_own_capacitance_rolls_off_an_ac_sweep() {
         assert_eq!(compared, 3, "every frequency must have been compared");
     }
 }
+
+/// `XCJC` splits `CJC` across the base resistance, and the split matters.
+///
+/// `XCJC·CJC` connects to the **internal** base node, so `RB` sits in series with
+/// it. The rest hangs off the external base pin, where it does not. A base driven
+/// through a source resistance therefore sees a different capacitance depending on
+/// the split, and at 100 MHz with `RB = 1k` and `CJC = 10p` ngspice moves by a
+/// factor of 1.74 across the range:
+///
+/// | card | ngspice `|V(b)|` | relative |
+/// |---|---|---|
+/// | absent | 5.174797e-01 | 1.0000 |
+/// | `XCJC=1.0` | 5.174797e-01 | 1.0000 |
+/// | `XCJC=0.5` | 3.733585e-01 | 0.7215 |
+/// | `XCJC=0.0` | 2.975813e-01 | 0.5751 |
+///
+/// Absent and `XCJC=1.0` are identical, which is how the default was read off
+/// rather than assumed. Five values are compared below, so a wrong split cannot
+/// pass by matching at one endpoint: putting all of `CJC` outside `RB`, which is
+/// what shipped before, is exactly the `XCJC=0` row and is 0.575 of the right
+/// answer at the default card.
+#[test]
+fn xcjc_splits_the_collector_capacitance_across_the_base_resistance() {
+    let mut compared = 0;
+    let mut mags = Vec::new();
+    for x in [
+        "",
+        "XCJC=1.0",
+        "XCJC=0.75",
+        "XCJC=0.5",
+        "XCJC=0.25",
+        "XCJC=0.0",
+    ] {
+        let deck = format!(
+            "* xcjc\n.model qn NPN (IS=1e-16 BF=100 RB=1k CJC=10p {x})\n\
+             V1 in 0 DC 0 AC 1\nR1 in b 1k\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+        );
+        let net = parse_spice(&deck).expect("parse");
+        let mut registry = DeviceRegistry::new();
+        registry.register_builtin_models(&net.models);
+        let opts = SimOptions::from_netlist(&net);
+        let r = fairchild_core::ac_analysis_opts(&net, &[1e8], Some("v1"), &registry, &opts)
+            .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+        let mag = r.magnitude("b", 0).expect("v(b)");
+        mags.push(mag);
+        if let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e8) {
+            let rel = (mag - ng).abs() / ng;
+            assert!(
+                rel < 2e-3,
+                "XCJC='{x}': fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} \
+                 (rel {rel:.2e})"
+            );
+            compared += 1;
+        }
+    }
+    // The default is 1.0, so an absent card and `XCJC=1.0` must be identical.
+    assert!(
+        (mags[0] - mags[1]).abs() / mags[0] < 1e-12,
+        "an absent XCJC must equal XCJC=1.0: {:.6e} against {:.6e}",
+        mags[0],
+        mags[1]
+    );
+    // And the split must be monotonic in `XCJC`, which a wrong sign would break.
+    for w in mags[1..].windows(2) {
+        assert!(
+            w[1] < w[0],
+            "|V(b)| must fall as XCJC falls, because more of CJC moves outside \
+             RB and loads the base pin directly: got {mags:?}"
+        );
+    }
+    if compared > 0 {
+        assert_eq!(compared, 6, "every XCJC value must have been compared");
+    }
+}
+
+/// fairchild's AC magnitude at `node` on `deck`, at one frequency.
+fn fc_ac_mag(deck: &str, source: &str, node: &str, f: f64) -> f64 {
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::ac_analysis_opts(&net, &[f], Some(source), &registry, &opts)
+        .unwrap_or_else(|e| panic!("ac failed on\n{deck}\n{e:?}"));
+    r.magnitude(node, 0)
+        .unwrap_or_else(|| panic!("no node '{node}' in\n{deck}"))
+}
+
+/// `XTF`/`VTF`/`ITF` modulate the forward transit time with bias.
+///
+/// `TF_eff = TF·(1 + XTF·(IF/(IF+ITF))²·exp(VBC/(1.44·VTF)))`. Without them the
+/// transit time is constant, so `fT` does not fall at high current and does not
+/// rise with `VCE` — the two things this group exists to describe, and the two
+/// things a card that sets them is asking for.
+///
+/// # Why this is an end-to-end comparison
+///
+/// The capacitance is **not** `TF_eff·gm`. It is the derivative of the charge, and
+/// the two differ: the charge takes `(1 + xf)` while the capacitance takes
+/// `(1 + xf·(3 − 2·tmp))`, because `IF·d(xf)/d(vbe) = 2·xf·(1−tmp)·gbe`. Extracting
+/// a capacitance from an ngspice divider to fit the law directly gave 9.70 where
+/// the derivative form predicts 9.93 and the charge form predicts 7.35 — enough to
+/// identify which form is right, not enough to pin it. So the assertion here is on
+/// the AC response of the whole deck, which needs no extraction and no assumption
+/// about what the probe loads.
+///
+/// `CJE` and `CJC` are zero on purpose, so the diffusion charge is the only
+/// capacitance in the circuit and a wrong transit time cannot hide behind a
+/// depletion capacitance that happens to dominate.
+#[test]
+fn the_transit_time_rises_with_bias_through_xtf_vtf_and_itf() {
+    let mut compared = 0;
+    let mut mags = Vec::new();
+    for extra in [
+        "",
+        "XTF=1",
+        "XTF=5",
+        "XTF=10",
+        "XTF=10 ITF=1e-4",
+        "XTF=10 ITF=1e-3",
+        "XTF=10 VTF=1",
+        "XTF=10 VTF=5",
+        "XTF=10 VTF=1 ITF=1e-3",
+    ] {
+        let deck = format!(
+            "* transit time\n\
+             .model qn NPN (IS=1e-16 BF=100 CJE=0 CJC=0 TF=1n {extra})\n\
+             VBB bb 0 DC 0.75 AC 1\nR1 bb b 1k\nVC c 0 DC 5\nQ1 c b 0 qn\n"
+        );
+        let mag = fc_ac_mag(&deck, "vbb", "b", 1e7);
+        mags.push(mag);
+        let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e7) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (mag - ng).abs() / ng;
+        assert!(
+            rel < 2e-3,
+            "'{extra}': fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel \
+             {rel:.2e}). Ignoring the group entirely would give the '' row's \
+             {:.6e} for all nine cards.",
+            mags[0]
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 9, "every card must have been compared");
+    // The group must actually move the answer, or the comparison above is vacuous.
+    assert!(
+        (mags[3] / mags[0]) < 0.2,
+        "XTF=10 must load the base an order harder than a constant TF: {:.6e} \
+         against {:.6e}",
+        mags[3],
+        mags[0]
+    );
+}
+
+/// `VTF` makes the base-emitter charge depend on the base-collector voltage, and
+/// that transcapacitance has to reach `.ac` as well as transient.
+///
+/// This is the only asymmetric reactance in the device: the current flows base to
+/// emitter and the charge varies with `vbc`, so the stamp's rows and columns
+/// differ. A `ReactiveBranchSpec` is a two-terminal branch and cannot express it,
+/// so it goes through `load_reactive_jacobian` instead — and
+/// `tests/circuit/reactances_reach_ac.rs` is what makes forgetting that a failure
+/// rather than a quiet wrong bandwidth.
+///
+/// The probe is a `VCE` sweep. With `VTF` finite the transit time depends on
+/// `VBC`, so the base loading changes with the collector supply at a fixed base
+/// bias. Without the transcapacitance the DC operating point still moves, so the
+/// response is not flat — which is why this asserts agreement with ngspice rather
+/// than mere movement.
+#[test]
+fn the_vtf_transcapacitance_reaches_ac() {
+    let mut compared = 0;
+    for vc in [1.0, 2.0, 5.0, 10.0] {
+        let deck = format!(
+            "* vtf transcapacitance\n\
+             .model qn NPN (IS=1e-16 BF=100 VAF=50 CJE=0 CJC=0 TF=1n XTF=10 VTF=2)\n\
+             VBB bb 0 DC 0.75 AC 1\nR1 bb b 1k\nVC c 0 DC {vc}\nQ1 c b 0 qn\n"
+        );
+        let mag = fc_ac_mag(&deck, "vbb", "b", 1e7);
+        let Some(ng) = ngspice_ac_mag(&deck, "mag(v(b))", 1e7) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        let rel = (mag - ng).abs() / ng;
+        assert!(
+            rel < 2e-3,
+            "VC={vc}: fairchild |V(b)|={mag:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             `VAF=50` is on the card so the base charge is bias-dependent too, \
+             which means the transcapacitance is non-zero for a second reason and \
+             dropping either half fails here."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 4, "every VCE point must have been compared");
+}
+
+/// ngspice's transient value of `v(node)` at `at_time`.
+fn ngspice_tran_value(deck: &str, node: &str, at_time: f64, step: f64, stop: f64) -> Option<f64> {
+    let ng = find_ngspice()?;
+    let mut tmp = tempfile::NamedTempFile::new().ok()?;
+    let meas = format!("v_{node}_at");
+    write!(
+        tmp,
+        "{deck}.control\ntran {step:e} {stop:e}\n.endc\n\
+         .meas tran {meas} FIND v({node}) AT={at_time:.6e}\n.end\n"
+    )
+    .ok()?;
+    let out = Command::new(&ng).arg("-b").arg(tmp.path()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with(&meas.to_lowercase()) {
+            if let Some(rest) = t.split('=').nth(1) {
+                if let Ok(v) = rest.split_whitespace().next()?.parse::<f64>() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The transcapacitance has to be in the residual as well as the Jacobian.
+///
+/// `.ac` never touches the residual, so every AC test above passes with the
+/// transcapacitance stamped in `load_jacobian_tran` and left out of the
+/// companion's `cv`. That omission is not harmless. `cv` is the term the Jacobian
+/// stamp contributes at the linearisation point, and the history current cancels
+/// it — so leaving one contribution out leaves a spurious `scale·cbe_x·vbc` in the
+/// converged answer. A silent wrong answer, in transient only.
+///
+/// This deck makes the transcapacitance large. `XTF=10 VTF=2` puts a strong `VBC`
+/// dependence in the transit time, `VAF=50` puts a second one in through the base
+/// charge, and the collector swings 5 V through a 1 kΩ load, so `VBC` moves across
+/// the whole step. `CJE` and `CJC` are zero so no depletion capacitance can mask
+/// it.
+#[test]
+fn the_transcapacitance_is_in_the_transient_residual_too() {
+    let deck = "* transcapacitance in transient\n\
+        .model qn NPN (IS=1e-16 BF=100 VAF=50 CJE=0 CJC=0 TF=1n XTF=10 VTF=2)\n\
+        VIN bb 0 PULSE(0.6 0.8 1n 1n 1n 20n 40n)\n\
+        R1 bb b 1k\n\
+        VCC vcc 0 DC 5\n\
+        RC vcc c 1k\n\
+        Q1 c b 0 qn\n";
+    let step = 20e-12_f64;
+    let stop = 40e-9_f64;
+    let net = parse_spice(deck).expect("parse");
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&net.models);
+    let opts = SimOptions::from_netlist(&net);
+    let r = fairchild_core::tran_nr_with_registry_opts(&net, step, stop, &registry, &opts)
+        .expect("tran");
+
+    let mut compared = 0;
+    for at in [5e-9, 10e-9, 15e-9, 25e-9, 30e-9] {
+        let fc = r.voltage_at("c", at).expect("v(c)");
+        let Some(ng) = ngspice_tran_value(deck, "c", at, step, stop) else {
+            eprintln!("ngspice not available — skipping");
+            return;
+        };
+        // 1% — a transient comparison across two integrators at a switching
+        // edge, not an operating point. The fault this exists to catch is a
+        // spurious current proportional to `cbe_x·vbc`, which on this deck is
+        // orders larger than that.
+        let rel = (fc - ng).abs() / ng.abs().max(1e-3);
+        assert!(
+            rel < 1e-2,
+            "t={at:e}: fairchild V(c)={fc:.6e}, ngspice {ng:.6e} (rel {rel:.2e}). \
+             Leaving the transcapacitance out of the companion's `cv` while \
+             stamping it in the Jacobian puts a spurious `scale·cbe_x·vbc` in the \
+             converged answer, and no AC test can see it."
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 5, "every timepoint must have been compared");
+}
