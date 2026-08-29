@@ -1112,6 +1112,15 @@ fn assignments(text: &str) -> Vec<(String, String)> {
             if let Some(prev) = glued.pop() {
                 t = format!("{prev}=");
             }
+        } else if t.starts_with('=') {
+            // `name =value`. The comment above claimed this form was handled and
+            // it was not, exactly as on the SPICE side (#105). A foundry header
+            // aligns its defaults in columns — `pwbp    =1e35` — so the name and
+            // the `=` are routinely separated, and the name was surviving as a
+            // bare token, which the caller then read as a port.
+            if let Some(prev) = glued.pop() {
+                t = format!("{prev}{t}");
+            }
         }
         while t.ends_with('=') && i + 1 < toks.len() {
             i += 1;
@@ -1829,6 +1838,47 @@ tr1 tran stop=1u step=1n
         let r = found.next().expect("no resistor in the netlist");
         assert!(found.next().is_none(), "expected exactly one resistor");
         r
+    }
+
+    /// `name =value` is one assignment on this side too.
+    ///
+    /// A foundry header aligns its defaults in columns, so the `=` is separated
+    /// from its name, its value, or both. Only two of the four spellings were
+    /// glued, and the name in the other two survived as a bare token — which the
+    /// subcircuit header then read as a port (#105).
+    #[test]
+    fn a_spaced_equals_is_one_assignment() {
+        for text in [
+            "x a=1 b=2",
+            "x a = 1 b = 2",
+            "x a= 1 b= 2",
+            "x a =1 b =2",
+            "x a    =1 b    =2",
+        ] {
+            let got = assignments(text);
+            assert_eq!(
+                got,
+                vec![("a".into(), "1".into()), ("b".into(), "2".into())],
+                "every spelling of `=` is the same assignment: {text:?} gave {got:?}"
+            );
+        }
+    }
+
+    /// And a parenthesised value containing spaces stays whole through the glue.
+    #[test]
+    fn a_spaced_equals_keeps_a_parenthesised_value_whole() {
+        let got = assignments("x rwire =((5.3 / (w * nf) - 0.0002) * (nf + 1)) c=1");
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "rwire".into(),
+                    "((5.3 / (w * nf) - 0.0002) * (nf + 1))".into()
+                ),
+                ("c".into(), "1".into()),
+            ],
+            "got {got:?}"
+        );
     }
 
     #[test]
