@@ -308,8 +308,18 @@ pub(super) fn collect_defs(lines: &[(usize, String)]) -> Result<CollectDefsResul
 }
 
 /// Parse `.subckt <name> <port1> ... [param=default ...]`.
+///
+/// Tokenised by [`split_assignments`], the same splitter `.param` uses, because a
+/// default's value may be an expression: `rwire={(a - b)*(n + 1)}` is one token,
+/// not five.
+///
+/// It used to split on whitespace. A value containing a space then became several
+/// tokens, none holding an `=`, and each was read as **another port** — so a
+/// three-port foundry cell declared eleven and every call to it was refused. The
+/// deck was fine; the header was being read with a different idea of what a token
+/// is than the `.param` line two lines below it.
 pub(super) fn parse_subckt_header(line: &str, lineno: usize) -> Result<SubcktHeader, ParseError> {
-    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let tokens = split_assignments(line);
     if tokens.len() < 2 {
         return Err(ParseError::FieldCount {
             expected: "≥2 (.subckt name [ports ...])",
@@ -322,7 +332,7 @@ pub(super) fn parse_subckt_header(line: &str, lineno: usize) -> Result<SubcktHea
     let mut params = Vec::new();
     for tok in &tokens[2..] {
         if let Some((k, v)) = tok.split_once('=') {
-            params.push((k.to_lowercase(), v.to_string()));
+            params.push((k.trim().to_lowercase(), v.trim().to_string()));
         } else {
             ports.push(canon_node(tok));
         }
@@ -437,6 +447,15 @@ fn split_assignments(line: &str) -> Vec<String> {
             if let Some(prev) = glued.pop() {
                 t = format!("{prev}=");
             }
+        } else if t.starts_with('=') {
+            // `name =value`: the `=` opens this token, so its name is the one
+            // before it. The comment above this block already claimed this form
+            // was handled and it was not — a foundry header aligns its defaults
+            // in columns (`pwbp    =1e35`), so the name and the `=` are routinely
+            // separated and the name was being read as a port (#105).
+            if let Some(prev) = glued.pop() {
+                t = format!("{prev}{t}");
+            }
         }
         while t.ends_with('=') && i + 1 < toks.len() {
             i += 1;
@@ -445,7 +464,32 @@ fn split_assignments(line: &str) -> Vec<String> {
         glued.push(t);
         i += 1;
     }
-    glued
+
+    // Pass 2: a token that cannot open an assignment continues the value before
+    // it. Separate from pass 1 because that pass is still deciding where the `=`
+    // signs go — run together, this one swallows a bare name whose `= value`
+    // has not been attached yet.
+    //
+    // Only once an assignment has started: before that the tokens are positional,
+    // the ports on a `.subckt` header or the nodes on an element line.
+    //
+    // This is what carries an unbracketed expression whole. Keeping bracketed runs
+    // together is not enough, because a value ends at a depth-zero space and
+    // `(extr==1) ? (1e-4) : (…)` has three of them.
+    let mut merged: Vec<String> = Vec::new();
+    for t in glued {
+        if !crate::tokens::opens_assignment(&t)
+            && merged
+                .last()
+                .is_some_and(|p| crate::tokens::opens_assignment(p))
+        {
+            let prev = merged.pop().expect("checked by is_some_and");
+            merged.push(format!("{prev} {t}"));
+        } else {
+            merged.push(t);
+        }
+    }
+    merged
 }
 
 // ─── expansion helpers ────────────────────────────────────────────────────────
@@ -1267,6 +1311,7 @@ pub(super) fn expand_instance(
     if call_nets.len() != def.ports.len() {
         return Err(ParseError::SubcktPortCount {
             name: def_name.to_string(),
+            ports: def.ports.join(" "),
             expected: def.ports.len(),
             got: call_nets.len(),
             line: call_lineno,
