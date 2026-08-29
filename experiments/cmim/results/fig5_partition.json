@@ -1,0 +1,50 @@
+{
+  "paper": "ground state for N = 16 to 256; TTS in Fig 5b",
+  "hyperparameters": {
+    "alpha": 1.0,
+    "beta": 0.3,
+    "bits": 3.3
+  },
+  "rows": [
+    {
+      "N": 16,
+      "hit_rate": 1.0,
+      "mean_best_difference": 0.6,
+      "mean_iters": 51.1,
+      "symbols": 272,
+      "tts_s": 0.00517956298828125
+    },
+    {
+      "N": 32,
+      "hit_rate": 0.0,
+      "mean_best_difference": 41.9,
+      "mean_iters": null,
+      "symbols": 1056,
+      "tts_s": null
+    },
+    {
+      "N": 64,
+      "hit_rate": 0.0,
+      "mean_best_difference": 166.6,
+      "mean_iters": null,
+      "symbols": 4160,
+      "tts_s": null
+    },
+    {
+      "N": 128,
+      "hit_rate": 0.0,
+      "mean_best_difference": 547.2,
+      "mean_iters": null,
+      "symbols": 16512,
+      "tts_s": null
+    },
+    {
+      "N": 256,
+      "hit_rate": 0.0,
+      "mean_best_difference": 903.9,
+      "mean_iters": null,
+      "symbols": 65792,
+      "tts_s": null
+    }
+  ]
+}

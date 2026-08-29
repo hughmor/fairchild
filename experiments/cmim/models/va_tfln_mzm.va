@@ -1,0 +1,156 @@
+// va_tfln_mzm — thin-film lithium niobate travelling-wave Mach-Zehnder
+// modulator, as used in the cascaded-modulator Ising machine.
+//
+// The device is the HyperLight part described in Al-Kayed et al., Nature 648,
+// 576 (2025), Supplementary Section S1.1 and Table S1.  Every default below is
+// one of that paper's measured numbers.  See ../SPECS.md section 2 for the
+// citation of each one.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   in     optical bundle in
+//   out    optical bundle out
+//   rf_p   rf_n            radio-frequency drive, into the on-chip 50 ohm
+//   th_p   th_n            thermal phase shifter, sets the bias point
+//
+// The optical ports are bundles, so one source serves any channel count.  The
+// deck decides the width with `.optical_port bus N` and the modulator acts on
+// every channel at once, which is what a lithium niobate interferometer does:
+// its electrodes have no idea how many colours are inside.  Wavelength arrives
+// through `LAMBDA(in, k)` and is resolved before the solve, so there is no
+// wavelength parameter here and nothing to pass along by hand.
+//
+// Physics
+//   The two arms are driven push-pull, so the device is chirp free and only
+//   the intensity carries information:
+//
+//     phi   = phi_bias + pi*v_eff/v_pi_dc + pi*P_heat/p_pi
+//     T     = alpha * [ (1 - 1/ER)*(1 + cos(phi))/2 + 1/ER ]
+//     A_out = sqrt(T) * A_in * exp(-j*phi_prop)
+//
+//   `alpha` is 10^(-il_dB/10), a POWER loss, so the amplitude factor is the
+//   square root of it.  That is the convention every native fc_* device uses.
+//
+//   At the default bias, phi_bias = -90 degrees, cos(phi) becomes
+//   sin(pi*v/v_pi) and the transmission is (1 + sin(pi*v/v_pi))/2.  That is
+//   exactly the form the paper's equations 6 and 7 use, and it is why the spin
+//   nonlinearity the algorithm sees is a sine rather than a cosine.
+//
+//   The 3 dB the paper attributes to "biasing at quadrature" is already inside
+//   this expression: T averages to 1/2.  So il_dB carries only the 2 dB device
+//   insertion loss and the 4 dB chip coupling loss, and the total of 9 dB in
+//   Supplementary S4.2 comes out of the model, not out of a parameter.
+//
+// Electro-optic bandwidth
+//   `f_eo` is one real pole on an internal node, so the roll-off is a state in
+//   the MNA and `.ac` measures it.  The effective half-wave voltage that
+//   results is v_pi_dc*sqrt(1 + (f/f_eo)^2).
+//
+//   THE PAPER DISAGREES WITH ITSELF HERE.  Table S1 and the S1.1 text both say
+//   the electro-optic 3 dB bandwidth exceeds 110 GHz, which is the default.
+//   The right-hand axis of Figure S1(e) reads about 4.5 V at 100 GHz against
+//   1.5 V at DC, a factor of three, which needs f_eo near 35 GHz.  Both cannot
+//   be true.  The system response of Figure S5(a), 3 dB at 55 GHz for the whole
+//   loop, is the target that matters for replication, and it is reached with
+//   f_eo = 110 GHz once the driver and the receiver contribute their own poles.
+//   See ../SPECS.md open gap 2.
+//
+// The RF port
+//   A travelling-wave electrode terminated on chip looks resistive across its
+//   band.  `r_term` is that termination and `c_elec` is the residual electrode
+//   capacitance the driver must charge.  The port draws no photocurrent: an
+//   MZM shifts phase, it does not absorb, so unlike va_eam there is no
+//   back-action from the optical state into the drive network.
+//
+//   `rf_n` must be the RF return, normally node 0.  The internal pole node
+//   references it, so a floating rf_n would see a small fictitious current
+//   during transients.
+//
+// NOT modelled, deliberately:
+//   * Electrode microwave loss and velocity mismatch as such.  A real
+//     travelling-wave response is |1-exp(-u)|/|u| with u = alpha*L + j*dbeta*L,
+//     which rolls off far more slowly than one pole.  One pole is used here
+//     because the paper gives two numbers, not an S-parameter file, and a
+//     shape fitted to two numbers has no business claiming more structure.
+//   * Wavelength dependence of v_pi_dc and of the extinction ratio.  Both are
+//     measured at one wavelength in the paper.  A wide comb would see the
+//     splitter imbalance move and the extinction fall at the band edges.
+//   * Bias drift and the thermal time constant.  The thermal path is
+//     algebraic, which is right for a DC bias and wrong for a bias servo.
+//   * Chirp.  Push-pull drive makes it zero, and the paper's device is
+//     push-pull.
+//   * Photorefractive and pyroelectric drift, the two effects that actually
+//     move a lithium niobate bias point over hours.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_tfln_mzm(in, out, rf_p, rf_n, th_p, th_n);
+    optical_bundle in, out;
+    inout rf_p, rf_n, th_p, th_n;
+    electrical rf_p, rf_n, th_p, th_n;
+
+    // Internal node carrying the electro-optic pole.
+    electrical veo;
+
+    parameter real v_pi_dc      = 1.5    from (0:inf);  // DC half-wave voltage (V)
+    parameter real f_eo         = 110G   from (0:inf);  // EO 3 dB bandwidth (Hz)
+    parameter real er_dB        = 42.0   from (0:inf);  // DC extinction ratio (dB)
+    parameter real il_dB        = 6.0    from [0:inf);  // device 2 dB + coupling 4 dB
+    parameter real phi_bias_deg = -90.0;                // quadrature by default
+    parameter real r_term       = 50.0   from (0:inf);  // on-chip termination (ohm)
+    parameter real c_elec       = 50f    from [0:inf);  // electrode capacitance (F)
+    parameter real p_pi         = 60m    from (0:inf);  // heater power for pi (W)
+    parameter real r_heater     = 500.0  from (0:inf);  // thermal phase shifter (ohm)
+    parameter real L_cm         = 1.4    from (0:inf);  // electrode length (cm)
+    parameter real n_g          = 2.2    from (0:inf);  // TFLN group index
+
+    integer k;
+    real tau_eo, v_eff, er_lin, alpha_lin;
+    real p_heat, phi, t_pow, t_amp, phi_prop, c_p, s_p;
+
+    analog begin
+        // ── RF port: termination plus electrode capacitance ───────────────
+        I(rf_p, rf_n) <+ V(rf_p, rf_n) / r_term;
+        if (c_elec > 0.0)
+            I(rf_p, rf_n) <+ ddt(c_elec * V(rf_p, rf_n));
+
+        // ── electro-optic pole ────────────────────────────────────────────
+        // 1 S in parallel with tau farads on an internal node, so V(veo)
+        // tracks the drive with time constant tau_eo.  Same idiom as va_tia.
+        tau_eo = 1.0 / (`M_TWO_PI * f_eo);
+        I(veo, rf_n) <+ (V(veo, rf_n) - V(rf_p, rf_n)) * 1.0;
+        I(veo, rf_n) <+ tau_eo * ddt(V(veo, rf_n));
+        v_eff = V(veo, rf_n);
+
+        // ── thermal bias ──────────────────────────────────────────────────
+        p_heat = V(th_p, th_n) * V(th_p, th_n) / r_heater;
+        I(th_p, th_n) <+ V(th_p, th_n) / r_heater;
+
+        // ── interferometer ────────────────────────────────────────────────
+        er_lin    = pow(10.0, er_dB / 10.0);
+        alpha_lin = pow(10.0, -il_dB / 10.0);
+
+        phi = phi_bias_deg * `M_PI / 180.0
+            + `M_PI * v_eff / v_pi_dc
+            + `M_PI * p_heat / p_pi;
+
+        t_pow = alpha_lin * ((1.0 - 1.0 / er_lin) * (1.0 + cos(phi)) / 2.0
+                             + 1.0 / er_lin);
+        t_amp = sqrt(t_pow);
+
+        // ── propagate, one channel at a time ──────────────────────────────
+        // LAMBDA is filled by the elaborator from whatever source the deck
+        // routes here, so it carries no derivative and the propagation phase
+        // costs nothing in the Jacobian.
+        for (k = 0; k < N(in); k = k + 1) begin
+            phi_prop = `M_TWO_PI * n_g * (L_cm * 1e-2) / LAMBDA(in, k);
+            c_p = cos(phi_prop);
+            s_p = sin(phi_prop);
+            OF(E_RE(out, k)) <+ t_amp * ( OF(E_RE(in, k)) * c_p
+                                        + OF(E_IM(in, k)) * s_p);
+            OF(E_IM(out, k)) <+ t_amp * (-OF(E_RE(in, k)) * s_p
+                                        + OF(E_IM(in, k)) * c_p);
+        end
+    end
+endmodule

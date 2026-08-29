@@ -1,0 +1,125 @@
+{
+  "paper": "S3.2: digital needs 6 bits to match analogue at 3.3 bits",
+  "rows": [
+    {
+      "bits": 2.0,
+      "dither": 0.0,
+      "quality_pct": 75.95394736842104,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 2.0,
+      "dither": 0.05,
+      "quality_pct": 82.92763157894737,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 2.5,
+      "dither": 0.0,
+      "quality_pct": 82.20394736842104,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 2.5,
+      "dither": 0.05,
+      "quality_pct": 92.63157894736842,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 3.0,
+      "dither": 0.0,
+      "quality_pct": 83.75,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 3.0,
+      "dither": 0.05,
+      "quality_pct": 95.0657894736842,
+      "hit_rate": 0.25
+    },
+    {
+      "bits": 3.3,
+      "dither": 0.0,
+      "quality_pct": 87.53289473684211,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 3.3,
+      "dither": 0.05,
+      "quality_pct": 98.25657894736842,
+      "hit_rate": 0.625
+    },
+    {
+      "bits": 4.0,
+      "dither": 0.0,
+      "quality_pct": 92.46710526315789,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 4.0,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    },
+    {
+      "bits": 4.5,
+      "dither": 0.0,
+      "quality_pct": 94.07894736842105,
+      "hit_rate": 0.0
+    },
+    {
+      "bits": 4.5,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    },
+    {
+      "bits": 5.0,
+      "dither": 0.0,
+      "quality_pct": 96.74342105263158,
+      "hit_rate": 0.5
+    },
+    {
+      "bits": 5.0,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    },
+    {
+      "bits": 6.0,
+      "dither": 0.0,
+      "quality_pct": 98.45394736842105,
+      "hit_rate": 0.75
+    },
+    {
+      "bits": 6.0,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    },
+    {
+      "bits": 7.0,
+      "dither": 0.0,
+      "quality_pct": 98.58552631578948,
+      "hit_rate": 0.75
+    },
+    {
+      "bits": 7.0,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    },
+    {
+      "bits": 8.0,
+      "dither": 0.0,
+      "quality_pct": 98.55263157894737,
+      "hit_rate": 0.75
+    },
+    {
+      "bits": 8.0,
+      "dither": 0.05,
+      "quality_pct": 99.34210526315789,
+      "hit_rate": 0.875
+    }
+  ]
+}

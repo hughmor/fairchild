@@ -1,0 +1,173 @@
+// va_qd_soa — quantum dot semiconductor optical amplifier.
+//
+// The Innolume device described in Al-Kayed et al., Nature 648, 576 (2025),
+// Supplementary Section S1.1.  In the Ising machine it sits after the two
+// cascaded modulators and before the photodetector, and it is the only signal
+// amplifier in the loop.  Every default is one of that paper's measured
+// numbers.  See ../SPECS.md section 3.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   in               optical bundle in
+//   out              optical bundle out
+//   anode  cathode   bias, so the deck can account for its 1.19 W
+//
+// The optical ports are bundles.  Gain is evaluated per channel at that
+// channel's own wavelength, and saturation is driven by the TOTAL power over
+// all channels, which is what makes an amplifier a shared resource.
+//
+// Physics
+//   Unsaturated gain follows a Gaussian in wavelength, fitted through the peak
+//   gain and the 3 dB optical bandwidth:
+//
+//     g0_dB(lambda) = g_peak_dB * exp( -(lambda - lambda_peak)^2 / (2*sigma^2) )
+//
+//   Saturation uses the input form, because the paper quotes an INPUT
+//   saturation power of 4.1 dBm:
+//
+//     G = G0 / (1 + P_in_total / P_sat_in)
+//
+//   At P_in = P_sat_in the gain is 3 dB down, which is what "input saturation
+//   power" means.  Checked against Figure S1(b): 18.2 dB at -25 dBm falling to
+//   14.7 dB at +5 dBm, against about 14 dB measured.
+//
+//   The machine runs the amplifier at -13 dBm input, well below saturation, so
+//   in the experiment this term is a 0.2 dB correction.  It is here because a
+//   model that only works at one operating point cannot tell you when you have
+//   left it.
+//
+// Noise — and where it is realised
+//   The amplified spontaneous emission density follows the paper's own
+//   Supplementary equation 20:
+//
+//     rho_ASE = NF * G * h*c / (lambda * F_pol)      W/Hz, one polarisation
+//
+//   With NF = 5 dB, G = 18 dB and lambda = 1310 nm this gives 1.513e-17 W/Hz.
+//   Supplementary S4.2 prints the same mantissa as "1.513 fW/Hz", which is
+//   1.513e-15.  The exponent in the paper is wrong by a factor of 100, the
+//   physics is not.
+//
+//   THAT NUMBER IS NOT INJECTED HERE, and the reason is a trap worth naming.
+//   fairchild realises noise as random CURRENTS at the terminals a power
+//   spectral density is defined between.  A `white_noise` written inside a
+//   POTENTIAL contribution — which is the only kind an optical field wire
+//   takes — compiles, loads, runs, and contributes nothing.  An earlier
+//   version of this file put 20 dBm of spontaneous emission on the field and
+//   the receiver's variance did not move by one part in ten thousand.
+//
+//   The simulator has no field-domain optical noise at all: its native budget
+//   is `4kT/R + 2qI + RIN*I^2`, every term of it electrical, at the detector.
+//   So the amplifier's density is exported through `ase_out`, an ordinary
+//   electrical node that carries watts per hertz as its potential, and
+//   `va_receiver` turns it into the two beat currents that direct detection
+//   actually produces.  One place computes the density.  One place realises it.
+//
+//   `ase_out` needs no return path and draws no current.  Wire it to the
+//   receiver's `ase_in` and to nothing else.
+//
+// Temperature
+//   Figure S2(b) gives the gain spectrum at 15, 30 and 45 C.  The peak moves
+//   +0.567 nm/K and loses 0.11 dB/K.  Both are linear fits through those
+//   points, and both are inert until `.options temp` leaves the reference.
+//
+// NOT modelled, deliberately:
+//   * Carrier dynamics.  A QD SOA recovers in a few picoseconds, which is fast
+//     against a 106 GBaud symbol but not infinitely fast.  Patterning effects
+//     therefore do not appear.  This is the biggest simplification in the file.
+//   * Inhomogeneous broadening.  Saturation here is homogeneous: every channel
+//     shares one saturation term.  A real quantum dot amplifier has far lower
+//     cross-gain modulation than that, which is one of its selling points, so
+//     this model OVERSTATES WDM crosstalk.  It is conservative, not correct.
+//   * Self-phase modulation from the linewidth enhancement factor, measured at
+//     0.86 to 1.2 in S1.1.  Direct detection does not see it here.
+//   * Gain against bias current.  The paper gives one operating point,
+//     700 mA at 1.7 V, so gain is a parameter and the bias port is a
+//     bookkeeping resistance that reproduces that point.  Do not read a bias
+//     sweep out of this model.
+//   * Polarisation dependent gain.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_qd_soa(in, out, ase_in, ase_out, anode, cathode);
+    optical_bundle in, out;
+    inout ase_in, ase_out, anode, cathode;
+    // Not volts.  These two carry an ASE spectral density in W/Hz, one
+    // polarisation, so that a chain of amplifiers cascades the way a noise
+    // figure does.  Ground `ase_in` when nothing feeds it.
+    electrical ase_in, ase_out;
+    electrical anode, cathode;
+
+    parameter real g_peak_dB      = 18.2   from (0:inf);  // small-signal gain (dB)
+    parameter real lambda_peak_nm = 1300.0 from (0:inf);  // gain peak at t_ref (nm)
+    parameter real bw_3dB_nm      = 27.3   from (0:inf);  // optical 3 dB bandwidth (nm)
+    parameter real p_sat_in_dBm   = 4.1;                  // input saturation power (dBm)
+    parameter real nf_dB          = 5.6    from (0:inf);  // noise figure (dB)
+    parameter real f_pol          = 2.0    from (0:inf);  // polarisation factor
+    parameter real r_bias         = 2.43   from (0:inf);  // 1.7 V at 700 mA (ohm)
+    parameter real t_ref_c        = 20.0;                 // where the defaults hold (C)
+    parameter real dlambda_dt     = 0.567;                // peak shift (nm/K)
+    parameter real dg_dt          = -0.11;                // peak gain slope (dB/K)
+    parameter integer ase_on      = 1      from [0:1];    // 1 injects ASE
+
+    integer k;
+    real t_c, lam_pk, g_pk, two_sig2, p_sat_in, p_in_tot, sat;
+    real lam_nm, dl, g0_dB, g_lin, a_amp, hnu, nf_lin, g_ref;
+
+    analog begin
+        // ── temperature ───────────────────────────────────────────────────
+        t_c    = $temperature - 273.15;
+        lam_pk = lambda_peak_nm + dlambda_dt * (t_c - t_ref_c);
+        g_pk   = g_peak_dB      + dg_dt      * (t_c - t_ref_c);
+        if (g_pk < 3.1) g_pk = 3.1;
+
+        // Gaussian width, fitted so the gain is 3 dB down at half the stated
+        // optical bandwidth.
+        two_sig2 = (bw_3dB_nm / 2.0) * (bw_3dB_nm / 2.0) / ln(g_pk / (g_pk - 3.0));
+
+        // ── total input power sets the saturation every channel shares ────
+        p_in_tot = 0.0;
+        for (k = 0; k < N(in); k = k + 1) begin
+            p_in_tot = p_in_tot
+                     + OF(E_RE(in, k)) * OF(E_RE(in, k))
+                     + OF(E_IM(in, k)) * OF(E_IM(in, k));
+        end
+        p_sat_in = 1e-3 * pow(10.0, p_sat_in_dBm / 10.0);
+        sat      = 1.0 + p_in_tot / p_sat_in;
+
+        nf_lin = pow(10.0, nf_dB / 10.0);
+        g_ref  = 1.0;
+
+        // ── amplify, one channel at a time ────────────────────────────────
+        for (k = 0; k < N(in); k = k + 1) begin
+            lam_nm = LAMBDA(in, k) * 1e9;
+            dl     = lam_nm - lam_pk;
+            g0_dB  = g_pk * exp(-dl * dl / two_sig2);
+            g_lin  = pow(10.0, g0_dB / 10.0) / sat;
+            a_amp  = sqrt(g_lin);
+
+            OF(E_RE(out, k)) <+ a_amp * OF(E_RE(in, k));
+            OF(E_IM(out, k)) <+ a_amp * OF(E_IM(in, k));
+
+            if (k == 0) begin
+                g_ref = g_lin;
+                hnu   = `P_H * `P_C / LAMBDA(in, k);
+            end
+        end
+
+        // ── export the ASE density, Supplementary equation 20 ─────────────
+        // One scalar for the whole bundle, taken at channel 0.  Spontaneous
+        // emission fills the band, so every channel sees very nearly this
+        // density; the gain shape across a comb makes it a few tenths of a dB
+        // wrong at the edges, and no receiver in this machine can tell.
+        if (ase_on != 0)
+            V(ase_out) <+ g_ref * V(ase_in) + nf_lin * g_ref * hnu / f_pol;
+        else
+            V(ase_out) <+ g_ref * V(ase_in);
+
+        // ── bias ──────────────────────────────────────────────────────────
+        // A resistance, not a diode.  It reproduces 700 mA at 1.7 V so that a
+        // power budget adds up, and it says nothing about the junction.
+        I(anode, cathode) <+ V(anode, cathode) / r_bias;
+    end
+endmodule

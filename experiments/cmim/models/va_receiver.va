@@ -1,0 +1,192 @@
+// va_receiver — photodetector and transimpedance amplifier as one block.
+//
+// The Ising machine's optical-to-electrical converter.  Al-Kayed et al.,
+// Nature 648, 576 (2025) gives one number for it: the photodetector has a 3 dB
+// bandwidth of 100 GHz (Methods, and the Extended Data Figure 1 caption).  It
+// does not name the detector, does not give its responsivity, and does not name
+// the amplifier that follows it at all.
+//
+// The two are one module here because the paper treats them as one block and
+// because nothing in the work separates them.  Splitting them would invent a
+// boundary the data cannot support.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   in      optical bundle in
+//   ase_in  amplified spontaneous emission density arriving with the signal,
+//           W/Hz, one polarisation, as a node potential.  NOT volts.  Ground
+//           it for a link with no optical amplifier.
+//   out     single-ended electrical output into the oscilloscope
+//   gnd     reference
+//
+// The optical port is a bundle and the detector sums power over every channel
+// in it.  That is what a photodiode does: it has no colour vision, which is
+// exactly why a parallel wavelength-multiplexed version of this machine needs
+// a demultiplexer in front of one detector per channel.
+//
+// Physics
+//   P     = sum over channels of re^2 + im^2                 W
+//   I_ph  = responsivity * P + i_dark                        A
+//   pole at f_pd, then transimpedance z_t, then a pole at f_tia, then a soft
+//   clip, then a source impedance.
+//
+//   Two cascaded real poles, each a state on an internal node, so `.ac`
+//   measures the response rather than a parameter asserting it.
+//
+// Noise — the whole direct-detection budget
+//   Shot noise on the photocurrent, 2*q*I_ph, which is exact and needs no
+//   assumption.  Input-referred current noise for the amplifier, which needs
+//   one.  And the two beat terms that an optically amplified link lives or
+//   dies by, from the density arriving on `ase_in`:
+//
+//     S_sig-sp = 4 * R^2 * P_sig * rho_ase              A^2/Hz
+//     S_sp-sp  = 2 * R^2 * rho_ase^2 * bw_opt_hz        A^2/Hz
+//
+//   These are current sources, and that is not a modelling preference.
+//   fairchild realises noise as random currents at the terminals a spectral
+//   density is defined between, and it has no field-domain optical noise at
+//   all: its native budget is 4kT/R + 2qI + RIN*I^2, every term electrical, at
+//   the detector.  A `white_noise` written into an optical field wire, which
+//   only takes potential contributions, compiles and is silently discarded.
+//   So the amplifier exports a density and this device turns it into current.
+//
+//   With the machine's numbers the signal-spontaneous term is about 125 times
+//   the shot noise, which is what makes it worth getting right.
+//
+//   The ASE also carries DC power, R*rho*bw_opt_hz, and that is added to the
+//   photocurrent rather than left out: it is a real offset and the receiver
+//   DSP removes a mean it has to have seen.
+//
+// ── WHY THE NOISE OPERATING POINT IS A PARAMETER ────────────────────────────
+//
+// `i_ph_n`, `p_sig_n` and `rho_ase_n` state the bias the noise densities are
+// evaluated at.  They look redundant next to `i_ph`, `p_opt` and `V(ase_in)`,
+// which the model already knows.  They are not.
+//
+// A `white_noise()` whose power argument depends on a SOLVED quantity is
+// evaluated at a fixed point by fairchild and never updated.  Measured on this
+// very model: with `white_noise(2*q*i_ph)` written against the real
+// photocurrent, the output noise stayed at 3.2046e-6 V for 0, 0.01, 0.1, 1.0
+// and 2.0 mW of optical power, against 1.05e-3 V predicted at 1 mW.  It does
+// the same in `.noise`: the output density came back bit-identical at 0 mW and
+// 1 mW.  A `white_noise()` with a constant argument is exact — swept over four
+// decades of `i_n_in` it tracks the analytic discrete-time prediction to 0.6 %.
+//
+// So the bias is passed in, and `common/link.py` measures it from a first pass
+// over the same deck rather than asserting it.  That is the same discipline
+// `.noise` needs anyway: it linearises about one bias, and a modulated link
+// does not have one, so a link is characterised at each rail and not at its
+// average.  All three default to zero, which means "no noise", not "unknown".
+//
+// ASSUMED DEFAULTS, all of them flagged in ../SPECS.md:
+//   responsivity  0.8 A/W, typical for an InGaAs PIN at 1310 nm.  Gap 7.
+//   i_dark        10 nA, typical for the class.
+//   z_t           300 V/A.  Chosen so that the link's average photocurrent of
+//                 about 1.9 mA lands near a half volt, which is a readable
+//                 oscilloscope level, and so that the full modulated swing of
+//                 0 to 1.1 V fits inside v_swing.  Nothing in the paper sets it.
+//   f_tia         70 GHz.  The paper names no amplifier.  Supplementary S4.2
+//                 describes a 45.5 GHz part, and that is a projection for a
+//                 scaled integrated system, not the laboratory receiver: at
+//                 45.5 GHz a 106 GBaud signal would not survive.  Gap 3.
+//   i_n_in        3 pA/sqrt(Hz), the floor of a good wideband front end.
+//
+// DC coupling is deliberate.  The paper's equation 8 reaches the wanted product
+// by removing a DC term, and Methods puts that removal in the receiver DSP as
+// its first step, "the mean was removed".  Keeping the hardware DC coupled
+// leaves exactly one place that decides what the DC term is worth.
+//
+// NOT modelled, deliberately:
+//   * Second-order front-end response and gain peaking.  A real
+//     transimpedance amplifier's bandwidth depends on the detector capacitance
+//     it sees, so changing the detector would change the response.  Here it
+//     does not.
+//   * Photodetector saturation and space-charge screening at high photocurrent.
+//   * Avalanche gain and its excess noise factor.  This is a PIN.
+//   * Wavelength dependence of the responsivity.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module va_receiver(in, ase_in, out, gnd);
+    optical_bundle in;
+    inout ase_in, out, gnd;
+    // Not volts.  `ase_in` carries an ASE spectral density in W/Hz, one
+    // polarisation, exported by va_qd_soa.  Ground it if there is no amplifier.
+    electrical ase_in;
+    electrical out, gnd;
+    // One internal node per pole: the detector's, then the amplifier's.
+    electrical pd, filt;
+
+    parameter real responsivity = 0.8   from (0:inf);  // A/W
+    parameter real i_dark       = 10n   from [0:inf);  // A
+    parameter real f_pd         = 100G  from (0:inf);  // detector 3 dB (Hz)
+    parameter real z_t          = 300.0 from (0:inf);  // V/A
+    parameter real f_tia        = 70G   from (0:inf);  // amplifier 3 dB (Hz)
+    parameter real i_n_in       = 3p    from [0:inf);  // A/sqrt(Hz)
+    parameter real bw_opt_hz    = 4.77T from (0:inf);  // optical noise bandwidth
+    // The bias the noise densities are evaluated at.  See the header.
+    parameter real i_ph_n       = 0.0   from [0:inf);  // A
+    parameter real p_sig_n      = 0.0   from [0:inf);  // W
+    parameter real rho_ase_n    = 0.0   from [0:inf);  // W/Hz, one polarisation
+    parameter real v_swing      = 2.0   from (0:inf);  // V, half of peak-to-peak
+    parameter real clip_n       = 4.0   from [2:inf);  // clip sharpness
+    parameter real r_out        = 50.0  from (0:inf);  // ohm
+    parameter integer polarity  = 1     from [-1:1] exclude 0;
+
+    integer k;
+    real p_opt, rho, r2, i_ph, tau_pd, tau_tia, v_ideal, v_norm, v_clip;
+
+    analog begin
+        // ── detection ─────────────────────────────────────────────────────
+        p_opt = 0.0;
+        for (k = 0; k < N(in); k = k + 1) begin
+            p_opt = p_opt
+                  + OF(E_RE(in, k)) * OF(E_RE(in, k))
+                  + OF(E_IM(in, k)) * OF(E_IM(in, k));
+        end
+        rho = V(ase_in);
+        if (rho < 0.0) rho = 0.0;
+        r2 = responsivity * responsivity;
+        // The ASE carries its own DC power alongside the signal.
+        i_ph = responsivity * (p_opt + rho * bw_opt_hz) + i_dark;
+
+        // The detector pole, as a current on an internal node held at 1 S.
+        // V(pd) therefore carries the photocurrent in amperes, numerically.
+        tau_pd = 1.0 / (`M_TWO_PI * f_pd);
+        I(pd, gnd) <+ (V(pd, gnd) - i_ph) * 1.0;
+        I(pd, gnd) <+ tau_pd * ddt(V(pd, gnd));
+
+        // Every density below is built from PARAMETERS only.  Writing any of
+        // them against i_ph, p_opt or V(ase_in) silently freezes it — see the
+        // header.  They belong at the detector, before the pole, because that
+        // is where the carriers are generated.
+        if (i_ph_n > 0.0)
+            I(pd, gnd) <+ white_noise(2.0 * `P_Q * i_ph_n, "shot");
+        if (i_n_in > 0.0)
+            I(pd, gnd) <+ white_noise(i_n_in * i_n_in, "amp_input");
+        if (rho_ase_n > 0.0) begin
+            I(pd, gnd) <+ white_noise(4.0 * r2 * p_sig_n * rho_ase_n, "sig_spont");
+            I(pd, gnd) <+ white_noise(2.0 * r2 * rho_ase_n * rho_ase_n * bw_opt_hz,
+                                      "spont_spont");
+        end
+        // `ase_in` is read, never loaded: the exporting device drives it with a
+        // potential contribution and this one must not fight it.
+
+        // ── transimpedance and its pole ───────────────────────────────────
+        tau_tia = 1.0 / (`M_TWO_PI * f_tia);
+        v_ideal = polarity * z_t * V(pd, gnd);
+        I(filt, gnd) <+ (V(filt, gnd) - v_ideal) * 1.0;
+        I(filt, gnd) <+ tau_tia * ddt(V(filt, gnd));
+
+        // ── output stage ──────────────────────────────────────────────────
+        // Soft saturation.  `u/(1+u^n)^(1/n)` is flat-topped rather than
+        // tanh-shaped: linear to 0.04 % at a fifth of the swing where tanh
+        // already costs 1.3 %, and still smooth, so the Jacobian stays
+        // continuous through the clip.  Same function as va_tia.
+        v_norm = V(filt, gnd) / v_swing;
+        v_clip = v_swing * v_norm
+                 / pow(1.0 + pow(abs(v_norm), clip_n), 1.0 / clip_n);
+        I(out, gnd) <+ (V(out, gnd) - v_clip) / r_out;
+    end
+endmodule

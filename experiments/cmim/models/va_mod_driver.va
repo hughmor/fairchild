@@ -1,0 +1,92 @@
+// va_mod_driver — radio-frequency driver amplifier between the arbitrary
+// waveform generator and a thin-film lithium niobate modulator.
+//
+// THIS PART IS NOT IN THE PAPER.  Al-Kayed et al., Nature 648, 576 (2025) names
+// the AWG (Keysight M8199B) and the modulators (HyperLight) and never names the
+// driver.  The only driver number anywhere in the work is 100 mW, and that
+// appears in Supplementary S4.2 as a projection for a different, integrated
+// system.  So this model is a placeholder with a job: carry the electrical path
+// from the AWG output to the modulator electrode with the right gain, the right
+// swing, the right bandwidth and a stated noise floor, so that the loop's
+// measured response can be compared against Figure S5(a).
+//
+// Read every default here as ASSUMED.  ../SPECS.md open gap 3.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   in    single-ended input from the AWG
+//   out   single-ended output into the 50 ohm modulator electrode
+//   gnd   reference for both
+//
+// What each parameter is for
+//   a_v       voltage gain.  The AWG delivers about 1 Vpp and the modulator
+//             wants close to 3 Vpp to span its half-wave, so 3 is the default.
+//   f_3db     one real pole on an internal node.  The default is 65 GHz, which
+//             is the M8199B analogue bandwidth, because that instrument
+//             dominates this path and the driver itself is unspecified.  The
+//             AWG model in common/instruments.py therefore does NOT filter:
+//             this pole is the one place the transmit-path bandwidth lives.
+//   v_swing   output saturation, half of the peak-to-peak swing.  A driver
+//             that clips is not a defect here, it is how the first modulator
+//             gets pushed into its nonlinear half-wave.
+//   clip_n    clip sharpness.  `u/(1+u^n)^(1/n)` stays linear to 0.04 % at a
+//             fifth of the swing, where tanh already costs 1.3 %, and its
+//             derivative stays continuous so Newton does not stall.  Same
+//             function as va_tia, for the same reason.
+//   r_out     source impedance.  50 ohm into the modulator's 50 ohm on-chip
+//             termination, so the modulator sees half the open-circuit swing.
+//             a_v already accounts for that in its default.
+//   v_n_in    input-referred voltage noise density.  10 nV/sqrt(Hz) is typical
+//             for a broadband driver of this class and is not measured.
+//
+// NOT modelled, deliberately:
+//   * Slew rate limiting, which a real driver hits before its small-signal
+//     bandwidth at these swings.
+//   * Amplitude-to-phase conversion and memory effects.
+//   * Supply rails, so the clip is symmetric about zero.
+//   * Return loss.  The output is an ideal Thevenin source behind r_out, so a
+//     mismatch reflects nothing.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module va_mod_driver(in, out, gnd);
+    inout in, out, gnd;
+    electrical in, out, gnd;
+    // Internal node carrying the single-pole roll-off, so the pole is a real
+    // state in the MNA and `.ac` measures it.
+    electrical filt;
+
+    parameter real a_v      = 3.0   from (0:inf);   // V/V
+    parameter real r_in     = 50.0  from (0:inf);   // ohm
+    parameter real f_3db    = 65G   from (0:inf);   // Hz
+    parameter real v_swing  = 2.0   from (0:inf);   // V, half of peak-to-peak
+    parameter real clip_n   = 4.0   from [2:inf);   // clip sharpness
+    parameter real r_out    = 50.0  from (0:inf);   // ohm
+    parameter real v_n_in   = 10n   from [0:inf);   // V/sqrt(Hz), input-referred
+
+    real tau, v_ideal, v_norm, v_clip;
+
+    analog begin
+        tau = 1.0 / (`M_TWO_PI * f_3db);
+
+        // ── input stage ──────────────────────────────────────────────────
+        I(in, gnd) <+ V(in, gnd) / r_in;
+
+        // Input-referred noise, injected where the signal enters so that the
+        // same transfer function carries both.  A voltage density across r_in
+        // is a current density of v_n_in/r_in, and `white_noise` takes power.
+        if (v_n_in > 0.0)
+            I(in, gnd) <+ white_noise((v_n_in / r_in) * (v_n_in / r_in), "input");
+
+        // ── gain and pole ────────────────────────────────────────────────
+        v_ideal = a_v * V(in, gnd);
+        I(filt, gnd) <+ (V(filt, gnd) - v_ideal) * 1.0;
+        I(filt, gnd) <+ tau * ddt(V(filt, gnd));
+
+        // ── output stage ─────────────────────────────────────────────────
+        v_norm = V(filt, gnd) / v_swing;
+        v_clip = v_swing * v_norm
+                 / pow(1.0 + pow(abs(v_norm), clip_n), 1.0 / clip_n);
+        I(out, gnd) <+ (V(out, gnd) - v_clip) / r_out;
+    end
+endmodule

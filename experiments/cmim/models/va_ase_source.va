@@ -1,0 +1,87 @@
+// va_ase_source — the bulk semiconductor optical amplifier that anneals the
+// Ising machine, modelled as what it is: a bias current turned into an
+// amplified-spontaneous-emission density.
+//
+// In Al-Kayed et al., Nature 648, 576 (2025), a bulk SOA runs with no optical
+// input.  Its spontaneous emission enters the loop through a 50:50 fibre
+// coupler ahead of the quantum dot amplifier, and its bias current is the only
+// annealing knob in the machine.  Methods, "Controllable optical noise source
+// for annealing", and Extended Data Figure 2.
+//
+// Terminals (order matters, it is the netlist terminal order):
+//   ase_out    ASE spectral density delivered to the amplifier, W/Hz, one
+//              polarisation, as a node potential.  NOT volts.
+//
+// WHY THIS HAS NO OPTICAL PORTS.  It emitted a field once.  The field was
+// identically zero, because spontaneous emission has no mean amplitude, and
+// the noise on it was silently discarded: fairchild realises noise as random
+// currents at the terminals a spectral density is defined between, and a
+// `white_noise` inside a POTENTIAL contribution — the only kind an optical
+// field wire takes — compiles and contributes nothing.  A device whose entire
+// output is zero is not a device.  So the density travels on an ordinary
+// electrical node to `va_qd_soa`'s `ase_in`, cascades through its gain, and
+// becomes real current noise at `va_receiver`, which is the only place in a
+// direct-detection link where amplified spontaneous emission is measurable
+// anyway.
+//
+// Physics
+//   Above threshold the emitted ASE power rises with drive current:
+//
+//     P_ASE = p_ase_ref * ((I - I_th) / (I_ref - I_th))^n_exp
+//     rho   = P_ASE / (bw_ase_nm expressed as a frequency width)
+//
+// THIS SHAPE IS A CALIBRATION, NOT A MEASUREMENT.
+//   Extended Data Figure 2(a) plots ASE power and scope-referred noise
+//   variance against bias current from 0 to 110 mA, and the paper gives no
+//   table behind the plot.  What the paper does give is three fixed points:
+//
+//     60 mA   the bias that minimises iterations on a 400-node lattice
+//     100 mA  the start of the exponential schedule
+//     18.2 mV^2 and gamma = 0.0235 per iteration, the schedule itself
+//
+//   The variance is quoted at the oscilloscope, in millivolts squared, and the
+//   paper never states the conversion from there to spin amplitude.  So
+//   `p_ase_ref_dBm` is a FITTED constant: `common/channel.py` solves it so
+//   that the modelled scope-referred variance at 100 mA equals 18.2 mV^2.
+//   Because it is fitted, every fixed loss between this facet and the
+//   amplifier — the 3 dB of the 50:50 combiner above all — is absorbed into
+//   it.  Read `p_ase_ref_dBm` as "density delivered to the amplifier input",
+//   never as a measurement of the part.  See ../SPECS.md open gap 4.
+//
+// NOT modelled, deliberately:
+//   * Gain.  The device has an optical input in principle and none here.
+//   * The spectral shape of the emission, which Extended Data Figure 2(c)
+//     shows.  Only the part inside the signal band reaches the receiver.
+//   * Thermal roll-off of ASE power at high current.
+//   * Any dynamics.  The bias changes once per iteration, which is 10 000
+//     times slower than the carrier lifetime.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module va_ase_source(ase_out);
+    inout ase_out;
+    electrical ase_out;
+
+    parameter real i_bias_mA     = 0.0    from [0:inf);  // drive current (mA)
+    parameter real i_th_mA       = 20.0   from [0:inf);  // ASE threshold (mA)
+    parameter real i_ref_mA      = 100.0  from (0:inf);  // where p_ase_ref holds
+    parameter real p_ase_ref_dBm = 0.0;                  // fitted, see above
+    parameter real n_exp         = 1.5    from (0:inf);  // current exponent
+    parameter real bw_ase_nm     = 40.0   from (0:inf);  // emission width (nm)
+    parameter real wavelength_nm = 1310.0 from (0:inf);  // centre lambda (nm)
+
+    real x, p_ase, lam, bw_hz;
+
+    analog begin
+        x = (i_bias_mA - i_th_mA) / (i_ref_mA - i_th_mA);
+        if (x < 0.0) x = 0.0;
+        p_ase = 1e-3 * pow(10.0, p_ase_ref_dBm / 10.0) * pow(x, n_exp);
+
+        // Optical bandwidth in hertz: dnu = c * dlambda / lambda^2.
+        lam   = wavelength_nm * 1e-9;
+        bw_hz = `P_C * (bw_ase_nm * 1e-9) / (lam * lam);
+
+        V(ase_out) <+ p_ase / bw_hz;
+    end
+endmodule

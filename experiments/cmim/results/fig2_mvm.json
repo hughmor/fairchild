@@ -1,0 +1,77 @@
+{
+  "status": "DOES NOT REPRODUCE \u2014 see README",
+  "rows": [
+    {
+      "baud_GBaud": 4.0,
+      "accuracy_pct": 27.834743427362262,
+      "accuracy_sd_pct": 3.1048846689924314,
+      "bits": 0.4719285557324775,
+      "bits_sd": 0.06100750146041429,
+      "paper_accuracy_pct": 98.16,
+      "paper_bits": 5.03
+    },
+    {
+      "baud_GBaud": 16.0,
+      "accuracy_pct": 22.556071637203285,
+      "accuracy_sd_pct": 3.6966022665144664,
+      "bits": 0.37037071473732,
+      "bits_sd": 0.06732179344908194,
+      "paper_accuracy_pct": null,
+      "paper_bits": null
+    },
+    {
+      "baud_GBaud": 32.0,
+      "accuracy_pct": 16.04908378084004,
+      "accuracy_sd_pct": 4.003991220954369,
+      "bits": 0.2539750631190952,
+      "bits_sd": 0.0672945103463008,
+      "paper_accuracy_pct": null,
+      "paper_bits": 4.5
+    },
+    {
+      "baud_GBaud": 64.0,
+      "accuracy_pct": 13.920328651968198,
+      "accuracy_sd_pct": 3.823391069726255,
+      "bits": 0.21765949126039438,
+      "bits_sd": 0.06343533152967122,
+      "paper_accuracy_pct": 96.2,
+      "paper_bits": null
+    },
+    {
+      "baud_GBaud": 96.0,
+      "accuracy_pct": 7.461407852063745,
+      "accuracy_sd_pct": 2.6993879425711853,
+      "bits": 0.11248727751857207,
+      "bits_sd": 0.0421101495401747,
+      "paper_accuracy_pct": null,
+      "paper_bits": null
+    },
+    {
+      "baud_GBaud": 106.0,
+      "accuracy_pct": 6.900263521611796,
+      "accuracy_sd_pct": 2.439963250419596,
+      "bits": 0.10364602153806714,
+      "bits_sd": 0.037783285905934716,
+      "paper_accuracy_pct": null,
+      "paper_bits": 3.3
+    },
+    {
+      "baud_GBaud": 128.0,
+      "accuracy_pct": 4.103930642194384,
+      "accuracy_sd_pct": 2.240436563210402,
+      "bits": 0.060853459170624916,
+      "bits_sd": 0.03391854163894603,
+      "paper_accuracy_pct": null,
+      "paper_bits": null
+    },
+    {
+      "baud_GBaud": 148.0,
+      "accuracy_pct": 3.161300731706268,
+      "accuracy_sd_pct": 1.687526192211273,
+      "bits": 0.04656391943093461,
+      "bits_sd": 0.02518132340956912,
+      "paper_accuracy_pct": 90.7,
+      "paper_bits": 2.79
+    }
+  ]
+}

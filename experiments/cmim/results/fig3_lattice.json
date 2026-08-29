@@ -1,0 +1,76 @@
+{
+  "paper": "Fig 3b: 97.2 % at 41,209 nodes, 1,000 iterations; Fig 3a: ground state of 101x101 at ~671 iterations",
+  "hyperparameters": {
+    "alpha": 0.86,
+    "beta": 1.0,
+    "bits": 3.3
+  },
+  "rows": [
+    {
+      "L": 10,
+      "nodes": 100,
+      "couplings": 360,
+      "quality_pct": 100.0,
+      "quality_sd_pct": 0.0,
+      "best_pct": 100.0,
+      "hit_rate": 1.0,
+      "iters_to_ground": 70.2,
+      "seconds": 0.713050127029419
+    },
+    {
+      "L": 14,
+      "nodes": 196,
+      "couplings": 728,
+      "quality_pct": 100.0,
+      "quality_sd_pct": 0.0,
+      "best_pct": 100.0,
+      "hit_rate": 1.0,
+      "iters_to_ground": 93.0,
+      "seconds": 0.7798440456390381
+    },
+    {
+      "L": 20,
+      "nodes": 400,
+      "couplings": 1520,
+      "quality_pct": 98.94736842105263,
+      "quality_sd_pct": 2.105263157894734,
+      "best_pct": 100.0,
+      "hit_rate": 0.8,
+      "iters_to_ground": 344.0,
+      "seconds": 0.9043238162994385
+    },
+    {
+      "L": 30,
+      "nodes": 900,
+      "couplings": 3480,
+      "quality_pct": 98.50574712643677,
+      "quality_sd_pct": 1.8304394701052302,
+      "best_pct": 100.0,
+      "hit_rate": 0.6,
+      "iters_to_ground": 574.0,
+      "seconds": 1.252903938293457
+    },
+    {
+      "L": 40,
+      "nodes": 1600,
+      "couplings": 6240,
+      "quality_pct": 96.97435897435898,
+      "quality_sd_pct": 0.45036328385257074,
+      "best_pct": 97.3076923076923,
+      "hit_rate": 0.0,
+      "iters_to_ground": null,
+      "seconds": 1.6502962112426758
+    },
+    {
+      "L": 50,
+      "nodes": 2500,
+      "couplings": 9800,
+      "quality_pct": 96.66938775510205,
+      "quality_sd_pct": 1.0686085336786015,
+      "best_pct": 97.95918367346938,
+      "hit_rate": 0.0,
+      "iters_to_ground": null,
+      "seconds": 2.1829721927642822
+    }
+  ]
+}
