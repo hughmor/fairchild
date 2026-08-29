@@ -64,7 +64,7 @@ pub struct Rule {
     pub arch: Option<&'static str>,
     /// System tasks to remove, written as they appear in source.
     pub tasks: &'static [&'static str],
-    /// What the user loses, in a sentence that finishes "…, so <this>".
+    /// What the user loses, in a sentence that finishes `"…, so <this>"`.
     pub cost: &'static str,
 }
 

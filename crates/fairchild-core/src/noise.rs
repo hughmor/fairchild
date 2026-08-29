@@ -7,7 +7,7 @@
 //!      node V(out_pos) − V(out_neg).
 //!   3. For every uncorrelated noise source k at nodes (p,n) with one-sided
 //!      current PSD S_ik(f) [A²/Hz]:
-//!      S_V_out_k(f) = |λ[p] − λ[n]|² · S_ik(f).
+//!      `S_V_out_k(f) = |λ[p] − λ[n]|² · S_ik(f)`.
 //!   4. Sum the contributions and divide by the squared signal-path gain to
 //!      get the input-referred PSD.
 //!

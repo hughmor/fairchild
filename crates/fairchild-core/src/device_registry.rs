@@ -16,7 +16,7 @@ use crate::models::{
 };
 
 /// The set of instance parameters from an `X…` element line, threaded into a
-/// [`ModelFactory::build`] call. Keys are case-insensitive; the set tracks which
+/// [`ModelFactory`] call. Keys are case-insensitive; the set tracks which
 /// keys a device actually consumed so unrecognised (typo'd) params can be
 /// reported, and can rename keys for the PDK-alias path.
 ///

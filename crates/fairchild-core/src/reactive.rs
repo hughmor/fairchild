@@ -85,9 +85,24 @@ impl BranchHistory {
 
 /// Norton companion `(G_eq, I_hist)` for one branch at step size `h`.
 ///
-/// This is the only place an integration method is interpreted. A new method is
-/// one arm here, and no caller can forget it because `mode` is a parameter of
-/// the single function everyone calls.
+/// This is the only place an integration method is interpreted **for a charge or
+/// flux companion**, which is what almost every caller wants: `mode` is a
+/// parameter of the single function they all call, so a new method is one arm
+/// here and none of them can forget it.
+///
+/// Two places outside it also read the method, and a new method has to visit both:
+///
+/// - `adjoint_tran::beta_of` — the coefficient on the previous step's
+///   stored current. Only Trapezoidal carries one today, so its `_ => 0.0` arm
+///   silently swallows any future multi-step method, and the transient adjoint
+///   would be wrong rather than unimplemented.
+/// - `TranStepper::gear2_h_prev` — which methods want a second accepted point
+///   before they can use their higher-order form.
+///
+/// This doc claimed to be the only place full stop. It is worth having said
+/// otherwise, because `#93` was already a method parsed, stored, and then
+/// silently run as Backward Euler. Making the claim true — folding `beta_of` in
+/// here — is the better fix and is not this one.
 ///
 /// `gear2_h_prev` is `Some(h_prev)` only when BDF-2 is permitted for this step
 /// — mode is GEAR, no recent rejection, and the step ratio is sane. GEAR
@@ -139,7 +154,7 @@ pub fn companion(
 /// Returns `(i_n, dq_scale)`: the branch current at this iterate, and the factor
 /// such that `dq_scale · ∂q/∂x` is its Jacobian. `dq_scale` is deliberately the
 /// same quantity [`conductance`] returns for `value = 1`, so the two forms
-/// cannot drift apart — [`charge_current_agrees_with_scalar_companion`] pins
+/// cannot drift apart — `charge_current_agrees_with_scalar_companion` pins
 /// that.
 ///
 /// `q_prev2` is `Some` only when a second charge history exists; BDF-2 also

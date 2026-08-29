@@ -8,7 +8,7 @@
 //! with output, so the switch is process-wide instead, the way a log level is.
 //!
 //! Frontends set it once at startup; nothing in the library reads it except
-//! [`warn_user!`]. Warnings are cosmetic, which is what makes one global
+//! [`crate::warn_user!`]. Warnings are cosmetic, which is what makes one global
 //! acceptable here: a Python program running two `Circuit`s on two threads
 //! shares the setting, and the cost of that is a missing line of stderr.
 
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
 
-/// Silence every [`warn_user!`] in the library. Errors are unaffected — a
+/// Silence every [`crate::warn_user!`] in the library. Errors are unaffected — a
 /// warning says the run continued, and an error is still returned to the caller.
 pub fn set_quiet(quiet: bool) {
     QUIET.store(quiet, Ordering::Relaxed);

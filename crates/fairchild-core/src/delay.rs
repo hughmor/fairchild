@@ -100,7 +100,7 @@ impl DelayLine {
         (0..w).map(|j| a[j] + f * (b[j] - a[j])).collect()
     }
 
-    /// Record `snapshot` at the current time (set via [`set_state`]) and trim
+    /// Record `snapshot` at the current time (set via [`Self::set_state`]) and trim
     /// history older than one full delay window — keeping one sample before the
     /// window so [`sample`](Self::sample) can still bracket `t − delay_s`.
     pub fn record(&mut self, snapshot: Vec<f64>, delay_s: f64) {

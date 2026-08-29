@@ -752,13 +752,15 @@ impl GummelPoonBjt {
         // Jacobian-only — `ic`/`ib` never saw it — so a reverse-biased BJT
         // carried `2·IS = 2e-16` where ngspice carries `gmin·V ≈ 1e-12`.
         //
-        // fairchild still reads *half* of ngspice's leakage on a 3-terminal BJT,
-        // and that is a different gap: ngspice also puts `gmin` across the
-        // collector-substrate junction, whose node defaults to ground. Confirmed
-        // by pinning the substrate at the collector potential in ngspice, which
-        // removes exactly one `gmin·V`. That junction is not modelled here at all
-        // (`docs/model_status.md` — `CJS`/`VJS`/`MJS`/`FCS`), so it is recorded
-        // rather than faked.
+        // This used to read *half* of ngspice's leakage, because ngspice also
+        // puts `gmin` across the collector-substrate junction and that junction
+        // was not modelled. It is now (#97 §3), and `gsub` carries its `gmin`
+        // — so a reverse-biased BJT leaks `2·gmin·V`, which is ngspice's answer.
+        //
+        // PrimeSim's is `1·`: it puts no `gmin` on that junction. The two
+        // references split exactly down the middle on a picoamp, so following
+        // ngspice here is a choice rather than conformance, and it is recorded as
+        // one in `docs/model_status.md`.
         let gpi = gbe / bf_t + gben + gmin;
         let gmu = gbc / br_t + gbcn + gmin;
 

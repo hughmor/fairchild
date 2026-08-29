@@ -81,7 +81,8 @@ impl AcResult {
         Ok(())
     }
 
-    /// Write a CSV with columns: freq_hz, mag_V(<node>), phase_deg_V(<node>), ...
+    /// Write a CSV with columns: `freq_hz`, `mag_V(<node>)`,
+    /// `phase_deg_V(<node>)`, and so on.
     pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
         write!(w, "freq_hz")?;
         for name in self.voltages.keys() {

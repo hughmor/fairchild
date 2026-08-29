@@ -25,9 +25,10 @@ use crate::mna::MnaMatrix;
 ///   left dark — physically the same device, and its output ports are N-channel
 ///   buses with somewhere for the leakage to live.
 ///
-/// Parameters (all optional): `il_db`, `lambda0_nm`, `df_ghz`, `fwhm_ghz`,
-/// `shape_p`, `dlambda_dt_pm_per_k`, `t_nom_k`. With only `il_db` set the loss
-/// is flat across the band; adding `fwhm_ghz` gives each channel a passband.
+/// Parameters (all optional): `il_db`, `lambda0_nm`, `df_ghz` (alias
+/// `spacing_ghz`), `fwhm_ghz` (alias `bw_ghz`), `shape_p`,
+/// `dlambda_dt_pm_per_k`, `t_nom_k`. With only `il_db` set the loss is flat
+/// across the band; adding `fwhm_ghz` gives each channel a passband.
 #[derive(Clone)]
 struct ChannelFilter {
     lambda0_m: f64,

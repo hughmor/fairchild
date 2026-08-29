@@ -157,6 +157,12 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # A doc link that does not resolve is a comment pointing at code that is
+      # not there. `cargo doc` has always found these and nobody read the output;
+      # 24 had accumulated, two of them real.
+      - name: Doc links resolve
+        run: cargo doc --workspace --no-deps
+
       # Since #76, `SolverKind::Auto` prefers KLU when the feature is compiled
       # in — so the two configurations genuinely exercise different backends
       # (they used to be identical, which is why this was once a single full
