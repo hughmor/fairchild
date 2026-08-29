@@ -195,14 +195,106 @@ def interleave(x: np.ndarray, w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return out_x, out_w
 
 
-def deinterleave(y: np.ndarray) -> np.ndarray:
-    """Average each data symbol with its auxiliary partner.  See `interleave`."""
-    return 0.5 * (y[0::2] + y[1::2])
+def accumulate_interleaved(y: np.ndarray, starts: np.ndarray,
+                           parity: int = 0) -> np.ndarray:
+    """Sum each interleaved block, which is where the linear terms cancel.
+
+    THIS IS THE EXTRACTION, and pairing symbols off two at a time is not.
+
+    After DC removal the received symbol stream is, up to constants,
+
+        y_j = a*x_j + b*w_j + c*x_j*w_j
+
+    and `interleave` has arranged that every element appears twice, once as
+    `(x_i, w_i)` and once as `(-x_i, -w_i)`.  Summing a whole block therefore
+    gives
+
+        sum_j y_j = a*sum(x_i - x_i) + b*sum(w_i - w_i) + 2c*sum(x_i*w_i)
+
+    so both single-channel terms cancel across the block and the wanted product
+    comes out at twice its amplitude.  The multiply-accumulate the algorithm
+    needs is the same operation that does the cancelling: there is no separate
+    extraction step and nothing to condition.
+
+    Intersymbol interference cancels with them, which is the part that matters.
+    The electrical path is linear, so its contribution to the linear terms is a
+    convolution, and the sum of a convolution over an antisymmetric sequence is
+    itself antisymmetric — zero to the edges of the block.
+
+    Averaging each pair first, then accumulating, is algebraically identical and
+    numerically far worse: it cancels two terms several times larger than the
+    wanted one, symbol by symbol, at the Nyquist frequency where an equaliser is
+    least accurate, and the ISI no longer has a whole block to cancel over.
+    Measured on this model at 106 GBaud, pairwise recovers the product with an
+    accuracy of about 26 %; block accumulation recovers the dot product to a few
+    per cent.
+
+    `starts` are the block boundaries in DATA-element units, as
+    `scipy.sparse.csr_matrix.indptr` gives them.  They are doubled here because
+    the transmitted stream carries two symbols per element.
+    """
+    y = y[parity:]
+    idx = 2 * np.asarray(starts, dtype=int)
+    idx = np.clip(idx, 0, max(len(y) - 1, 0))
+    if len(y) == 0:
+        return np.zeros(len(starts))
+    return 0.5 * np.add.reduceat(y, idx)
+
+
+def deinterleave(y: np.ndarray, parity: int = 0) -> np.ndarray:
+    """Average each data symbol with its auxiliary partner.
+
+    Kept because it is the clearest way to SHOW that the interleaving inverts
+    Methods equation 7, and the module self-check uses it for exactly that.  Do
+    not use it to extract a matrix-vector product: see
+    `accumulate_interleaved`, which is both better conditioned and the operation
+    the algorithm wanted anyway.
+
+    `parity` says which of the two symbols starts a pair.  Getting it wrong does
+    not degrade the answer, it destroys it.  Use `find_parity`.
+    """
+    y = y[parity:]
+    n = (len(y) // 2) * 2
+    return 0.5 * (y[:n:2] + y[1:n:2])
+
+
+def find_parity(y: np.ndarray) -> int:
+    """Which offset pairs each data symbol with its own auxiliary.
+
+    The receiver cannot know this from the synchronisation alone.  A correlation
+    peak fixes the sample the pilots start on, and one symbol is two samples at
+    two samples per symbol, so an error of a single symbol flips the pairing
+    while leaving the pilot fit untouched.  It has to be resolved from the data.
+
+    The discriminator comes from the scheme itself.  Under the right pairing the
+    DIFFERENCE of a pair carries the two single-channel terms, which are several
+    times larger than the product, and the SUM carries only the product.  Under
+    the wrong pairing neither cancels and the two come out the same size.  So
+    take the offset that maximises the ratio of the two variances.
+
+    Measured on this model, over 4 to 148 GBaud: the right parity gives a ratio
+    of 19 to 190, the wrong one gives 0.9 to 1.1.  There is no ambiguous case in
+    the operational configuration.  With both modulators driven small-signal the
+    margin narrows to about 2, which is a symptom of the same conditioning
+    problem described in ../README.md.
+    """
+    best, arg = -1.0, 0
+    for p in (0, 1):
+        s = y[p:]
+        n = (len(s) // 2) * 2
+        if n < 4:
+            continue
+        d = 0.5 * (s[:n:2] - s[1:n:2])
+        m = 0.5 * (s[:n:2] + s[1:n:2])
+        r = float(np.var(d) / max(np.var(m), 1e-30))
+        if r > best:
+            best, arg = r, p
+    return arg
 
 
 # ── pre-emphasis ────────────────────────────────────────────────────────────
-def preemphasis(f: np.ndarray, h: np.ndarray, baud: float,
-                taps: int = RRC_TAPS, sps: int = SPS_SHAPE,
+def preemphasis(f: np.ndarray, h: np.ndarray, fs: float = AWG_FS,
+                taps: int = RRC_TAPS,
                 max_db: float = PREEMPH_MAX_DB) -> np.ndarray:
     """An FIR that inverts the link's measured response, within a boost limit.
 
@@ -210,12 +302,17 @@ def preemphasis(f: np.ndarray, h: np.ndarray, baud: float,
     cap rather than by a Tikhonov term, because a cap is what a real driver
     imposes: past its swing it stops boosting and starts clipping.
 
-    Designed on the shaping grid, `sps` samples per symbol, so it can sit
-    between the pulse shaper and the AWG resampler exactly where Methods puts
-    it.  The result is windowed to `taps` and normalised to unit gain at DC, so
-    it changes the shape of the spectrum and not the size of the signal.
+    `fs` is the grid the filter will run on, which for a zero-order-hold
+    transmitter is the converter's own sample rate.  The result is windowed to
+    `taps` and normalised to unit gain at DC, so it changes the shape of the
+    spectrum and not the size of the signal.
+
+    Methods puts a pre-emphasis filter after the pulse shaping, "to compensate
+    for known transmission-path losses", and Figure S5(a) is measured with it
+    applied: the loop is 3 dB down at 55 GHz there against 33 GHz for the raw
+    link.  Leaving it out is the single largest reason a modelled accuracy sits
+    below the paper's at high baud rates.
     """
-    fs = sps * baud
     grid = np.fft.rfftfreq(4096, d=1.0 / fs)
     mag = np.interp(grid, f, np.abs(h), left=np.abs(h[0]), right=np.abs(h[-1]))
     mag = np.maximum(mag / mag[0], 1e-12)
@@ -227,14 +324,58 @@ def preemphasis(f: np.ndarray, h: np.ndarray, baud: float,
 
 
 # ── transmitter ─────────────────────────────────────────────────────────────
+def nrz(sym: np.ndarray, baud: float) -> np.ndarray:
+    """Zero-order hold onto the AWG grid: one held level per symbol.
+
+    THE TRANSMIT PULSE MUST BE FREE OF INTERSYMBOL INTERFERENCE AT THE SAMPLING
+    INSTANT, and that is a hard requirement of this architecture rather than a
+    preference.  The two channels are multiplied OPTICALLY, before anything on
+    the receive side can act.  Write the shaped waveforms as x + e and w + d,
+    where e and d are each channel's own intersymbol interference:
+
+        (x + e)(w + d) = x*w + x*d + w*e + e*d
+
+    The two cross terms are products of the data with the interference.  They
+    are second order in the data, so the interleaving does not cancel them —
+    it cancels terms that are LINEAR in the transmitted sequence — and neither
+    does the block accumulation.  Receive-side filtering is harmless for exactly
+    the same reason: it acts after the product, it is linear in the product
+    stream, and a linear filter of unit DC gain conserves a block sum.
+
+    Measured at 4 GBaud with no channel impairment at all, recovering
+    accumulated dot products: root-raised-cosine shaping gives 21 %, and this
+    gives what the ideal symbols give.
+
+    The paper says NRZ where it compares itself with other machines
+    (Supplementary S3.3, "operating a non-return-to-zero (NRZ) signal for spin
+    encoding at > 100 GBaud"), and root-raised cosine where it lists the DSP
+    stages (Methods).  Both are true of a real transmitter — a DAC holds a level
+    for a sample and the pre-emphasis shapes what follows — but the pulse the
+    MODULATOR sees has to be flat at the symbol centre, so the hold is what
+    matters here.
+
+    Samples per symbol is not an integer in general: at 106 GBaud it is 2.4151,
+    because the instrument has one clock and the baud rate is chosen against it.
+    So the symbol index is computed per sample rather than by repeating.
+    """
+    sps = AWG_FS / baud
+    n_out = int(np.floor(len(sym) * sps))
+    idx = np.minimum((np.arange(n_out) / sps).astype(int), len(sym) - 1)
+    return np.asarray(sym, dtype=float)[idx]
+
+
 def tx(sym_x: np.ndarray, sym_w: np.ndarray, baud: float, rolloff: float,
-       preemph: np.ndarray | None = None, n_pilot: int = PILOT_SYMBOLS
-       ) -> tuple[np.ndarray, np.ndarray]:
+       preemph: np.ndarray | None = None, n_pilot: int = PILOT_SYMBOLS,
+       shape: str = "nrz") -> tuple[np.ndarray, np.ndarray]:
     """Both AWG channels, from spin symbols and weight symbols.
 
     `sym_x` and `sym_w` must already be interleaved and the same length.  The
     pilot sequence is prepended to both, as Methods describes, so the receiver's
     synchronisation and equaliser training see the same channel the data does.
+
+    `shape` is `"nrz"` or `"rrc"`.  Read `nrz` before choosing `"rrc"`: root
+    raised cosine is what Methods lists, and it costs most of the answer,
+    because its intersymbol interference reaches the optical multiplication.
     """
     if len(sym_x) != len(sym_w):
         raise ValueError("the two channels must carry the same symbol count")
@@ -251,12 +392,19 @@ def tx(sym_x: np.ndarray, sym_w: np.ndarray, baud: float, rolloff: float,
     out = []
     for s in (np.concatenate([p, sym_x]),
               np.concatenate([np.ones(n_pilot), sym_w])):
-        up = np.zeros(len(s) * SPS_SHAPE)
-        up[::SPS_SHAPE] = s
-        shaped = np.convolve(up, h, mode="same")
-        if preemph is not None:
-            shaped = np.convolve(shaped, preemph, mode="same")
-        grid = to_awg_grid(shaped, baud)
+        if shape == "nrz":
+            grid = nrz(s, baud)
+            if preemph is not None:
+                grid = np.convolve(grid, preemph, mode="same")
+        elif shape == "rrc":
+            up = np.zeros(len(s) * SPS_SHAPE)
+            up[::SPS_SHAPE] = s
+            shaped = np.convolve(up, h, mode="same")
+            if preemph is not None:
+                shaped = np.convolve(shaped, preemph, mode="same")
+            grid = to_awg_grid(shaped, baud)
+        else:
+            raise ValueError("shape is 'nrz' or 'rrc'")
         # Scale to the converter's full scale, which is what a transmitter does
         # and what makes the drive levels downstream mean anything.  Pulse
         # shaping overshoots a symbol by 10 to 20 %, so without this the spin
@@ -283,18 +431,46 @@ def _windows(rx2: np.ndarray, n_sym: int, taps: int, off: int) -> np.ndarray:
     return np.lib.stride_tricks.sliding_window_view(xp, taps)[starts]
 
 
-def _sync(rx2: np.ndarray, ref: np.ndarray, search: int = 4096) -> int:
-    """Offset, in 2-samples-per-symbol units, of the pilots inside `rx2`.
+def _sync(rx2: np.ndarray, ref: np.ndarray, search: int = 4096,
+          refine: int = 6) -> tuple[int, np.ndarray]:
+    """Where the pilots start, in 2-samples-per-symbol units, and the equaliser.
 
-    Cross-correlation against the pilot symbols on the same grid.  Returns the
-    lag of the peak, which with a spectrally flat pilot is unique.  With an
-    alternating pilot it is not — see `pilots`.
+    A correlation peak alone is not enough, and that cost a day.  It locates the
+    preamble to within a symbol or two, which is fine for reading the pilots and
+    useless for the data: the transmitted stream carries two symbols per matrix
+    element, so an offset error of one symbol moves every block boundary and
+    flips which auxiliary symbol pairs with which datum.  The accumulated
+    products then come out uncorrelated with the answer while the pilot fit
+    still looks perfect, which is the worst way for a bug to present.
+
+    So the correlation gives a starting point and the offset is then chosen by
+    the only criterion that reflects the data: train the equaliser at each
+    candidate and keep the one whose PILOT RESIDUAL is smallest.  That pins the
+    symbol grid, not just the preamble, because the equaliser can absorb a
+    fractional delay and cannot absorb a whole-symbol one.
+
+    Returns `(offset, coefficients)` so the caller does not train twice.
     """
     up = np.zeros(len(ref) * SPS_RX)
     up[::SPS_RX] = ref
     span = min(len(rx2), len(up) + search)
     c = signal.correlate(rx2[:span], up, mode="full")
-    return int(np.argmax(np.abs(c))) - (len(up) - 1)
+    coarse = int(np.argmax(np.abs(c))) - (len(up) - 1)
+
+    best = None
+    for d in range(-refine, refine + 1):
+        off = coarse + d * SPS_RX
+        try:
+            coef = _train_ffe(rx2, ref, off)
+        except np.linalg.LinAlgError:
+            continue
+        resid = _windows(rx2, len(ref), FFE_TAPS, off) @ coef - ref
+        score = float(np.mean(resid ** 2))
+        if best is None or score < best[0]:
+            best = (score, off, coef)
+    if best is None:
+        raise ValueError("could not train an equaliser at any candidate offset")
+    return best[1], best[2]
 
 
 def _train_ffe(rx2: np.ndarray, ref: np.ndarray, off: int,
@@ -314,9 +490,100 @@ def _train_ffe(rx2: np.ndarray, ref: np.ndarray, off: int,
     return np.linalg.solve(g, A.T @ ref)
 
 
+def integrate_symbols(samples: np.ndarray, baud: float, n_sym: int,
+                      offset: float = 0.0) -> np.ndarray:
+    """Average the samples inside each symbol.  The integrating photoreceiver.
+
+    THIS IS THE RECEIVER, and a feedforward equaliser reading two samples per
+    symbol is not.  Methods equation 9: the summation that finishes the
+    multiply-accumulate "can be performed digitally after ADC sampling or in the
+    analogue domain by means of an integrator before sampling".  Supplementary
+    S4.2 builds the scaled architecture around "the integrating photoreceiver",
+    whose "bandwidth requirements are relaxed" precisely because it integrates.
+
+    Why it is not interchangeable with sampling and equalising, measured on an
+    ideal square-law detector with no channel impairment at all, recovering
+    accumulated dot products:
+
+        integrate over each symbol                        99.1 %
+        two samples per symbol, then a 51-tap equaliser   23.7 %
+        two samples per symbol, no equaliser              51.3 %
+
+    The equaliser is not merely unnecessary here, it is harmful, and the reason
+    is worth keeping.  It is trained on zero-mean pilot symbols against a stream
+    carrying a large DC term, so least squares learns to suppress low
+    frequencies: its DC gain came out at 0.20.  The quantity being recovered is
+    a block sum, which is a low-frequency quantity, so the equaliser attenuates
+    exactly what the accumulation is trying to measure.  Symbol-level fidelity
+    stayed at r = 0.9986 while the block sums fell to r = 0.65 — the residual
+    was small but correlated, and summing 256 symbols amplifies a correlated
+    error by 256 where it amplifies a white one by 16.
+
+    Integration also rejects the transmit-side intersymbol interference that the
+    optical multiplication would otherwise turn into a second-order error: with
+    `nrz` shaping the detected waveform is flat across a symbol, and the mean of
+    a flat thing is that thing.
+
+    `offset` is the sub-symbol phase of the boundaries, in samples.
+
+    THE BOUNDARIES MUST BE THE CONVERTER'S, NOT THE IDEAL SYMBOL PERIOD'S.  A
+    digital-to-analogue converter holds a level for whole samples, so symbol `k`
+    occupies samples `ceil(k*sps)` up to `ceil((k+1)*sps)`, and at 106 GBaud,
+    where `sps` is 2.4151, consecutive symbols are therefore two or three
+    samples wide.  Integrating instead over the exact interval `[k*sps,
+    (k+1)*sps)` straddles the staircase and mixes up to 40 % of a neighbouring
+    symbol into every result.
+
+    The symptom was diagnostic once seen: every baud rate with an INTEGER number
+    of samples per symbol worked — 4, 16, 32, 64 and 128 GBaud — and every one
+    without collapsed.  It reads exactly like a bandwidth limit and is not one.
+    Integrating on the converter's own boundaries is also what an integrating
+    photoreceiver does in hardware, where the staircase is the thing arriving.
+
+    `offset` is the sub-symbol phase of the boundaries, in samples.
+    """
+    sps = AWG_FS / baud
+    x = np.asarray(samples, dtype=float)
+    cum = np.concatenate([[0.0], np.cumsum(x)])
+    edges = offset + np.arange(n_sym + 1) * sps
+    e = np.clip(np.ceil(edges - 1e-9).astype(int), 0, len(x))
+    width = np.maximum(e[1:] - e[:-1], 1)
+    return (cum[e[1:]] - cum[e[:-1]]) / width
+
+
+def _sync_integrated(x: np.ndarray, baud: float, ref: np.ndarray,
+                     n_total: int) -> tuple[np.ndarray, float]:
+    """Find the symbol phase, then integrate on it.
+
+    The boundaries the integrator needs are a sub-sample phase, not a lag in
+    whole samples, so this searches the phase directly and scores each candidate
+    by how well the integrated preamble matches the known pilots.  Cheap: one
+    pass per candidate over a preamble.
+    """
+    sps = AWG_FS / baud
+    best = None
+    # A FIXED number of phases across one symbol, never a number derived from
+    # the sample count.  Deriving it gave 7 candidates at 106 GBaud, where a
+    # symbol is 2.4 samples, and 65 at 4 GBaud, where it is 64 — so the phase
+    # was resolved to a sixtieth of a symbol at the easy end and a fifth at the
+    # hard one.  That alone took the accuracy at 106 GBaud from usable to noise,
+    # and it looked exactly like a bandwidth limit.
+    for frac in np.linspace(0.0, sps, 65)[:-1]:
+        for lag in range(0, 8):
+            sym = integrate_symbols(x, baud, len(ref), frac + lag * sps)
+            a = sym - sym.mean()
+            b = ref - ref.mean()
+            d = float(a @ a)
+            r = abs(float(a @ b)) / np.sqrt(d * float(b @ b)) if d > 0 else 0.0
+            if best is None or r > best[0]:
+                best = (r, frac + lag * sps)
+    off = best[1]
+    return integrate_symbols(x, baud, n_total, off), off
+
+
 def rx(samples: np.ndarray, baud: float, n_data: int,
        n_pilot: int = PILOT_SYMBOLS, clip_sigma: float | None = CLIP_SIGMA,
-       pilot_kind: str = "prbs") -> np.ndarray:
+       pilot_kind: str = "prbs", mode: str = "integrate") -> np.ndarray:
     """Recover `n_data` symbols from an oscilloscope capture.
 
     Returns the equalised, clipped symbol sequence — still interleaved.  Pass it
@@ -334,12 +601,16 @@ def rx(samples: np.ndarray, baud: float, n_data: int,
     """
     x = np.asarray(samples, dtype=float)
     x = x - np.mean(x)                                    # 1
-    x2 = from_awg_grid(x, baud, SPS_RX)                   # 2
     ref = pilots(n_pilot, pilot_kind)
-    off = _sync(x2, ref)                                  # 3
-    coef = _train_ffe(x2, ref, off)                       # 4
     total = n_pilot + n_data
-    sym = _windows(x2, total, FFE_TAPS, off) @ coef       # 5, 6
+    if mode == "integrate":
+        sym, _ = _sync_integrated(x, baud, ref, total)    # 2, 3
+    elif mode == "equalise":
+        x2 = from_awg_grid(x, baud, SPS_RX)               # 2
+        off, coef = _sync(x2, ref)                        # 3, 4
+        sym = _windows(x2, total, FFE_TAPS, off) @ coef   # 5, 6
+    else:
+        raise ValueError("mode is 'integrate' or 'equalise'")
     sym = sym[n_pilot:total]
     if clip_sigma is not None and len(sym):               # 7
         lim = clip_sigma * np.std(sym)

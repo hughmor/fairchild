@@ -181,6 +181,56 @@ class Channel:
         return v
 
 
+class DeckChannel:
+    """The real deck, wearing `Channel`'s interface.
+
+    Same call signature as `Channel`, so anything that takes one takes the
+    other: `ising.mvm_analog`, `ising.calibrate_surrogate`, the replication
+    scripts.  Every sample it returns came out of a Newton solve.
+
+    USE THIS WHEREVER IT FITS.  `Channel` exists for the iteration loop and
+    nothing else: a thousand iterations of a 434,176-symbol problem is about a
+    billion timesteps and will not run.  A single-shot measurement — the
+    frequency response, a matrix-vector product, an eye — is a few thousand
+    symbols and runs here in seconds, so it should.
+
+    `oversample` is not a quality knob to be traded away.  This link's fastest
+    pole is at 127 GHz, whose time constant is 1.25 ps, against a 3.9 ps AWG
+    sample. Backward Euler at three time constants per step damps hard, and the
+    deck then swings 35 % less than it should.  Sixteen is the honest setting
+    and eight is the cheapest defensible one; `channel.validate()` prints the
+    convergence so the choice is visible rather than asserted.
+    """
+
+    def __init__(self, lk: Link | None = None, oversample: int = 8,
+                 method: str = "be", noise: bool = True, **params):
+        self.lk = lk or Link()
+        self.oversample = int(oversample)
+        self.method = method
+        self.noise_on = noise
+        self.params = dict(params)
+        self.noise_params = self.lk.noise_params(**self.params)
+
+    def __call__(self, awg_x: np.ndarray, awg_w: np.ndarray, baud: float,
+                 noise: bool | None = None, quantise_rx: bool = True
+                 ) -> np.ndarray:
+        n = min(len(awg_x), len(awg_w))
+        t = np.arange(n) / AWG_FS
+        use_noise = self.noise_on if noise is None else noise
+        kw = dict(self.params)
+        if use_noise:
+            kw.update(self.noise_params)
+        t_sim, v = self.lk.tran(
+            t, np.asarray(awg_x[:n], float), np.asarray(awg_w[:n], float),
+            tstep=1.0 / (self.oversample * AWG_FS), method=self.method,
+            trannoise=use_noise, **kw)
+        # Back onto the AWG grid, which is what the receive stack expects.
+        v = np.interp(t, t_sim, v)
+        if quantise_rx:
+            v = quantise(v - np.mean(v), enob_for_baud(baud))
+        return v
+
+
 # ── the annealing noise source ──────────────────────────────────────────────
 def ase_density(i_mA: float, p_ase_ref_dBm: float = -38.0,
                 i_th_mA: float = 20.0, i_ref_mA: float = 100.0,

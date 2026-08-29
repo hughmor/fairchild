@@ -132,44 +132,90 @@ def mvm_surrogate(W: sp.csr_matrix, s_ext: np.ndarray, bits: float,
 
 
 def calibrate_surrogate(channel, baud: float = 106e9, rolloff: float = 0.2,
-                        n: int = 128, trials: int = 8, seed: int = 0
-                        ) -> dict:
+                        n: int = 128, trials: int = 8, seed: int = 0,
+                        linear: bool = False, n_pilot: int = 512) -> dict:
     """Measure what the surrogate should quantise and dither by.
 
-    Pushes random weight and spin vectors through the real transmit DSP, the
-    behavioural channel and the real receive DSP, and compares the recovered
-    per-symbol products against what they should have been.  This is the
-    measurement Figure 2(c) reports, run on the model instead of the bench.
+    Pushes random vectors through the real transmit DSP, the behavioural
+    channel and the real receive DSP, and compares the recovered per-symbol
+    products against what they should have been.
+
+    `linear=True` is the paper's Figure 2 experiment and not the machine's
+    operating point.  Methods: "Both TFLN MZMs were operated in the linear
+    regime to assess MVM accuracy.  The modulators were driven with two random
+    vectors, x1 and x2, sampled from a uniform distribution in [-1, 1] at 8-bit
+    resolution.  The feedforward result is an element-wise multiplication,
+    x1 (*) x2".  So the target there is a plain product and both drives are
+    small.  `linear=False` leaves the spin channel across its half-wave, which
+    is what the solver actually uses, and the target is w*sin(pi*x/2).
+
+    IT MEASURES DOT PRODUCTS, NOT INDIVIDUAL PRODUCTS, because that is what
+    Figure 2 measures: "matrix multiplication performed at 64 GBaud using 500
+    randomly sampled 128 x 128 matrices", with the axes of Figure 2(c) labelled
+    "expected" and "measured vector-matrix product".  Each point there is one
+    accumulated row of length `n`.  The accumulation is also where the
+    interleaving cancels its linear terms, so measuring per-symbol products
+    would be measuring a quantity the machine never forms.
 
     Returns the accuracy the paper quotes, the effective bit precision, and the
     residual error as a fraction of full scale, which is the `sigma_rel` the
     surrogate wants.  Bit precision follows the paper's definition: the
-    signal-to-error ratio of the recovered product, written in bits.
+    signal-to-error ratio of the recovered value, written in bits.
 
-    The paper's own values, for comparison: 96.2 +/- 0.4 % and about 4.5 bits at
-    64 GBaud, falling to 3.3 bits at 106 GBaud (main text, Figures 2c and 2e).
+    The paper's own values: 98.16 +/- 0.31 % at 4 GBaud, 96.2 +/- 0.4 % at
+    64 GBaud, 90.7 +/- 0.94 % at 148 GBaud, and 5.03 down to 2.79 bits over the
+    same range (main text, Figures 2c and 2e).
+
+    Means are removed before the fit.  The stream carries a DC term that the
+    interleaving does not cancel, which Methods removes by "DC filtering" and
+    which a series capacitor ahead of the sampler would remove just as well.
     """
     import dsp
 
     rng = np.random.default_rng(seed)
-    acc, prec, res = [], [], []
-    for _ in range(trials):
-        w = rng.uniform(-1.0, 1.0, n)
-        x = rng.uniform(-1.0, 1.0, n)
-        ix, iw = dsp.interleave(x, w)
-        awg_x, awg_w = dsp.tx(ix, iw, baud, rolloff, n_pilot=512)
-        scope = channel(awg_x, awg_w, baud)
-        sym = dsp.rx(scope, baud, n_data=len(ix), n_pilot=512, clip_sigma=None)
-        got = dsp.deinterleave(sym)
-        want = w * np.sin(np.pi * x / 2.0)
-        g = float(got @ want) / float(got @ got) if got @ got else 0.0
-        err = g * got - want
-        acc.append(1.0 - np.std(err) / np.std(want))
-        prec.append(np.log2(np.std(want) / max(np.std(err), 1e-12)))
-        res.append(np.std(err) / np.max(np.abs(want)))
+    saved = getattr(channel, "a_v_x", None)
+    if linear and saved is not None:
+        channel.a_v_x = channel.a_v_w
+    try:
+        got_all, want_all = [], []
+        for _ in range(trials):
+            # 8-bit resolution on both drive vectors, as Methods specifies.
+            # `rows` dot products of length `n` per trial, so the statistics
+            # come from the same kind of population Figure 2(c) samples.
+            rows = 64
+            x = quantise(rng.uniform(-1.0, 1.0, rows * n), 8, 1.0)
+            w = quantise(rng.uniform(-1.0, 1.0, rows * n), 8, 1.0)
+            ix, iw = dsp.interleave(x, w)
+            awg_x, awg_w = dsp.tx(ix, iw, baud, rolloff, n_pilot=n_pilot)
+            scope = channel(awg_x, awg_w, baud)
+            sym = dsp.rx(scope, baud, n_data=len(ix), n_pilot=n_pilot,
+                         clip_sigma=None)
+            starts = np.arange(rows) * n
+            got = dsp.accumulate_interleaved(sym, starts,
+                                             dsp.find_parity(sym))
+            prod = x * w if linear else w * np.sin(np.pi * x / 2.0)
+            want = prod.reshape(rows, n).sum(axis=1)
+            k = min(len(got), len(want))
+            got_all.append(got[:k])
+            want_all.append(want[:k])
+        a = np.concatenate(got_all)
+        b = np.concatenate(want_all)
+        a, b = a - a.mean(), b - b.mean()
+        g = float(a @ b) / float(a @ a) if a @ a else 0.0
+        err = g * a - b
+        # Split by trial so the spread is a spread over runs, as the paper's
+        # error bars are.
+        chunks = np.array_split(err, trials)
+        ref = np.std(b)
+        acc = [1.0 - np.std(c) / ref for c in chunks]
+        prec = [np.log2(ref / max(np.std(c), 1e-12)) for c in chunks]
+    finally:
+        if linear and saved is not None:
+            channel.a_v_x = saved
     return {"accuracy": float(np.mean(acc)), "accuracy_sd": float(np.std(acc)),
             "bits": float(np.mean(prec)), "bits_sd": float(np.std(prec)),
-            "sigma_rel": float(np.mean(res))}
+            "sigma_rel": float(np.std(err) / np.max(np.abs(b))),
+            "measured": a.tolist(), "expected": b.tolist()}
 
 
 def mvm_analog(W: sp.csr_matrix, s_ext: np.ndarray, channel, baud: float,
@@ -203,10 +249,10 @@ def mvm_analog(W: sp.csr_matrix, s_ext: np.ndarray, channel, baud: float,
     awg_x, awg_w = dsp.tx(ix, iw, baud, rolloff, n_pilot=n_pilot)
     scope = channel(awg_x, awg_w, baud)
     sym = dsp.rx(scope, baud, n_data=len(ix), n_pilot=n_pilot)
-    prod = dsp.deinterleave(sym)
 
-    # Row sums, from the CSR row pointers.
-    acc = np.add.reduceat(prod, W.indptr[:-1])
+    # Row sums straight off the interleaved stream.  The accumulation IS the
+    # extraction — see dsp.accumulate_interleaved.
+    acc = dsp.accumulate_interleaved(sym, W.indptr[:-1], dsp.find_parity(sym))
     acc[np.diff(W.indptr) == 0] = 0.0
 
     ideal = W @ s_ext

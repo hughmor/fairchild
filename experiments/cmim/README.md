@@ -11,18 +11,25 @@ optical amplifier restores the level, a photodetector sums, and a digital
 signal processing stack closes the loop. A second, bulk amplifier injects
 controlled noise, which is how the machine anneals.
 
-Two things are modelled here, and keeping them apart is the point.
+**The measurements run in the simulator.** `replicate_deck.py` drives
+`link/netlists/cmim_link.sp` through `Link.tran` for every number it reports:
+the analogue dot product against baud rate, and the bifurcation. A single-shot
+measurement is a few thousand symbols and takes seconds, so there is no excuse
+for doing it any other way.
+
+`common/channel.py` holds a numpy model of the same physics, and it is for the
+iteration loop and nothing else. One iteration of the paper's largest problem is
+434,176 symbols at 106 GBaud, about a million timesteps; a thousand of them will
+not run, here or anywhere. `channel.validate()` pushes one waveform through both
+and reports the difference rather than asserting they agree, and
+`DeckChannel` wears the same interface so anything written against one runs
+against the other.
 
 | | what it is | what it is for |
 |---|---|---|
-| `models/` + `link/` | the physical layer, as a fairchild deck | frequency response, transfer functions, noise densities, power budget |
-| `common/channel.py` | the same physics in numpy, one pass | the 800-iteration solver loop |
-
-One iteration of the paper's largest problem is 434,176 symbols at 106 GBaud,
-which is about a million timesteps of circuit simulation. A thousand of them
-will not run, in this simulator or any other. So the fast model exists, and
-`channel.validate()` pushes one waveform through both and reports the
-difference rather than asserting the two agree.
+| `models/` + `link/` | the physical layer, as a fairchild deck | everything measurable |
+| `channel.DeckChannel` | that deck, as a channel object | the reported measurements |
+| `channel.Channel` | the same physics in numpy | the 800-iteration solver loop only |
 
 **Read [`SPECS.md`](SPECS.md) first.** It carries every number the models use,
 with the citation for each, and it marks what the paper does not say.
@@ -41,7 +48,8 @@ with the citation for each, and it marks what the paper does not say.
 | `common/channel.py` | the fast link model, and its validation |
 | `common/problems.py` | lattice, max-cut, number partitioning, HP folding |
 | `common/ising.py` | the state update, three ways to evaluate it |
-| `replicate.py` | works through the paper's figures |
+| `replicate_deck.py` | the dot product and the bifurcation, **in the deck** |
+| `replicate.py` | the solver benchmarks, on the numpy channel |
 | `results/` | JSON and PNG per figure |
 
 ## Running it
@@ -50,6 +58,11 @@ with the citation for each, and it marks what the paper does not say.
 cargo build --release --bin fairchild          # the deck driver needs it
 .venv/bin/python experiments/cmim/link/check.py            # the physical layer
 .venv/bin/python experiments/cmim/common/channel.py        # fast model vs deck
+
+# the measurements, every sample out of a Newton solve
+MPLBACKEND=Agg .venv/bin/python experiments/cmim/replicate_deck.py
+
+# the solver benchmarks, which use the numpy channel because they cannot not
 MPLBACKEND=Agg .venv/bin/python experiments/cmim/replicate.py
 ```
 
@@ -86,10 +99,43 @@ it converge: at 16 samples per AWG sample the two agree on amplitude to 0.5 %
 with an 8 % residual. At one sample per AWG sample they disagree by 41 %, and
 that is the integrator, not the model. See "Traps" below.
 
-**Bifurcation**, Figure 2(a) and 2(b). A clean pitchfork. The paper reports the
-critical feedback strength as a measurement and gives no closed form; there is
-one. With `J = 0` the update is `x <- alpha*sin(pi*x/2)`, so the fixed point at
-zero loses stability at `alpha_0 = 2/pi = 0.6366`. Measured: 0.6254.
+**Bifurcation**, Figure 2(a) and 2(b). The paper reports the critical feedback
+strength as a measurement and gives no closed form; there is one. With `J = 0`
+the update is `x <- alpha*sin(pi*x/2)`, so the fixed point at zero loses
+stability at `alpha_0 = 2/pi = 0.6366`. `ising.bifurcation` measures 0.6254 —
+but read the next paragraph before quoting it.
+
+**That numpy pitchfork carries no noise of any kind.** `ising.bifurcation`
+iterates the map directly: no channel, no shot noise, no quantisation, no
+transient. It is a check on the nonlinearity and nothing more, which is why it
+is suspiciously clean. `replicate_deck.bifurcation` is the real one: every
+iteration is a transient through the modulators, the amplifier and the receiver
+with `.options trannoise=1`, so the spins carry shot noise, amplifier noise and
+signal-spontaneous beat noise.
+
+It shows what the noiseless map cannot: spins clustered near zero below `2/pi`,
+a broad partially-separated region through the transition, and full pinning at
++/-1 above about 1.6, with occasional noise-driven escapes at low feedback. The
+"fully pinned" threshold measures 1.23 against the noiseless onset at 0.637 —
+noise and finite precision push complete bifurcation above the analytic
+instability, which is the behaviour Figure 2(a)'s heatmap shows.
+
+Three things had to be right before it showed a threshold at all, and all three
+are recorded in that function:
+
+* **The loop gain is a hardware constant, calibrated once.** Refitting it each
+  iteration by least squares against a noisy measurement is regression
+  dilution: the gain comes out systematically small, the loop sags below
+  threshold, and nothing separates at any alpha.
+* **A row of `alpha*I` has one non-zero**, so pruning the zeros gives a
+  single-element dot product with no block for the interleaving to cancel over.
+  Sending each row as `block` symbols of `alpha/block` against the same spin
+  accumulates the product coherently while the noise adds as its square root.
+  The two encodings compute the same row; only one can be read back.
+* **"Bifurcated" has to mean pinned, not displaced.** With real noise in the
+  loop a sub-threshold spin wanders, and a loose threshold counts that as a
+  bifurcation: at `|x| > 0.25` every feedback strength including zero came out
+  bifurcated while the scatter plainly showed a transition at `2/pi`.
 
 **Precision against solution quality**, Supplementary S3.2 and Figure S14. This
 is the paper's headline comparison and it reproduces without forcing. On a 20x20
@@ -124,48 +170,60 @@ The paper reaches the ground state for every lattice up to 10,201 nodes and
 97.2 % at 41,209. We fall off around 1,600. The curve has the right shape and
 sits about an order of magnitude to the left.
 
-## What does not work yet
+**Analogue dot product, Figures 2(c) to 2(e).** Runs in the deck. Accuracy falls
+monotonically with baud rate, which is the behaviour the paper reports, and sits
+below the paper's absolute numbers:
 
-**Analogue matrix-vector multiplication, Figures 2(c) to 2(e).** The end-to-end
-path through the real transmit DSP, the channel and the real receive DSP
-recovers the wanted product with a correlation of about 0.9 at low baud rates
-and worse above 64 GBaud, against the paper's 98.16 % accuracy at 4 GBaud.
+| baud | ours, spin channel nonlinear | ours, both linear | paper |
+|---|---|---|---|
+| 4 GBaud | 92.8 % (3.79 bits) | 89.7 % | 98.16 % (5.03 bits) |
+| 32 GBaud | 82.1 % (2.48 bits) | 67.5 % | — (4.5 bits) |
+| 64 GBaud | 67.2 % (1.61 bits) | 50.7 % | 96.2 % |
+| 106 GBaud | 16.1 % | 5.8 % | — (3.3 bits) |
+| 148 GBaud | 1.1 % | 1.7 % | 90.7 % (2.79 bits) |
 
-The cause is isolated and it is not tuning. Turning the noise and the
-quantisation off at 4 GBaud, where the link is flat to within 0.01 dB, makes it
-*worse*, not better. The fault is the time-interleaving scheme, and that scheme
-is a reconstruction: Methods says the wanted product is extracted "by a
-combination of DC filtering and a time-interleaving encoding scheme" and cites
-the group's earlier cascaded-modulator work rather than stating it.
+Four things were wrong before this worked, and all four were mine:
 
-The scheme in `dsp.interleave` sends `(x, w)` then `(-x, -w)` and takes the sum.
-It is algebraically exact — `dsp.py`'s self-check inverts Methods equation 7 to
-3e-16 — and it is the only scheme of that shape that works: differencing, or
-inverting one channel alone, each leave a single-channel term behind. But it is
-ill conditioned. It recovers a product term by cancelling two single-channel
-terms that are two to three times larger and that alternate sign at the symbol
-rate, which is the Nyquist frequency, which is exactly where a feedforward
-equaliser is least accurate. A few per cent of residual intersymbol
-interference on the larger terms swamps the smaller one.
+1. **The extraction is the accumulation.** The interleaving sends `(x, w)` then
+   `(-x, -w)`; summing a whole block cancels both single-channel terms and
+   doubles the product. Averaging each pair first and accumulating afterwards is
+   algebraically identical and numerically hopeless — it cancels terms several
+   times larger than the wanted one, symbol by symbol, at the Nyquist frequency.
+   See `dsp.accumulate_interleaved`.
+2. **The receiver integrates.** Methods equation 9 offers the summation "in the
+   analogue domain by means of an integrator before sampling" and Supplementary
+   S4.2 builds the scaled system around "the integrating photoreceiver". Reading
+   two samples per symbol and equalising instead gives 23.7 % where integration
+   gives 99.1 %, on an ideal detector with no channel at all. The equaliser is
+   actively harmful: trained on zero-mean pilots against a stream with a large
+   DC, its DC gain came out at 0.20, and a block sum is a low-frequency
+   quantity.
+3. **The transmit pulse must be flat at the symbol centre.** The two channels
+   are multiplied optically, so each channel's own intersymbol interference
+   becomes a cross term that is second order in the data and cancels nowhere.
+   Root-raised cosine gives 21 % with no channel impairment at all. The paper
+   says NRZ where it compares itself with other machines (S3.3); `dsp.nrz` is
+   the default.
+4. **The integration boundaries are the converter's.** At 106 GBaud a symbol is
+   2.4151 samples, so a DAC holds symbols for two or three samples and the
+   integrator has to use the same edges. Truncating them to integers made every
+   non-integer samples-per-symbol rate collapse while 4, 16, 32, 64 and
+   128 GBaud looked fine. It reads exactly like a bandwidth limit.
 
-Two further findings sit underneath it:
+What still separates us from the paper is smaller and named: the transmit
+**pre-emphasis is written and not applied**. Figure S5(a) is measured with it, at
+3 dB down at 55 GHz against 33 GHz for the raw link, so it is worth several bits
+at the top of the range. `dsp.preemphasis` builds the filter from `Link.ac`.
 
-* Root-raised-cosine shaping is free of intersymbol interference only once a
-  matched filter completes it into a raised cosine, and this link cannot apply
-  one: the two waveforms are multiplied optically before anything matched could
-  act. Measured at 8 GBaud, where bandwidth costs nothing, the raw product
-  correlates 0.89 with the wanted value at roll-off 0.2 and 0.98 at roll-off
-  1.0. Moving the equaliser to after the deinterleave lifts the low-baud
-  correlation from about 0 to 0.77 and does not survive to 106 GBaud.
-* The paper's stated pilot sequence, "8,192 alternating ones and zeros", cannot
-  do either job the paper gives it. Its autocorrelation is periodic with a
-  two-symbol period, so it fixes the alignment only modulo two symbols, and a
-  51-tap least-squares fit against a single tone is rank deficient. `dsp.pilots`
-  defaults to a maximal-length sequence and keeps the paper's version behind
-  `kind="alternating"`.
+Two notes on the paper's stated DSP, both recorded rather than worked around:
 
-Resolving this needs the interleaving scheme from reference 14, or the published
-data set at <https://github.com/Shastri-Lab/tfln-ising-nature-paper-2025>.
+* The pilot sequence, "8,192 alternating ones and zeros", is a single tone. Its
+  autocorrelation is periodic with a two-symbol period, so it fixes alignment
+  only modulo two symbols, and a 51-tap least-squares fit against it is rank
+  deficient. `dsp.pilots` defaults to a maximal-length sequence and keeps the
+  paper's version behind `kind="alternating"`.
+* The 51-tap feedforward equaliser is kept, behind `rx(mode="equalise")`, for
+  symbol-level readout. It is not on the path that computes a dot product.
 
 **Number partitioning beyond about 32 numbers.** `N = 16` reaches the ground
 state on every run. Above that the result is strongly seed dependent — at

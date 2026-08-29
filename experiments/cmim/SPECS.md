@@ -331,24 +331,34 @@ so this directory uses 13,359. The G81 quality appears as both 96.34 % and
 These are the places where the paper does not say enough, ordered by how much
 the answer changes the model.
 
-1. **The time-interleaving scheme, and the rest of the DSP detail.** This is the
-   one that currently blocks a result. Methods extracts the wanted product "by
-   a combination of DC filtering and a time-interleaving encoding scheme" and
-   cites reference 14 rather than stating it. `common/dsp.py` reconstructs a
-   scheme that inverts Methods equation 7 exactly, and it is ill conditioned:
-   see README, "What does not work yet".
+1. **The DSP detail.** Methods gives the stage list, and Supplementary S1.3 two
+   tap counts inside a latency estimate. It does not give the pre-emphasis
+   response, the equaliser training length, the clipping threshold, the
+   resampling filter or the synchronisation metric. Each has a stated default,
+   marked in the code.
 
-   The paper also does not give the pre-emphasis response, the equaliser
-   training length, the clipping threshold, the resampling filter or the
-   synchronisation metric. Each has a stated default, marked in the code.
+   **The time-interleaving scheme is now closed**, and it is not what a naive
+   reading gives. Methods extracts the product "by a combination of DC filtering
+   and a time-interleaving encoding scheme", citing reference 14. Send
+   `[x1,-x1,x2,-x2,…]` against `[w1,-w1,w2,-w2,…]`, then SUM OVER THE WHOLE
+   BLOCK: every linear term cancels across the block and the product comes out
+   at twice its amplitude. The multiply-accumulate the algorithm already needs
+   is the cancellation. Removing the DC beforehand is either digital, as
+   Methods does it, or a series capacitor ahead of the sampler.
 
-   Two of its stated details do not work as written. The pilot sequence,
-   "8,192 alternating ones and zeros", is a single tone: its autocorrelation is
-   periodic with a two-symbol period, so it fixes alignment only modulo two
-   symbols, and a 51-tap least-squares fit against it is rank deficient.
-   Separately, root-raised-cosine shaping is free of intersymbol interference
-   only once a matched filter completes it, and this link multiplies the two
-   waveforms optically before any matched filter could act.
+   Pairing each symbol with its own auxiliary and averaging is algebraically
+   identical and numerically hopeless. See `dsp.accumulate_interleaved`.
+
+   Two of the paper's stated details do not work as written. The pilot
+   sequence, "8,192 alternating ones and zeros", is a single tone: its
+   autocorrelation is periodic with a two-symbol period, so it fixes alignment
+   only modulo two symbols, and a 51-tap least-squares fit against it is rank
+   deficient. And root-raised-cosine shaping is free of intersymbol
+   interference only once a matched filter completes it, which this link cannot
+   do: it multiplies the two waveforms optically first, so each channel's
+   interference becomes a cross term that is second order in the data. The
+   transmit pulse has to be flat at the symbol centre, which is the NRZ the
+   paper names in Supplementary S3.3.
 
 2. **`Vπ(f)` and `S21(f)` are read off a plot.** Figure S1e is the only source.
    The model fits a smooth curve to the two endpoints and the shape. Any
