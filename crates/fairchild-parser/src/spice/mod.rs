@@ -660,6 +660,8 @@ fn extract_lib_section(content: &str, section: &str) -> Option<String> {
 /// Carries the same caveat as [`parse_spice`]: WDM dispatch comes from the
 /// static name list, so a front end loading a user's deck wants
 /// [`parse_spice_file_with_arity`].
+use crate::spectre::Dialect;
+
 pub fn parse_spice_file(path: &Path) -> Result<Netlist, ParseError> {
     parse_spice_file_with_arity(path, &StaticArity)
 }
@@ -669,19 +671,69 @@ pub fn parse_spice_file_with_arity(
     path: &Path,
     oracle: &dyn ArityOracle,
 ) -> Result<Netlist, ParseError> {
+    parse_spice_file_with_arity_lang(path, oracle, Dialect::Auto)
+}
+
+/// [`parse_spice_file_with_arity`], with the dialect chosen by the caller.
+pub fn parse_spice_file_with_arity_lang(
+    path: &Path,
+    oracle: &dyn ArityOracle,
+    dialect: Dialect,
+) -> Result<Netlist, ParseError> {
     let src = std::fs::read_to_string(path).map_err(|e| ParseError::Syntax {
         line: 0,
         msg: format!("cannot read '{}': {e}", path.display()),
     })?;
-    // A `.scs` deck is as loadable as a `.sp` one: the dialect is detected from
-    // the content, so one entry point serves both and a caller does not choose.
-    let src = if crate::spectre::looks_like_spectre(&src) {
+    // A `.scs` deck is as loadable as a `.sp` one. The dialect is detected from
+    // the content by default, so one entry point serves both, and a caller that
+    // knows can say instead.
+    let src = if dialect.is_spectre(&src) {
         crate::spectre::to_spice(&src)?
     } else {
         src
     };
     let resolved = resolve_includes(&src, path.parent(), 0)?;
-    parse_resolved(&resolved, oracle)
+    parse_resolved(&resolved, oracle).map_err(|e| hint_dialect(e, dialect, &resolved))
+}
+
+/// Add a dialect hint to a parse error when the file may have been read as the
+/// wrong language.
+///
+/// The detection defaults to SPICE, so a Spectre fragment with neither a
+/// `simulator lang=` line nor a `//` comment is read as SPICE — and then fails on
+/// something that says nothing about dialects, which is a long way from the cause.
+/// The hint fires only on `Auto`, only on a failure, and only when the text
+/// carries a construct SPICE cannot spell.
+fn hint_dialect(e: ParseError, dialect: Dialect, text: &str) -> ParseError {
+    if dialect != Dialect::Auto || !crate::spectre::smells_like_spectre(text) {
+        return e;
+    }
+    ParseError::Syntax {
+        line: 0,
+        msg: format!(
+            "{e}\n\nThis file was read as SPICE, and it contains instances whose \
+             nodes are parenthesised, which is Spectre. If it is Spectre, give it a \
+             `simulator lang=spectre` first line or pass `--lang spectre`."
+        ),
+    }
+}
+
+/// Transliterate a file to SPICE and return the text, for inspection.
+///
+/// The transliteration is an intermediate the user never sees, and when a Spectre
+/// deck fails the first question is what it became. Answering that used to mean
+/// writing a program against the parser.
+pub fn emit_spice_file(path: &Path, dialect: Dialect) -> Result<String, ParseError> {
+    let src = std::fs::read_to_string(path).map_err(|e| ParseError::Syntax {
+        line: 0,
+        msg: format!("cannot read '{}': {e}", path.display()),
+    })?;
+    let src = if dialect.is_spectre(&src) {
+        crate::spectre::to_spice(&src)?
+    } else {
+        src
+    };
+    resolve_includes(&src, path.parent(), 0)
 }
 
 // ─── analysis directive parsers ───────────────────────────────────────────────

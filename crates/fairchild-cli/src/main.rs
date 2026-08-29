@@ -15,8 +15,8 @@ use fairchild_core::{
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
 use fairchild_parser::{
-    check_disciplines, parse_spice_file_with_arity, AcVariation, Analysis, BundleArity, Netlist,
-    OutVar, PermissiveArity, StaticArity,
+    check_disciplines, AcVariation, Analysis, BundleArity, Netlist, OutVar, PermissiveArity,
+    StaticArity,
 };
 
 /// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
@@ -39,6 +39,22 @@ struct Cli {
     /// Input SPICE netlist file
     #[arg(short, long)]
     file: PathBuf,
+
+    /// Netlist dialect: auto, spectre, or spice.
+    ///
+    /// `auto` decides per file from the content, which is what lets a SPICE deck
+    /// include a Spectre model library. Give it explicitly for a Spectre fragment
+    /// that carries neither a `simulator lang=` line nor a `//` comment, which
+    /// `auto` reads as SPICE.
+    #[arg(long, value_name = "auto|spectre|spice", default_value = "auto")]
+    lang: fairchild_parser::Dialect,
+
+    /// Print the deck as SPICE, with every include resolved, and exit.
+    ///
+    /// A Spectre deck is transliterated to SPICE before it is parsed. When one
+    /// fails, this is what it became.
+    #[arg(long)]
+    emit_spice: bool,
 
     /// Output format
     #[arg(long, default_value = "csv")]
@@ -506,7 +522,21 @@ fn main() {
     // one. Silence the library for the probe and put the setting back.
     let was_quiet = fairchild_parser::warn::quiet();
     fairchild_parser::warn::set_quiet(true);
-    let probe = parse_spice_file_with_arity(&cli.file, &PermissiveArity);
+    if cli.emit_spice {
+        match fairchild_parser::emit_spice_file(&cli.file, cli.lang) {
+            Ok(text) => {
+                print!("{text}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let probe =
+        fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &PermissiveArity, cli.lang);
     let arity_reg = probe
         .as_ref()
         .ok()
@@ -516,8 +546,10 @@ fn main() {
     // A pass-one failure is a real parse error; report it from the pass that
     // uses the honest oracle so the message is the one the user should see.
     let mut netlist = match arity_reg {
-        Some(reg) => parse_spice_file_with_arity(&cli.file, &reg),
-        None => parse_spice_file_with_arity(&cli.file, &StaticArity),
+        Some(reg) => fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &reg, cli.lang),
+        None => {
+            fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &StaticArity, cli.lang)
+        }
     }
     .unwrap_or_else(|e| {
         eprintln!("error: {e}");

@@ -11,6 +11,7 @@
 //! everywhere else in this tree. These three were two separate binaries before
 //! `transient_noise_flatness` would have made a third.
 
+mod dialect;
 mod dropped_parameters;
 mod quiet;
 mod transient_noise_flatness;
