@@ -16,7 +16,7 @@
 //!   power  := unary {'^' unary}     (right associative; handled iteratively)
 //!   unary  := ['+'|'-'|'!'] atom
 //!   atom   := number | name | V(name [, name]) | I(name) | TIME |
-//!             name '(' [args] ')' | '(' expr ')'
+//!             name '(' `[args]` ')' | '(' expr ')'
 
 use std::fmt;
 

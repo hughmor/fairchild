@@ -264,7 +264,7 @@ pub trait Device: Send + Sync {
     /// model (G_eq, I_hist) between (pos, neg) of each branch every NR
     /// iteration in transient analysis, using the device-reported `value`
     /// (typically C(V_op) at the current iterate).  After each successful
-    /// timestep the integrator reads V_C = x[pos] − x[neg] from the
+    /// timestep the integrator reads `V_C = x[pos] − x[neg]` from the
     /// converged solution and updates the history.
     ///
     /// Default empty.  Override for devices with linear C(V) or L(I)

@@ -292,7 +292,8 @@ impl SimOptions {
     /// Build the linear solver matching this options' `solver` choice, sized
     /// for an `n`-row system.  Used by every analysis entry point.  When
     /// `equilibrate` is set, the chosen backend is wrapped in an
-    /// [`EquilibratedSolver`] that two-sided-scales the system before LU.
+    /// [`crate::solver::EquilibratedSolver`] that two-sided-scales the system
+    /// before LU.
     pub fn linear_solver(&self, n: usize) -> Box<dyn LinearSolver> {
         let base = make_solver(self.solver, n);
         if self.equilibrate {

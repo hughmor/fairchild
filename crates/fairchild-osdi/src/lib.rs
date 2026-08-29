@@ -51,6 +51,17 @@
 //! Authoring guide and worked examples: `docs/user-guide.md` §14 and
 //! `examples/verilog_a/`.
 
+// A doc link that does not resolve is a comment describing code that is not
+// there, and this crate has shipped two of them: a link to a `LambdaSelect` that
+// was deleted, and a `build` method on a type alias for a function. `cargo doc`
+// found both and nobody was reading it, so the class is denied here instead.
+//
+// Private targets are allowed on purpose. The item really is there, and a link to
+// it helps whoever is reading the source — which for a simulator is most readers.
+// Only the rendered page loses, and only for an item nobody outside can call.
+#![deny(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::private_intra_doc_links)]
+
 pub mod compile;
 pub mod device;
 pub mod dialect;

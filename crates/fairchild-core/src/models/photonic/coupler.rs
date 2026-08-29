@@ -9,8 +9,10 @@ use crate::mna::MnaMatrix;
 /// 2×2 directional coupler with length-coupled cross-coefficient.
 ///
 /// Lossless coupling matrix:
+/// ```text
 ///   [c]   [ t   k] [a]    with t = cos(κL), k = -j sin(κL),
 ///   [d] = [ k   t] [b]    so |t|² + |k|² = 1.
+/// ```
 ///
 /// In SVEA real/imag form:
 ///   c_re = t·a_re + s·b_im     d_re = t·b_re + s·a_im
@@ -25,7 +27,9 @@ use crate::mna::MnaMatrix;
 ///    d.0.re, d.0.im, d.0.λ, ..., d.{N-1}.λ]
 /// Each channel uses the same κ·L (wavelength-independent at this tier).
 /// The wavelength tag on each output channel mirrors whichever input port is
-/// actually lit — see [`LambdaSelect`].  Port a wins when both are; that is
+/// actually lit. `LambdaSelect` used to latch that and was deleted; see
+/// [`crate::lambda`], which resolves a wavelength before the solve instead.
+/// Port a wins when both are lit; that is
 /// what makes an **add**-fed ring (light in on port b only) carry its λ.
 pub struct NativeDirectionalCoupler {
     kappa_per_m: f64,
@@ -142,7 +146,8 @@ impl Device for NativeDirectionalCoupler {
 
     /// Both inputs reach both outputs, so both are declared. Resolution takes
     /// whichever input a source actually reached — which is what
-    /// [`LambdaSelect`] was latching for, decided structurally instead of from
+    /// the deleted `LambdaSelect` was latching for, decided structurally rather
+    /// than from
     /// values that are still settling. Two *different* wavelengths arriving on
     /// one coupler is a deck bug either way; the first declared wins and the
     /// disagreement is recorded, rather than being averaged into a wire.

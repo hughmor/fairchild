@@ -1,7 +1,7 @@
 //! Host-driven transient stepping.
 //!
 //! [`TranStepper`] is the fixed-step transient loop turned inside out: instead
-//! of running to `stop` and handing back a [`TranResult`], it holds the
+//! of running to `stop` and handing back a [`crate::tran::TranResult`], it holds the
 //! integrator state between timesteps so an external program can drive the
 //! clock, read node voltages, and write source values at every point.  That is
 //! what mixed-signal co-simulation needs — the digital side advances the analog

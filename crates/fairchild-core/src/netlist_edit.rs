@@ -12,8 +12,8 @@ use fairchild_parser::{Element, Netlist, Waveform};
 /// Matching is case-insensitive on both names.  Passives accept `value`, their
 /// physical name (`resistance` / `capacitance` / `inductance`), or the bare
 /// element letter (`r` / `c` / `l`); sources accept `value`, `dc`, or `v` / `i`
-/// and become a DC waveform; MOSFET and OSDI instances take any instance
-/// parameter, appended if not already present.
+/// and become a DC waveform; MOSFET, BJT, diode and OSDI instances take any
+/// instance parameter, appended if not already present.
 ///
 /// The device-with-params arm is what lets a Verilog-A transistor be swept: a
 /// `.model`-card OSDI device is instantiated as an ordinary `M`/`Q`/`D` line,
