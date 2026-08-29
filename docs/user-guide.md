@@ -1200,6 +1200,28 @@ Convergence aids that don't appear as fields but always run:
 
 ## 8. CLI reference
 
+### Dialects
+
+A deck may be SPICE or Spectre, and `auto` decides per file from the content —
+`simulator lang=`, or a `//` comment before anything else. Per *file*, not per run,
+so a SPICE deck that includes a Spectre model library works, which is the usual
+arrangement with a foundry PDK.
+
+Detection defaults to SPICE when it sees neither tell. That is right for a deck and
+wrong for an included Spectre fragment that carries no marker, so `--lang spectre`
+says it outright. A file read as SPICE that contains parenthesised node lists gets
+a hint to that effect when it fails.
+
+`--emit-spice` prints what a Spectre deck became. A Spectre deck is transliterated
+to SPICE before it is parsed, and when one fails the first useful question is what
+it turned into:
+
+```bash
+fairchild -f cell.scs --emit-spice | head -40
+fairchild -f fragment.scs --lang spectre --op
+```
+
+
 ```
 fairchild [OPTIONS] --file <FILE>
 ```
@@ -1216,6 +1238,8 @@ fairchild [OPTIONS] --file <FILE>
 | `--reltol`, `--gmin`, `--method`, `--maxstep`, `--solver` | Convenience flags |
 | `--variable-step` | LTE-controlled variable-step transient (same as `.options variable_step=1`) |
 | `--no-pnjlim` | Disable junction limiting |
+| `--lang auto\|spectre\|spice` | Netlist dialect (default `auto`, which decides per file from the content) |
+| `--emit-spice` | Print the deck as SPICE with every include resolved, then exit |
 | `--check` | Parse + discipline-check only |
 | `--list-nodes` / `--list-models` | Inspect parsed netlist, then exit |
 | `-v` / `-q` | Verbose / quiet. `-q` silences every warning, including the ones raised inside the parser and the solver — a skipped `.control` block, an ignored `.print`, an unrecognised `.options` key, a MOSFET card asking for an unimplemented level. Errors are unaffected |

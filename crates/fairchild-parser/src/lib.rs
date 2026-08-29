@@ -8,11 +8,11 @@ pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
 mod tokens;
 
-pub use spectre::parse_spectre;
+pub use spectre::{parse_spectre, Dialect};
 pub use spice::{
-    bundle_arity_for, parse_outvar, parse_spice, parse_spice_file, parse_spice_file_with_arity,
-    parse_spice_value, parse_spice_with_arity, ArityOracle, ArityQuery, BundleArity,
-    PermissiveArity, StaticArity,
+    bundle_arity_for, emit_spice_file, parse_outvar, parse_spice, parse_spice_file,
+    parse_spice_file_with_arity, parse_spice_file_with_arity_lang, parse_spice_value,
+    parse_spice_with_arity, ArityOracle, ArityQuery, BundleArity, PermissiveArity, StaticArity,
 };
 
 /// Which flattened terminal counts each model name is instantiated at.

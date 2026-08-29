@@ -40,6 +40,83 @@ pub fn parse_spectre(input: &str) -> Result<crate::Netlist, ParseError> {
     crate::parse_spice(&spice)
 }
 
+/// Which dialect a file is in, when the caller knows.
+///
+/// Spectre decides this by *how the stream is entered*, not by looking at the
+/// text: the netlist handed to the simulator is Spectre by default, and
+/// `simulator lang=` switches within it. That is why the marker is a statement
+/// rather than a header, and why a caller who knows should be able to say so.
+///
+/// [`Dialect::Auto`] is the default and keeps the content sniffing, which is what
+/// lets one entry point load a `.sp` deck that includes a `.scs` model library —
+/// the common real arrangement, and more permissive than Spectre's own rule that
+/// an include inherits the includer's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// Detect from the content, per file.
+    #[default]
+    Auto,
+    /// Spectre, whatever the content looks like.
+    Spectre,
+    /// SPICE, whatever the content looks like.
+    Spice,
+}
+
+impl std::str::FromStr for Dialect {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Dialect::Auto),
+            "spectre" | "scs" => Ok(Dialect::Spectre),
+            "spice" | "sp" => Ok(Dialect::Spice),
+            other => Err(format!(
+                "unknown dialect '{other}': expected auto, spectre or spice"
+            )),
+        }
+    }
+}
+
+impl Dialect {
+    /// Should this text be transliterated? `Auto` asks the content.
+    pub fn is_spectre(self, text: &str) -> bool {
+        match self {
+            Dialect::Spectre => true,
+            Dialect::Spice => false,
+            Dialect::Auto => looks_like_spectre(text),
+        }
+    }
+}
+
+/// Does a file read as SPICE nonetheless look like it was meant to be Spectre?
+///
+/// The detection defaults to SPICE, so a Spectre fragment carrying neither a
+/// `simulator lang=` line nor a `//` comment is read as SPICE and fails somewhere
+/// that does not mention the dialect. This is the hint for that case, and it looks
+/// for the one construct SPICE has no spelling for: an instance whose nodes are
+/// parenthesised.
+///
+/// Only a hint. It is attached to an error, never used to decide.
+pub fn smells_like_spectre(text: &str) -> bool {
+    text.lines().take(400).any(|line| {
+        let t = line.trim();
+        // `name (a b c) master …` — a Spectre instance. SPICE never parenthesises
+        // a node list.
+        let Some(open) = t.find('(') else {
+            return false;
+        };
+        let Some(close) = t[open..].find(')') else {
+            return false;
+        };
+        let head = t[..open].trim();
+        let after = t[open + close + 1..].trim();
+        !head.is_empty()
+            && !head.starts_with(['.', '*', '+'])
+            && head.split_whitespace().count() == 1
+            && !after.is_empty()
+            && !t[open + 1..open + close].contains(',')
+    })
+}
+
 /// Does this text look like Spectre rather than SPICE?
 ///
 /// Checked by content, not extension: a `.scs` suffix is a convention and a
