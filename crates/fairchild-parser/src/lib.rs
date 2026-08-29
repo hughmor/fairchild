@@ -6,6 +6,8 @@ pub mod warn;
 
 pub use error::{DisciplineError, ParseError};
 pub use expr::{EvalContext, Expr, ExprError};
+mod tokens;
+
 pub use spectre::parse_spectre;
 pub use spice::{
     bundle_arity_for, parse_outvar, parse_spice, parse_spice_file, parse_spice_file_with_arity,

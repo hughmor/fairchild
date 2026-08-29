@@ -1130,7 +1130,32 @@ fn assignments(text: &str) -> Vec<(String, String)> {
         i += 1;
     }
 
-    glued
+    // Pass 2: a token that cannot open an assignment continues the value before
+    // it. Separate from pass 1 because that pass is still deciding where the `=`
+    // signs go — run together, this one swallows a bare name whose `= value`
+    // has not been attached yet.
+    //
+    // Only once an assignment has started: before that the tokens are positional,
+    // the ports on a `.subckt` header or the nodes on an element line.
+    //
+    // This is what carries an unbracketed expression whole. Keeping bracketed runs
+    // together is not enough, because a value ends at a depth-zero space and
+    // `(extr==1) ? (1e-4) : (…)` has three of them.
+    let mut merged: Vec<String> = Vec::new();
+    for t in glued {
+        if !crate::tokens::opens_assignment(&t)
+            && merged
+                .last()
+                .is_some_and(|p| crate::tokens::opens_assignment(p))
+        {
+            let prev = merged.pop().expect("checked by is_some_and");
+            merged.push(format!("{prev} {t}"));
+        } else {
+            merged.push(t);
+        }
+    }
+
+    merged
         .into_iter()
         .filter_map(|t| {
             t.split_once('=')
