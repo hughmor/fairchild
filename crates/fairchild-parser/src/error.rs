@@ -25,13 +25,19 @@ pub enum ParseError {
     #[error("line {line}: unsupported {what}")]
     UnsupportedForm { what: String, line: usize },
     #[error(
-        "line {line}: subckt '{name}' called with {got} port(s) but definition has {expected}"
+        "line {line}: subckt '{name}' called with {got} port(s) but definition has \
+         {expected}: {ports}"
     )]
     SubcktPortCount {
         name: String,
         expected: usize,
         got: usize,
         line: usize,
+        /// The declared ports, listed because the count alone points at the call
+        /// site when the fault is usually in the header. A `.subckt` default whose
+        /// value could not be read used to arrive here as extra ports, and seeing
+        /// `w nf ((5.3585/(w*1e6*nf)` in this list says immediately what happened.
+        ports: String,
     },
     #[error("subckt expansion cycle: '{name}' is already being expanded (circular reference)")]
     SubcktCycle { name: String },
