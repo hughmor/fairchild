@@ -25,6 +25,7 @@ use fairchild_parser::{Element, Netlist, OutVar, ParamName};
 use crate::adjoint::{dc_sensitivity, Output, ParamRef, Sensitivities};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 
 /// One row of a `.sens` report.
@@ -83,24 +84,36 @@ impl SensResult {
     /// Nutmeg carries the sensitivities alone — it has one value per variable
     /// and no room for the nominal, the error bar or the reached flag.  The CSV
     /// is the complete report; this is the interchange form.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Sensitivity Analysis")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: {}", self.rows.len())?;
-        writeln!(w, "No. Points: 1")?;
-        writeln!(w, "Variables:")?;
-        for (i, r) in self.rows.iter().enumerate() {
-            writeln!(w, "\t{i}\t{}\tnotype", r.name)?;
-        }
-        writeln!(w, "Values:")?;
-        for (i, r) in self.rows.iter().enumerate() {
-            if i == 0 {
-                writeln!(w, " 0\t{:.6e}", r.sensitivity)?;
-            } else {
-                writeln!(w, "\t{:.6e}", r.sensitivity)?;
-            }
-        }
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
+        let plot = Plot {
+            title,
+            plotname: "Sensitivity Analysis",
+            complex: false,
+            vars: self.rows.iter().map(|r| Var::notype(&r.name)).collect(),
+            n_points: Some(1),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
+        let values: Vec<f64> = self.rows.iter().map(|r| r.sensitivity).collect();
+        wr.point(&values)?;
+        wr.done()?;
         Ok(())
     }
 }

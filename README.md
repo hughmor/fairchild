@@ -124,9 +124,9 @@ builds the SuiteSparse KLU backend, which is the fastest on large circuits.
 | **Sources** | DC, PULSE, PWL, SIN, EXP, SFFM, AM, `AC <mag> [phase]` |
 | **Analyses** | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | **Integration** | Backward Euler, trapezoidal, GEAR (BDF-2); fixed or LTE-controlled step |
-| **Solvers** | dense LU, sparse LU (faer), KLU; Armijo-damped Newton with `pnjlim`/`fetlim`, source and gmin homotopy |
+| **Solvers** | dense LU, sparse LU (faer), KLU; Armijo-damped Newton with `pnjlim`/`fetlim`; source, gmin and pseudo-transient homotopy |
 | **Directives** | `.options`, `.ic`, `.nodeset`, `.measure`, `.lib`, `.include`, `.param`, `.subckt`, `.temp`, `.alter`, `.model`, `.va`, `.osdi` |
-| **Output** | CSV, and ngspice-compatible Nutmeg rawfiles |
+| **Output** | CSV, and ngspice-compatible Nutmeg rawfiles in both ASCII and binary; a transient streams, so memory does not grow with the run |
 | **Verilog-A** | `.va` source compiled on demand (OpenVAF-Reloaded) or pre-built `.osdi` v0.4 — foundry electrical models, and optical models too |
 
 Not supported: lossy transmission lines, `.disto`, `.pz`, native `.mc`, PSF/FSDB.

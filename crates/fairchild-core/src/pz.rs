@@ -55,6 +55,7 @@ use crate::ac::assemble_ac_matrices;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::CircuitTopology;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 
 /// Largest pencil `.pz` will factor densely.
@@ -142,25 +143,37 @@ impl PzResult {
         Ok(())
     }
 
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
         let rows = self.labelled();
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Pole-Zero Analysis")?;
-        writeln!(w, "Flags: complex")?;
-        writeln!(w, "No. Variables: {}", rows.len())?;
-        writeln!(w, "No. Points: 1")?;
-        writeln!(w, "Variables:")?;
-        for (i, (name, _)) in rows.iter().enumerate() {
-            writeln!(w, "\t{i}\t{name}\tnotype")?;
-        }
-        writeln!(w, "Values:")?;
-        for (i, (_, r)) in rows.iter().enumerate() {
-            if i == 0 {
-                writeln!(w, " 0\t{:.6e},{:.6e}", r.re, r.im)?;
-            } else {
-                writeln!(w, "\t{:.6e},{:.6e}", r.re, r.im)?;
-            }
-        }
+        let plot = Plot {
+            title,
+            plotname: "Pole-Zero Analysis",
+            complex: true,
+            vars: rows.iter().map(|(n, _)| Var::notype(n)).collect(),
+            n_points: Some(1),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
+        let values: Vec<(f64, f64)> = rows.iter().map(|(_, r)| (r.re, r.im)).collect();
+        wr.point_complex(&values)?;
+        wr.done()?;
         Ok(())
     }
 }

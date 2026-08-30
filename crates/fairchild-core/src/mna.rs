@@ -164,15 +164,84 @@ impl CircuitTopology {
     where
         R: GminRow,
     {
-        let n_nodes = self.n_nodes();
-        let vsrc_end = n_nodes + self.vsrc_index.len();
         for (i, row) in a.iter_mut().enumerate() {
-            if i >= n_nodes && i < vsrc_end {
+            if self.is_vsrc_branch_row(i) {
                 continue; // vsource branch rows carry their own equation
             }
             let add = if row.is_all_zero() { 1.0 } else { g };
             if add != 0.0 {
                 row[i] += add;
+            }
+        }
+    }
+
+    /// Is row `i` a voltage source's branch equation?
+    ///
+    /// A branch row states `V(p) − V(n) = E` rather than a current balance, so
+    /// [`Self::stamp_gmin`]'s conductance floor does not belong on it — that
+    /// would not floor a node, it would corrupt a constraint.
+    /// [`Self::stamp_pseudo_transient`] *does* touch these rows, deliberately
+    /// and with a different element; see there.
+    fn is_vsrc_branch_row(&self, i: usize) -> bool {
+        let n_nodes = self.n_nodes();
+        i >= n_nodes && i < n_nodes + self.vsrc_index.len()
+    }
+
+    /// Stamp one step of a fictitious transient over the whole matrix: a
+    /// capacitor from every KCL row to `x_ref`, and an inductor in series with
+    /// every voltage source, both as Backward Euler companions.
+    ///
+    /// `s` is the stiffness — `C/h` in siemens on a KCL row, `L/h` in ohms on a
+    /// branch row. One number for both, because there is one fictitious
+    /// timestep: `s → 0` is `h → ∞`, where the capacitor is an open circuit,
+    /// the inductor a short, and the equations are the real DC ones again.
+    ///
+    /// **The branch rows are the half that is easy to leave out, and the half
+    /// that decides whether this works.** A KCL capacitor damps a node's
+    /// voltage, and a node driven by a voltage source has no voltage of its
+    /// own to damp — its value comes from the branch constraint. A feedback
+    /// loop that runs through ideal sources is therefore purely algebraic, and
+    /// capacitors alone leave it exactly as stiff as it was. The series
+    /// inductor damps the branch *current*, which is the state that loop
+    /// actually has. Measured: with KCL rows alone, a cross-coupled pair of
+    /// behavioural inverters still failed every stage; with both, it converges.
+    ///
+    /// The two kinds of row take opposite signs — see the body.
+    ///
+    /// This is [`Self::stamp_gmin`]'s diagonal plus the source term that aims
+    /// it at `x_ref` instead of at ground — see [`crate::newton`]'s
+    /// `pseudo_transient` for why that difference is the method.
+    ///
+    /// The pivot on an unreachable row is *not* repeated here. `stamp_gmin`
+    /// runs first and has already placed it, and a second one would double the
+    /// pivot and pull the row toward `x_ref` instead of toward zero.
+    pub fn stamp_pseudo_transient(
+        &self,
+        a: &mut [SparseRow],
+        b: &mut [f64],
+        s: f64,
+        x_ref: &[f64],
+    ) {
+        debug_assert_eq!(x_ref.len(), a.len());
+        for i in 0..a.len() {
+            // **The two row kinds take opposite signs, and getting that wrong
+            // is not a small error.** A KCL row reads a current balance, so
+            // `+s` on its diagonal is a conductance to ground and `+s·x_ref` is
+            // the capacitor companion's current source. A branch row reads
+            // `V(p) − V(n) = E`, and this codebase's `I(V)` is the current
+            // *leaving* the source's `+` node — negative for a source
+            // delivering power (see `stamp_vsource_at`). `+s` there therefore
+            // raises the terminal voltage as the source delivers more, which is
+            // a *negative* series resistance: it pumps energy into the very
+            // loop the pseudo-transient is trying to damp. Measured, with the
+            // sign wrong: the residual grew from 3.1 to 2.9e3 over 600 steps
+            // and the trajectory ran away.
+            if self.is_vsrc_branch_row(i) {
+                a[i][i] -= s;
+                b[i] -= s * x_ref[i];
+            } else {
+                a[i][i] += s;
+                b[i] += s * x_ref[i];
             }
         }
     }
@@ -1893,6 +1962,131 @@ mod tests {
         );
         // Off-diagonals untouched.
         assert_eq!(a[0][1], 0.0);
+    }
+
+    /// Iterating the pseudo-transient step must converge on the DC solution.
+    ///
+    /// The subject is a divider whose answer is arithmetic: 1 V across two
+    /// equal 1 kΩ resistors is 0.5 V at the midpoint and 0.5 mA out of the
+    /// source, negative by this file's branch-current convention. Nothing in
+    /// the solver gets a vote on that number, which is what makes this an
+    /// anchor rather than an agreement between two of our own subsystems.
+    ///
+    /// **A fixed-point test would pass with the sign inverted**, which is why
+    /// this iterates instead. The pseudo term is `s·(x − x_ref)` and vanishes
+    /// at `x_ref` whichever sign it carries, so seeding at the solution and
+    /// getting it back proves nothing at all. What the sign decides is whether
+    /// the iteration converges: with `+s` on the branch row the series
+    /// resistance is negative — `I(V)` is the current leaving the source's `+`
+    /// node and runs negative when the source delivers power — and the
+    /// fictitious element pumps energy into the loop rather than damping it.
+    ///
+    /// Sabotaged by flipping the branch sign in `stamp_pseudo_transient`: this
+    /// test then leaves the midpoint at 1.0 V instead of 0.5 V.
+    #[test]
+    fn iterating_a_pseudo_step_converges_on_the_dc_solution() {
+        // Rows: 0 = v(in), 1 = v(mid), 2 = i(V1).
+        // V1 in 0 1.0 / R1 in mid 1k / R2 mid 0 1k.
+        let g = 1e-3;
+        let build = || {
+            let mut a = vec![vec![0.0f64; 3]; 3];
+            let mut b = vec![0.0f64; 3];
+            a[0][0] = g;
+            a[0][1] = -g;
+            a[1][0] = -g;
+            a[1][1] = 2.0 * g;
+            a[0][2] = 1.0;
+            a[2][0] = 1.0;
+            b[2] = 1.0;
+            (a, b)
+        };
+        let exact = [1.0, 0.5, -5e-4];
+
+        // Confirm the hand-built system really is the divider, so a later
+        // reader can trust the target this converges toward.
+        let (a0, b0) = build();
+        let direct = solve3(&a0, &b0);
+        for k in 0..3 {
+            assert!(
+                (direct[k] - exact[k]).abs() < 1e-12,
+                "hand-built divider row {k}: {} against {}",
+                direct[k],
+                exact[k]
+            );
+        }
+
+        let net = parse_spice("* divider\nV1 in 0 1.0\nR1 in mid 1k\nR2 mid 0 1k\n.op\n").unwrap();
+        let topo = CircuitTopology::build(&net);
+        assert_eq!(topo.size, 3);
+
+        // Start well away from the solution and integrate the fictitious
+        // transient at a fixed stiffness.
+        let mut x = vec![0.2, 0.9, 4e-3];
+        let s = 1e-2;
+        for _ in 0..2000 {
+            let (mut a, mut b) = build();
+            let mut rows: Vec<SparseRow> = a
+                .iter()
+                .map(|r| {
+                    let mut sr = SparseRow::with_cols(&[0, 1, 2]);
+                    for (j, v) in r.iter().enumerate() {
+                        sr[j] = *v;
+                    }
+                    sr
+                })
+                .collect();
+            topo.stamp_pseudo_transient(&mut rows, &mut b, s, &x);
+            for (i, sr) in rows.iter().enumerate() {
+                for j in 0..3 {
+                    a[i][j] = sr[j];
+                }
+            }
+            // The signs the whole method rests on, asserted where they are made.
+            assert!(a[0][0] > g, "a KCL row must gain a positive conductance");
+            assert!(
+                a[2][2] < 0.0,
+                "a branch row diagonal must be negative: `+s` there is a \
+                 negative series resistance and pumps energy into the loop"
+            );
+            x = solve3(&a, &b);
+        }
+
+        for k in 0..3 {
+            assert!(
+                (x[k] - exact[k]).abs() <= 1e-6 * exact[k].abs().max(1e-6),
+                "row {k} settled at {} rather than {}; x={x:?}",
+                x[k],
+                exact[k]
+            );
+        }
+    }
+
+    /// Gaussian elimination on 3×3, so the test above depends on no part of the
+    /// solver it is checking.
+    fn solve3(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
+        let mut m = [[0.0f64; 4]; 3];
+        for i in 0..3 {
+            m[i][..3].copy_from_slice(&a[i][..3]);
+            m[i][3] = b[i];
+        }
+        for c in 0..3 {
+            let p = (c..3)
+                .max_by(|&i, &j| m[i][c].abs().partial_cmp(&m[j][c].abs()).unwrap())
+                .unwrap();
+            m.swap(c, p);
+            assert!(m[c][c].abs() > 0.0, "singular 3x3 in test helper");
+            for r in 0..3 {
+                if r == c {
+                    continue;
+                }
+                let f = m[r][c] / m[c][c];
+                let pivot = m[c];
+                for (k, v) in m[r].iter_mut().enumerate().skip(c) {
+                    *v -= f * pivot[k];
+                }
+            }
+        }
+        (0..3).map(|i| m[i][3] / m[i][i]).collect()
     }
 
     /// A row nothing stamped into is pinned at 1, not at `gmin`.
