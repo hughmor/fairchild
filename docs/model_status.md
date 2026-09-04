@@ -791,6 +791,15 @@ transitively by the integration tests. No ngspice comparison.
 | `TD` | ✅ | ✅ | ✅ ngspice |
 | `F`, `NL` | ✅ | ✅ | ⚠️ desugars to `TD` |
 
+Per analysis, because a delay behaves differently in each and the difference is
+silent:
+
+| Analysis | Behaviour | Validated |
+|---|---|---|
+| `.tran` | Branin, history + linear interpolation | ✅ ngspice (matched, open, shorted) |
+| `.op` / `.dc` | ideal through-connection (`v1 = v2`, `i1 + i2 = 0`) | ✅ ngspice |
+| `.tf` / `.sens` | differentiates the `.op` above | ⚠️ follows `.op`, not separately pinned |
+
 Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 
 ---

@@ -169,3 +169,42 @@ fn shorted_far_end_reflection() {
         &[0.0, 0.5, 0.0],
     );
 }
+
+/// The DC limit of the Branin relations: adding them gives `i1 + i2 = 0` and
+/// subtracting them gives `v1 = v2`, so a lossless line is an ideal
+/// through-connection at DC.
+///
+/// The load is 1 kΩ, deliberately not `Z0`. A line that terminated itself in
+/// `Z0` would draw `1/(50+50)` and leave the far end dead, and no test using a
+/// 50 Ω load could tell the two apart.
+#[test]
+fn dc_operating_point_conducts_through_the_line() {
+    let net = "* DC bias through a lossless line\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rload b 0 1k\n\
+               .op\n";
+    let parsed = parse_spice(net).expect("parse failed");
+    let op = fairchild_core::dc_op_nr(&parsed).expect("dc op failed");
+    let v_a = op.node_voltage("a").expect("node a");
+    let v_b = op.node_voltage("b").expect("node b");
+    let i_vs = op.vsrc_current("vs").expect("I(Vs)");
+
+    // ngspice on the same deck: v(a) = v(b) = 0.952381, i(vs) = −9.52381e−4.
+    // An absolute anchor, and also the closed form 1/(50+1000).
+    let expect_v = 1000.0 / 1050.0;
+    let expect_i = -1.0 / 1050.0;
+    assert!(
+        (v_a - expect_v).abs() < 1e-9,
+        "V(a)={v_a:.9}, expected {expect_v:.9} — a Z0 terminator would give 0.5"
+    );
+    assert!(
+        (v_b - expect_v).abs() < 1e-9,
+        "V(b)={v_b:.9}, expected {expect_v:.9} — a dead far end would give 0"
+    );
+    assert!(
+        (i_vs - expect_i).abs() < 1e-12,
+        "I(Vs)={i_vs:.9}, expected {expect_i:.9} — 1/(50+50) would give −1e−2"
+    );
+}
