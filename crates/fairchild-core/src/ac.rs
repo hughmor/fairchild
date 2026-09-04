@@ -156,6 +156,10 @@ pub(crate) struct AcSystem {
     pub l_mat: Vec<SparseRow>,
     pub b_re: Vec<f64>,
     pub b_im: Vec<f64>,
+    /// Devices whose small-signal contribution is not `G + jωC + Λ/(jω)` — a
+    /// delay line is the case that exists. Kept alive past the assembly because
+    /// their stamp has to be recomputed at every frequency.
+    pub delay_devices: Vec<Box<dyn Device>>,
 }
 
 impl AcSystem {
@@ -165,11 +169,53 @@ impl AcSystem {
         let mut rhs = vec![0.0f64; 2 * size];
         rhs[..size].copy_from_slice(&self.b_re);
         rhs[size..].copy_from_slice(&self.b_im);
+        let omega = omega_of(f);
+        let extra = AcExtras::build(&self.delay_devices, size, omega);
         (
-            ac_block(&self.g_mat, &self.c_mat, &self.l_mat, omega_of(f)),
+            ac_block(&self.g_mat, &self.c_mat, &self.l_mat, omega, &extra),
             rhs,
         )
     }
+}
+
+/// The per-frequency complex entries from [`Device::ac_stamps`], split into the
+/// real block's two halves.
+///
+/// Empty is the usual case and costs one branch: a circuit with no delay in it
+/// assembles exactly as it did before.
+#[derive(Default)]
+pub(crate) struct AcExtras {
+    re: Vec<SparseRow>,
+    im: Vec<SparseRow>,
+}
+
+impl AcExtras {
+    pub(crate) fn build(devices: &[Box<dyn Device>], size: usize, omega: f64) -> Self {
+        let stamps: Vec<crate::device::AcStamp> =
+            devices.iter().flat_map(|d| d.ac_stamps(omega)).collect();
+        if stamps.is_empty() {
+            return Self::default();
+        }
+        let mut out = AcExtras {
+            re: vec![SparseRow::default(); size],
+            im: vec![SparseRow::default(); size],
+        };
+        for s in stamps {
+            out.re[s.row][s.col] += s.re;
+            out.im[s.row][s.col] += s.im;
+        }
+        out
+    }
+}
+
+/// Row `i` of an extras half, or an empty row when the half is absent — which
+/// is every circuit without a delay in it.
+#[inline]
+fn extra_row(which: &[SparseRow], i: usize) -> &SparseRow {
+    static EMPTY: std::sync::OnceLock<SparseRow> = std::sync::OnceLock::new();
+    which
+        .get(i)
+        .unwrap_or_else(|| EMPTY.get_or_init(SparseRow::default))
 }
 
 /// `2πf`, in one place so `.ac`, `.noise` and the adjoint cannot disagree.
@@ -194,11 +240,15 @@ pub(crate) fn omega_of(f: f64) -> f64 {
 /// [`CircuitTopology::sparse_from_dense`] used to do to the dense build — a
 /// structurally-present zero would change the solver's pivot order and move
 /// goldens for no reason.
+/// `extra` carries the per-frequency complex entries of [`AcExtras`], which is
+/// how a delay reaches the frequency domain (#110). It is empty for every
+/// circuit without one, and then this assembles exactly what it always did.
 pub(crate) fn ac_block(
     g: &[SparseRow],
     c: &[SparseRow],
     l: &[SparseRow],
     omega: f64,
+    extra: &AcExtras,
 ) -> Vec<SparseRow> {
     let size = g.len();
     let mut top = Vec::with_capacity(size);
@@ -214,11 +264,42 @@ pub(crate) fn ac_block(
                 b_vals.push(b);
             }
         });
+        // Merge the imaginary extras into the susceptance row. Both sides are
+        // ascending, so this stays one linear pass.
+        let ex_im = extra_row(&extra.im, i);
+        if !ex_im.entries().0.is_empty() {
+            let base =
+                SparseRow::from_parts(std::mem::take(&mut b_cols), std::mem::take(&mut b_vals));
+            crate::mna::union_rows(&base, ex_im, |j, bv, ev| {
+                let s = bv + ev;
+                if s != 0.0 {
+                    b_cols.push(j as u32);
+                    b_vals.push(s);
+                }
+            });
+        }
+        // Same for the real extras and the conductance row.
+        let merged_g;
+        let ex_re = extra_row(&extra.re, i);
+        let g_row = if ex_re.entries().0.is_empty() {
+            &g[i]
+        } else {
+            let (mut cols, mut vals) = (Vec::new(), Vec::new());
+            crate::mna::union_rows(&g[i], ex_re, |j, gv, ev| {
+                let s = gv + ev;
+                if s != 0.0 {
+                    cols.push(j as u32);
+                    vals.push(s);
+                }
+            });
+            merged_g = SparseRow::from_parts(cols, vals);
+            &merged_g
+        };
         let g_nz = || {
-            let (cols, vals) = g[i].entries();
+            let (cols, vals) = g_row.entries();
             cols.iter().zip(vals).filter(|(_, v)| **v != 0.0)
         };
-        let n = g[i].entries().0.len() + b_cols.len();
+        let n = g_row.entries().0.len() + b_cols.len();
         let (mut tc, mut tv) = (Vec::with_capacity(n), Vec::with_capacity(n));
         let (mut bc, mut bv) = (Vec::with_capacity(n), Vec::with_capacity(n));
         // Top row: G (cols < size), then −B shifted right.
@@ -254,7 +335,8 @@ pub(crate) fn assemble_ac(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<AcSystem, SimError> {
-    let (topo, g_mat, c_mat, l_mat, _) = assemble_ac_matrices(netlist, registry, opts)?;
+    let (topo, g_mat, c_mat, l_mat, _, delay_devices) =
+        assemble_ac_matrices(netlist, registry, opts)?;
     let (b_ac_re, b_ac_im) = build_ac_rhs(&topo, netlist, ac_source).ok_or(SimError::NoAcSource)?;
     Ok(AcSystem {
         topo,
@@ -263,6 +345,7 @@ pub(crate) fn assemble_ac(
         l_mat,
         b_re: b_ac_re,
         b_im: b_ac_im,
+        delay_devices,
     })
 }
 
@@ -296,6 +379,7 @@ pub(crate) type AcMatrices = (
     Vec<SparseRow>,
     Vec<SparseRow>,
     Vec<LBranch>,
+    Vec<Box<dyn Device>>,
 );
 
 /// The frequency-independent matrices of the AC system, without an excitation.
@@ -432,7 +516,15 @@ pub(crate) fn assemble_ac_matrices(
     // nodal `opts.gmin` that used to make these rows solvable as a side effect.
     topo.pin_rows_empty_in_all(&mut g_mat, &c_mat, &l_mat);
 
-    Ok((topo, g_mat, c_mat, l_mat, l_branches))
+    // Keep only the devices that have a per-frequency complex stamp. Probed at
+    // one arbitrary non-zero omega: `ac_stamps` reports structure, and a device
+    // with none returns an empty list at every frequency.
+    let delay_devices: Vec<Box<dyn Device>> = devices
+        .into_iter()
+        .filter(|d| !d.ac_stamps(1.0).is_empty())
+        .collect();
+
+    Ok((topo, g_mat, c_mat, l_mat, l_branches, delay_devices))
 }
 /// Run a small-signal AC sweep.
 ///

@@ -798,7 +798,14 @@ silent:
 |---|---|---|
 | `.tran` | Branin, history + linear interpolation | ✅ ngspice (matched, open, shorted) |
 | `.op` / `.dc` | ideal through-connection (`v1 = v2`, `i1 + i2 = 0`) | ✅ ngspice |
+| `.ac` / `.noise` | exact `exp(−jωTD)` coupling per frequency | ✅ closed form + ngspice (quarter-wave resonance) |
 | `.tf` / `.sens` | differentiates the `.op` above | ⚠️ follows `.op`, not separately pinned |
+| `.pz` | **hard error** | — |
+
+`.pz` refuses rather than answering: it solves `det(G + sC) = 0`, and a delay
+contributes `exp(−s·TD)`, which has no linear matrix pencil and infinitely many
+poles. Truncating it would return a finite pole set for a circuit that does not
+have one.
 
 Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 

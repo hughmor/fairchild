@@ -186,6 +186,58 @@ impl Device for NativeTLine {
         self.load_jacobian(mat);
     }
 
+    /// The delayed coupling `exp(−jωTD)`, which is the frequency-domain twin of
+    /// the history source `load_residual` writes.
+    ///
+    /// `load_jacobian` has already stamped the left-hand sides
+    /// `V1 − Z0·I1` and `V2 − Z0·I2`, so what is missing is the right-hand
+    /// sides as couplings rather than as a known:
+    ///
+    /// ```text
+    ///   V1 − Z0·I1 − q·(V2 + Z0·I2) = 0
+    ///   V2 − Z0·I2 − q·(V1 + Z0·I1) = 0,     q = exp(−jωTD)
+    /// ```
+    ///
+    /// At `ω = 0` this is `q = 1`, and adding and subtracting the two rows
+    /// returns `i1 + i2 = 0` and `v1 = v2` — the same through-connection the DC
+    /// stamp puts in directly.
+    fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
+        use crate::device::AcStamp;
+        let (qr, qi) = ((omega * self.td).cos(), -(omega * self.td).sin());
+        let mut out = Vec::with_capacity(6);
+        // Row `br` couples to the *far* port's voltage and current.
+        let mut row = |br: NodeId, pos: NodeId, neg: NodeId, far_br: NodeId| {
+            let Some(r) = br else { return };
+            if let Some(c) = pos {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: -qr,
+                    im: -qi,
+                });
+            }
+            if let Some(c) = neg {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: qr,
+                    im: qi,
+                });
+            }
+            if let Some(c) = far_br {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: -qr * self.z0,
+                    im: -qi * self.z0,
+                });
+            }
+        };
+        row(self.br1, self.b_pos, self.b_neg, self.br2);
+        row(self.br2, self.a_pos, self.a_neg, self.br1);
+        out
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         if !self.delay.is_active() {
             return;

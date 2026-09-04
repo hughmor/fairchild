@@ -177,7 +177,21 @@ pub fn pole_zero(
     drive: PzDrive,
     want: PzWant,
 ) -> Result<PzResult, SimError> {
-    let (topo, g_mat, c_mat, _l_mat, l_branches) = assemble_ac_matrices(netlist, registry, opts)?;
+    let (topo, g_mat, c_mat, _l_mat, l_branches, delay_devices) =
+        assemble_ac_matrices(netlist, registry, opts)?;
+    // `.pz` solves `det(G + sC) = 0`, a linear matrix pencil. A delay's
+    // response is `exp(−s·tau)`, which is transcendental: it has infinitely many
+    // poles and no pencil form at all. Truncating it to the `G + sC` part would
+    // return a finite pole set for a circuit that does not have one, so refuse.
+    if !delay_devices.is_empty() {
+        return Err(SimError::ParameterError(
+            "`.pz` cannot analyse a circuit containing a delay: a transmission line \
+             or an optical group delay contributes exp(-s*tau), which has no linear \
+             matrix pencil and infinitely many poles. Use `.ac`, which models the \
+             delay exactly at each frequency"
+                .into(),
+        ));
+    }
     let n = topo.size;
 
     // Rows: the MNA unknowns, one per inductor current, and — for a voltage
