@@ -80,6 +80,9 @@ PORT_SCHEMA: Dict[str, List[str]] = {
     "fc_pn_th_ps_inj":    ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L3
     "fc_pn_th_ps_full":   ["bundle", "bundle", "scalar", "scalar", "scalar", "scalar"],   # L4
     "fc_mzm":             ["bundle", "bundle", "scalar", "scalar"],     # in, out, sig, gnd
+    # Travelling wave: the electrode is a two-port, so both ends are pins and
+    # the deck supplies the source and the termination.
+    "fc_tw_ps":           ["bundle", "bundle", "scalar", "scalar"],     # in, out, rf_in, rf_out
     # `fc_circulator` requires bidirectional propagation; pin count 3,
     # all bundle.  Included for completeness.
     "fc_circulator":      ["bundle", "bundle", "bundle"],

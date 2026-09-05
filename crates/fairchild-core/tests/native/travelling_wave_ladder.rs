@@ -278,3 +278,140 @@ fn a_detuned_termination_ripples_at_the_round_trip_period() {
         period / 1e9
     );
 }
+
+// ── fc_tw_ps: the same construction, built by the device ─────────────────────
+
+/// The device deck: one element where the hand-written ladder needs `2N + 3`
+/// lines. `n_slices` is set explicitly so the two are the same circuit — the
+/// derived count is checked separately.
+fn tw_device(n_m: f64, n_slices: usize, z_term: f64) -> String {
+    format!(
+        "* fc_tw_ps\n\
+         .options waveguide_delay=1\n\
+         .optical_port oi\n\
+         .optical_port oo\n\
+         Xlas oi fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+         Vrf rf 0 DC 0 AC 1\n\
+         Rs rf e0 {Z0}\n\
+         Rt eN 0 {z_term}\n\
+         Xtw oi oo e0 eN fc_tw_ps l_um={l_um} v_pi_l={V_PI_L} n_g={N_G} \
+         n_m={n_m} z0={Z0} n_slices={n_slices} alpha_dB_cm=0 pin_at_ref=1\n",
+        l_um = L_M * 1e6,
+    )
+}
+
+fn device_response(deck: &str, freqs: &[f64]) -> Vec<f64> {
+    let parsed = parse_spice(deck).expect("parse");
+    let ac = ac_analysis(&parsed, freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac sweep");
+    (0..freqs.len())
+        .map(|i| {
+            let re = ac.magnitude("oo_re_0", i).expect("field re");
+            let im = ac.magnitude("oo_im_0", i).expect("field im");
+            (re * re + im * im).sqrt()
+        })
+        .collect()
+}
+
+/// `fc_tw_ps` is the hand-written ladder, to the digit.
+///
+/// Not an anchor — both sides are fairchild — but it is the right test for
+/// *this* claim, which is that the device builds the construction the closed
+/// forms above already validated. The physics is pinned upstream; what is at
+/// risk here is the wiring, and a wiring error shows up as a mismatch with the
+/// deck that is known to be right.
+#[test]
+fn the_device_reproduces_the_hand_written_ladder() {
+    const N_M: f64 = 2.1;
+    let freqs: Vec<f64> = (1..=10).map(|k| k as f64 * 5e9).collect();
+    let hand = eo_response(&ladder(N_M, Drive::Co, Z0), &freqs);
+    let dev = device_response(&tw_device(N_M, N_SLICES, Z0), &freqs);
+    let scale = dev[0] / hand[0];
+    assert!(
+        (scale - 1.0).abs() < 1e-6,
+        "low-frequency response differs by {scale:.6}x before any walk-off"
+    );
+    for (i, f) in freqs.iter().enumerate() {
+        let rel = (dev[i] - hand[i]).abs() / hand[0];
+        assert!(
+            rel < 1e-6,
+            "at {:.0} GHz the device gives {:.6e} and the hand ladder {:.6e}",
+            f / 1e9,
+            dev[i],
+            hand[i]
+        );
+    }
+}
+
+/// The slice count follows `f_max`, and the answer converges as it rises.
+///
+/// The convergence sweep is the point: `N` is a discretisation, and a
+/// discretisation you cannot check is a number you are trusting. Doubling
+/// `slices_per_wave` must move the answer by less than the last doubling did.
+#[test]
+fn the_slice_count_follows_f_max_and_the_answer_converges() {
+    const N_M: f64 = 2.1;
+    // Well inside the band, where the walk-off is strong enough that an
+    // under-resolved ladder would show it.
+    let f = 30e9;
+    let mut last: Option<f64> = None;
+    let mut deltas = Vec::new();
+    for n in [6, 12, 24, 48] {
+        let r = device_response(&tw_device(N_M, n, Z0), &[f])[0];
+        if let Some(prev) = last {
+            deltas.push((r - prev).abs() / r);
+        }
+        last = Some(r);
+    }
+    assert!(
+        deltas.windows(2).all(|w| w[1] < w[0]),
+        "refining the ladder must converge; successive changes were {deltas:?}"
+    );
+    assert!(
+        *deltas.last().unwrap() < 0.01,
+        "24 -> 48 slices still moves the answer by {:.2}%",
+        100.0 * deltas.last().unwrap()
+    );
+
+    // And the derived count tracks f_max: a wider band asks for more slices,
+    // which is visible as a smaller requested timestep.
+    let build = |f_max: f64| {
+        let deck = format!(
+            "* derived slice count\n\
+             .optical_port oi\n\
+             .optical_port oo\n\
+             Xlas oi fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Vrf rf 0 DC 0\n\
+             Rs rf e0 {Z0}\n\
+             Rt eN 0 {Z0}\n\
+             Xtw oi oo e0 eN fc_tw_ps l_um={l_um} v_pi_l={V_PI_L} n_g={N_G} n_m={N_M} \
+             z0={Z0} f_max={f_max:e} alpha_dB_cm=0 pin_at_ref=1\n",
+            l_um = L_M * 1e6,
+        );
+        let parsed = parse_spice(&deck).expect("parse");
+        // The requested step is tau per slice over two, so it is a direct read
+        // of the slice count without exposing one.
+        let opts = SimOptions::from_netlist(&parsed);
+        let mut topo = fairchild_core::mna::CircuitTopology::build_resolved(
+            &parsed,
+            &opts.sim_context(),
+            &DeviceRegistry::new(),
+        );
+        let devices = fairchild_core::newton::build_devices(
+            &parsed,
+            &mut topo,
+            &opts.sim_context(),
+            &DeviceRegistry::new(),
+        )
+        .expect("build");
+        devices
+            .iter()
+            .filter_map(|d| d.requested_max_timestep())
+            .fold(f64::INFINITY, f64::min)
+    };
+    let coarse = build(10e9);
+    let fine = build(80e9);
+    assert!(
+        fine < coarse / 4.0,
+        "8x the bandwidth should ask for a much finer ladder: {coarse:.3e} s vs {fine:.3e} s"
+    );
+}

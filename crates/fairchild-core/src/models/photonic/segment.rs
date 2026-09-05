@@ -111,6 +111,13 @@ type Couplings<'a> = &'a [(NodeId, f64)];
 
 /// The optical core: bundle propagation + perturbation + delay + stamping,
 /// shared by the waveguide and every active phase-shifter / modulator class.
+///
+/// `Clone` so a composite device can cut `N` identical slices from one
+/// configured template rather than repeating its parameter handling `N` times
+/// (`fc_tw_ps`). A clone copies the delay history too, which is what you want
+/// at construction — it is empty — and is why cloning a *running* segment is
+/// not something any caller does.
+#[derive(Clone)]
 pub struct OpticalSegment {
     pub length_m: f64,
     pub n_eff: f64,
