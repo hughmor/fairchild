@@ -572,6 +572,12 @@ impl Device for NativeOptical2x2 {
         cols
     }
 
+    /// Half the latency, from `tau_s` alone: the delay is engaged whenever the
+    /// parameter is set, so the bound needs no eval to have happened (#112).
+    fn requested_max_timestep(&self) -> Option<f64> {
+        (self.tau_s > 0.0).then_some(self.tau_s / 2.0)
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         if !self.delay.is_active() {
             return;

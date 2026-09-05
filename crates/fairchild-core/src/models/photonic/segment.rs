@@ -163,6 +163,11 @@ pub struct OpticalSegment {
     // ── Group-delay line (engaged only when the owning device asks) ──────────
     delay: DelayLine,
     delayed: Vec<f64>,
+    /// `SimOptions::waveguide_delay`, cached at `setup_model`. The owning
+    /// device decides per-eval whether the delay is engaged; this is the
+    /// run-level setting, and it is what the step controller can ask about
+    /// before any eval has happened.
+    delay_option: bool,
 }
 
 impl OpticalSegment {
@@ -194,6 +199,7 @@ impl OpticalSegment {
             src_im: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
+            delay_option: false,
         }
     }
 
@@ -231,7 +237,19 @@ impl OpticalSegment {
             self.wl_ref_m = ctx.lambda_center_m;
         }
         self.wpc = ctx.wires_per_channel();
+        self.delay_option = ctx.waveguide_delay;
         self.refresh_tau();
+    }
+
+    /// The timestep this segment needs, or `None` when its delay is not
+    /// engaged.
+    ///
+    /// Answered from the option and the geometry rather than from
+    /// `delay.is_active()`, because the step controller asks before the first
+    /// `eval` — and a bound that only appears after the first step is a bound
+    /// that missed the first step. See `Device::requested_max_timestep`.
+    pub fn requested_max_timestep(&self) -> Option<f64> {
+        (self.delay_option && self.tau_g_s > 0.0).then_some(self.tau_g_s / 2.0)
     }
 
     /// Bind the segment to its `2·wpc·N` optical bundle wires (in block then out

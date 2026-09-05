@@ -277,6 +277,10 @@ impl Device for ActiveOpticalDevice {
         self.model.reactive_branches()
     }
 
+    fn requested_max_timestep(&self) -> Option<f64> {
+        self.seg.requested_max_timestep()
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         self.seg.commit(x);
         self.model.commit(x);

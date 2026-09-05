@@ -55,6 +55,10 @@ pub struct NativeTLine {
     br1: Option<usize>,
     br2: Option<usize>,
     delay: DelayLine,
+    /// Whether this step stamps the travelling-wave form. False before the
+    /// first accepted step, when there is no history to reconstruct from and
+    /// the DC through-connection is the honest answer — see `eval`.
+    travelling: bool,
     // History-driven source values for the current step (E1, E2).
     e1: f64,
     e2: f64,
@@ -72,6 +76,7 @@ impl NativeTLine {
             br1: None,
             br2: None,
             delay: DelayLine::new(),
+            travelling: false,
             e1: 0.0,
             e2: 0.0,
         }
@@ -133,10 +138,37 @@ impl Device for NativeTLine {
         self.br2 = Some(first_idx + 1);
     }
 
+    /// Half the one-way delay.
+    ///
+    /// `DelayLine::sample` clamps above its newest sample, so a step longer
+    /// than `TD` reconstructs the delayed wave from the previous accepted point
+    /// and the line quietly behaves as one of delay `h` instead of `TD`. The
+    /// step has to come from the geometry, not from the `.tran` card (#112).
+    fn requested_max_timestep(&self) -> Option<f64> {
+        (self.td > 0.0).then_some(self.td / 2.0)
+    }
+
     fn eval(&mut self, _x: &[f64], flags: EvalFlags, ctx: &SimContext) {
-        let active = flags.transient && self.td > 0.0;
-        self.delay.set_state(active, ctx.time_s);
-        if active {
+        // Engaged means "record history this step". It is not the same as
+        // "reconstruct from history": before the first accepted step there is
+        // nothing to reconstruct from.
+        let engaged = flags.transient && self.td > 0.0;
+        self.delay.set_state(engaged, ctx.time_s);
+        // With no history the travelling-wave form would read `E = 0` and make
+        // each port a `Z0` terminator, which is not a limit of anything — it
+        // drops a DC bias the operating point had solved for and never gets it
+        // back. The DC through-connection is the right answer for a step with
+        // no past, and one step later there is a past.
+        //
+        // Only a time-domain run reconstructs from history. `.ac` and `.noise`
+        // evaluate under transient flags too (they need the reactive caches)
+        // and have no history by construction, but they do not want any: their
+        // delay is the exact `exp(−jωTD)` coupling in `ac_stamps`, which
+        // completes these same travelling-wave rows. `ctx.discretisation` is
+        // the discriminator, because only a time-domain step sets one.
+        let time_domain = ctx.discretisation.is_some();
+        self.travelling = engaged && (!time_domain || !self.delay.is_empty());
+        if self.travelling {
             // Delayed snapshot [v1, v2, i1, i2] at t − TD.
             let d = self.delay.sample(self.td, 4);
             let (v1d, v2d, i1d, i2d) = (d[0], d[1], d[2], d[3]);
@@ -167,7 +199,7 @@ impl Device for NativeTLine {
         // `i2` leaves port B.
         stamp_port_kcl(mat, self.a_pos, self.a_neg, self.br1);
         stamp_port_kcl(mat, self.b_pos, self.b_neg, self.br2);
-        if self.delay.is_active() {
+        if self.travelling {
             // Each port is a voltage source `E` behind series Z0, with the
             // branch current as the unknown (source-with-resistance).
             stamp_branch_row(mat, self.a_pos, self.a_neg, self.br1, self.z0);

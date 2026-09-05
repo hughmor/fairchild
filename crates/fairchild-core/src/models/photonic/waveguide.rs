@@ -106,6 +106,10 @@ impl Device for NativeWaveguide {
         self.seg.stamp(mat);
     }
 
+    fn requested_max_timestep(&self) -> Option<f64> {
+        self.seg.requested_max_timestep()
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         self.seg.commit(x);
     }
