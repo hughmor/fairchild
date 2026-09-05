@@ -1006,6 +1006,7 @@ impl Device for Mosfet1 {
             // and not the charge branch's `∂q/∂v`, so zero is correct here
             // rather than merely conservative.
             dvalue_dstate: 0.0,
+            charge: None,
         };
         let mut v = Vec::new();
         if self.cgs_eval != 0.0 {

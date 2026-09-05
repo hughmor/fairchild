@@ -526,7 +526,12 @@ pub fn noise_analysis(
         //   [ B   G ] [V_im] = [b_im]
         // where the RHS injects 1 V at the input source's branch row.
         let n2 = 2 * size;
-        let a_fwd = crate::ac::ac_block(&g_mat, &c_mat, &l_mat, crate::ac::omega_of(f));
+        // Delays are not in `G`/`C`/`Λ` — see `Device::ac_stamps`. Without this
+        // the signal-path gain `H(f)` through a line would be the gain through
+        // a bare terminator, and the input-referred noise wrong by that factor.
+        let omega = crate::ac::omega_of(f);
+        let extra = crate::ac::AcExtras::build(&devices, size, omega);
+        let a_fwd = crate::ac::ac_block(&g_mat, &c_mat, &l_mat, omega, &extra);
         let mut rhs_fwd = vec![0.0f64; n2];
         rhs_fwd[n_nodes + input_vsrc_idx] = 1.0; // unit AC amplitude on V source
         let v_fwd = noise_solver.solve(&a_fwd, &rhs_fwd)?;

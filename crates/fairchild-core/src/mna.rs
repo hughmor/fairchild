@@ -1617,8 +1617,22 @@ fn element_nets(el: &Element) -> Vec<&str> {
 /// Backward Euler companion state for a capacitor at one time step.
 /// Returns (G_eq, I_hist) where G_eq = C/h and I_hist = G_eq * V_prev.
 pub fn cap_companion(capacitance: f64, h: f64, v_prev: f64) -> (f64, f64) {
-    let g = capacitance / h;
-    (g, g * v_prev)
+    cap_companion_q(capacitance, h, capacitance * v_prev)
+}
+
+/// [`cap_companion`] on stored **charge** rather than on `C·v`.
+///
+/// The two are the same thing for a linear capacitor, and they are not the same
+/// thing for a junction: `q(v) = ∫C dv`, which is not `C(v)·v` once `C` depends
+/// on `v`. A branch whose capacitance moves with its own voltage has to supply
+/// the charge, or the companion integrates the wrong state variable and the
+/// device comes out with the wrong speed — 2.3x too fast on a 2 V step for a
+/// `m_j = 0.5` junction, which is not a rounding error.
+///
+/// `capacitance` is still `dq/dv` at the current iterate: it sets the
+/// conductance, which is `∂i/∂v`.
+pub fn cap_companion_q(capacitance: f64, h: f64, q_prev: f64) -> (f64, f64) {
+    (capacitance / h, q_prev / h)
 }
 
 /// Backward Euler companion state for an inductor at one time step.
@@ -1694,10 +1708,28 @@ pub fn cap_companion_gear2(
     v_prev: f64,
     v_prev2: f64,
 ) -> (f64, f64) {
+    cap_companion_gear2_q(
+        capacitance,
+        h,
+        h_prev,
+        capacitance * v_prev,
+        capacitance * v_prev2,
+    )
+}
+
+/// [`cap_companion_gear2`] on stored charge — see [`cap_companion_q`] for why a
+/// bias-dependent capacitance cannot use `C·v` as its state.
+pub fn cap_companion_gear2_q(
+    capacitance: f64,
+    h: f64,
+    h_prev: f64,
+    q_prev: f64,
+    q_prev2: f64,
+) -> (f64, f64) {
     let rho = h / h_prev;
     let denom = h * (1.0 + rho);
     let g_eq = capacitance * (1.0 + 2.0 * rho) / denom;
-    let i_hist = capacitance * ((1.0 + rho) / h * v_prev - (rho * rho) / denom * v_prev2);
+    let i_hist = (1.0 + rho) / h * q_prev - (rho * rho) / denom * q_prev2;
     (g_eq, i_hist)
 }
 

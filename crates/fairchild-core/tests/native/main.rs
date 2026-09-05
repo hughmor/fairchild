@@ -30,3 +30,5 @@ mod native_thermal_ps_rc;
 mod native_wdm_mrr;
 mod native_wdm_mux;
 mod optical_noise;
+mod optical_small_signal_ac;
+mod travelling_wave_ladder;

@@ -111,6 +111,13 @@ type Couplings<'a> = &'a [(NodeId, f64)];
 
 /// The optical core: bundle propagation + perturbation + delay + stamping,
 /// shared by the waveguide and every active phase-shifter / modulator class.
+///
+/// `Clone` so a composite device can cut `N` identical slices from one
+/// configured template rather than repeating its parameter handling `N` times
+/// (`fc_tw_ps`). A clone copies the delay history too, which is what you want
+/// at construction — it is empty — and is why cloning a *running* segment is
+/// not something any caller does.
+#[derive(Clone)]
 pub struct OpticalSegment {
     pub length_m: f64,
     pub n_eff: f64,
@@ -163,6 +170,16 @@ pub struct OpticalSegment {
     // ── Group-delay line (engaged only when the owning device asks) ──────────
     delay: DelayLine,
     delayed: Vec<f64>,
+    /// Whether this eval stamps the delayed form: couplings dropped, output
+    /// driven by the reconstructed history (or, in `.ac`, by `ac_stamps`).
+    /// False when the delay is engaged but there is no history yet — see
+    /// `refresh_with_sens`.
+    delayed_stamp: bool,
+    /// `SimOptions::waveguide_delay`, cached at `setup_model`. The owning
+    /// device decides per-eval whether the delay is engaged; this is the
+    /// run-level setting, and it is what the step controller can ask about
+    /// before any eval has happened.
+    delay_option: bool,
 }
 
 impl OpticalSegment {
@@ -194,6 +211,8 @@ impl OpticalSegment {
             src_im: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
+            delayed_stamp: false,
+            delay_option: false,
         }
     }
 
@@ -231,7 +250,19 @@ impl OpticalSegment {
             self.wl_ref_m = ctx.lambda_center_m;
         }
         self.wpc = ctx.wires_per_channel();
+        self.delay_option = ctx.waveguide_delay;
         self.refresh_tau();
+    }
+
+    /// The timestep this segment needs, or `None` when its delay is not
+    /// engaged.
+    ///
+    /// Answered from the option and the geometry rather than from
+    /// `delay.is_active()`, because the step controller asks before the first
+    /// `eval` — and a bound that only appears after the first step is a bound
+    /// that missed the first step. See `Device::requested_max_timestep`.
+    pub fn requested_max_timestep(&self) -> Option<f64> {
+        (self.delay_option && self.tau_g_s > 0.0).then_some(self.tau_g_s / 2.0)
     }
 
     /// Bind the segment to its `2·wpc·N` optical bundle wires (in block then out
@@ -464,7 +495,21 @@ impl OpticalSegment {
         dpert_dv: &[(PerChannel, f64, PerChannel)],
     ) {
         self.delay.set_state(delay_active, ctx.time_s);
-        if delay_active {
+        // Engaged is not the same as "reconstruct from history". Before the
+        // first accepted step there is nothing to reconstruct from, and a
+        // delayed source read out of an empty buffer is zero — the segment
+        // would extinguish its own output for one step and a resonator would
+        // ring on the artefact. With no past, the steady-state transfer is the
+        // honest answer, and one step later there is a past.
+        //
+        // `.ac` reaches here under transient flags too, has no history by
+        // construction, and does want the delayed form: its delay is the exact
+        // `exp(−jΩτ_g)` coupling in `ac_stamps`, which replaces the couplings
+        // dropped below. `ctx.discretisation` tells the two apart, because only
+        // a time-domain step sets one.
+        let time_domain = ctx.discretisation.is_some();
+        self.delayed_stamp = delay_active && (!time_domain || !self.delay.is_empty());
+        if self.delayed_stamp {
             let width = self.n_channels * self.vals_per_channel();
             self.delayed = self.delay.sample(self.tau_g_s, width);
         }
@@ -499,7 +544,18 @@ impl OpticalSegment {
                 continue;
             }
             // The (re, im) pair that c and s multiply in the current mode.
-            let (sr, si) = if delay_active {
+            // The field the coefficient's *derivative* multiplies, which is a
+            // different question from where the output comes from.
+            //
+            // In the time domain that is the delayed field: the light being
+            // modulated now entered a group delay ago. In the frequency domain
+            // there is no history to read — `.ac` linearises about an operating
+            // point — and reading the empty buffer would put a zero here and
+            // silently delete the modulation, leaving a segment that propagates
+            // light and does not respond to its drive. The operating-point
+            // field at the input is the right small-signal answer, and it is
+            // frequency-independent by construction.
+            let (sr, si) = if self.delayed_stamp && time_domain {
                 (self.delayed[per * k], self.delayed[per * k + 1])
             } else {
                 let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
@@ -556,7 +612,7 @@ impl OpticalSegment {
     /// input nodes are dropped. The delay state is the one set by the most
     /// recent [`refresh`](Self::refresh).
     pub fn stamp(&self, mat: &mut MnaMatrix) {
-        let delay_active = self.delay.is_active();
+        let delay_active = self.delayed_stamp;
         let n = self.n_channels;
         let wpc = self.wpc;
         let bpc = Self::bpc(wpc);
@@ -641,7 +697,7 @@ impl OpticalSegment {
                 }
             }
         }
-        if !self.delay.is_active() {
+        if !self.delayed_stamp {
             return;
         }
         let n = self.n_channels;
@@ -668,6 +724,63 @@ impl OpticalSegment {
                 }
             }
         }
+    }
+
+    /// The envelope delay as a per-frequency complex coupling, `exp(−jΩτ_g)`
+    /// times the couplings [`stamp`](Self::stamp) drops in delay mode.
+    ///
+    /// The optical unknowns are envelope quadratures, so in a small-signal
+    /// sweep each of `in_re` and `in_im` is itself a phasor at the *modulation*
+    /// frequency `Ω`. The propagation phase and loss are already in `c` and `s`
+    /// — they are the carrier's business and do not move with `Ω`. What the
+    /// delay adds is `out(Ω) = (c − js)·exp(−jΩτ_g)·in(Ω)`, and that factor is
+    /// the whole content of this stamp.
+    ///
+    /// Empty unless the delay is engaged, in which case the instantaneous
+    /// couplings are in `G` already and there is nothing to add.
+    pub fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
+        use crate::device::AcStamp;
+        if !self.delayed_stamp {
+            return Vec::new();
+        }
+        let (qr, qi) = ((omega * self.tau_g_s).cos(), -(omega * self.tau_g_s).sin());
+        let (n, wpc) = (self.n_channels, self.wpc);
+        let bpc = Self::bpc(wpc);
+        let out_base = wpc * n;
+        let mut out = Vec::with_capacity(4 * n);
+        let push = |row: Option<usize>, col: NodeId, k: f64, sink: &mut Vec<AcStamp>| {
+            if let (Some(r), Some(c)) = (row, col) {
+                sink.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: k * qr,
+                    im: k * qi,
+                });
+            }
+        };
+        for k in 0..n {
+            let (c, s) = (self.c_cached[k], self.s_cached[k]);
+            let (in_re, in_im) = (self.nodes[wpc * k], self.nodes[wpc * k + 1]);
+            let (r_re, r_im) = (self.branches[bpc * k], self.branches[bpc * k + 1]);
+            push(r_re, in_re, -c, &mut out);
+            push(r_re, in_im, -s, &mut out);
+            push(r_im, in_re, s, &mut out);
+            push(r_im, in_im, -c, &mut out);
+            if wpc == 5 {
+                // Backward direction: the input is the *output* block's wire,
+                // matching the couplings `stamp` drops for it.
+                let (bw_re, bw_im) = (
+                    self.nodes[out_base + wpc * k + 2],
+                    self.nodes[out_base + wpc * k + 3],
+                );
+                let (rb_re, rb_im) = (self.branches[bpc * k + 2], self.branches[bpc * k + 3]);
+                push(rb_re, bw_re, -c, &mut out);
+                push(rb_re, bw_im, -s, &mut out);
+                push(rb_im, bw_re, s, &mut out);
+                push(rb_im, bw_im, -c, &mut out);
+            }
+        }
+        out
     }
 
     /// Record the current port amplitudes so future steps can read them back

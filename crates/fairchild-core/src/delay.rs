@@ -70,9 +70,20 @@ impl DelayLine {
     ///
     /// Clamping semantics: before the first recorded sample the signal is taken
     /// as the earliest snapshot (the DC/initial value); after the last it holds
-    /// the most recent snapshot, so a delay shorter than the current timestep
-    /// degrades gracefully to "no delay" rather than extrapolating. Returns a
-    /// `width`-long zero vector if no history has been recorded yet.
+    /// the most recent snapshot rather than extrapolating.
+    ///
+    /// That second clamp is a trap worth naming. When the step `h` exceeds the
+    /// delay, `t − delay_s` lands past the newest sample and the reconstruction
+    /// returns the *previous accepted solution*. The device does not lose its
+    /// delay, it gets a delay of `h`: the effective delay is `max(τ, h)`, which
+    /// tracks the step size instead of the geometry. Devices owning a delay
+    /// therefore bound the step through
+    /// [`Device::requested_max_timestep`](crate::device::Device::requested_max_timestep)
+    /// so this cannot be reached (#112).
+    ///
+    /// Returns a `width`-long zero vector if no history has been recorded yet.
+    /// A device should treat that case as "no past" and stamp its steady-state
+    /// limit, not as "the past was zero".
     pub fn sample(&self, delay_s: f64, width: usize) -> Vec<f64> {
         let tq = self.time_s - delay_s;
         if self.hist_t.is_empty() {

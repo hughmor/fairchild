@@ -185,6 +185,22 @@ impl TranStepper {
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);
 
+        // A fixed-step run promises a sample grid, so a device asking for a
+        // smaller step cannot be honoured by sub-stepping without breaking that
+        // promise. Refuse instead: the answer at this step size would be a
+        // circuit with a different delay in it (#112).
+        if let Some(bound) = crate::tran::device_max_timestep(&devices) {
+            if step > bound {
+                return Err(SimError::ParameterError(format!(
+                    "timestep {step:.3e} s is too large for a delay in this circuit: \
+                     it needs {bound:.3e} s or less, or the delay is reconstructed \
+                     from one sample and behaves as {step:.3e} s. Lower the `.tran` \
+                     step, or set `.options variable_step=1` to let the controller \
+                     choose it"
+                )));
+            }
+        }
+
         let reactive = ReactiveState::new(&netlist, &topo, &mut devices, &ctx, &x);
         let mat = MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
 

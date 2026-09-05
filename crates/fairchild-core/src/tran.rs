@@ -415,6 +415,18 @@ pub fn tran_nr_with_registry_var(
     )
 }
 
+/// The smallest timestep any device asks for, or `None` when none does.
+///
+/// One place answers "how small must this step be for the devices in the
+/// circuit", so the initial step, the per-step controller and the fixed-step
+/// gate cannot come to different conclusions.
+pub(crate) fn device_max_timestep(devices: &[Box<dyn crate::device::Device>]) -> Option<f64> {
+    devices
+        .iter()
+        .filter_map(|d| d.requested_max_timestep())
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
 /// Variable-step transient with explicit `SimOptions`.
 ///
 /// `step` is the maximum allowed timestep (upper bound, further capped by
@@ -535,7 +547,11 @@ pub fn tran_nr_with_registry_var_opts(
     push_timepoint(&mut result, 0.0, &topo, &x);
 
     let mut t = 0.0_f64;
-    let mut h = step;
+    // The first step gets the same device-requested bound every later step gets
+    // (see the `requested_max_timestep` call after an accepted step). A delay
+    // device asks for `tau/2`, and a first step longer than the delay would
+    // reconstruct it from a history one sample deep.
+    let mut h = step.min(device_max_timestep(&devices).unwrap_or(f64::INFINITY));
     let mut h_prev = 0.0_f64;
     let mut x_prev = x.clone();
     let mut consecutive_rejects = 0usize;
@@ -784,15 +800,12 @@ pub fn tran_nr_with_registry_var_opts(
                 h_actual * (0.9 / lte_norm).sqrt()
             };
             h = h.clamp(h_actual * 0.1, h_actual * 4.0).min(step);
-            // A compiled model may have asked for a smaller next step through
-            // Verilog-A's `$bound_step`. LTE cannot cover that on its own: it
-            // measures the error of a step already taken, and the model is saying
-            // the *next* one will miss something. Native devices return `None`.
-            if let Some(bound) = devices
-                .iter()
-                .filter_map(|d| d.requested_max_timestep())
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            {
+            // A model may have asked for a smaller next step — a compiled one
+            // through Verilog-A's `$bound_step`, a delay device because its
+            // reconstruction needs samples inside the delay window. LTE covers
+            // neither on its own: it measures the error of a step already
+            // taken, and both are saying the *next* one will miss something.
+            if let Some(bound) = device_max_timestep(&devices) {
                 h = h.min(bound);
             }
         } else {

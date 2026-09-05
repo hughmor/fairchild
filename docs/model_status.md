@@ -791,6 +791,22 @@ transitively by the integration tests. No ngspice comparison.
 | `TD` | ✅ | ✅ | ✅ ngspice |
 | `F`, `NL` | ✅ | ✅ | ⚠️ desugars to `TD` |
 
+Per analysis, because a delay behaves differently in each and the difference is
+silent:
+
+| Analysis | Behaviour | Validated |
+|---|---|---|
+| `.tran` | Branin, history + linear interpolation | ✅ ngspice (matched, open, shorted) |
+| `.op` / `.dc` | ideal through-connection (`v1 = v2`, `i1 + i2 = 0`) | ✅ ngspice |
+| `.ac` / `.noise` | exact `exp(−jωTD)` coupling per frequency | ✅ closed form + ngspice (quarter-wave resonance) |
+| `.tf` / `.sens` | differentiates the `.op` above | ⚠️ follows `.op`, not separately pinned |
+| `.pz` | **hard error** | — |
+
+`.pz` refuses rather than answering: it solves `det(G + sC) = 0`, and a delay
+contributes `exp(−s·TD)`, which has no linear matrix pencil and infinitely many
+poles. Truncating it would return a finite pole set for a circuit that does not
+have one.
+
 Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
 
 ---
@@ -830,6 +846,7 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 | `fc_mzm` | `v_pi`, `alpha`, `alpha_db`/`il_db`, `e_r`, `e_r_db`, `f_c` | ⚠️ analytic |
 | `fc_optical_2x2` | `s11`, `s12`, `s21`, `s22`, `il_db`, `tau_s`, `allow_gain`, per-channel `w`/`dw_dv_<k>` | ⚠️ analytic + power conservation |
 | `fc_photodetector` | `responsivity`, `i_dark`, `r_shunt`, `r_series`, `c_par`/`c_j0` | ⚠️ analytic (`native_pd_r_series`); owns no optical wire, and sums both propagation directions into one photocurrent |
+| `fc_tw_ps` | `l_um`/`l_m`, `v_pi_l`, `n_g`, `n_m`/`n_rf`, `z0`, `f_max`, `slices_per_wave`, `n_slices`, plus the segment geometry set | ✅ four closed forms on the equivalent hand-written ladder (flat when velocity matched, walk-off sinc with its null, the `n_m + n_g` collapse under reverse drive, and the round-trip ripple), plus a convergence sweep in `N`. RF loss is **not** modelled, so it is optimistic where `√f` attenuation dominates |
 | Phase shifters (`fc_pn_ps`, `fc_thermal_ps`, `fc_pn_th_ps`, … + `LEVEL`) | `dn_dv`, `da_dv`, `g_pn`, `v_pi_l`, `c_j0`, `v_bi`, `m_j`, `i_sat`, `n_diode`, `tau_carrier`, `dn_dv_inj`, `da_dv_inj`, `dn_di`, `da_di`, `beta_tpa`, `a_eff_m2`, `r_th`, `dn_dt`, `r_series`, `r_heater`, `p_pi`, `tau_th`, plus the `fc_waveguide` geometry set | ⚠️ characterisation pins + an equivalence test vs a discrete `C`; the LEVEL-4 optical back-action (`beta_tpa`, `r_th`, `dn_dt`) is pinned on a WDM bus against hand-computed absorbed-power and per-channel cross-TPA budgets, forward and backward (`native_pn_ps_full.rs`, `bidirectional_composition.rs`); fitted against measured chip data in `experiments/giona` but that comparison is not a committed regression |
 | `fc_phase_shifter_expr` | `dneff`, `dalpha` (expression strings over `V`, `T`, `lambda`) | ⚠️ in-tree |
 
@@ -839,7 +856,9 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 |---|---|
 | Optical noise — laser RIN, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor |
 | Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
-| Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
+| Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default**. In `.tran` it bounds the timestep to `τ_g/2`. In `.ac` it is the exact `exp(−jΩτ_g)` coupling; `.pz` refuses a circuit containing one |
+| Junction charge in transient | ✅ `fc_pn_ps_cap` integrates `q = ∫C dv`, pinned by a charge-conservation test. ⚠️ the forward-injection drives (`fc_pn_ps_full`, `fc_pn_th_ps` composites) still integrate `C(v)·v`, which makes their depletion half faster than it is — their charge depends on an internal junction voltage the branch cannot report |
+| Small-signal optical response in `.ac` | ✅ a modulator's `∂field/∂V` reaches the AC Jacobian, matched to the closed form. It used to read exactly zero through `fc_mzm`, `fc_xfer` and the lasers, which freeze that column and rely on the repair `.op` does |
 | Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |
 
 ---

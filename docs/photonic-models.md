@@ -393,13 +393,18 @@ when the optical modulation bandwidth approaches `1/τ_g` (high-speed links, lon
 delay lines); leave it off otherwise (cheaper, and the delay is negligible at
 low modulation rates). See `examples/photonic/waveguide_delay_demo.sp`.
 
-The corresponding group delay `τ_g = L · n_g / c` is computed at setup
-time and stored on the device. It is informational at this tier — the
-waveguide currently stamps an instantaneous envelope transfer (no time-
-domain delay line); τ_g matters only when modulation bandwidth is
-comparable to 1/τ_g (typically tens to hundreds of GHz on chip), which
-this device's first-pass model does not yet reproduce. A future
-transmission-line device will use τ_g directly.
+Per analysis, with the option on:
+
+| Analysis | What the delay does |
+|---|---|
+| `.tran` | output envelope reconstructed at `t − τ_g`, and the timestep is bounded to `τ_g/2` so the reconstruction has samples inside its own window |
+| `.ac` / `.noise` | exact `exp(−jΩτ_g)` coupling, so the envelope response carries a group delay of `τ_g` and the phase slope is `−360°·τ_g` per hertz |
+| `.op` / `.dc` | nothing: a steady state has no delay |
+| `.pz` | **hard error** — `exp(−s·τ_g)` has no linear matrix pencil |
+
+The first transient step is a special case worth knowing. There is no history
+to reconstruct from, so the segment stamps its steady-state transfer for that
+one step rather than reading an empty buffer as darkness.
 
 ### `fc_dcoupler` — 2×2 directional coupler
 
@@ -1267,6 +1272,70 @@ behaviour, driving only the heater gives `fc_thermal_ps`, driving both
 sums the phase shifts. Bundle-aware: ONE physical device handles all N
 optical channels with one shared PN junction AND one shared heater
 resistor.
+
+### `fc_tw_ps` — travelling-wave phase shifter
+
+```
+X<name>  in  out  rf_in  rf_out  fc_tw_ps  [param=val …]
+```
+
+A lumped phase shifter says the whole electrode is at one voltage. That is true
+while the device is short against the RF wavelength, and false exactly where a
+travelling-wave modulator earns its name. This element is the interleaved
+ladder instead: `N` optical slices, `N` electrode sections, and slice `i`
+driven by node `i` of the electrode.
+
+```
+  rf_in ──[T]──┬──[T]──┬── … ──┬──[T]── rf_out
+               │       │       │
+  in ────[seg]─┴─[seg]─┴─ … ───┴─[seg]── out
+```
+
+Both ends of the electrode are pins, so the deck supplies the source impedance
+and the termination — which is what makes the termination's effect visible.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `l_um` / `l_m` | 3000 µm | Total interaction length. |
+| `v_pi_l` | 0.012 V·m | Phase efficiency (1.2 V·cm), as `fc_pn_ps`. |
+| `n_g` | 4.19 | Optical group index — sets the optical delay per slice. |
+| `n_m` / `n_rf` | 4.2 | **Microwave** index of the electrode, *loaded*. |
+| `z0` | 35 Ω | Electrode characteristic impedance, *loaded*. |
+| `f_max` | 50 GHz | Top of the band you care about. Sets the slice count. |
+| `slices_per_wave` | 10 | Slices per RF wavelength. Raise it to check convergence. |
+| `n_slices` | — | Override the count outright, for a convergence sweep. |
+| (segment geometry) | — | `n_eff`, `alpha_dB_cm`, `wl_ref_nm`, `pin_at_ref` carry over. |
+
+**What emerges rather than being modelled.** Velocity mismatch, termination
+ripple, and the bandwidth collapse when the RF is launched against the light
+are not computed anywhere in this device. They follow from the RF and the
+optical envelope accumulating delay at different rates down the same ladder.
+Each is pinned against its closed form in
+`tests/native/travelling_wave_ladder.rs`:
+
+| Effect | Closed form |
+|---|---|
+| Velocity matched (`n_m = n_g`) | flat |
+| Walk-off | `sinc(ω·L·(n_m − n_g)/2c)` |
+| RF launched against the light | the same, with `n_m + n_g` |
+| Termination mismatch | ripple of period `c/(2·n_m·L)` |
+
+**Why `N` is not yours to pick.** The RF voltage has to be roughly constant
+across one slice, so `Δz ≪ c/(f_max·n_m)`. The card takes `f_max` and the
+device solves `N = ceil(slices_per_wave · L · n_m · f_max / c)`. Convergence is
+`O(Δz²)`; raise `slices_per_wave` until the answer stops moving, or pin
+`n_slices` to sweep it.
+
+**The cost.** Both delays are per slice, so the transient timestep is bounded
+by the *slice* transit time, not the device's. A finer ladder is a slower run,
+which is the price of resolving a travelling wave and the reason `f_max` is a
+parameter rather than a guess.
+
+**Not modelled.** RF loss: the electrode sections are lossless, so there is no
+conductor loss and no skin effect, and above the frequency where `√f`
+attenuation dominates this device is optimistic. No per-slice junction
+capacitance either — the electrode is unloaded, so give it the *loaded* `n_m`
+and `z0`. Bidirectional light is refused rather than half-modelled.
 
 ### `fc_mzm` — idealised testbench Mach-Zehnder modulator
 

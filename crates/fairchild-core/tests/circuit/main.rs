@@ -14,6 +14,7 @@ mod binned_model_cards;
 mod construction_order;
 mod controlled_sources;
 mod coupled_inductors;
+mod delay_bounds_the_timestep;
 mod differential_pair_dc;
 mod global_nets;
 mod inductor_is_a_dc_short;

@@ -28,11 +28,16 @@
 //! (unlike the photonic waveguide, whose group delay is opt-in). The generic
 //! history/interpolation is provided by [`crate::delay::DelayLine`].
 //!
-//! Operating point: with no history the line presents `Z0` at each port (the
-//! `E = 0` seed). For a transient started from rest this is exact; a circuit
-//! that relies on a DC bias propagating *through* the line at `.op` will settle
-//! to the correct through-connection within a few `TD` of transient but is not
-//! captured by a standalone `.op`.
+//! Operating point: the same two relations, with the delayed terms equal to the
+//! present ones. Adding them gives `i1 + i2 = 0` and subtracting them gives
+//! `v1 = v2`, so at DC the line is an ideal through-connection and that is what
+//! the branch rows stamp. ngspice agrees: a 1 V source through 50 Ω into a
+//! 1 kΩ load across the line draws `1/(50+1000)`, not `1/(50+50)`.
+//!
+//! The `E = 0` seed the operating point used to stamp made each port a `Z0`
+//! resistor and left the far end dead, so any deck biasing a device *through* a
+//! line started from the wrong state, and `.tf` read the input resistance of a
+//! terminator rather than of a line.
 
 use crate::delay::DelayLine;
 use crate::device::{Device, EvalFlags, NodeId, SimContext};
@@ -50,6 +55,10 @@ pub struct NativeTLine {
     br1: Option<usize>,
     br2: Option<usize>,
     delay: DelayLine,
+    /// Whether this step stamps the travelling-wave form. False before the
+    /// first accepted step, when there is no history to reconstruct from and
+    /// the DC through-connection is the honest answer — see `eval`.
+    travelling: bool,
     // History-driven source values for the current step (E1, E2).
     e1: f64,
     e2: f64,
@@ -67,6 +76,7 @@ impl NativeTLine {
             br1: None,
             br2: None,
             delay: DelayLine::new(),
+            travelling: false,
             e1: 0.0,
             e2: 0.0,
         }
@@ -75,6 +85,31 @@ impl NativeTLine {
     #[inline]
     fn port_v(&self, x: &[f64], pos: NodeId, neg: NodeId) -> f64 {
         pos.map_or(0.0, |i| x[i]) - neg.map_or(0.0, |i| x[i])
+    }
+
+    /// The two branch rows at DC, where the delayed terms equal the present
+    /// ones: `v1 − v2 = 0` in the first, `i1 + i2 = 0` in the second.
+    ///
+    /// Both rows are needed. Stamping `v1 = v2` twice leaves the current
+    /// undetermined, and `gmin` would make that non-singular rather than an
+    /// error.
+    fn stamp_dc_rows(&self, mat: &mut MnaMatrix) {
+        if let Some(j) = self.br1 {
+            for (node, sign) in [
+                (self.a_pos, 1.0),
+                (self.a_neg, -1.0),
+                (self.b_pos, -1.0),
+                (self.b_neg, 1.0),
+            ] {
+                if let Some(i) = node {
+                    mat.a[j][i] += sign;
+                }
+            }
+        }
+        if let (Some(j), Some(k)) = (self.br2, self.br1) {
+            mat.a[j][k] += 1.0;
+            mat.a[j][j] += 1.0;
+        }
     }
 }
 
@@ -103,10 +138,37 @@ impl Device for NativeTLine {
         self.br2 = Some(first_idx + 1);
     }
 
+    /// Half the one-way delay.
+    ///
+    /// `DelayLine::sample` clamps above its newest sample, so a step longer
+    /// than `TD` reconstructs the delayed wave from the previous accepted point
+    /// and the line quietly behaves as one of delay `h` instead of `TD`. The
+    /// step has to come from the geometry, not from the `.tran` card (#112).
+    fn requested_max_timestep(&self) -> Option<f64> {
+        (self.td > 0.0).then_some(self.td / 2.0)
+    }
+
     fn eval(&mut self, _x: &[f64], flags: EvalFlags, ctx: &SimContext) {
-        let active = flags.transient && self.td > 0.0;
-        self.delay.set_state(active, ctx.time_s);
-        if active {
+        // Engaged means "record history this step". It is not the same as
+        // "reconstruct from history": before the first accepted step there is
+        // nothing to reconstruct from.
+        let engaged = flags.transient && self.td > 0.0;
+        self.delay.set_state(engaged, ctx.time_s);
+        // With no history the travelling-wave form would read `E = 0` and make
+        // each port a `Z0` terminator, which is not a limit of anything — it
+        // drops a DC bias the operating point had solved for and never gets it
+        // back. The DC through-connection is the right answer for a step with
+        // no past, and one step later there is a past.
+        //
+        // Only a time-domain run reconstructs from history. `.ac` and `.noise`
+        // evaluate under transient flags too (they need the reactive caches)
+        // and have no history by construction, but they do not want any: their
+        // delay is the exact `exp(−jωTD)` coupling in `ac_stamps`, which
+        // completes these same travelling-wave rows. `ctx.discretisation` is
+        // the discriminator, because only a time-domain step sets one.
+        let time_domain = ctx.discretisation.is_some();
+        self.travelling = engaged && (!time_domain || !self.delay.is_empty());
+        if self.travelling {
             // Delayed snapshot [v1, v2, i1, i2] at t − TD.
             let d = self.delay.sample(self.td, 4);
             let (v1d, v2d, i1d, i2d) = (d[0], d[1], d[2], d[3]);
@@ -115,7 +177,8 @@ impl Device for NativeTLine {
             self.e1 = v2d + self.z0 * i2d;
             self.e2 = v1d + self.z0 * i1d;
         } else {
-            // No history → each port presents Z0 (the operating-point seed).
+            // The DC through-connection is homogeneous: no source, only the
+            // `v1 = v2` / `i1 + i2 = 0` rows in `load_jacobian`.
             self.e1 = 0.0;
             self.e2 = 0.0;
         }
@@ -132,10 +195,19 @@ impl Device for NativeTLine {
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        // Stamp each port as a voltage source `E` behind series Z0, with the
-        // branch current as the unknown (standard MNA source-with-resistance).
-        stamp_branch(mat, self.a_pos, self.a_neg, self.br1, self.z0);
-        stamp_branch(mat, self.b_pos, self.b_neg, self.br2, self.z0);
+        // KCL is the same in both regimes: `i1` leaves port A into the device,
+        // `i2` leaves port B.
+        stamp_port_kcl(mat, self.a_pos, self.a_neg, self.br1);
+        stamp_port_kcl(mat, self.b_pos, self.b_neg, self.br2);
+        if self.travelling {
+            // Each port is a voltage source `E` behind series Z0, with the
+            // branch current as the unknown (source-with-resistance).
+            stamp_branch_row(mat, self.a_pos, self.a_neg, self.br1, self.z0);
+            stamp_branch_row(mat, self.b_pos, self.b_neg, self.br2, self.z0);
+        } else {
+            // DC limit of the same relations: `v1 = v2` and `i1 + i2 = 0`.
+            self.stamp_dc_rows(mat);
+        }
     }
 
     fn load_residual_tran(&self, b: &mut [f64], _alpha: f64) {
@@ -144,6 +216,58 @@ impl Device for NativeTLine {
 
     fn load_jacobian_tran(&self, mat: &mut MnaMatrix, _alpha: f64) {
         self.load_jacobian(mat);
+    }
+
+    /// The delayed coupling `exp(−jωTD)`, which is the frequency-domain twin of
+    /// the history source `load_residual` writes.
+    ///
+    /// `load_jacobian` has already stamped the left-hand sides
+    /// `V1 − Z0·I1` and `V2 − Z0·I2`, so what is missing is the right-hand
+    /// sides as couplings rather than as a known:
+    ///
+    /// ```text
+    ///   V1 − Z0·I1 − q·(V2 + Z0·I2) = 0
+    ///   V2 − Z0·I2 − q·(V1 + Z0·I1) = 0,     q = exp(−jωTD)
+    /// ```
+    ///
+    /// At `ω = 0` this is `q = 1`, and adding and subtracting the two rows
+    /// returns `i1 + i2 = 0` and `v1 = v2` — the same through-connection the DC
+    /// stamp puts in directly.
+    fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
+        use crate::device::AcStamp;
+        let (qr, qi) = ((omega * self.td).cos(), -(omega * self.td).sin());
+        let mut out = Vec::with_capacity(6);
+        // Row `br` couples to the *far* port's voltage and current.
+        let mut row = |br: NodeId, pos: NodeId, neg: NodeId, far_br: NodeId| {
+            let Some(r) = br else { return };
+            if let Some(c) = pos {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: -qr,
+                    im: -qi,
+                });
+            }
+            if let Some(c) = neg {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: qr,
+                    im: qi,
+                });
+            }
+            if let Some(c) = far_br {
+                out.push(AcStamp {
+                    row: r,
+                    col: c,
+                    re: -qr * self.z0,
+                    im: -qi * self.z0,
+                });
+            }
+        };
+        row(self.br1, self.b_pos, self.b_neg, self.br2);
+        row(self.br2, self.a_pos, self.a_neg, self.br1);
+        out
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
@@ -158,18 +282,27 @@ impl Device for NativeTLine {
     }
 }
 
-/// Stamp one Branin branch: `V(pos) − V(neg) − Z0·I = E` with branch current
-/// `I` (the RHS `E` is added in `load_residual`).  Grounded (`None`) terminals
-/// are skipped, which correctly drops the corresponding entries.
-fn stamp_branch(mat: &mut MnaMatrix, pos: NodeId, neg: NodeId, br: NodeId, z0: f64) {
+/// Couple a port current into the two node KCL rows: the branch current leaves
+/// `pos` and enters `neg`.  Grounded (`None`) terminals are skipped, which
+/// correctly drops the corresponding entries.
+fn stamp_port_kcl(mat: &mut MnaMatrix, pos: NodeId, neg: NodeId, br: NodeId) {
     let Some(j) = br else { return };
-    // KCL: branch current leaves `pos`, enters `neg`.
     if let Some(p) = pos {
         mat.a[p][j] += 1.0;
-        mat.a[j][p] += 1.0;
     }
     if let Some(n) = neg {
         mat.a[n][j] -= 1.0;
+    }
+}
+
+/// Stamp one Branin branch row: `V(pos) − V(neg) − Z0·I = E` (the RHS `E` is
+/// added in `load_residual`).
+fn stamp_branch_row(mat: &mut MnaMatrix, pos: NodeId, neg: NodeId, br: NodeId, z0: f64) {
+    let Some(j) = br else { return };
+    if let Some(p) = pos {
+        mat.a[j][p] += 1.0;
+    }
+    if let Some(n) = neg {
         mat.a[j][n] -= 1.0;
     }
     // Series characteristic impedance on the branch diagonal.
@@ -188,22 +321,37 @@ mod tests {
     }
 
     #[test]
-    fn dc_seed_presents_z0_at_each_port() {
-        // With no history the operating point stamps a Z0 source-behind-resistor
-        // at each port: branch row diagonal = −Z0, KCL coupling ±1.
+    fn dc_stamps_a_through_connection_not_a_terminator() {
+        // At DC the delayed terms equal the present ones, so the two relations
+        // collapse to `v1 = v2` and `i1 + i2 = 0`. Z0 must not appear.
         let mut t = NativeTLine::new(50.0, 1e-9);
         t.setup_instance(&[Some(0), None, Some(1), None], &SimContext::default());
         t.bind_extra_nodes(2); // br1=2, br2=3
         t.eval(&[0.0; 4], EvalFlags::dc(), &SimContext::default());
         let mut mat = MnaMatrix::zeros(4);
         t.load_jacobian(&mut mat);
-        assert_eq!(mat.a[2][2], -50.0, "branch-1 diagonal = −Z0");
-        assert_eq!(mat.a[3][3], -50.0, "branch-2 diagonal = −Z0");
+        // Row br1: V(A+) − V(B+) = 0.
+        assert_eq!(mat.a[2][0], 1.0, "branch-1 row: +V(A+)");
+        assert_eq!(mat.a[2][1], -1.0, "branch-1 row: −V(B+)");
+        // Row br2: i1 + i2 = 0.
+        assert_eq!(mat.a[3][2], 1.0, "branch-2 row: +i1");
+        assert_eq!(mat.a[3][3], 1.0, "branch-2 row: +i2");
+        // KCL unchanged.
         assert_eq!(mat.a[0][2], 1.0, "A+ KCL coupling to i1");
-        assert_eq!(mat.a[2][0], 1.0, "branch-1 row references V(A+)");
+        assert_eq!(mat.a[1][3], 1.0, "B+ KCL coupling to i2");
+        // No Z0 anywhere: a terminator would put −50 on a branch diagonal.
+        for row in 0..4 {
+            for col in 0..4 {
+                assert!(
+                    mat.a[row][col].abs() <= 1.0,
+                    "Z0 leaked into the DC stamp at [{row}][{col}]: {}",
+                    mat.a[row][col]
+                );
+            }
+        }
         let mut b = vec![0.0; 4];
         t.load_residual(&mut b);
-        assert!(b.iter().all(|&v| v == 0.0), "no source at the DC seed");
+        assert!(b.iter().all(|&v| v == 0.0), "the DC row is homogeneous");
     }
 
     #[test]

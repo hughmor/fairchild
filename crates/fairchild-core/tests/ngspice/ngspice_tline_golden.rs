@@ -6,6 +6,10 @@
 //! and a shorted far end (−1 reflection). Measurements are taken on the signal
 //! plateaus (well away from the ~20 ps edges) so the comparison is not
 //! sensitive to fixed-step-vs-adaptive edge sampling.
+//!
+//! `.op` and `.ac` are here too, because a delay behaves differently in each
+//! analysis and the difference used to be silent — the DC seed made the line a
+//! terminator (#111) and the frequency domain dropped it entirely (#110).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -167,5 +171,150 @@ fn shorted_far_end_reflection() {
         &[("b", 2.0e-9), ("a", 2.0e-9), ("a", 3.2e-9)],
         &["v_b", "v_a_mid", "v_a_late"],
         &[0.0, 0.5, 0.0],
+    );
+}
+
+/// The DC limit of the Branin relations: adding them gives `i1 + i2 = 0` and
+/// subtracting them gives `v1 = v2`, so a lossless line is an ideal
+/// through-connection at DC.
+///
+/// The load is 1 kΩ, deliberately not `Z0`. A line that terminated itself in
+/// `Z0` would draw `1/(50+50)` and leave the far end dead, and no test using a
+/// 50 Ω load could tell the two apart.
+#[test]
+fn dc_operating_point_conducts_through_the_line() {
+    let net = "* DC bias through a lossless line\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rload b 0 1k\n\
+               .op\n";
+    let parsed = parse_spice(net).expect("parse failed");
+    let op = fairchild_core::dc_op_nr(&parsed).expect("dc op failed");
+    let v_a = op.node_voltage("a").expect("node a");
+    let v_b = op.node_voltage("b").expect("node b");
+    let i_vs = op.vsrc_current("vs").expect("I(Vs)");
+
+    // ngspice on the same deck: v(a) = v(b) = 0.952381, i(vs) = −9.52381e−4.
+    // An absolute anchor, and also the closed form 1/(50+1000).
+    let expect_v = 1000.0 / 1050.0;
+    let expect_i = -1.0 / 1050.0;
+    assert!(
+        (v_a - expect_v).abs() < 1e-9,
+        "V(a)={v_a:.9}, expected {expect_v:.9} — a Z0 terminator would give 0.5"
+    );
+    assert!(
+        (v_b - expect_v).abs() < 1e-9,
+        "V(b)={v_b:.9}, expected {expect_v:.9} — a dead far end would give 0"
+    );
+    assert!(
+        (i_vs - expect_i).abs() < 1e-12,
+        "I(Vs)={i_vs:.9}, expected {expect_i:.9} — 1/(50+50) would give −1e−2"
+    );
+}
+
+/// A lossless line in `.ac`, against the closed form for a loaded line.
+///
+/// The anchor is analytic, not another fairchild path:
+///
+/// ```text
+///   Zin  = Z0·(Z_L + j·Z0·tan βl) / (Z0 + j·Z_L·tan βl)
+///   V(a) = Vs·Zin/(Rs + Zin)
+///   V(b) = V(a) / (cos βl + j·(Z0/Z_L)·sin βl),     βl = ω·TD
+/// ```
+///
+/// The sweep straddles the quarter-wave resonance at `1/(4·TD)` = 250 MHz,
+/// where a near-open line pulls `V(a)` down to almost nothing. A model that
+/// dropped the delay would report a flat 0.5 at every frequency, which is what
+/// this catches. ngspice on the same deck agrees digit for digit at all five
+/// points (`vm(a)` = 0.9999303, 0.7026148, 0.006283029, 0.7115001, 0.9999303).
+#[test]
+fn ac_sweep_matches_the_loaded_line_closed_form() {
+    const Z0: f64 = 50.0;
+    const RS: f64 = 50.0;
+    const TD: f64 = 1e-9;
+    const ZL: f64 = 1e6;
+
+    let net = "* AC through a lossless line\n\
+               Vs s 0 DC 0 AC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rterm b 0 1Meg\n";
+    let parsed = parse_spice(net).expect("parse failed");
+    let freqs: Vec<f64> = (0..5).map(|k| 1e6 + k as f64 * 125e6).collect();
+    let ac = fairchild_core::ac_analysis(
+        &parsed,
+        &freqs,
+        Some("vs"),
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .expect("ac failed");
+
+    // Minimal complex helpers — a test is not worth a dependency.
+    let mul = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+    let div = |a: (f64, f64), b: (f64, f64)| {
+        let d = b.0 * b.0 + b.1 * b.1;
+        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+    };
+    let mag = |a: (f64, f64)| (a.0 * a.0 + a.1 * a.1).sqrt();
+
+    let mut saw_resonance = false;
+    for (fi, &f) in freqs.iter().enumerate() {
+        let bl = 2.0 * std::f64::consts::PI * f * TD;
+        let t = bl.tan();
+        let zin = mul((Z0, 0.0), div((ZL, Z0 * t), (Z0, ZL * t)));
+        let va = div(zin, (zin.0 + RS, zin.1));
+        let vb = div(va, (bl.cos(), (Z0 / ZL) * bl.sin()));
+
+        let got_a = ac.magnitude("a", fi).expect("node a");
+        let got_b = ac.magnitude("b", fi).expect("node b");
+        assert!(
+            (got_a - mag(va)).abs() < 1e-6,
+            "f={f:.3e}: |V(a)|={got_a:.7}, closed form {:.7}",
+            mag(va)
+        );
+        assert!(
+            (got_b - mag(vb)).abs() < 1e-6,
+            "f={f:.3e}: |V(b)|={got_b:.7}, closed form {:.7}",
+            mag(vb)
+        );
+        if mag(va) < 0.05 {
+            saw_resonance = true;
+        }
+    }
+    assert!(
+        saw_resonance,
+        "the sweep must cross the quarter-wave resonance, or a delay-free \
+         model would pass it"
+    );
+}
+
+/// `.pz` has no pencil form for `exp(-s·TD)`, so it must refuse rather than
+/// return the poles of the circuit with the line deleted.
+#[test]
+fn pz_refuses_a_circuit_containing_a_delay() {
+    let net = "* pole-zero through a lossless line\n\
+               Vs s 0 DC 0 AC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rterm b 0 1k\n\
+               C1 b 0 1p\n";
+    let parsed = parse_spice(net).expect("parse failed");
+    let err = fairchild_core::pz::pole_zero(
+        &parsed,
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+        &fairchild_core::SimOptions::default(),
+        "s",
+        "0",
+        "b",
+        "0",
+        fairchild_parser::PzDrive::Vol,
+        fairchild_parser::PzWant::Both,
+    )
+    .expect_err("`.pz` must refuse a delay, not truncate it");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("delay"),
+        "the error must name the delay as the reason, got: {msg}"
     );
 }
