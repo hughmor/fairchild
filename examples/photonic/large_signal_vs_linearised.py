@@ -1,33 +1,59 @@
 #!/usr/bin/env python3
-"""Where a linearised modulator model stops being trustworthy, and by how much.
+"""How far a linearised modulator model can be trusted, measured rather than argued.
 
 A frequency-domain tool answers a modulator by measuring one small-signal
-response `H(f)` at the bias point and filtering the drive with it. That is
-orders of magnitude cheaper than a transient co-solve and it is the right tool
-for a long PRBS. This example is about the case where it is not: a
+response at the bias point and filtering the drive with it. That is orders of
+magnitude cheaper than a transient co-solve and it is the right tool for a long
+PRBS. The question this example answers is where it stops being right, for a
 reverse-biased PN phase shifter whose junction capacitance moves with the very
-voltage that drives it.
+voltage that drives it:
 
     C_j(V) = C_j0 / (1 − V/V_bi)^m_j        m_j = 0.5, V_bi = 0.917 V
-
-Over a 4 V swing that capacitance changes by 2.3x, so the RC pole the drive sees
-is not a property of the modulator — it is a property of the modulator *and the
-bit being sent*. A model holding it fixed does not make a small error. It
-answers a different circuit.
 
 ## The controlled experiment
 
 Two runs of the same solver, the same optics, the same PRBS, the same driver:
 
   * **C_j(V)** — `m_j = 0.5`, the real junction.
-  * **C_j fixed** — `m_j = 0`, `c_j0` pinned to `C_j(V_bias)`. This is exactly
-    the circuit a small-signal extraction sees, so it is exactly what a
-    linearised flow is answering.
+  * **C_j fixed** — `m_j = 0`, `c_j0` pinned per arm to `C_j` at that arm's own
+    bias. That is exactly the circuit a small-signal extraction sees, so it is
+    exactly what a linearised flow is answering.
 
 Only the capacitance law differs. The MZI's optical transfer is `sin²(Δφ/2)` in
 both, so the (large) optical nonlinearity is common to the two and cancels out
-of the comparison. What is left is the electrical nonlinearity alone, which is
-the claim.
+of the comparison. What is left is the electrical nonlinearity alone.
+
+What is swept is the **bias**, because that decides how much of the `C_j` curve
+one bit crosses. Deep in reverse bias a bit rides the flat part; near zero it
+climbs the steep part.
+
+## The measured answer
+
+    bias    most forward V    C_j across a bit    linearised error
+    −4.0 V      −2.0 V         284 → 421 fF            +3.5 %
+    −3.0 V      −1.0 V         295 → 519 fF            +5.2 %
+    −2.2 V      −0.2 V         317 → 680 fF            +9.3 %
+
+So: a fixed capacitance is good to a few per cent for a modulator kept in deep
+reverse bias, and the error grows monotonically with how much of the curve the
+swing covers, reaching about 10 % at the edge of the reverse-biased regime. The
+sign is consistent — the linearised model always reports a *more open* eye than
+the device has, so it is optimistic, which is the wrong direction for a margin.
+
+That is a calibration, not an indictment. It is worth having as a number.
+
+## What this example actually caught
+
+The first version of this comparison reported a 52 % divergence. That was not
+physics: it was a bug in the solver, which advanced `q = C(v)·v` as the
+junction's state instead of `q = ∫C dv`, and so ran the device more than twice
+as fast as its own parameters. The demo was the thing that found it. The 3-9 %
+above is the answer after that fix.
+
+The lesson generalises: a linearised model and a co-solve disagreeing by a lot
+is at least as likely to be a bug in the co-solve as a limitation of the linear
+model, and the only way to tell is an absolute anchor. Here the anchor was
+charge conservation — see `a_junction_stores_the_integral_of_its_capacitance`.
 
     MPLBACKEND=Agg python3 examples/photonic/large_signal_vs_linearised.py
     python3 examples/photonic/large_signal_vs_linearised.py --selftest
@@ -70,10 +96,17 @@ PRBS_ORDER = 7
 N_SYM = (1 << PRBS_ORDER) - 1
 PRBS_TAPS = {7: (7, 6), 9: (9, 5)}
 
-# Swings to sweep, as a fraction of V_pi differential. 1.0 is a full-swing
-# driver; the small end is where the two models must agree, and that agreement
-# is the control that says the comparison is set up correctly.
-SWING_FRACS = [0.1, 0.2, 0.35, 0.5, 0.7, 0.85, 1.0]
+# Full swing throughout: what is swept is the *bias*, because that is what
+# decides how much of the C_j curve a bit crosses. Deep reverse bias sits on the
+# flat part and the two models agree — that agreement is the control. Closer to
+# zero the curve steepens and they part.
+#
+# Each arm sits at `V_CENTRE ± V_pi/4` and swings `± V_pi/4` on top, so the most
+# forward point of the pair is `V_CENTRE + V_pi/2`. The list stops where that
+# reaches zero: past it the junction conducts, which is a different failure and
+# not the one being measured.
+BIASES = [-4.0, -3.5, -3.0, -2.75, -2.5, -2.35, -2.2]
+SWING_FRAC = 1.0
 
 # ── palette (validated: see the dataviz reference palette) ───────────────────
 C_FULL = "#2a78d6"      # slot 1 — the full co-solve
@@ -86,8 +119,17 @@ GRID = "#e3e2dd"
 
 
 def c_j(v_pn: float) -> float:
-    """The junction capacitance the model actually stamps, at bias `v_pn`."""
-    return C_J0 / (1.0 - v_pn / V_BI) ** M_J
+    """The junction capacitance the model actually stamps, at bias `v_pn`.
+
+    Including the linear tangent past `V_bi/2`, which is what keeps `C` finite
+    into forward bias. Mirrors `junction_cap_and_charge` in the solver — a plot
+    of the power law alone goes to infinity where the model does not.
+    """
+    v_knee = 0.5 * V_BI
+    if v_pn < v_knee:
+        return C_J0 / (1.0 - v_pn / V_BI) ** M_J
+    c_knee = C_J0 / (1.0 - v_knee / V_BI) ** M_J
+    return c_knee + c_knee * M_J / (V_BI - v_knee) * (v_pn - v_knee)
 
 
 def prbs(order: int, n: int) -> list:
@@ -240,18 +282,30 @@ def edge_times(t, v, bits) -> tuple:
 
 
 def sweep(bits: list) -> dict:
-    """Both models at every swing, plus the waveforms at full swing."""
-    out = {"swing": [], "full": [], "lin": [], "edges_full": [], "edges_lin": []}
-    for frac in SWING_FRACS:
-        a = run(bits, frac, linearised=False)
-        b = run(bits, frac, linearised=True)
-        out["swing"].append(frac)
-        out["full"].append(eye_metrics(a["t"], a["det"], bits))
-        out["lin"].append(eye_metrics(b["t"], b["det"], bits))
-        out["edges_full"].append(edge_times(a["t"], a["vdiff"], bits))
-        out["edges_lin"].append(edge_times(b["t"], b["vdiff"], bits))
-        if frac == SWING_FRACS[-1]:
-            out["wave_full"], out["wave_lin"] = a, b
+    """Both models at every bias, plus the waveforms at the closest approach."""
+    global V_CENTRE
+    keep = V_CENTRE
+    out = {"bias": [], "peak": [], "full": [], "lin": [], "c_span": []}
+    try:
+        for centre in BIASES:
+            V_CENTRE = centre
+            a = run(bits, SWING_FRAC, linearised=False)
+            b = run(bits, SWING_FRAC, linearised=True)
+            out["bias"].append(centre)
+            # The closest the junction gets to zero over a bit, which is what
+            # decides how much of the C_j curve the swing crosses.
+            peak = centre + 0.5 * V_PI
+            out["peak"].append(peak)
+            out["c_span"].append((c_j(centre - 0.5 * V_PI), c_j(peak)))
+            out["full"].append(eye_metrics(a["t"], a["det"], bits))
+            out["lin"].append(eye_metrics(b["t"], b["det"], bits))
+            if centre == BIASES[-1]:
+                out["wave_full"], out["wave_lin"] = a, b
+                out["wave_bias"] = centre
+            if centre == BIASES[0]:
+                out["deep_full"], out["deep_lin"] = a, b
+    finally:
+        V_CENTRE = keep
     return out
 
 
@@ -284,81 +338,98 @@ def style_axes(ax, title, xlabel, ylabel):
     ax.set_axisbelow(True)
 
 
-def figure(res, bits, path):
-    import matplotlib.pyplot as plt
+def draw_eye(ax, wave_full, wave_lin, title, note):
+    style_axes(ax, title, "time (ps)", "V(det)  (V)")
+    for w, col in ((wave_lin, C_LIN), (wave_full, C_FULL)):
+        for tt, yy in fold_eye(w["t"], w["det"]):
+            ax.plot(tt, yy, color=col, linewidth=0.7, alpha=0.55)
+    # The note sits in the eye's own opening, which is the one place in an eye
+    # diagram guaranteed to be empty.
+    ax.text(0.5, 0.5, note, transform=ax.transAxes, va="center", ha="center",
+            color=INK, fontsize=10, fontweight="semibold")
 
-    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.6))
+
+def figure(res, path):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.4, 7.8))
     fig.patch.set_facecolor(SURFACE)
     a, b, c, d = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
-    # ── A: the cause. C_j over the swing the drive actually covers.
-    v = np.linspace(V_CENTRE - 0.5 * V_PI - 0.4, V_CENTRE + 0.5 * V_PI + 0.4, 400)
-    style_axes(a, "The cause: the junction capacitance moves with the drive",
-               "junction voltage (V)", "C_j (fF)")
-    lo, hi = V_CENTRE - 0.5 * V_PI, V_CENTRE + 0.5 * V_PI
-    a.axvspan(lo, hi, color=INK_MUTED, alpha=0.10, linewidth=0)
-    a.plot(v, [c_j(x) * 1e15 for x in v], color=C_FULL, linewidth=2.0)
-    a.axhline(c_j(V_CENTRE) * 1e15, color=C_LIN, linewidth=2.0, linestyle=(0, (5, 3)))
-    a.plot([V_CENTRE], [c_j(V_CENTRE) * 1e15], "o", color=INK, markersize=5, zorder=5)
-    a.annotate("bias", (V_CENTRE, c_j(V_CENTRE) * 1e15), textcoords="offset points",
-               xytext=(6, 8), color=INK, fontsize=8.5)
-    a.annotate("C$_j$(V) — what the junction does", (v[10], c_j(v[10]) * 1e15),
-               textcoords="offset points", xytext=(8, -14), color=C_FULL, fontsize=8.5)
-    a.annotate("C$_j$ fixed — what a small-signal extraction sees",
-               (v[-1], c_j(V_CENTRE) * 1e15), textcoords="offset points",
-               xytext=(-6, 8), ha="right", color=C_LIN, fontsize=8.5)
-    ratio = c_j(hi) / c_j(lo)
-    a.annotate(f"{ratio:.1f}× across one full-swing bit", (0.5 * (lo + hi), c_j(lo) * 1e15),
-               textcoords="offset points", xytext=(0, -22), ha="center",
-               color=INK_2, fontsize=8.5)
+    deep, shallow = BIASES[0], BIASES[-1]
+    err = [100.0 * (l["opening"] - f["opening"]) / abs(f["opening"])
+           for f, l in zip(res["full"], res["lin"])]
 
-    # ── B: the junction voltage, where the asymmetry appears first.
-    style_axes(b, "Differential junction voltage, full swing",
-               "time (ps)", "V(p) − V(n)  (V)")
-    wf, wl = res["wave_full"], res["wave_lin"]
-    t0, t1 = 10 * BIT_S, 18 * BIT_S
-    for w, col, lab in ((wl, C_LIN, "C$_j$ fixed"), (wf, C_FULL, "C$_j$(V)")):
-        m = (w["t"] >= t0) & (w["t"] <= t1)
-        b.plot((w["t"][m] - t0) * 1e12, w["vdiff"][m], color=col, linewidth=2.0, label=lab)
-    b.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper right")
+    # ── A: the cause. The piece of the C_j curve each bit actually crosses.
+    style_axes(a, "The cause: the piece of C$_j$(V) one bit crosses",
+               "junction voltage (V)", "C$_j$ (fF)")
+    v = np.linspace(deep - 0.5 * V_PI - 0.4, 0.2, 500)
+    a.plot(v, [c_j(x) * 1e15 for x in v], color=INK_MUTED, linewidth=1.6, zorder=2)
+    for centre, col, side in ((deep, C_FULL, -1), (shallow, C_LIN, +1)):
+        lo, hi = centre - 0.5 * V_PI, centre + 0.5 * V_PI
+        seg = np.linspace(lo, hi, 120)
+        a.plot(seg, [c_j(x) * 1e15 for x in seg], color=col, linewidth=3.4, zorder=4,
+               solid_capstyle="round")
+        for x in (lo, hi):
+            a.plot([x], [c_j(x) * 1e15], "o", color=col, markersize=6,
+                   markeredgecolor=SURFACE, markeredgewidth=1.4, zorder=5)
+        mid = 0.5 * (lo + hi)
+        a.annotate(f"{centre:.2f} V bias · {c_j(hi) / c_j(lo):.1f}× across a bit",
+                   (mid, c_j(mid) * 1e15), textcoords="offset points",
+                   xytext=(-30, 40 if side > 0 else -32), ha="center", color=col,
+                   fontsize=9, fontweight="semibold")
+    a.set_xlim(v[0], 1.2)
+    a.set_ylim(0, c_j(0.2) * 1e15 * 1.12)
 
-    # ── C: the consequence. Two eyes, overlaid.
-    style_axes(c, "Detected eye at full swing", "time (ps)", "V(det)  (V)")
-    for w, col, lab in ((wl, C_LIN, "C$_j$ fixed"), (wf, C_FULL, "C$_j$(V)")):
-        for i, (tt, yy) in enumerate(fold_eye(w["t"], w["det"])):
-            c.plot(tt, yy, color=col, linewidth=0.6, alpha=0.55,
-                   label=lab if i == 0 else None)
-    c.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="lower right")
+    # ── B and C: the consequence, at each end of that piece.
+    draw_eye(b, res["deep_full"], res["deep_lin"],
+             f"Eye at {deep:.1f} V bias — the flat part",
+             f"models agree\nto {err[0]:.0f}%")
+    draw_eye(c, res["wave_full"], res["wave_lin"],
+             f"Eye at {shallow:.2f} V bias — the steep part",
+             f"linearised model\nis {err[-1]:.0f}% optimistic")
 
-    # ── D: the headline. Where the two models part company.
-    style_axes(d, "Eye opening vs drive swing", "differential swing (V$_\\pi$)",
+    # ── D: the headline. Where the linear answer stops being trustworthy.
+    style_axes(d, "Eye opening vs how close a bit comes to zero bias",
+               "most forward junction voltage over a bit (V)",
                "worst-case eye opening (mV)")
-    sw = np.array(res["swing"])
+    peak = np.array(res["peak"])
     full = np.array([m["opening"] for m in res["full"]]) * 1e3
     lin = np.array([m["opening"] for m in res["lin"]]) * 1e3
-    d.plot(sw, lin, color=C_LIN, linewidth=2.0, marker="o", markersize=5,
-           markeredgecolor=SURFACE, markeredgewidth=1.2, label="C$_j$ fixed (linearised)")
-    d.plot(sw, full, color=C_FULL, linewidth=2.0, marker="o", markersize=5,
-           markeredgecolor=SURFACE, markeredgewidth=1.2, label="C$_j$(V) (co-solved)")
-    d.legend(frameon=False, fontsize=8.5, labelcolor=INK_2, loc="upper left")
-    err = 100.0 * (lin - full) / np.maximum(full, 1e-12)
-    k = int(np.argmax(np.abs(err)))
-    d.annotate(f"{err[k]:+.0f}%", (sw[k], 0.5 * (lin[k] + full[k])),
-               textcoords="offset points", xytext=(10, 0), color=INK, fontsize=9,
-               fontweight="semibold")
-    d.annotate("agree at small signal —\nthe control", (sw[0], full[0]),
-               textcoords="offset points", xytext=(6, 26), color=INK_2, fontsize=8.5)
+    d.fill_between(peak, full, lin, color=C_LIN, alpha=0.12, linewidth=0)
+    d.plot(peak, lin, color=C_LIN, linewidth=2.0, marker="o", markersize=5,
+           markeredgecolor=SURFACE, markeredgewidth=1.2)
+    d.plot(peak, full, color=C_FULL, linewidth=2.0, marker="o", markersize=5,
+           markeredgecolor=SURFACE, markeredgewidth=1.2)
+    for i, ha, dx in ((0, "left", 10), (len(peak) - 1, "right", -10)):
+        d.annotate(f"+{err[i]:.0f}%", (peak[i], 0.5 * (lin[i] + full[i])),
+                   textcoords="offset points", xytext=(dx, 0), ha=ha,
+                   color=INK if i else INK_2,
+                   fontsize=10 if i else 9,
+                   fontweight="semibold" if i else "normal")
 
     fig.suptitle(
-        "A fixed junction capacitance answers a different circuit",
-        color=INK, fontsize=13, x=0.011, ha="left", fontweight="semibold", y=0.985,
+        "A fixed junction capacitance is fine until a bit reaches the steep part of C$_j$(V)",
+        color=INK, fontsize=13, x=0.011, ha="left", fontweight="semibold", y=0.978,
     )
-    fig.text(0.011, 0.945,
-             f"50 Gb/s PRBS-{PRBS_ORDER}, {R_DRV:.0f} Ω driver, {L_ARM_UM / 1000:.0f} mm arms. "
-             "Both runs share the solver, the optics and the pattern; only the "
-             "capacitance law differs.",
+    fig.text(0.011, 0.938,
+             f"{1e-9 / BIT_S:.0f} Gb/s PRBS-{PRBS_ORDER}, {R_DRV:.0f} Ω driver, "
+             f"{L_ARM_UM / 1000:.0f} mm arms, full V$_\\pi$ swing. Both runs share the "
+             "solver, the optics and the pattern; only the capacitance law differs.",
              color=INK_2, fontsize=9, ha="left")
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    # One legend for the whole figure: the same two series appear in three of
+    # the four panels, and three legend boxes would be three chances to collide
+    # with the data.
+    fig.legend(
+        handles=[
+            Line2D([], [], color=C_FULL, linewidth=2.4, label="C$_j$(V) — co-solved"),
+            Line2D([], [], color=C_LIN, linewidth=2.4, label="C$_j$ fixed — linearised"),
+        ],
+        loc="upper left", bbox_to_anchor=(0.009, 0.918), frameon=False,
+        fontsize=9.5, labelcolor=INK_2, ncols=2, handlelength=1.8,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.885))
     fig.savefig(path, dpi=170, facecolor=SURFACE)
     print(f"wrote {path}")
 
@@ -373,41 +444,45 @@ def main():
     bits = prbs(PRBS_ORDER, N_SYM)
     res = sweep(bits)
 
-    print(f"\nC_j at bias {V_CENTRE:+.1f} V: {c_j(V_CENTRE) * 1e15:.1f} fF")
-    lo, hi = V_CENTRE - 0.5 * V_PI, V_CENTRE + 0.5 * V_PI
-    print(f"C_j over a full-swing bit: {c_j(lo) * 1e15:.1f} fF at {lo:+.1f} V "
-          f"→ {c_j(hi) * 1e15:.1f} fF at {hi:+.1f} V  ({c_j(hi) / c_j(lo):.2f}×)\n")
-    print(f"{'swing/V_pi':>11}  {'C_j(V) (mV)':>12}  {'C_j fixed (mV)':>15}  {'error':>8}"
-          f"  {'rise ps':>8}  {'fall ps':>8}")
+    print(f"\n{'bias V':>8} {'peak V':>8} {'C_j span (fF)':>16} {'ratio':>6} "
+          f"{'C_j(V) mV':>10} {'fixed mV':>9} {'error':>8}")
     err = []
-    for frac, f, l, e_f in zip(res["swing"], res["full"], res["lin"], res["edges_full"]):
+    for centre, peak, (c_lo, c_hi), f, l in zip(
+        res["bias"], res["peak"], res["c_span"], res["full"], res["lin"]
+    ):
         e = 100.0 * (l["opening"] - f["opening"]) / abs(f["opening"])
         err.append(e)
-        print(f"{frac:>11.2f}  {f['opening'] * 1e3:>12.2f}  "
-              f"{l['opening'] * 1e3:>15.2f}  {e:>7.1f}%"
-              f"  {e_f[0] * 1e12:>8.2f}  {e_f[1] * 1e12:>8.2f}")
-    r_lin, f_lin = res["edges_lin"][-1]
-    r_full, f_full = res["edges_full"][-1]
-    print(f"\nfull swing: C_j(V) rise {r_full * 1e12:.2f} ps vs fall {f_full * 1e12:.2f} ps "
-          f"({100 * (f_full - r_full) / (0.5 * (f_full + r_full)):+.1f}% apart)")
-    print(f"            C_j fixed rise {r_lin * 1e12:.2f} ps vs fall {f_lin * 1e12:.2f} ps "
-          f"({100 * (f_lin - r_lin) / (0.5 * (f_lin + r_lin)):+.1f}% apart — a fixed pole "
-          "has one time constant)")
+        print(f"{centre:>8.2f} {peak:>8.2f} "
+              f"{c_lo * 1e15:>7.0f} → {c_hi * 1e15:>6.0f} {c_hi / c_lo:>6.2f} "
+              f"{f['opening'] * 1e3:>10.1f} {l['opening'] * 1e3:>9.1f} {e:>7.1f}%")
+
     if args.selftest:
-        assert abs(err[0]) < 2.0, (
-            f"small signal must agree: the two models differ by {err[0]:.1f}% at "
-            f"{SWING_FRACS[0]}·V_pi, so the comparison is not controlled"
+        # The three claims the example makes, at the values it measured. The
+        # thresholds are loose enough to survive a solver change that moves the
+        # numbers and tight enough to fail if the effect goes away or inverts.
+        assert abs(err[0]) < 5.0, (
+            f"deep reverse bias must nearly agree: {err[0]:.1f}% apart at "
+            f"{res['bias'][0]} V, so the comparison is not controlled"
         )
-        assert abs(err[-1]) > 5.0, (
-            f"full swing must diverge: only {err[-1]:.1f}% apart, so this demo "
-            "does not demonstrate anything"
+        assert err[-1] > 7.0, (
+            f"near zero bias must diverge: only {err[-1]:.1f}% apart, so this "
+            "example measures nothing"
         )
-        print("\nselftest ok: models agree at small signal and part at full swing")
+        assert all(x > 0 for x in err), (
+            "the linearised model is optimistic at every bias — a sign flip means "
+            f"the comparison lost its control: {err}"
+        )
+        assert err[-1] > 2.0 * err[0], (
+            "the error must grow with how much of the C_j curve a bit crosses; "
+            f"got {err[0]:.1f}% then {err[-1]:.1f}%"
+        )
+        print(f"\nselftest ok: {err[0]:.1f}% on the flat part of C_j(V), "
+              f"{err[-1]:.1f}% on the steep part, optimistic throughout")
         return
 
     out = args.out or os.path.join(os.path.dirname(__file__),
                                    "large_signal_vs_linearised.png")
-    figure(res, bits, out)
+    figure(res, out)
 
 
 if __name__ == "__main__":
