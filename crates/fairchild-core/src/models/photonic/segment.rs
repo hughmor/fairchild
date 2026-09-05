@@ -537,7 +537,18 @@ impl OpticalSegment {
                 continue;
             }
             // The (re, im) pair that c and s multiply in the current mode.
-            let (sr, si) = if self.delayed_stamp {
+            // The field the coefficient's *derivative* multiplies, which is a
+            // different question from where the output comes from.
+            //
+            // In the time domain that is the delayed field: the light being
+            // modulated now entered a group delay ago. In the frequency domain
+            // there is no history to read — `.ac` linearises about an operating
+            // point — and reading the empty buffer would put a zero here and
+            // silently delete the modulation, leaving a segment that propagates
+            // light and does not respond to its drive. The operating-point
+            // field at the input is the right small-signal answer, and it is
+            // frequency-independent by construction.
+            let (sr, si) = if self.delayed_stamp && time_domain {
                 (self.delayed[per * k], self.delayed[per * k + 1])
             } else {
                 let read = |nid: NodeId| nid.map_or(0.0, |i| x[i]);
