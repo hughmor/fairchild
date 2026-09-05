@@ -201,6 +201,23 @@ pub struct ReactiveBranchSpec {
     /// `fc_pn_ps_cap` arm, the missing term is 22 % of the drive node's
     /// diagonal and put the parameter gradient 16 % out.
     pub dvalue_dstate: f64,
+    /// Stored charge (C) or flux (Wb) at the current iterate, when `value·state`
+    /// is not it.
+    ///
+    /// **This is the state variable the integrator advances**, and for a
+    /// junction it is not `C(v)·v`. The depletion charge is `q(v) = ∫C dv`, and
+    /// with `C ∝ (1 − v/V_bi)^−m` the two differ by a factor of 2.3 over a 2 V
+    /// step. Integrating `C(v)·v` makes the device *faster* than it is — a
+    /// `fc_pn_ps_cap` arm that should take 46 ps to cross 10-90 through 50 Ω
+    /// took 20 ps, and every eye, bandwidth and edge measured through it was
+    /// wrong in the optimistic direction, with nothing to notice.
+    ///
+    /// `None` means `q = value·state`, which is exact for a linear branch and
+    /// is what every constant `C` or `L` reports. A branch reporting a charge
+    /// also gets its Jacobian from `value` alone (`∂i/∂v = α·dq/dv = α·C`), so
+    /// it leaves [`Self::dvalue_dstate`] at zero: the correction that field
+    /// exists for is a correction to the wrong charge model.
+    pub charge: Option<f64>,
 }
 
 /// Bit-flags controlling which contributions `eval` should compute.

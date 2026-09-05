@@ -14,6 +14,42 @@
 
 use super::segment::{OpticalSegment, PerChannel};
 use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
+
+/// A depletion junction's capacitance **and its stored charge** at bias `v`.
+///
+/// ```text
+///   C(v) = C_j0·(1 − v/V_bi)^−m          q(v) = ∫₀^v C dv'
+///        = C_j0·V_bi/(1−m)·[1 − (1 − v/V_bi)^(1−m)]
+/// ```
+///
+/// The charge is the point of this function. `C(v)·v` is not it, and using
+/// `C(v)·v` as the integrator's state makes a `m_j = 0.5` junction come out 2.3x
+/// too fast on a 2 V step — see `ReactiveBranchSpec::charge`. The capacitance
+/// alone is still what the Jacobian and the small-signal analyses want, because
+/// there it is `∂q/∂v`.
+///
+/// Past `V_bi/2` both switch to the tangent line, so `C` stays finite into
+/// forward bias and `q` stays its exact integral: `q(v) = q(knee) +
+/// C_knee·Δ + ½·(dC/dv)·Δ²`.
+fn junction_cap_and_charge(v: f64, c_j0: f64, v_bi: f64, m_j: f64) -> (f64, f64) {
+    let v_knee = 0.5 * v_bi;
+    // q(v) for the power law, exact for m ≠ 1 (m_j is clamped below 1).
+    let q_law = |v: f64| c_j0 * v_bi / (1.0 - m_j) * (1.0 - (1.0 - v / v_bi).powf(1.0 - m_j));
+    if v < v_knee {
+        let c = c_j0 / (1.0 - v / v_bi).powf(m_j);
+        (c, q_law(v))
+    } else {
+        let c_knee = c_j0 / (1.0 - v_knee / v_bi).powf(m_j);
+        let dc_dv = c_knee * m_j / (v_bi - v_knee);
+        let d = v - v_knee;
+        // Linear past the knee, so the slope is the tangent's own and the
+        // charge is that line's integral.
+        (
+            c_knee + dc_dv * d,
+            q_law(v_knee) + c_knee * d + 0.5 * dc_dv * d * d,
+        )
+    }
+}
 use crate::device::{Device, EvalFlags, NodeId, ReactiveBranchSpec, ReactiveKind, SimContext};
 use crate::mna::MnaMatrix;
 use fairchild_parser::{EvalContext, Expr};
@@ -418,9 +454,12 @@ pub struct PnDrive {
     da_dv: f64,
     // Per-eval cache: C_j(V_pn) at the current iterate.
     c_j_cached: f64,
-    /// `dC_j/dV_pn` at the cached bias — the Jacobian term the charge branch
-    /// needs and the residual does not.  See `ReactiveBranchSpec::dvalue_dstate`.
-    dc_j_dv_cached: f64,
+    /// The junction's stored charge at the cached bias, `∫C dv`.
+    ///
+    /// This is the state the integrator advances, and it is *not* `C·V`. See
+    /// `ReactiveBranchSpec::charge`. Carrying it also removes the need for
+    /// `dC/dV`: the Jacobian of a charge branch is `α·dq/dv = α·C`.
+    q_j_cached: f64,
     anode: NodeId,
     cathode: NodeId,
 }
@@ -437,7 +476,7 @@ impl PnDrive {
             m_j: 0.5,
             da_dv: 0.0,
             c_j_cached: 0.0,
-            dc_j_dv_cached: 0.0,
+            q_j_cached: 0.0,
             anode: None,
             cathode: None,
         }
@@ -448,7 +487,7 @@ impl PnDrive {
         PnDrive {
             c_j0: 20e-15,
             c_j_cached: 20e-15,
-            dc_j_dv_cached: 0.0,
+            q_j_cached: 0.0,
             ..Self::new()
         }
     }
@@ -479,22 +518,13 @@ impl PhotonicActiveModel for PnDrive {
         let v_c = self.cathode.map_or(0.0, |i| x[i]);
         let v_pn = v_a - v_c;
 
-        // Depletion C_j(V_pn) with a linear tangent past V_bi/2 to stay finite
-        // and keep the NR Jacobian smooth (only meaningful when c_j0 > 0).
+        // Depletion C_j(V_pn) and its stored charge, with a linear tangent past
+        // V_bi/2 to stay finite and keep the NR Jacobian smooth (only
+        // meaningful when c_j0 > 0).
         if self.c_j0 > 0.0 {
-            let v_knee = 0.5 * self.v_bi;
-            if v_pn < v_knee {
-                let c = self.c_j0 / (1.0 - v_pn / self.v_bi).powf(self.m_j);
-                self.c_j_cached = c;
-                // d/dv [c_j0·(1 − v/v_bi)^−m] = C·m/(v_bi − v)
-                self.dc_j_dv_cached = c * self.m_j / (self.v_bi - v_pn);
-            } else {
-                let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
-                let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
-                self.c_j_cached = c_knee + dc_dv * (v_pn - v_knee);
-                // Linear past the knee, so the slope is the tangent's own.
-                self.dc_j_dv_cached = dc_dv;
-            }
+            let (c, q) = junction_cap_and_charge(v_pn, self.c_j0, self.v_bi, self.m_j);
+            self.c_j_cached = c;
+            self.q_j_cached = q;
         }
 
         // Reverse-bias FCA loss: Δα = (dα/dV)·max(0, −V_pn).
@@ -519,7 +549,8 @@ impl PhotonicActiveModel for PnDrive {
             pos: self.anode,
             neg: self.cathode,
             value: self.c_j_cached,
-            dvalue_dstate: self.dc_j_dv_cached,
+            dvalue_dstate: 0.0,
+            charge: Some(self.q_j_cached),
         }]
     }
 
@@ -669,8 +700,15 @@ impl PhotonicActiveModel for Injection {
             kind: ReactiveKind::Capacitor,
             pos: self.anode,
             neg: self.cathode,
+            // Still the `q = C·v` state, which is wrong for the depletion
+            // half of this capacitance in the same way `PnDrive`'s was — the
+            // device comes out faster than it is. Not converted with it because
+            // the charge here is a function of the *internal* junction voltage,
+            // which the series resistance separates from the branch voltage, so
+            // the branch cannot report `q(v_branch)` without solving for it.
             value: self.c_d_cached,
             dvalue_dstate: self.dc_d_dv_cached,
+            charge: None,
         }]
     }
 
@@ -933,8 +971,15 @@ impl PhotonicActiveModel for FullPnDrive {
             kind: ReactiveKind::Capacitor,
             pos: self.anode,
             neg: self.cathode,
+            // Still the `q = C·v` state, which is wrong for the depletion
+            // half of this capacitance in the same way `PnDrive`'s was — the
+            // device comes out faster than it is. Not converted with it because
+            // the charge here is a function of the *internal* junction voltage,
+            // which the series resistance separates from the branch voltage, so
+            // the branch cannot report `q(v_branch)` without solving for it.
             value: self.c_eff_cached,
             dvalue_dstate: self.dc_eff_dv_cached,
+            charge: None,
         }]
     }
 

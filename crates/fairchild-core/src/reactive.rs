@@ -43,7 +43,7 @@ use indexmap::IndexMap;
 use fairchild_parser::{Element, Netlist};
 
 use crate::device::{Device, ReactiveBranchSpec, ReactiveKind};
-use crate::mna::{cap_companion, cap_companion_gear2, ind_companion, ind_companion_gear2};
+use crate::mna::{cap_companion_gear2_q, cap_companion_q, ind_companion, ind_companion_gear2};
 use crate::mna::{CircuitTopology, MnaMatrix};
 use crate::tran::{coupled_inductor_currents, IntegratorMode};
 
@@ -62,6 +62,16 @@ pub struct BranchHistory {
     /// `state` one timepoint further back. `None` until two steps have been
     /// accepted, which is what gates BDF-2 for this branch.
     pub state_prev2: Option<f64>,
+    /// Stored charge (or flux) at the accepted point — **the state the
+    /// integrator actually advances**.
+    ///
+    /// `value·state` for every linear branch, and deliberately not that for a
+    /// junction: `q = ∫C dv` is not `C(v)·v` once `C` moves with `v`. See
+    /// `ReactiveBranchSpec::charge`.
+    pub charge: f64,
+    /// `charge` one timepoint further back, for BDF-2. Paired with
+    /// `state_prev2`, which gates it.
+    pub charge_prev2: f64,
 }
 
 impl BranchHistory {
@@ -69,8 +79,20 @@ impl BranchHistory {
     /// through a capacitor (or, by the established convention, none through an
     /// inductor either), no second-order history yet.
     pub fn seeded(kind: ReactiveKind, value: f64, across: f64) -> Self {
+        Self::seeded_with_charge(kind, value, across, value * across)
+    }
+
+    /// [`Self::seeded`] for a branch whose charge is not `value·across`.
+    pub fn seeded_with_charge(kind: ReactiveKind, value: f64, across: f64, charge: f64) -> Self {
         BranchHistory {
             value,
+            charge: match kind {
+                ReactiveKind::Capacitor => charge,
+                // An inductor's state is its current, seeded at zero, so its
+                // flux is zero too.
+                ReactiveKind::Inductor => 0.0,
+            },
+            charge_prev2: 0.0,
             state: match kind {
                 ReactiveKind::Capacitor => across,
                 // Inductors start from zero current — the convention the
@@ -119,7 +141,9 @@ pub fn companion(
         (mode, gear2_h_prev, hist.state_prev2)
     {
         return match kind {
-            ReactiveKind::Capacitor => cap_companion_gear2(value, h, h_prev, hist.state, prev2),
+            ReactiveKind::Capacitor => {
+                cap_companion_gear2_q(value, h, h_prev, hist.charge, hist.charge_prev2)
+            }
             ReactiveKind::Inductor => ind_companion_gear2(value, h, h_prev, hist.state, prev2),
         };
     }
@@ -129,14 +153,14 @@ pub fn companion(
         // the whole point of storing `aux`.
         (ReactiveKind::Capacitor, IntegratorMode::Trapezoidal) => {
             let g = 2.0 * value / h;
-            (g, g * hist.state + hist.aux)
+            (g, 2.0 * hist.charge / h + hist.aux)
         }
         // i_L = G·v + I_hist with G = h/2L and I_hist = i_L(t_n) + G·v_L(t_n).
         (ReactiveKind::Inductor, IntegratorMode::Trapezoidal) => {
             let g = h / (2.0 * value.max(1e-30));
             (g, hist.state + g * hist.aux)
         }
-        (ReactiveKind::Capacitor, _) => cap_companion(value, h, hist.state),
+        (ReactiveKind::Capacitor, _) => cap_companion_q(value, h, hist.charge),
         (ReactiveKind::Inductor, _) => ind_companion(value, h, hist.state),
     }
 }
@@ -337,12 +361,36 @@ pub fn advance(
     across: f64,
     new_value: f64,
 ) {
+    advance_with_charge(hist, kind, stamped, across, new_value, new_value * across)
+}
+
+/// [`advance`] for a branch whose charge is not `new_value·across`.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_with_charge(
+    hist: &mut BranchHistory,
+    kind: ReactiveKind,
+    stamped: (f64, f64),
+    across: f64,
+    new_value: f64,
+    new_charge: f64,
+) {
     let (g_eq, i_hist) = stamped;
     hist.state_prev2 = Some(hist.state);
+    hist.charge_prev2 = hist.charge;
     match kind {
         ReactiveKind::Capacitor => {
             hist.state = across;
-            hist.aux = g_eq * across - i_hist; // i_C = G·v − I_hist
+            hist.charge = new_charge;
+            // The current at the accepted point, which only Trapezoidal reads.
+            // `g_eq` was built from the *old* value, so dividing it back out
+            // recovers the method's coefficient and leaves the charge to carry
+            // the state: i_C = alpha·q − I_hist.
+            let alpha = if hist.value.abs() > 0.0 {
+                g_eq / hist.value
+            } else {
+                0.0
+            };
+            hist.aux = alpha * new_charge - i_hist;
         }
         ReactiveKind::Inductor => {
             hist.state = g_eq * across + i_hist; // i_L = G·v + I_hist
@@ -506,7 +554,15 @@ impl ReactiveState {
             .map(|dev| {
                 dev.reactive_branches()
                     .iter()
-                    .map(|br| BranchHistory::seeded(br.kind, br.value, branch_voltage(br, x)))
+                    .map(|br| {
+                        let v = branch_voltage(br, x);
+                        BranchHistory::seeded_with_charge(
+                            br.kind,
+                            br.value,
+                            v,
+                            br.charge.unwrap_or(br.value * v),
+                        )
+                    })
                     .collect()
             })
             .collect();
@@ -601,12 +657,13 @@ impl ReactiveState {
         for (d, dev) in devices.iter().enumerate() {
             for (b, br) in dev.reactive_branches().iter().enumerate() {
                 let across = branch_voltage(br, x);
-                advance(
+                advance_with_charge(
                     &mut self.devs[d][b],
                     br.kind,
                     self.dev_state[d][b],
                     across,
                     br.value,
+                    br.charge.unwrap_or(br.value * across),
                 );
             }
         }
@@ -655,24 +712,38 @@ pub fn stamp_device_branches(
     for (d, dev) in devices.iter().enumerate() {
         for (b, br) in dev.reactive_branches().iter().enumerate() {
             let (_g_old, i_hist) = dev_state[d][b];
-            // `g_val` is the residual's coefficient: the branch carries
-            // `q = value·v`, so its current is `g_val·v − i_hist`.
+            // `g_val` is the coefficient the *charge* is multiplied by:
+            // `conductance` is linear in the branch value, so this is `α·C`.
             let g_val = conductance(br.kind, br.value, mode, h, gear2_h_prev);
-            // `g_jac` is `∂(current)/∂v`, which for a bias-dependent value picks
-            // up a second term.  `conductance` is linear in `value` for every
-            // mode, so the extra derivative scales the same way and can go
-            // through the same helper.
-            let g_jac = if br.dvalue_dstate == 0.0 {
-                g_val
-            } else {
-                let v = branch_voltage(br, x);
-                g_val + v * conductance(br.kind, br.dvalue_dstate, mode, h, gear2_h_prev)
+            let v0 = branch_voltage(br, x);
+            // The branch current is `α·q − i_hist`. Two ways to say what `q` is:
+            //
+            // * a reported charge — the honest one for a junction, where
+            //   `q = ∫C dv ≠ C(v)·v`. Then `∂i/∂v = α·dq/dv = α·C = g_val`, with
+            //   no correction term at all.
+            // * `value·v`, for everything linear. Then `∂i/∂v` picks up the
+            //   second term `α·v·dC/dv`, which is only the derivative of a
+            //   charge model that a bias-dependent branch should not be using.
+            let (g_jac, comp) = match br.charge {
+                // `conductance` clamps its argument to 1e-30, which is right
+                // for a capacitance and wrong for a charge: a reverse-biased
+                // junction's is negative. So take the method's coefficient on
+                // its own — the same route `ChargeHistory::scale` takes — and
+                // multiply.
+                Some(q) => {
+                    let alpha = conductance(ReactiveKind::Capacitor, 1.0, mode, h, gear2_h_prev);
+                    (g_val, g_val * v0 - alpha * q)
+                }
+                None if br.dvalue_dstate == 0.0 => (g_val, 0.0),
+                None => {
+                    let g =
+                        g_val + v0 * conductance(br.kind, br.dvalue_dstate, mode, h, gear2_h_prev);
+                    (g, (g - g_val) * v0)
+                }
             };
             // Norton: stamp the true derivative into `A`, and put the difference
             // back on the RHS so the *residual* `A·x − b` is unchanged. Getting
             // this wrong would move the answer, not just the iteration count.
-            let v0 = branch_voltage(br, x);
-            let comp = (g_jac - g_val) * v0;
             // For an inductor the current is i = G_eq·v + I_hist, so the history
             // adds rather than subtracts.
             let i_sign = match br.kind {
@@ -710,6 +781,7 @@ pub fn branch_voltage(br: &ReactiveBranchSpec, x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mna::cap_companion;
 
     /// `charge_current` must be the *same* method interpretation as
     /// `companion`, not a second one that happens to look similar. For a
@@ -739,6 +811,10 @@ mod tests {
                 state: v_prev,
                 aux: i_prev,
                 state_prev2: Some(v_prev2),
+                // A linear branch, so the charge is exactly `C·v` — which is
+                // what makes the two forms below comparable at all.
+                charge: c * v_prev,
+                charge_prev2: c * v_prev2,
             };
             let v_new = 0.83;
 
@@ -841,6 +917,8 @@ mod tests {
                 state: 0.4,
                 aux: 0.1,
                 state_prev2: Some(0.3),
+                charge: 3e-9 * 0.4,
+                charge_prev2: 3e-9 * 0.3,
             };
             for mode in [
                 IntegratorMode::BackwardEuler,
