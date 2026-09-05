@@ -448,6 +448,66 @@ pub(crate) fn assemble_ac_matrices(
     // honest answer — the solver reports it rather than inventing a
     // conductance — and `.ac` never pinned an empty row anyway.
 
+    // --- Columns the devices freeze rather than differentiate (#113) ---
+    //
+    // A device that stamps a coefficient frozen at the previous iterate leaves
+    // its control column structurally empty, and declares that through
+    // `frozen_jacobian_columns`. The operating point repairs those before
+    // differentiating, which is why `.sens` and `.tf` see through a modulator.
+    // `.ac` did not, so the column stayed empty and the small-signal path
+    // through `fc_mzm`, `fc_xfer` and the laser was *exactly* zero — a solve
+    // that succeeds and reports nothing, because `gmin` and the passive network
+    // keep the matrix non-singular.
+    //
+    // The delta rather than the column: the finite difference is taken over the
+    // whole assembly, so writing it wholesale would also overwrite this
+    // column's linear entries with ones stamped under `InductorDc::Short`,
+    // which is not what `.ac` wants. Subtracting the stamped baseline cancels
+    // every linear contribution exactly and leaves only what the device froze.
+    let frozen = crate::adjoint::frozen_columns(&topo, &devices);
+    if !frozen.is_empty() {
+        let mut scratch = crate::mna::MnaMatrix::zeros(size);
+        let _ = crate::newton::residual_l2(
+            &mut scratch,
+            &topo,
+            netlist,
+            &mut devices,
+            &ctx,
+            1.0,
+            0.0,
+            None,
+            &x0,
+        );
+        let base: Vec<Vec<f64>> = frozen
+            .iter()
+            .map(|&c| (0..size).map(|r| scratch.a[r][c]).collect())
+            .collect();
+        for (k, &col) in frozen.iter().enumerate() {
+            let fd = crate::adjoint::fd_jacobian_column(
+                col,
+                &mut scratch,
+                &topo,
+                netlist,
+                &mut devices,
+                &ctx,
+                None,
+                &x0,
+            );
+            for (row, (f, b)) in fd.iter().zip(base[k].iter()).enumerate() {
+                let d = f - b;
+                if d != 0.0 {
+                    g_mat[row][col] += d;
+                }
+            }
+        }
+        // The probes left every device linearised at `x0 ± h`. The reactance
+        // query below reads their caches, so put them back on the operating
+        // point first.
+        for dev in devices.iter_mut() {
+            dev.eval(&x0, EvalFlags::tran(), &ctx);
+        }
+    }
+
     // --- Capacitance matrix C (purely imaginary part of Y) ---
     let mut c_mat = vec![SparseRow::default(); size];
     for el in &netlist.elements {

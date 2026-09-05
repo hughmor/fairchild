@@ -855,7 +855,8 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 |---|---|
 | Optical noise — laser RIN, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor |
 | Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
-| Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default** |
+| Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default**. In `.tran` it bounds the timestep to `τ_g/2`. In `.ac` it is the exact `exp(−jΩτ_g)` coupling; `.pz` refuses a circuit containing one |
+| Small-signal optical response in `.ac` | ✅ a modulator's `∂field/∂V` reaches the AC Jacobian, matched to the closed form. It used to read exactly zero through `fc_mzm`, `fc_xfer` and the lasers, which freeze that column and rely on the repair `.op` does |
 | Reflections at facets | ✅ `fc_facet` (one port, flat with wavelength, needs `enable_bidirectional`). Grating-coupler and interface reflections are still ❌ |
 
 ---
