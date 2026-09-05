@@ -110,6 +110,10 @@ impl Device for NativeWaveguide {
         self.seg.requested_max_timestep()
     }
 
+    fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
+        self.seg.ac_stamps(omega)
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         self.seg.commit(x);
     }

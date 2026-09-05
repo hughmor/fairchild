@@ -125,6 +125,11 @@ pub struct NativeOptical2x2 {
     branches: Vec<Option<usize>>,
     delay: DelayLine,
     delayed: Vec<f64>,
+    /// Whether this eval stamps the delayed form. False when the delay is
+    /// engaged but there is no history yet: reconstructing from an empty buffer
+    /// would extinguish the output for one step. See `OpticalSegment`, which
+    /// makes the same distinction for the same reason.
+    delayed_stamp: bool,
 }
 
 /// Branch rows per channel: thru_re, thru_im, drop_re, drop_im. λ gets none —
@@ -159,6 +164,7 @@ impl NativeOptical2x2 {
             branches: Vec::new(),
             delay: DelayLine::new(),
             delayed: Vec::new(),
+            delayed_stamp: false,
         }
     }
 
@@ -250,7 +256,12 @@ impl NativeOptical2x2 {
     /// Rebuild every weight-mode channel's matrix from its control voltage.
     fn refresh(&mut self, x: &[f64], delay_active: bool, ctx: &SimContext) {
         self.delay.set_state(delay_active, ctx.time_s);
-        if delay_active {
+        // See `OpticalSegment::refresh_with_sens`: engaged is not the same as
+        // "reconstruct from history", and `.ac` wants the delayed form without
+        // any history at all.
+        let time_domain = ctx.discretisation.is_some();
+        self.delayed_stamp = delay_active && (!time_domain || !self.delay.is_empty());
+        if self.delayed_stamp {
             self.delayed = self
                 .delay
                 .sample(self.tau_s, self.n_channels * DELAY_VALS_PER_CHANNEL);
@@ -297,6 +308,67 @@ impl NativeOptical2x2 {
             self.nodes[p4 + wpc * k],
             self.nodes[p4 + wpc * k + 1],
         )
+    }
+    /// The four branch rows of channel `k`: `(slot, output node, couplings)`.
+    ///
+    /// One description, three consumers — the Jacobian stamp, the frequency
+    /// domain (which multiplies every coupling by `exp(-jΩτ)`), and whatever
+    /// reads them next. Two copies of this array would be two chances to
+    /// disagree about a sign.
+    fn channel_rows(&self, k: usize) -> [StampRow; 4] {
+        {
+            let (in1_re, in1_im, in2_re, in2_im, t_re, t_im, d_re, d_im) = self.channel_nodes(k);
+            let m = &self.s[k];
+            let g = self.il_amp;
+            let base = BRANCHES_PER_CHANNEL * k;
+            // out_re = Re(s_a)·in1_re − Im(s_a)·in1_im + Re(s_b)·in2_re − Im(s_b)·in2_im
+            // out_im = Im(s_a)·in1_re + Re(s_a)·in1_im + Im(s_b)·in2_re + Re(s_b)·in2_im
+            // stamp_potential_eq writes V(out) − Σk·V(in) = 0, so the couplings
+            // carry a minus sign. In delay mode they drop out entirely and the
+            // RHS history source drives the output (load_residual).
+            [
+                (
+                    base,
+                    t_re,
+                    [
+                        (in1_re, -g * m[0].0),
+                        (in1_im, g * m[0].1),
+                        (in2_re, -g * m[1].0),
+                        (in2_im, g * m[1].1),
+                    ],
+                ),
+                (
+                    base + 1,
+                    t_im,
+                    [
+                        (in1_re, -g * m[0].1),
+                        (in1_im, -g * m[0].0),
+                        (in2_re, -g * m[1].1),
+                        (in2_im, -g * m[1].0),
+                    ],
+                ),
+                (
+                    base + 2,
+                    d_re,
+                    [
+                        (in1_re, -g * m[2].0),
+                        (in1_im, g * m[2].1),
+                        (in2_re, -g * m[3].0),
+                        (in2_im, g * m[3].1),
+                    ],
+                ),
+                (
+                    base + 3,
+                    d_im,
+                    [
+                        (in1_re, -g * m[2].1),
+                        (in1_im, -g * m[2].0),
+                        (in2_re, -g * m[3].1),
+                        (in2_im, -g * m[3].0),
+                    ],
+                ),
+            ]
+        }
     }
 }
 
@@ -436,7 +508,7 @@ impl Device for NativeOptical2x2 {
     }
 
     fn load_residual(&self, b: &mut [f64]) {
-        if !self.delay.is_active() {
+        if !self.delayed_stamp {
             return;
         }
         // Delay mode: the outputs are driven by the history-reconstructed
@@ -468,61 +540,9 @@ impl Device for NativeOptical2x2 {
     }
 
     fn load_jacobian(&self, mat: &mut MnaMatrix) {
-        let delay_active = self.delay.is_active();
         for k in 0..self.n_channels {
-            let (in1_re, in1_im, in2_re, in2_im, t_re, t_im, d_re, d_im) = self.channel_nodes(k);
-            let m = &self.s[k];
-            let g = self.il_amp;
-            let base = BRANCHES_PER_CHANNEL * k;
-            // out_re = Re(s_a)·in1_re − Im(s_a)·in1_im + Re(s_b)·in2_re − Im(s_b)·in2_im
-            // out_im = Im(s_a)·in1_re + Re(s_a)·in1_im + Im(s_b)·in2_re + Re(s_b)·in2_im
-            // stamp_potential_eq writes V(out) − Σk·V(in) = 0, so the couplings
-            // carry a minus sign. In delay mode they drop out entirely and the
-            // RHS history source drives the output (load_residual).
-            let rows: [StampRow; 4] = [
-                (
-                    base,
-                    t_re,
-                    [
-                        (in1_re, -g * m[0].0),
-                        (in1_im, g * m[0].1),
-                        (in2_re, -g * m[1].0),
-                        (in2_im, g * m[1].1),
-                    ],
-                ),
-                (
-                    base + 1,
-                    t_im,
-                    [
-                        (in1_re, -g * m[0].1),
-                        (in1_im, -g * m[0].0),
-                        (in2_re, -g * m[1].1),
-                        (in2_im, -g * m[1].0),
-                    ],
-                ),
-                (
-                    base + 2,
-                    d_re,
-                    [
-                        (in1_re, -g * m[2].0),
-                        (in1_im, g * m[2].1),
-                        (in2_re, -g * m[3].0),
-                        (in2_im, g * m[3].1),
-                    ],
-                ),
-                (
-                    base + 3,
-                    d_im,
-                    [
-                        (in1_re, -g * m[2].1),
-                        (in1_im, -g * m[2].0),
-                        (in2_re, -g * m[3].1),
-                        (in2_im, -g * m[3].0),
-                    ],
-                ),
-            ];
-            for (slot, out, ins) in rows {
-                if delay_active {
+            for (slot, out, ins) in self.channel_rows(k) {
+                if self.delayed_stamp {
                     stamp_potential_eq(mat, &self.branches, slot, out, &[]);
                 } else {
                     stamp_potential_eq(mat, &self.branches, slot, out, &ins);
@@ -576,6 +596,34 @@ impl Device for NativeOptical2x2 {
     /// parameter is set, so the bound needs no eval to have happened (#112).
     fn requested_max_timestep(&self) -> Option<f64> {
         (self.tau_s > 0.0).then_some(self.tau_s / 2.0)
+    }
+
+    /// `exp(−jΩτ_s)` on every coupling the delayed stamp drops — the same
+    /// construction `OpticalSegment::ac_stamps` documents.
+    fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
+        if !self.delayed_stamp {
+            return Vec::new();
+        }
+        let (qr, qi) = ((omega * self.tau_s).cos(), -(omega * self.tau_s).sin());
+        let mut out = Vec::with_capacity(4 * BRANCHES_PER_CHANNEL * self.n_channels);
+        for k in 0..self.n_channels {
+            for (slot, _out_node, ins) in self.channel_rows(k) {
+                let Some(row) = self.branches[slot] else {
+                    continue;
+                };
+                for (node, coef) in ins {
+                    if let Some(col) = node {
+                        out.push(crate::device::AcStamp {
+                            row,
+                            col,
+                            re: coef * qr,
+                            im: coef * qi,
+                        });
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {

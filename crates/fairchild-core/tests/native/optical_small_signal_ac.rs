@@ -97,6 +97,86 @@ fn an_mzm_has_no_response_at_its_transfer_peak() {
     );
 }
 
+/// The envelope group delay is a phase slope, and the slope is `−τ_g`.
+///
+/// `.ac` on an optical path used to be flat in phase whatever the geometry,
+/// because the delay lived only in the residual and no frequency-domain
+/// assembly reads one (#114). The anchor is the definition of group delay:
+/// `out(Ω) = H·exp(−jΩτ_g)·in(Ω)`, so `dφ/df = −360°·τ_g` exactly, and the
+/// magnitude does not move at all on a lossless segment.
+///
+/// The on/off pair matters as much as the slope. With the option off the
+/// transmission is documented as instantaneous, so a phase slope there would be
+/// a different bug — the delay leaking into a run that did not ask for it.
+#[test]
+fn the_envelope_group_delay_is_a_phase_slope_in_ac() {
+    const L_M: f64 = 1e-2;
+    const N_G: f64 = 4.2;
+    let tau_g = L_M * N_G / 299_792_458.0;
+
+    let sweep = |delay: bool| {
+        let net = format!(
+            "* envelope delay in .ac\n\
+             .optical_port l_out\n\
+             .optical_port m_out\n\
+             .optical_port w_out\n\
+             Xlaser l_out fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+             Xmzm l_out m_out vsig 0 fc_mzm V_pi=3.0 alpha=1.0 e_r=1k\n\
+             Xwg m_out w_out fc_waveguide L_um=10000 n_g=4.2 alpha_dB_cm=0.0\n\
+             Vsig vsig 0 DC 1.5 AC 1\n\
+             .options waveguide_delay={}\n",
+            if delay { 1 } else { 0 }
+        );
+        let freqs = [1e9, 3e9, 5e9];
+        let ac = ac_analysis(
+            &parse_spice(&net).unwrap(),
+            &freqs,
+            Some("vsig"),
+            &DeviceRegistry::new(),
+        )
+        .expect("ac sweep");
+        let phases: Vec<f64> = (0..freqs.len())
+            .map(|i| ac.phase_deg("w_out_re_0", i).expect("optical output"))
+            .collect();
+        let mags: Vec<f64> = (0..freqs.len())
+            .map(|i| ac.magnitude("w_out_re_0", i).expect("optical output"))
+            .collect();
+        (freqs, phases, mags)
+    };
+
+    let (freqs, phases, mags) = sweep(true);
+    let want = -360.0 * tau_g * (freqs[1] - freqs[0]);
+    for w in phases.windows(2) {
+        // Unwrap: the step is under 180 degrees, so the shorter arc is the
+        // real one.
+        let mut d = w[1] - w[0];
+        while d > 180.0 {
+            d -= 360.0;
+        }
+        while d < -180.0 {
+            d += 360.0;
+        }
+        assert!(
+            (d - want).abs() < 1e-6,
+            "phase step {d:.4} deg per {:.1} GHz, expected {want:.4} \
+             (tau_g = {:.2} ps)",
+            (freqs[1] - freqs[0]) / 1e9,
+            tau_g * 1e12
+        );
+    }
+    assert!(
+        mags.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-12),
+        "a lossless delay must not change the magnitude: {mags:?}"
+    );
+
+    let (_, flat, _) = sweep(false);
+    assert!(
+        flat.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-9),
+        "with the option off the transmission is instantaneous, so the phase \
+         must not move: {flat:?}"
+    );
+}
+
 /// The photodetector converts that field response to a current, and only an
 /// *intensity* change reaches it. This is the end-to-end statement: a link's
 /// AC response is not zero, and it is zero at the transfer peak for the same

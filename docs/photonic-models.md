@@ -393,13 +393,18 @@ when the optical modulation bandwidth approaches `1/τ_g` (high-speed links, lon
 delay lines); leave it off otherwise (cheaper, and the delay is negligible at
 low modulation rates). See `examples/photonic/waveguide_delay_demo.sp`.
 
-The corresponding group delay `τ_g = L · n_g / c` is computed at setup
-time and stored on the device. It is informational at this tier — the
-waveguide currently stamps an instantaneous envelope transfer (no time-
-domain delay line); τ_g matters only when modulation bandwidth is
-comparable to 1/τ_g (typically tens to hundreds of GHz on chip), which
-this device's first-pass model does not yet reproduce. A future
-transmission-line device will use τ_g directly.
+Per analysis, with the option on:
+
+| Analysis | What the delay does |
+|---|---|
+| `.tran` | output envelope reconstructed at `t − τ_g`, and the timestep is bounded to `τ_g/2` so the reconstruction has samples inside its own window |
+| `.ac` / `.noise` | exact `exp(−jΩτ_g)` coupling, so the envelope response carries a group delay of `τ_g` and the phase slope is `−360°·τ_g` per hertz |
+| `.op` / `.dc` | nothing: a steady state has no delay |
+| `.pz` | **hard error** — `exp(−s·τ_g)` has no linear matrix pencil |
+
+The first transient step is a special case worth knowing. There is no history
+to reconstruct from, so the segment stamps its steady-state transfer for that
+one step rather than reading an empty buffer as darkness.
 
 ### `fc_dcoupler` — 2×2 directional coupler
 
