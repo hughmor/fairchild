@@ -783,6 +783,35 @@ impl OpticalSegment {
         out
     }
 
+    /// How fast each channel's delayed field is bending, as
+    /// `(row, |d²y/dt²|)` against the output wire's own tolerance.
+    ///
+    /// The delayed source is rotated by `c`/`s` before it reaches the branch
+    /// row, so the curvature is rotated with it — the pair's magnitude is what
+    /// matters and is rotation-invariant, so it is reported on both
+    /// quadratures. Empty unless the segment is reconstructing from history:
+    /// `.ac` has none and wants none.
+    pub fn delay_curvature(&self, time_domain: bool) -> Vec<(usize, f64)> {
+        if !(self.delayed_stamp && time_domain) {
+            return Vec::new();
+        }
+        let per = self.vals_per_channel();
+        let d = self.delay.recent_curvature(self.n_channels * per);
+        let out_base = self.wpc * self.n_channels;
+        let mut out = Vec::with_capacity(2 * self.n_channels);
+        for k in 0..self.n_channels {
+            let (c, sn) = (self.c_cached[k], self.s_cached[k]);
+            let amp = (c * c + sn * sn).sqrt();
+            let e = amp * (d[per * k].hypot(d[per * k + 1]));
+            for q in 0..2 {
+                if let Some(r) = self.nodes[out_base + self.wpc * k + q] {
+                    out.push((r, e));
+                }
+            }
+        }
+        out
+    }
+
     /// Record the current port amplitudes so future steps can read them back
     /// delayed by `τ_g`. No-op when the delay line is inactive.
     pub fn commit(&mut self, x: &[f64]) {

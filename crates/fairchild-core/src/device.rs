@@ -432,6 +432,31 @@ pub trait Device: Send + Sync {
     /// It exists for compiled models, where Verilog-A's `$bound_step` is the
     /// model saying "do not step past this or you will miss something". LTE alone
     /// cannot cover that, because it measures the error of a step already taken.
+    /// Curvature of a delayed quantity this device will have to interpolate,
+    /// as `(row, |d²y/dt²|)`.
+    ///
+    /// A companion to [`Device::requested_max_timestep`] for the part of the
+    /// error that depends on a tolerance. The device knows the physics — how
+    /// fast its delayed quantity is bending — and the controller knows what
+    /// counts as accurate for that row, so the two are reported separately and
+    /// combined as `h ≤ √(8·tol/|y''|)`, the step at which linear
+    /// interpolation's `⅛·h²·|y''|` fits inside the row's tolerance.
+    ///
+    /// It has to be a **bound on the next step**, not a local truncation error.
+    /// An LTE gets a step *rejected* and retried smaller; the error in a
+    /// reconstruction cannot be fixed that way, because it lives in history
+    /// recorded a delay ago at whatever step was in force then. A controller
+    /// that rejects on it shrinks until it runs out of rejections. See
+    /// [`DelayLine::recent_curvature`](crate::delay::DelayLine::recent_curvature).
+    ///
+    /// `row` is the row whose tolerance applies, not necessarily the row the
+    /// quantity is stamped into: a delayed travelling wave is a voltage stamped
+    /// into a *current* row, and comparing volts against a current tolerance
+    /// would be meaningless.
+    fn delay_curvature(&self) -> Vec<(usize, f64)> {
+        Vec::new()
+    }
+
     fn requested_max_timestep(&self) -> Option<f64> {
         None
     }

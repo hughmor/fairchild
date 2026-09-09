@@ -245,6 +245,24 @@ pencil and infinitely many poles.
 
 An unrecognised parameter on a `T` card is an error, not a silent drop.
 
+**Both stepping modes honour a delay, by different means.** A delay needs a step
+short enough to reconstruct it, and the two paths get there differently:
+
+* **Variable step** (`.options variable_step=1`) simply chooses it. The
+  controller clamps `h` to `TD/2`, from the first step, and additionally to
+  `√(8·tol/|y''|)` for any row its error estimate cannot see — a wave arriving
+  at a node a source pins, whose effect shows up as a current the estimate never
+  looks at.
+* **Fixed step** keeps the output grid you asked for and takes an integer number
+  of internal steps per point. Every requested time is still landed on exactly,
+  and the extra cost is reported once. Shrinking the step outright would have
+  moved every output time, and refusing would have handed you an arithmetic
+  problem the device had already solved.
+
+The first delay window is the exception to both: history begins at the end of
+the first step, so the first `TD` of a run is reconstructed from one sample and
+is only first-order accurate. Start from a step you would be happy with anyway.
+
 ### Switches (`S` voltage-controlled, `W` current-controlled)
 
 ```

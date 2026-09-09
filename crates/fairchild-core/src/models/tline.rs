@@ -353,6 +353,33 @@ impl Device for NativeTLine {
         out
     }
 
+    /// How fast each port's travelling wave is bending.
+    ///
+    /// `E = k·(v + Z0·i)` at the far port, so its curvature is the same
+    /// combination of the recorded quantities' curvatures. It is a voltage, and
+    /// the row whose tolerance it should be judged against is therefore the
+    /// port node — not the branch row it is stamped into, whose unknown is a
+    /// current.
+    fn delay_curvature(&self) -> Vec<(usize, f64)> {
+        if !self.travelling {
+            return Vec::new();
+        }
+        let c = self.delay.recent_curvature(4);
+        let (e1, e2) = (
+            self.k * (c[1] + self.z0 * c[3]),
+            self.k * (c[0] + self.z0 * c[2]),
+        );
+        let mut out = Vec::with_capacity(2);
+        // The wave arriving at port A is what port A's node will see.
+        if let Some(r) = self.a_pos.or(self.a_neg) {
+            out.push((r, e1));
+        }
+        if let Some(r) = self.b_pos.or(self.b_neg) {
+            out.push((r, e2));
+        }
+        out
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         if !self.delay.is_active() {
             return;

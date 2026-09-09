@@ -114,6 +114,12 @@ impl Device for NativeWaveguide {
         self.seg.ac_stamps(omega)
     }
 
+    fn delay_curvature(&self) -> Vec<(usize, f64)> {
+        // Only a time-domain run reconstructs from history, and only it has a
+        // step controller to tell.
+        self.seg.delay_curvature(true)
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         self.seg.commit(x);
     }

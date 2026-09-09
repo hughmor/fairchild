@@ -563,6 +563,18 @@ impl Device for NativeTwPhaseShifter {
         }
     }
 
+    fn delay_curvature(&self) -> Vec<(usize, f64)> {
+        let mut out: Vec<(usize, f64)> = self
+            .segs
+            .iter()
+            .flat_map(|s| s.delay_curvature(true))
+            .collect();
+        for line in &self.lines {
+            out.extend(line.delay_curvature());
+        }
+        out
+    }
+
     fn commit_timestep(&mut self, x: &[f64]) {
         for seg in &mut self.segs {
             seg.commit(x);

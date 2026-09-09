@@ -40,6 +40,7 @@ use crate::options::SimOptions;
 use crate::reactive::{stamp_device_branches, ReactiveState};
 use crate::solver::{Factorisation, LinearSolver};
 use crate::tran::IntegratorMode;
+use crate::warn_user;
 
 /// A transient analysis paused between timesteps.
 ///
@@ -69,6 +70,10 @@ pub struct TranStepper {
     /// the variable-step integrator.
     reactive: ReactiveState,
     step: f64,
+    /// Internal steps per *output* point. 1 unless a device asked for a step
+    /// shorter than the card's, in which case `step` is the internal one and
+    /// this is how many of them make up a requested interval — see `new`.
+    substeps: usize,
     t: f64,
     /// Trapezoidal deliberately takes its first step with Backward Euler, for
     /// stability across the t=0 discontinuity.  Step control, not integration
@@ -185,21 +190,31 @@ impl TranStepper {
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);
 
-        // A fixed-step run promises a sample grid, so a device asking for a
-        // smaller step cannot be honoured by sub-stepping without breaking that
-        // promise. Refuse instead: the answer at this step size would be a
-        // circuit with a different delay in it (#112).
+        // A device may need a smaller step than the card asked for — a delay
+        // line does, because `sample` clamps above its newest point and the
+        // effective delay would otherwise be the step (#112).
+        //
+        // A fixed-step run promises a sample grid, so the step cannot simply be
+        // shrunk: that would move every output point. What it can do is take an
+        // **integer** number of internal steps per output point. Every
+        // requested time is then still landed on exactly — no interpolation —
+        // and the delay is resolved. Refusing was the first version of this and
+        // was worse: it made the user solve an arithmetic problem the device had
+        // already solved.
+        let mut substeps = 1usize;
         if let Some(bound) = crate::tran::device_max_timestep(&devices) {
-            if step > bound {
-                return Err(SimError::ParameterError(format!(
-                    "timestep {step:.3e} s is too large for a delay in this circuit: \
-                     it needs {bound:.3e} s or less, or the delay is reconstructed \
-                     from one sample and behaves as {step:.3e} s. Lower the `.tran` \
-                     step, or set `.options variable_step=1` to let the controller \
-                     choose it"
-                )));
+            if bound > 0.0 && step > bound {
+                substeps = (step / bound).ceil() as usize;
+                warn_user!(
+                    "timestep {step:.3e} s is longer than a delay in this circuit \
+                     allows ({bound:.3e} s), so each output point takes {substeps} \
+                     internal steps of {:.3e} s. The output grid is unchanged; the \
+                     run costs {substeps}x more",
+                    step / substeps as f64
+                );
             }
         }
+        let step = step / substeps as f64;
 
         let reactive = ReactiveState::new(&netlist, &topo, &mut devices, &ctx, &x);
         let mat = MnaMatrix::with_pattern(topo.size, plan.pattern.clone());
@@ -234,6 +249,7 @@ impl TranStepper {
             mat,
             reactive,
             step,
+            substeps,
             t: 0.0,
             first_step: true,
             sources,
@@ -582,9 +598,17 @@ impl TranStepper {
         self.t
     }
 
-    /// The fixed step size, after clamping to `opts.max_step`.
+    /// The **internal** step size, after clamping to `opts.max_step` and after
+    /// any sub-stepping a device asked for.
     pub fn step_size(&self) -> f64 {
         self.step
+    }
+
+    /// Internal steps per output point — 1 unless a delay device asked for a
+    /// finer step than the `.tran` card's (#112). A driver that records every
+    /// point should record every `substeps`-th one.
+    pub fn substeps(&self) -> usize {
+        self.substeps
     }
 
     /// Voltage at `node` for the current timepoint.

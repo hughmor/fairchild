@@ -349,12 +349,23 @@ pub fn tran_nr_with_registry_opts(
     // The first timepoint is `step` even when that overshoots `stop` (a
     // stop < step run still produces one solved point); every later one is
     // clamped so the run lands exactly on `stop`.
+    //
+    // `step` here is the *internal* step, which a delay device may have made
+    // shorter than the card's (#112). `substeps` of them make one requested
+    // interval, so recording every `substeps`-th point reproduces exactly the
+    // grid the card asked for — landed on, not interpolated to.
+    let substeps = st.substeps();
+    let mut taken = 0usize;
     let mut t_next = step;
     loop {
         st.solve_at(t_next)?;
         st.commit(t_next);
-        push_timepoint(&mut result, st.time(), st.topology(), st.solution());
-        if st.time() >= stop {
+        taken += 1;
+        let last = st.time() >= stop;
+        if taken.is_multiple_of(substeps) || last {
+            push_timepoint(&mut result, st.time(), st.topology(), st.solution());
+        }
+        if last {
             break;
         }
         st.advance_history();
@@ -425,6 +436,42 @@ pub(crate) fn device_max_timestep(devices: &[Box<dyn crate::device::Device>]) ->
         .iter()
         .filter_map(|d| d.requested_max_timestep())
         .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// The largest step at which a delay's linear interpolation still fits inside
+/// the tolerance of the row it lands in — **for the rows the LTE estimate
+/// cannot see**.
+///
+/// `⅛·h²·|y''| ≤ tol` ⇒ `h ≤ √(8·tol/|y''|)`. Infinite when nothing reports a
+/// curvature on such a row, which is most circuits.
+///
+/// The gate is the point, and it is worth the paragraph. A delayed source drives
+/// node voltages, and the LTE estimate — `|corrector − predictor|` on the
+/// solution — already tracks those: both errors are `O(h²·y'')` on the same
+/// signal, so the controller was already holding the step to the right order.
+/// Measured: adding this bound unconditionally cost 25 % more steps on a
+/// matched line carrying a 1 GHz sine and moved the far-end waveform by nothing.
+///
+/// What the LTE genuinely cannot see is a row it excludes. `forced_nodes` are
+/// left out because a source pins them, and branch rows are outside the norm
+/// altogether — so a wave arriving at a line driven by an ideal source shows up
+/// as a *current*, which nothing in the estimate looks at. That is the hole this
+/// closes, and paying for it only there is what keeps it free everywhere else.
+pub(crate) fn device_curvature_limit(
+    devices: &[Box<dyn crate::device::Device>],
+    tol: &crate::tolerance::Tolerances,
+    x: &[f64],
+    blind: &HashSet<usize>,
+) -> f64 {
+    if blind.is_empty() {
+        return f64::INFINITY;
+    }
+    devices
+        .iter()
+        .flat_map(|d| d.delay_curvature())
+        .filter(|(row, curv)| *row < x.len() && *curv > 0.0 && blind.contains(row))
+        .map(|(row, curv)| (8.0 * tol.bound(row, x[row]) / curv).sqrt())
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Variable-step transient with explicit `SimOptions`.
@@ -510,6 +557,16 @@ pub fn tran_nr_with_registry_var_opts(
         })
         .flatten()
         .flatten()
+        .collect();
+
+    // Every row the LTE estimate does not look at: the nodes a source pins, and
+    // everything past the node block (branch rows, which the norm never
+    // reaches). A delay device reporting a curvature on one of these is
+    // reporting an error nothing else can catch — see `device_curvature_limit`.
+    let lte_blind: HashSet<usize> = forced_nodes
+        .iter()
+        .copied()
+        .chain(n_nodes..topo.size)
         .collect();
 
     for dev in &mut devices {
@@ -808,6 +865,16 @@ pub fn tran_nr_with_registry_var_opts(
             if let Some(bound) = device_max_timestep(&devices) {
                 h = h.min(bound);
             }
+            // And the part of a delay's error that depends on a tolerance. The
+            // device reports how fast its delayed quantity is bending; the
+            // tolerance for that row lives here; linear interpolation's error
+            // is `h²·|y''|/8`, so this is the step at which it fits.
+            //
+            // A bound rather than a rejection, and that is not a detail: the
+            // error in a reconstruction lives in history recorded a delay ago,
+            // so rejecting the current step cannot reduce it and a controller
+            // that tries shrinks until it runs out of rejections (#112 part 2).
+            h = h.min(device_curvature_limit(&devices, &tol, &x, &lte_blind));
         } else {
             consecutive_rejects += 1;
             if consecutive_rejects > opts.max_rejections {
