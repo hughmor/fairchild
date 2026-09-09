@@ -203,7 +203,7 @@ struct Cli {
     single_output: bool,
 }
 
-#[derive(Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, ValueEnum)]
 enum Format {
     Csv,
     /// Nutmeg rawfile, ASCII.
