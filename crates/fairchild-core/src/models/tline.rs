@@ -1,12 +1,13 @@
-//! Lossless transmission line (`T` element), Branin's method of characteristics.
+//! Transmission line (`T` element), Branin's method of characteristics.
 //!
-//! A lossless line of characteristic impedance `Z0` and one-way delay `TD` is
-//! exactly modelled by two coupled port relations (with port voltages `v1, v2`
-//! and the currents `i1, i2` flowing into each port from the external circuit):
+//! A line of characteristic impedance `Z0`, one-way delay `TD` and one-way
+//! amplitude transmission `k` is exactly modelled by two coupled port relations
+//! (with port voltages `v1, v2` and the currents `i1, i2` flowing into each port
+//! from the external circuit):
 //!
 //! ```text
-//!   v1(t) − Z0·i1(t) = v2(t−TD) + Z0·i2(t−TD)        (port A)
-//!   v2(t) − Z0·i2(t) = v1(t−TD) + Z0·i1(t−TD)        (port B)
+//!   v1(t) − Z0·i1(t) = k·[v2(t−TD) + Z0·i2(t−TD)]        (port A)
+//!   v2(t) − Z0·i2(t) = k·[v1(t−TD) + Z0·i1(t−TD)]        (port B)
 //! ```
 //!
 //! Each line is therefore an independent voltage source `E` (the far port's
@@ -14,25 +15,49 @@
 //! current as an explicit MNA branch unknown:
 //!
 //! ```text
-//!   V(A+) − V(A−) − Z0·i1 = E1,   E1 = v2(t−TD) + Z0·i2(t−TD)
-//!   V(B+) − V(B−) − Z0·i2 = E2,   E2 = v1(t−TD) + Z0·i1(t−TD)
+//!   V(A+) − V(A−) − Z0·i1 = E1,   E1 = k·[v2(t−TD) + Z0·i2(t−TD)]
+//!   V(B+) − V(B−) − Z0·i2 = E2,   E2 = k·[v1(t−TD) + Z0·i1(t−TD)]
 //! ```
 //!
 //! Making `i1, i2` branch unknowns means the history snapshot `[v1, v2, i1, i2]`
 //! is read directly from the solution vector — no back-substitution — and the
-//! steady state self-consistently collapses to the DC limit of a lossless line
-//! (`v1 = v2`, `i1 = −i2`: an ideal through-connection), because there the
-//! delayed terms equal the present ones.
+//! steady state self-consistently collapses to the line's DC two-port, because
+//! there the delayed terms equal the present ones.
 //!
 //! The delay is intrinsic to the device and always modelled in transient runs
 //! (unlike the photonic waveguide, whose group delay is opt-in). The generic
 //! history/interpolation is provided by [`crate::delay::DelayLine`].
 //!
-//! Operating point: the same two relations, with the delayed terms equal to the
-//! present ones. Adding them gives `i1 + i2 = 0` and subtracting them gives
-//! `v1 = v2`, so at DC the line is an ideal through-connection and that is what
-//! the branch rows stamp. ngspice agrees: a 1 V source through 50 Ω into a
-//! 1 kΩ load across the line draws `1/(50+1000)`, not `1/(50+50)`.
+//! # Loss
+//!
+//! `k = 1` is the lossless line, which is what ngspice's `T` is and what a card
+//! without `loss_db` gets. `k = 10^(−loss_db/20)` makes it a **distortionless**
+//! line rather than a merely lossy one: a frequency-independent attenuation is
+//! what a line with `R'/L' = G'/C'` has, and for that line the form above is
+//! exact rather than approximate. Skin effect (`α ∝ √f`) is not expressible
+//! this way and is not modelled — it needs recursive convolution, which this is
+//! not, and pretending otherwise in `.ac` alone would make the two analyses
+//! disagree about the same device.
+//!
+//! # Operating point
+//!
+//! The same two relations with the delayed terms equal to the present ones.
+//! Adding and subtracting them gives
+//!
+//! ```text
+//!   i1 + i2 = (v1 + v2)·tanh(θ/2)/Z0
+//!   i1 − i2 = (v1 − v2)·coth(θ/2)/Z0        θ = −ln k = α·l
+//! ```
+//!
+//! which is **exactly** the line's own two-port (`coth θ − csch θ = tanh(θ/2)`),
+//! so a lossy line has the right DC resistance and a lossless one collapses to
+//! `i1 + i2 = 0`, `v1 = v2` — an ideal through-connection. ngspice agrees on the
+//! lossless case: a 1 V source through 50 Ω into a 1 kΩ load across the line
+//! draws `1/(50+1000)`, not `1/(50+50)`.
+//!
+//! The lossless form is stamped as those two constraints rather than as the
+//! `coth` expression, because `coth(θ/2)` diverges as `θ → 0`. The two agree
+//! everywhere else, and the constraint form is the limit.
 //!
 //! The `E = 0` seed the operating point used to stamp made each port a `Z0`
 //! resistor and left the far end dead, so any deck biasing a device *through* a
@@ -46,6 +71,10 @@ use crate::mna::MnaMatrix;
 pub struct NativeTLine {
     z0: f64,
     td: f64,
+    /// One-way amplitude transmission `k = 10^(−loss_db/20)`. Exactly 1 for a
+    /// lossless line, which is the default and the only thing ngspice's `T`
+    /// can be.
+    k: f64,
     // External terminals: A+, A−, B+, B−.
     a_pos: NodeId,
     a_neg: NodeId,
@@ -65,10 +94,20 @@ pub struct NativeTLine {
 }
 
 impl NativeTLine {
+    /// A lossless line — `k = 1`.
     pub fn new(z0: f64, td: f64) -> Self {
+        Self::with_loss(z0, td, 0.0)
+    }
+
+    /// A line with `loss_db` of total one-way attenuation.
+    ///
+    /// Voltage and power dB agree for a transmission line, so there is no
+    /// factor-of-two choice to get wrong here — see `Element::TransmissionLine`.
+    pub fn with_loss(z0: f64, td: f64, loss_db: f64) -> Self {
         NativeTLine {
             z0,
             td,
+            k: 10f64.powf(-loss_db.max(0.0) / 20.0),
             a_pos: None,
             a_neg: None,
             b_pos: None,
@@ -88,27 +127,66 @@ impl NativeTLine {
     }
 
     /// The two branch rows at DC, where the delayed terms equal the present
-    /// ones: `v1 − v2 = 0` in the first, `i1 + i2 = 0` in the second.
+    /// ones.
     ///
-    /// Both rows are needed. Stamping `v1 = v2` twice leaves the current
-    /// undetermined, and `gmin` would make that non-singular rather than an
-    /// error.
+    /// Lossless (`k = 1`): `v1 − v2 = 0` in the first row and `i1 + i2 = 0` in
+    /// the second. Both are needed — stamping `v1 = v2` twice leaves the
+    /// current undetermined, and `gmin` would make that non-singular rather
+    /// than an error.
+    ///
+    /// Lossy: the same two relations, which are no longer degenerate:
+    ///
+    /// ```text
+    ///   i1 + i2 = (v1 + v2)·tanh(θ/2)/Z0
+    ///   i1 − i2 = (v1 − v2)·coth(θ/2)/Z0        θ = −ln k
+    /// ```
+    ///
+    /// This is the line's exact two-port, not an approximation of it. The
+    /// lossless case is stamped separately only because `coth(θ/2)` diverges
+    /// as `θ → 0`.
     fn stamp_dc_rows(&self, mat: &mut MnaMatrix) {
-        if let Some(j) = self.br1 {
-            for (node, sign) in [
-                (self.a_pos, 1.0),
-                (self.a_neg, -1.0),
-                (self.b_pos, -1.0),
-                (self.b_neg, 1.0),
-            ] {
-                if let Some(i) = node {
-                    mat.a[j][i] += sign;
-                }
+        // Collect `(row, col, coefficient)` and apply once, so the two forms
+        // below are each a list of terms rather than a sequence of stamps.
+        let mut cells: Vec<(usize, usize, f64)> = Vec::with_capacity(10);
+        let push_v = |cells: &mut Vec<_>, row: NodeId, pos: NodeId, neg: NodeId, c: f64| {
+            let Some(r) = row else { return };
+            if let Some(i) = pos {
+                cells.push((r, i, c));
+            }
+            if let Some(i) = neg {
+                cells.push((r, i, -c));
+            }
+        };
+        if self.k >= 1.0 {
+            // Row 1: v1 − v2 = 0.
+            push_v(&mut cells, self.br1, self.a_pos, self.a_neg, 1.0);
+            push_v(&mut cells, self.br1, self.b_pos, self.b_neg, -1.0);
+            // Row 2: i1 + i2 = 0.
+            if let (Some(r), Some(b1), Some(b2)) = (self.br2, self.br1, self.br2) {
+                cells.push((r, b1, 1.0));
+                cells.push((r, b2, 1.0));
+            }
+        } else {
+            let half = (-0.5 * self.k.ln()).tanh(); // tanh(θ/2)
+            let g_even = half / self.z0; // (i1+i2) = g_even·(v1+v2)
+            let g_odd = 1.0 / (half * self.z0); // (i1−i2) = g_odd·(v1−v2)
+                                                // Row 1: (i1 + i2) − g_even·(v1 + v2) = 0.
+            push_v(&mut cells, self.br1, self.a_pos, self.a_neg, -g_even);
+            push_v(&mut cells, self.br1, self.b_pos, self.b_neg, -g_even);
+            if let (Some(r), Some(b1), Some(b2)) = (self.br1, self.br1, self.br2) {
+                cells.push((r, b1, 1.0));
+                cells.push((r, b2, 1.0));
+            }
+            // Row 2: (i1 − i2) − g_odd·(v1 − v2) = 0.
+            push_v(&mut cells, self.br2, self.a_pos, self.a_neg, -g_odd);
+            push_v(&mut cells, self.br2, self.b_pos, self.b_neg, g_odd);
+            if let (Some(r), Some(b1), Some(b2)) = (self.br2, self.br1, self.br2) {
+                cells.push((r, b1, 1.0));
+                cells.push((r, b2, -1.0));
             }
         }
-        if let (Some(j), Some(k)) = (self.br2, self.br1) {
-            mat.a[j][k] += 1.0;
-            mat.a[j][j] += 1.0;
+        for (r, c, v) in cells {
+            mat.a[r][c] += v;
         }
     }
 }
@@ -174,8 +252,8 @@ impl Device for NativeTLine {
             let (v1d, v2d, i1d, i2d) = (d[0], d[1], d[2], d[3]);
             // E1 is the wave arriving at port A from port B one delay ago; E2
             // the reverse.
-            self.e1 = v2d + self.z0 * i2d;
-            self.e2 = v1d + self.z0 * i1d;
+            self.e1 = self.k * (v2d + self.z0 * i2d);
+            self.e2 = self.k * (v1d + self.z0 * i1d);
         } else {
             // The DC through-connection is homogeneous: no source, only the
             // `v1 = v2` / `i1 + i2 = 0` rows in `load_jacobian`.
@@ -235,7 +313,12 @@ impl Device for NativeTLine {
     /// stamp puts in directly.
     fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
         use crate::device::AcStamp;
-        let (qr, qi) = ((omega * self.td).cos(), -(omega * self.td).sin());
+        // `k·exp(−jωTD)`: the attenuation is frequency-independent, so it is
+        // one real factor on the same coupling the lossless line has.
+        let (qr, qi) = (
+            self.k * (omega * self.td).cos(),
+            -self.k * (omega * self.td).sin(),
+        );
         let mut out = Vec::with_capacity(6);
         // Row `br` couples to the *far* port's voltage and current.
         let mut row = |br: NodeId, pos: NodeId, neg: NodeId, far_br: NodeId| {

@@ -1299,16 +1299,40 @@ and the termination — which is what makes the termination's effect visible.
 | `l_um` / `l_m` | 3000 µm | Total interaction length. |
 | `v_pi_l` | 0.012 V·m | Phase efficiency (1.2 V·cm), as `fc_pn_ps`. |
 | `n_g` | 4.19 | Optical group index — sets the optical delay per slice. |
-| `n_m` / `n_rf` | 4.2 | **Microwave** index of the electrode, *loaded*. |
-| `z0` | 35 Ω | Electrode characteristic impedance, *loaded*. |
+| `n_m` / `n_rf` | 4.2 | **Microwave** index of the *unloaded* electrode. |
+| `z0` | 35 Ω | Characteristic impedance of the *unloaded* electrode. |
+| `rf_loss_db_cm` | 0 | Electrode attenuation, dB/cm. Frequency-independent. |
+| `c_j0` | 0 | **Total** junction capacitance (F), split across the slices. Zero leaves the electrode unloaded. |
+| `v_bi`, `m_j` | 0.917, 0.5 | Junction built-in voltage and grading. |
 | `f_max` | 50 GHz | Top of the band you care about. Sets the slice count. |
 | `slices_per_wave` | 10 | Slices per RF wavelength. Raise it to check convergence. |
 | `n_slices` | — | Override the count outright, for a convergence sweep. |
 | (segment geometry) | — | `n_eff`, `alpha_dB_cm`, `wl_ref_nm`, `pin_at_ref` carry over. |
 
-**What emerges rather than being modelled.** Velocity mismatch, termination
-ripple, and the bandwidth collapse when the RF is launched against the light
-are not computed anywhere in this device. They follow from the RF and the
+**The electrode is loaded by the junction, and that emerges too.** Set `c_j0`
+and each slice shunts `C_j(V)` between its electrode node and ground. The
+loading is then in the *circuit*, so the loaded velocity and impedance come out
+of the ladder rather than out of a formula:
+
+```
+  n_m,loaded = n_m·√(1 + C_load/C'_sec)      z0,loaded = z0/√(1 + C_load/C'_sec)
+```
+
+with `C'_sec = TD_sec/z0`. Both are pinned to 1 % in
+`the_junction_loads_the_electrode_by_the_analytic_factor`, by terminating the
+line in the analytic `z0,loaded` — if that number is right the line is matched,
+and only then is the phase across it the one-way delay. Because `C_j` follows
+the instantaneous voltage, the loading varies *through a bit*, which is the
+thing a precomputed `H(ω)` cannot do.
+
+A periodically loaded line is also a low-pass structure. `validate` refuses a
+ladder whose Bragg cutoff `1/(π·TD_sec,loaded)` falls below `f_max`, because
+below it the ladder is the device and above it the ladder is reporting its own
+discretisation.
+
+**What emerges rather than being modelled.** Velocity mismatch, RF loss,
+termination ripple, and the bandwidth collapse when the RF is launched against
+the light are not computed anywhere in this device. They follow from the RF and the
 optical envelope accumulating delay at different rates down the same ladder.
 Each is pinned against its closed form in
 `tests/native/travelling_wave_ladder.rs`:
@@ -1319,6 +1343,7 @@ Each is pinned against its closed form in
 | Walk-off | `sinc(ω·L·(n_m − n_g)/2c)` |
 | RF launched against the light | the same, with `n_m + n_g` |
 | Termination mismatch | ripple of period `c/(2·n_m·L)` |
+| RF loss | `(1 − e^−(α+jΔβ)L) / ((α+jΔβ)L)` |
 
 **Why `N` is not yours to pick.** The RF voltage has to be roughly constant
 across one slice, so `Δz ≪ c/(f_max·n_m)`. The card takes `f_max` and the
@@ -1331,11 +1356,10 @@ by the *slice* transit time, not the device's. A finer ladder is a slower run,
 which is the price of resolving a travelling wave and the reason `f_max` is a
 parameter rather than a guess.
 
-**Not modelled.** RF loss: the electrode sections are lossless, so there is no
-conductor loss and no skin effect, and above the frequency where `√f`
-attenuation dominates this device is optimistic. No per-slice junction
-capacitance either — the electrode is unloaded, so give it the *loaded* `n_m`
-and `z0`. Bidirectional light is refused rather than half-modelled.
+**Not modelled.** Skin effect: `rf_loss_db_cm` is frequency-independent, so a
+real conductor's `√f` attenuation is missing and this device is optimistic above
+the frequency where that dominates. Bidirectional light is refused rather than
+half-modelled.
 
 ### `fc_mzm` — idealised testbench Mach-Zehnder modulator
 

@@ -31,7 +31,7 @@ use super::{dB_per_cm_to_neper_per_m, stamp_resistor};
 /// Past `V_bi/2` both switch to the tangent line, so `C` stays finite into
 /// forward bias and `q` stays its exact integral: `q(v) = q(knee) +
 /// C_knee·Δ + ½·(dC/dv)·Δ²`.
-fn junction_cap_and_charge(v: f64, c_j0: f64, v_bi: f64, m_j: f64) -> (f64, f64) {
+pub(super) fn junction_cap_and_charge(v: f64, c_j0: f64, v_bi: f64, m_j: f64) -> (f64, f64) {
     let v_knee = 0.5 * v_bi;
     // q(v) for the power law, exact for m ≠ 1 (m_j is clamped below 1).
     let q_law = |v: f64| c_j0 * v_bi / (1.0 - m_j) * (1.0 - (1.0 - v / v_bi).powf(1.0 - m_j));

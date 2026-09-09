@@ -211,24 +211,39 @@ need. For anything nonlinear, write the `B` element directly.
 > letters and mean something quite different. They are refused by name, with a
 > message pointing at `B` — rather than being read as a node called `POLY(1)`.
 
-### Transmission line (lossless)
+### Transmission line
 
 ```
-T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  TD=<seconds>
+T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  TD=<seconds>  [loss_db=<dB>]
 T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  F=<hz> [NL=<wavelengths>]
 ```
 
-Ideal lossless two-port delay line (Branin's method), characteristic impedance
-`Z0` and one-way delay `TD`. Instead of `TD` you may give a frequency `F` with
-optional normalised length `NL` (default `0.25`); then `TD = NL / F`. The delay
-is intrinsic and always modelled in transient analysis; at DC the line is an
-ideal through-connection. No `.model` card — parameters are on the element line.
+Two-port delay line (Branin's method), characteristic impedance `Z0` and
+one-way delay `TD`. Instead of `TD` you may give a frequency `F` with optional
+normalised length `NL` (default `0.25`); then `TD = NL / F`. The delay is
+intrinsic and always modelled in transient analysis. No `.model` card —
+parameters are on the element line.
 
 ```spice
-T1  in 0 out 0  Z0=50 TD=1n        ; 50 Ω, 1 ns one-way delay
+T1  in 0 out 0  Z0=50 TD=1n              ; 50 Ω, 1 ns one-way delay
+T2  in 0 out 0  Z0=35 TD=1n loss_db=1.5  ; and 1.5 dB of attenuation
 ```
 
-(Lossy lines with LTRA-style loss/dispersion are not yet supported.)
+`loss_db` is a **fairchild extension** — ngspice's `T` is lossless and rejects
+the key. It is the total one-way attenuation in dB (voltage and power dB agree
+for a line, so there is no factor of two to choose). The result is a
+*distortionless* line: a frequency-independent attenuation is what a line with
+`R'/L' = G'/C'` has, and for that line Branin's form is exact. Frequency
+dependent loss — a real conductor's skin effect, `α ∝ √f` — is **not**
+supported, and neither is LTRA-style dispersion.
+
+Per analysis: `.tran` reconstructs the delayed wave from history and bounds the
+timestep to `TD/2`; `.op`/`.dc` stamp the line's exact DC two-port (an ideal
+through-connection when lossless); `.ac`/`.noise` use the exact
+`k·exp(−jωTD)`; `.pz` **refuses**, because `exp(−s·TD)` has no linear matrix
+pencil and infinitely many poles.
+
+An unrecognised parameter on a `T` card is an error, not a silent drop.
 
 ### Switches (`S` voltage-controlled, `W` current-controlled)
 

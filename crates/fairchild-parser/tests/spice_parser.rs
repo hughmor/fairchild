@@ -597,9 +597,12 @@ fn parses_transmission_line_z0_td() {
         b_neg,
         z0,
         td,
+        loss_db,
     } = &nl.elements[0]
     {
         assert_eq!(name, "t1");
+        // No `loss_db` on the card means the lossless line ngspice has.
+        assert_eq!(*loss_db, 0.0);
         assert_eq!(a_pos, "in");
         assert_eq!(a_neg, "0");
         assert_eq!(b_pos, "out");

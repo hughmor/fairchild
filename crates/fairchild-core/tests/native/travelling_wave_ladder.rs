@@ -415,3 +415,258 @@ fn the_slice_count_follows_f_max_and_the_answer_converges() {
         "8x the bandwidth should ask for a much finer ladder: {coarse:.3e} s vs {fine:.3e} s"
     );
 }
+
+// ── the loaded electrode, and RF loss ────────────────────────────────────────
+
+/// A `fc_tw_ps` deck with the electrode's two ends exposed, so the electrode
+/// itself can be probed rather than only its optical effect.
+fn tw_probe(n_m: f64, n_slices: usize, c_j0: f64, loss_db_cm: f64, v_bias: f64) -> String {
+    format!(
+        "* fc_tw_ps, electrode probed\n\
+         .options waveguide_delay=1\n\
+         .optical_port oi\n\
+         .optical_port oo\n\
+         Xlas oi fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+         Vrf rf 0 DC {v_bias} AC 1\n\
+         Rs rf e0 {Z0}\n\
+         Rt eN 0 {Z0}\n\
+         Xtw oi oo e0 eN fc_tw_ps l_um={l_um} v_pi_l={V_PI_L} n_g={N_G} \
+         n_m={n_m} z0={Z0} n_slices={n_slices} c_j0={c_j0:e} v_bi=0.917 m_j=0.5 \
+         rf_loss_db_cm={loss_db_cm} alpha_dB_cm=0 pin_at_ref=1\n",
+        l_um = L_M * 1e6,
+    )
+}
+
+/// The junction loads the electrode, and both loaded quantities are the
+/// analytic ones.
+///
+/// ```text
+///   n_m,loaded = n_m·sqrt(1 + C_load/C'_sec)      z0,loaded = z0/sqrt(1 + C_load/C'_sec)
+/// ```
+///
+/// Measured on the electrode itself, not on the optical response, so the optics
+/// cannot launder an error. The test does it by *terminating in the analytic
+/// loaded impedance*: if that number is right the line is matched, and only
+/// then is the phase across it the one-way delay. Two predictions, one
+/// measurement, and each is the other's witness — a wrong impedance shows up as
+/// ripple and a wrong velocity as the wrong phase.
+///
+/// Terminating the same loaded line in its *unloaded* impedance is the control:
+/// that must ripple, or the loading did not change anything.
+#[test]
+fn the_junction_loads_the_electrode_by_the_analytic_factor() {
+    const N_M: f64 = 2.5; // unloaded electrode, faster than the light
+    const N: usize = 24;
+    const V_BIAS: f64 = -6.0; // through the divider, each slice sits at -3 V
+    const C_J0: f64 = 750e-15; // the same total a 3 mm `fc_pn_ps_cap` arm takes
+
+    // The analytic loaded quantities, at the bias each slice actually sits at.
+    // A source behind the termination into a matched line is a divider, so the
+    // slices sit at V_BIAS/2.
+    let td_sec = N_M * (L_M / N as f64) / C0;
+    let c_sec = td_sec / Z0;
+    let c_load = (C_J0 / N as f64) / (1.0 - 0.5 * V_BIAS / 0.917f64).sqrt();
+    let slow = (1.0 + c_load / c_sec).sqrt();
+    let z0_loaded = Z0 / slow;
+    let delay_unloaded = N_M * L_M / C0;
+    let delay_loaded = delay_unloaded * slow;
+    assert!(
+        slow > 1.15,
+        "these numbers should load the electrode appreciably; slow = {slow:.3}"
+    );
+
+    // `(delay at the lowest frequency, peak-to-peak ripple in |V(en)|)`.
+    let probe = |c_j0: f64, z_term: f64| {
+        let deck = tw_probe(N_M, N, c_j0, 0.0, V_BIAS)
+            .replace(&format!("Rs rf e0 {Z0}\n"), &format!("Rs rf e0 {z_term}\n"));
+        let deck = deck.replace(&format!("Rt eN 0 {Z0}\n"), &format!("Rt eN 0 {z_term}\n"));
+        let parsed = parse_spice(&deck).expect("parse");
+        let freqs: Vec<f64> = (1..=4).map(|k| k as f64 * 2e9).collect();
+        let ac = ac_analysis(&parsed, &freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac");
+        let phase_at = |i: usize| {
+            let (a, b) = (
+                ac.phase_deg("e0", i).expect("e0"),
+                ac.phase_deg("en", i).expect("en"),
+            );
+            let mut d = a - b;
+            while d < 0.0 {
+                d += 360.0;
+            }
+            d / 360.0 / freqs[i]
+        };
+        let mags: Vec<f64> = (0..freqs.len())
+            .map(|i| ac.magnitude("en", i).expect("en"))
+            .collect();
+        let (lo, hi) = mags
+            .iter()
+            .fold((f64::MAX, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+        (phase_at(0), (hi - lo) / hi)
+    };
+
+    // Control: no loading, terminated in the unloaded impedance.
+    let (d_unloaded, r_unloaded) = probe(0.0, Z0);
+    assert!(
+        (d_unloaded / delay_unloaded - 1.0).abs() < 0.01,
+        "control: unloaded delay {:.3} ps, geometry says {:.3} ps",
+        d_unloaded * 1e12,
+        delay_unloaded * 1e12
+    );
+    assert!(
+        r_unloaded < 0.01,
+        "control: an unloaded line in its own impedance must not ripple ({:.2}%)",
+        100.0 * r_unloaded
+    );
+
+    // Loaded, terminated in the analytic loaded impedance: matched, and the
+    // phase is the loaded delay.
+    let (d_loaded, r_loaded) = probe(C_J0, z0_loaded);
+    assert!(
+        r_loaded < 0.01,
+        "terminating in the analytic z0_loaded = {z0_loaded:.2} Ω should match the \
+         line; got {:.2}% ripple, so that impedance is wrong",
+        100.0 * r_loaded
+    );
+    assert!(
+        (d_loaded / delay_loaded - 1.0).abs() < 0.01,
+        "loaded delay {:.3} ps, the loaded-line formula says {:.3} ps \
+         (C_load/C_sec = {:.3}, slow = {slow:.3})",
+        d_loaded * 1e12,
+        delay_loaded * 1e12,
+        c_load / c_sec
+    );
+
+    // Control the other way: the same loaded line in its *unloaded* impedance
+    // must ripple. Without this, a loading that did nothing would pass the
+    // matched test by accident.
+    let (_, r_mismatched) = probe(C_J0, Z0);
+    assert!(
+        r_mismatched > 0.05 * r_loaded.max(1e-6) && r_mismatched > 0.01,
+        "a loaded line terminated in its unloaded impedance must ripple; got {:.2}%",
+        100.0 * r_mismatched
+    );
+}
+
+/// Step 3 of #116's validation ladder, which needed a lossy line to exist.
+///
+/// With RF attenuation the walk-off form becomes
+///
+/// ```text
+///   H(w) = (1 − exp(−(alpha + j·dbeta)·L)) / ((alpha + j·dbeta)·L)
+///   dbeta = w·(n_m − n_g)/c
+/// ```
+///
+/// which is the same integral as the lossless sinc with a complex argument. The
+/// visible difference is that the nulls fill in: a lossy electrode cannot
+/// cancel exactly, because the far slices contribute less than the near ones.
+#[test]
+fn rf_loss_follows_the_complex_walkoff_form() {
+    const N_M: f64 = 2.1;
+    const N: usize = 32;
+    const LOSS_DB_CM: f64 = 6.0;
+    let delta_n = N_G - N_M;
+    // Nepers over the whole device, from dB/cm: 1 dB = 1/8.686 Np.
+    let alpha_l = LOSS_DB_CM * (L_M * 100.0) * std::f64::consts::LN_10 / 20.0;
+
+    let deck = tw_probe(N_M, N, 0.0, LOSS_DB_CM, 0.0);
+    let freqs: Vec<f64> = (1..=12).map(|k| k as f64 * 5e9).collect();
+    let parsed = parse_spice(&deck).expect("parse");
+    let ac = ac_analysis(&parsed, &freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac");
+    let got: Vec<f64> = (0..freqs.len())
+        .map(|i| {
+            let re = ac.magnitude("oo_re_0", i).expect("re");
+            let im = ac.magnitude("oo_im_0", i).expect("im");
+            (re * re + im * im).sqrt()
+        })
+        .collect();
+
+    // |(1 − e^{−z})/z| with z = alpha_l + j·dbeta·L.
+    let form = |f: f64| {
+        let db = 2.0 * std::f64::consts::PI * f * delta_n / C0 * L_M;
+        let (zr, zi) = (alpha_l, db);
+        let e = (-zr).exp();
+        let (nr, ni) = (1.0 - e * zi.cos(), e * zi.sin());
+        ((nr * nr + ni * ni) / (zr * zr + zi * zi)).sqrt()
+    };
+
+    let norm = got[0] / form(freqs[0]);
+    for (f, v) in freqs.iter().zip(&got) {
+        let want = form(*f) * norm;
+        assert!(
+            (v - want).abs() < 0.05 * norm,
+            "at {:.0} GHz the lossy ladder gives {v:.4e}, the complex walk-off \
+             form says {want:.4e}",
+            f / 1e9
+        );
+    }
+
+    // Divide the walk-off out and what is left is the loss alone. The same
+    // ladder without `rf_loss_db_cm` is the control, so this compares two
+    // measurements against the *ratio* of two closed forms — a wrong `k` cannot
+    // survive that, while it could hide inside a single normalised curve.
+    let lossless = tw_probe(N_M, N, 0.0, 0.0, 0.0);
+    let parsed_ll = parse_spice(&lossless).expect("parse");
+    let ac_ll = ac_analysis(&parsed_ll, &freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac");
+    let sinc = |f: f64| {
+        let x = std::f64::consts::PI * f * L_M * delta_n / C0;
+        if x.abs() < 1e-12 {
+            1.0
+        } else {
+            (x.sin() / x).abs()
+        }
+    };
+    for (i, f) in freqs.iter().enumerate() {
+        let re = ac_ll.magnitude("oo_re_0", i).expect("re");
+        let im = ac_ll.magnitude("oo_im_0", i).expect("im");
+        let base = (re * re + im * im).sqrt();
+        // Skip the neighbourhood of the null, where both sides go through zero
+        // and a ratio is meaningless rather than wrong.
+        if sinc(*f) < 0.15 {
+            continue;
+        }
+        let got_ratio = got[i] / base;
+        let want_ratio = form(*f) / sinc(*f);
+        assert!(
+            (got_ratio / want_ratio - 1.0).abs() < 0.06,
+            "at {:.0} GHz loss costs a factor {got_ratio:.4}; the ratio of the two \
+             closed forms says {want_ratio:.4}",
+            f / 1e9
+        );
+    }
+
+    // And the DC end is the cleanest statement of all: at zero frequency the
+    // walk-off is 1 and the whole response is the loss integral
+    // `(1 − e^−αL)/(αL)`, which is a pure number.
+    let dc_ratio = {
+        let re = ac_ll.magnitude("oo_re_0", 0).expect("re");
+        let im = ac_ll.magnitude("oo_im_0", 0).expect("im");
+        got[0] / (re * re + im * im).sqrt()
+    };
+    let want_dc = (1.0 - (-alpha_l).exp()) / alpha_l;
+    assert!(
+        (dc_ratio / want_dc - 1.0).abs() < 0.03,
+        "a lossy electrode delivers {dc_ratio:.4} of the drive integral; \
+         (1 − e^−αL)/(αL) with αL = {alpha_l:.4} says {want_dc:.4}"
+    );
+}
+
+/// A ladder too coarse for its own loading is refused, not answered.
+///
+/// A periodically loaded line is a low-pass structure with a Bragg cutoff. Below
+/// it the ladder is the device; above it the ladder is reporting its own
+/// discretisation. Answering there would be the worst kind of plausible number.
+#[test]
+fn a_ladder_below_its_bragg_cutoff_is_refused() {
+    // Four slices carrying 750 fF between them: each section is loaded far past
+    // what it can carry at 80 GHz.
+    let deck = tw_probe(2.5, 4, 750e-15, 0.0, -6.0).replace("f_max=", "f_max_unused=");
+    let deck = format!("{deck}* f_max defaults to 50 GHz\n");
+    let parsed = parse_spice(&deck).expect("parse");
+    let msg = match fairchild_core::dc_op_nr(&parsed) {
+        Err(e) => format!("{e}"),
+        Ok(_) => panic!("a sub-Bragg ladder must be refused, not answered"),
+    };
+    assert!(
+        msg.contains("Bragg"),
+        "the error must name the cutoff as the reason, got: {msg}"
+    );
+}

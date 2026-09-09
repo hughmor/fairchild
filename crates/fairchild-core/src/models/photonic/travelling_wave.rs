@@ -35,15 +35,39 @@
 //! honest check is to raise `slices_per_wave` until the answer stops moving;
 //! `n_slices` overrides the count outright for exactly that sweep.
 //!
+//! # The electrode is loaded by the junction, and that is emergent too
+//!
+//! `n_m` and `z0` describe the **unloaded** electrode — the metal on its
+//! substrate, with no diode hanging off it. A real depletion modulator's
+//! electrode is loaded by the junction capacitance, which slows the wave and
+//! drops the impedance:
+//!
+//! ```text
+//!   n_m,loaded = n_m·√(1 + C_load/C'_sec)      z0,loaded = z0/√(1 + C_load/C'_sec)
+//! ```
+//!
+//! with `C'_sec = TD_sec/z0` the section's own capacitance. Set `c_j0` and each
+//! slice shunts `C_j(V)` between its electrode node and ground, so the loading
+//! is in the *circuit* rather than in a formula: the loaded velocity emerges
+//! from the ladder, and because `C_j` depends on the instantaneous voltage it
+//! varies through a bit. That is the thing a precomputed `H(ω)` cannot do, and
+//! the reason this device is worth its cost.
+//!
+//! `c_j0` is the **total** junction capacitance of the device, matching
+//! `fc_pn_ps_cap`, and each slice gets `c_j0/N`. The charge is integrated as
+//! `∫C dv`, not `C(v)·v` — see `ReactiveBranchSpec::charge`.
+//!
+//! Discrete loading has its own artefact: a periodically loaded line is a
+//! low-pass structure with a Bragg cutoff at `1/(π·TD_sec,loaded)`. That is
+//! what `slices_per_wave` keeps clear of the band, and `validate` refuses a
+//! ladder whose cutoff falls below `f_max`.
+//!
 //! # What it does not model
 //!
-//! * **RF loss.** The electrode sections are lossless (`T`), so there is no
-//!   conductor or dielectric loss and no skin effect. A real electrode rolls
-//!   off from `√f` attenuation as well as from walk-off, and this device will
-//!   be optimistic above the frequency where that dominates.
-//! * **A junction capacitance per slice.** The electrode is unloaded, so its
-//!   `n_m` and `Z0` are whatever the card says rather than the loaded values a
-//!   real segmented electrode has. Give the *loaded* numbers.
+//! * **Skin effect.** `rf_loss_db_cm` is frequency-independent, which makes the
+//!   electrode *distortionless* rather than merely lossy. A real conductor's
+//!   `α ∝ √f` needs recursive convolution; a frequency-dependent `k` in `.ac`
+//!   alone would make the two analyses disagree about the same device.
 //! * **Bidirectional light.** `wpc = 5` is refused: the backward wave would
 //!   need its own ladder, and leaving it undriven would be worse.
 
@@ -67,6 +91,13 @@ pub struct NativeTwPhaseShifter {
     /// wavelength: a differential `V_pi` over length `L` is a π phase shift.
     dn_dv: f64,
     v_pi_l: f64,
+    /// Total one-way RF attenuation of the electrode, dB/cm.
+    rf_loss_db_cm: f64,
+    /// Total junction capacitance of the device (F), zero for an unloaded
+    /// electrode. Each slice carries `c_j0/N`.
+    c_j0: f64,
+    v_bi: f64,
+    m_j: f64,
     /// Geometry handed to every slice. Held as a template because the slices do
     /// not exist until `validate`, which is the first point at which every
     /// parameter has been applied.
@@ -86,6 +117,9 @@ pub struct NativeTwPhaseShifter {
     elec: Vec<NodeId>,
     /// The per-slice drive voltage at the current iterate.
     v_slice: Vec<f64>,
+    /// Per-slice junction capacitance and stored charge at the current iterate.
+    c_j_slice: Vec<f64>,
+    q_j_slice: Vec<f64>,
     /// Whether the group delay is engaged (the run-level option).
     delay_option: bool,
     min_terminals: Option<usize>,
@@ -108,6 +142,10 @@ impl NativeTwPhaseShifter {
             f_max: 50e9,
             slices_per_wave: 10.0,
             n_slices_override: None,
+            rf_loss_db_cm: 0.0,
+            c_j0: 0.0,
+            v_bi: 0.917,
+            m_j: 0.5,
             // 1.2 V·cm, a typical depletion shifter.
             dn_dv: 0.0,
             v_pi_l: 0.012,
@@ -121,6 +159,8 @@ impl NativeTwPhaseShifter {
             rf_out: None,
             elec: Vec::new(),
             v_slice: Vec::new(),
+            c_j_slice: Vec::new(),
+            q_j_slice: Vec::new(),
             delay_option: false,
             min_terminals: None,
         }
@@ -221,6 +261,8 @@ impl Device for NativeTwPhaseShifter {
         let n = self.slice_count();
         let dz = self.length_m / n as f64;
         let td = self.n_m * dz / C0;
+        // Loss is per length, so a slice carries its share.
+        let loss_db = self.rf_loss_db_cm * dz * 100.0;
         self.segs = (0..n)
             .map(|_| {
                 let mut s = self.template.clone();
@@ -229,8 +271,30 @@ impl Device for NativeTwPhaseShifter {
                 s
             })
             .collect();
-        self.lines = (0..n).map(|_| NativeTLine::new(self.z0, td)).collect();
+        self.lines = (0..n)
+            .map(|_| NativeTLine::with_loss(self.z0, td, loss_db))
+            .collect();
         self.v_slice = vec![0.0; n];
+        self.c_j_slice = vec![0.0; n];
+        self.q_j_slice = vec![0.0; n];
+
+        // A periodically loaded line is a low-pass structure. Its Bragg cutoff
+        // has to sit above the band the user asked about, or the ladder is
+        // reporting its own discretisation as if it were the device.
+        if self.c_j0 > 0.0 {
+            let c_sec = td / self.z0;
+            let c_load = self.c_j0 / n as f64;
+            let td_loaded = td * (1.0 + c_load / c_sec).sqrt();
+            let f_bragg = 1.0 / (std::f64::consts::PI * td_loaded);
+            if f_bragg < self.f_max {
+                return Err(format!(
+                    "the loaded ladder's Bragg cutoff is {:.1} GHz, below the requested                      f_max of {:.1} GHz — {n} slices is too coarse for this loading.                      Raise slices_per_wave (now {:.0}) or lower c_j0",
+                    f_bragg / 1e9,
+                    self.f_max / 1e9,
+                    self.slices_per_wave
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -353,6 +417,22 @@ impl Device for NativeTwPhaseShifter {
                 self.refresh_dn_dv();
                 true
             }
+            "rf_loss_db_cm" | "alpha_rf_db_cm" => {
+                self.rf_loss_db_cm = value.max(0.0);
+                true
+            }
+            "c_j0" => {
+                self.c_j0 = value.max(0.0);
+                true
+            }
+            "v_bi" => {
+                self.v_bi = value.max(1e-3);
+                true
+            }
+            "m_j" => {
+                self.m_j = value.clamp(0.0, 0.99);
+                true
+            }
             other => {
                 // Everything else is segment geometry, applied to the template
                 // the slices are cut from. The per-slice length is ours.
@@ -386,9 +466,19 @@ impl Device for NativeTwPhaseShifter {
 
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let delay_active = flags.transient && self.delay_option;
+        let c_j0_slice = self.c_j0 / self.segs.len().max(1) as f64;
         for i in 0..self.segs.len() {
             let v = self.elec[i].map_or(0.0, |j| x[j]);
             self.v_slice[i] = v;
+            if c_j0_slice > 0.0 {
+                // The electrode node is the anode and ground the cathode, so a
+                // reverse bias is a negative node voltage — the same sign
+                // convention `PnDrive` uses.
+                let (c, q) =
+                    super::active::junction_cap_and_charge(v, c_j0_slice, self.v_bi, self.m_j);
+                self.c_j_slice[i] = c;
+                self.q_j_slice[i] = q;
+            }
             let dn = PerChannel::Uniform(self.dn_dv * v);
             let engaged = delay_active && self.segs[i].tau_g_s() > 0.0;
             self.segs[i].refresh_with_sens(
@@ -480,6 +570,28 @@ impl Device for NativeTwPhaseShifter {
         for line in &mut self.lines {
             line.commit_timestep(x);
         }
+    }
+
+    /// One junction capacitance per slice, between that slice's electrode node
+    /// and ground.
+    ///
+    /// This is what loads the electrode. It is a real branch in the circuit
+    /// rather than a correction to `n_m`, so the loaded velocity emerges from
+    /// the ladder and moves with the instantaneous voltage.
+    fn reactive_branches(&self) -> Vec<crate::device::ReactiveBranchSpec> {
+        if self.c_j0 <= 0.0 {
+            return Vec::new();
+        }
+        (0..self.segs.len())
+            .map(|i| crate::device::ReactiveBranchSpec {
+                kind: crate::device::ReactiveKind::Capacitor,
+                pos: self.elec[i],
+                neg: None,
+                value: self.c_j_slice[i],
+                dvalue_dstate: 0.0,
+                charge: Some(self.q_j_slice[i]),
+            })
+            .collect()
     }
 
     fn frozen_jacobian_columns(&self) -> Vec<usize> {

@@ -318,3 +318,148 @@ fn pz_refuses_a_circuit_containing_a_delay() {
         "the error must name the delay as the reason, got: {msg}"
     );
 }
+
+// ── loss: `loss_db`, a fairchild extension ───────────────────────────────────
+
+/// A lossy line's DC two-port, exactly.
+///
+/// The Branin form with an attenuation `k` on each travelling wave collapses at
+/// DC to `i1 + i2 = (v1+v2)·tanh(θ/2)/Z0` and `i1 − i2 = (v1−v2)·coth(θ/2)/Z0`,
+/// which *is* the line's own two-port rather than an approximation of it. The
+/// anchor is that two-port's textbook form, with a load deliberately unequal to
+/// `Z0` so a self-terminating line could not pass.
+#[test]
+fn a_lossy_line_has_the_right_dc_two_port() {
+    // 6.0206 dB is exactly a factor of two in amplitude, which makes every
+    // hyperbolic function below a rational number and the expectation exact.
+    const LOSS_DB: f64 = 6.020_599_913_279_624;
+    const Z0: f64 = 50.0;
+    const RS: f64 = 50.0;
+    const RL: f64 = 1000.0;
+    let k = 10f64.powf(-LOSS_DB / 20.0);
+    assert!((k - 0.5).abs() < 1e-12, "k should be 1/2, got {k}");
+
+    let theta = -k.ln();
+    let (th, ch, sh) = (theta.tanh(), theta.cosh(), theta.sinh());
+    let z_in = Z0 * (RL + Z0 * th) / (Z0 + RL * th);
+    let i_src = 1.0 / (RS + z_in);
+    let want_a = i_src * z_in;
+    let want_b = want_a / (ch + (Z0 / RL) * sh);
+
+    let net = format!(
+        "* DC through a lossy line\n\
+         Vs s 0 DC 1\n\
+         Rs s a {RS}\n\
+         T1 a 0 b 0 Z0={Z0} TD=1n loss_db={LOSS_DB}\n\
+         Rload b 0 {RL}\n"
+    );
+    let parsed = parse_spice(&net).expect("parse");
+    let op = fairchild_core::dc_op_nr(&parsed).expect("dc op");
+    let (v_a, v_b) = (
+        op.node_voltage("a").expect("node a"),
+        op.node_voltage("b").expect("node b"),
+    );
+    let i_vs = op.vsrc_current("vs").expect("I(Vs)");
+    assert!(
+        (v_a - want_a).abs() < 1e-9,
+        "V(a)={v_a:.9}, two-port says {want_a:.9}"
+    );
+    assert!(
+        (v_b - want_b).abs() < 1e-9,
+        "V(b)={v_b:.9}, two-port says {want_b:.9}"
+    );
+    assert!(
+        (i_vs + i_src).abs() < 1e-12,
+        "I(Vs)={i_vs:.9}, expected {:.9}",
+        -i_src
+    );
+}
+
+/// The same line in `.ac`, against the same two-port with `γl = θ + jωTD`.
+///
+/// The lossless test next door checks the resonance; this checks that loss
+/// damps it by exactly the right amount, which is the part a wrong `k` would
+/// get wrong while still producing a plausible notch.
+#[test]
+fn a_lossy_line_matches_the_complex_two_port_in_ac() {
+    const LOSS_DB: f64 = 3.0;
+    const Z0: f64 = 50.0;
+    const RS: f64 = 50.0;
+    const RL: f64 = 200.0;
+    const TD: f64 = 1e-9;
+    let theta = LOSS_DB * std::f64::consts::LN_10 / 20.0;
+
+    let net = format!(
+        "* AC through a lossy line\n\
+         Vs s 0 DC 0 AC 1\n\
+         Rs s a {RS}\n\
+         T1 a 0 b 0 Z0={Z0} TD=1n loss_db={LOSS_DB}\n\
+         Rterm b 0 {RL}\n"
+    );
+    let parsed = parse_spice(&net).expect("parse");
+    let freqs: Vec<f64> = (0..7).map(|k| 20e6 + k as f64 * 90e6).collect();
+    let ac = fairchild_core::ac_analysis(
+        &parsed,
+        &freqs,
+        Some("vs"),
+        &fairchild_core::device_registry::DeviceRegistry::new(),
+    )
+    .expect("ac");
+
+    let mul = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+    let div = |a: (f64, f64), b: (f64, f64)| {
+        let d = b.0 * b.0 + b.1 * b.1;
+        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+    };
+    let mag = |a: (f64, f64)| (a.0 * a.0 + a.1 * a.1).sqrt();
+    // cosh and sinh of a complex argument, from the real parts.
+    let cosh = |(x, y): (f64, f64)| (x.cosh() * y.cos(), x.sinh() * y.sin());
+    let sinh = |(x, y): (f64, f64)| (x.sinh() * y.cos(), x.cosh() * y.sin());
+
+    for (fi, &f) in freqs.iter().enumerate() {
+        let gl = (theta, 2.0 * std::f64::consts::PI * f * TD);
+        let (ch, sh) = (cosh(gl), sinh(gl));
+        let tanh = div(sh, ch);
+        let z_in = mul(
+            (Z0, 0.0),
+            div(
+                (RL + Z0 * tanh.0, Z0 * tanh.1),
+                (Z0 + RL * tanh.0, RL * tanh.1),
+            ),
+        );
+        let va = div(z_in, (z_in.0 + RS, z_in.1));
+        let vb = div(va, (ch.0 + (Z0 / RL) * sh.0, ch.1 + (Z0 / RL) * sh.1));
+
+        let got_a = ac.magnitude("a", fi).expect("node a");
+        let got_b = ac.magnitude("b", fi).expect("node b");
+        assert!(
+            (got_a - mag(va)).abs() < 1e-9,
+            "f={f:.3e}: |V(a)|={got_a:.9}, two-port {:.9}",
+            mag(va)
+        );
+        assert!(
+            (got_b - mag(vb)).abs() < 1e-9,
+            "f={f:.3e}: |V(b)|={got_b:.9}, two-port {:.9}",
+            mag(vb)
+        );
+    }
+}
+
+/// An unknown key on a `T` card is an error, not a silence.
+///
+/// It used to be dropped. That was survivable while every key was ngspice's;
+/// with `loss_db` in the set a typo would leave the line lossless and produce a
+/// plausible answer for a different line.
+#[test]
+fn a_misspelled_tline_parameter_is_refused() {
+    let net = "* typo\n\
+               Vs s 0 DC 1\n\
+               T1 s 0 b 0 Z0=50 TD=1n lossdb=3\n\
+               Rl b 0 50\n";
+    let err = parse_spice(net).expect_err("a typo'd key must not be dropped");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("lossdb") && msg.contains("loss_db"),
+        "the error must name both the typo and the accepted key, got: {msg}"
+    );
+}

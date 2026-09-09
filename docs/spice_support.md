@@ -52,7 +52,7 @@ fairchild does with a syntactically plausible line using that letter.
 | `Q` | BJT | ✅ Gummel-Poon L1 | — |
 | `R` | resistor | ✅ + parallel-C parasitic, `m=` | — |
 | `S` | voltage-controlled switch | ✅ | — |
-| `T` | lossless transmission line | ✅ | — |
+| `T` | lossless transmission line | ✅ + `loss_db` extension | — |
 | `U` | uniform RC line (URC) | ❌ | error |
 | `V` | independent voltage source | ✅ incl. `AC <mag> [phase]` | — |
 | `W` | current-controlled switch | ✅ | — |

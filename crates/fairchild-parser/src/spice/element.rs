@@ -391,6 +391,7 @@ pub(super) fn parse_element(
             let mut td: Option<f64> = None;
             let mut freq: Option<f64> = None;
             let mut nl: f64 = 0.25; // default quarter-wave per ngspice
+            let mut loss_db: f64 = 0.0;
             for tok in &tokens[5..] {
                 if let Some((k, v)) = tok.split_once('=') {
                     let val = parse_value(v, lineno)?;
@@ -399,7 +400,21 @@ pub(super) fn parse_element(
                         "td" => td = Some(val),
                         "f" => freq = Some(val),
                         "nl" => nl = val,
-                        _ => {}
+                        // A fairchild extension; ngspice's `T` is lossless.
+                        "loss_db" | "loss" => loss_db = val,
+                        // An unrecognised key used to be dropped in silence,
+                        // which for a line means a plausible answer for a
+                        // different line. `loss_db` is the reason it matters
+                        // now: a typo'd loss key would leave the electrode
+                        // lossless and nothing would say so.
+                        other => {
+                            return Err(ParseError::Syntax {
+                                line: lineno,
+                                msg: format!(
+                                    "transmission line: unknown parameter `{other}`.                                      Accepts Z0/ZO, TD, F, NL, and loss_db"
+                                ),
+                            })
+                        }
                     }
                 }
             }
@@ -426,6 +441,7 @@ pub(super) fn parse_element(
                 b_neg: canon_node(tokens[4]),
                 z0,
                 td,
+                loss_db,
             })
         }
         'x' => {

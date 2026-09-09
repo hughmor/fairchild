@@ -790,6 +790,7 @@ transitively by the integration tests. No ngspice comparison.
 | `Z0` | ✅ | ✅ | ✅ ngspice (matched, open, shorted far end) |
 | `TD` | ✅ | ✅ | ✅ ngspice |
 | `F`, `NL` | ✅ | ✅ | ⚠️ desugars to `TD` |
+| `loss_db` | ✅ | ✅ | ✅ exact two-port, DC and `.ac` (**fairchild extension**; ngspice's `T` is lossless) |
 
 Per analysis, because a delay behaves differently in each and the difference is
 silent:
@@ -807,7 +808,17 @@ contributes `exp(−s·TD)`, which has no linear matrix pencil and infinitely ma
 poles. Truncating it would return a finite pole set for a circuit that does not
 have one.
 
-Lossy lines (LTRA-style loss and dispersion) are **not** implemented.
+`loss_db` gives a **distortionless** line — a frequency-independent
+attenuation, which is what `R'/L' = G'/C'` has and for which Branin's form is
+exact rather than approximate. The DC limit is the line's own two-port
+(`i1+i2 = (v1+v2)·tanh(θ/2)/Z0`, `i1−i2 = (v1−v2)·coth(θ/2)/Z0`) and `.ac` is
+`k·exp(−jωTD)`; both are pinned against the textbook form to 1e-9.
+
+Frequency-dependent loss (skin effect, `α ∝ √f`) is **not** implemented and
+cannot be expressed this way — it needs recursive convolution. Nor is LTRA's
+dispersion. A `T` card with an unrecognised parameter is now a hard error rather
+than a silent drop, because with `loss_db` in the set a typo would leave the
+line lossless and say nothing.
 
 ---
 

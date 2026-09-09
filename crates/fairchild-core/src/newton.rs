@@ -509,12 +509,14 @@ pub fn build_devices_with_footprints(
                 b_neg,
                 z0,
                 td,
+                loss_db,
                 ..
             } => {
                 let term = |n: &fairchild_parser::NodeName| topo.node_index.get(n).copied();
                 let terms = [term(a_pos), term(a_neg), term(b_pos), term(b_neg)];
-                let mut dev: Box<dyn Device> =
-                    Box::new(crate::models::tline::NativeTLine::new(*z0, *td));
+                let mut dev: Box<dyn Device> = Box::new(
+                    crate::models::tline::NativeTLine::with_loss(*z0, *td, *loss_db),
+                );
                 dev.setup_model(ctx);
                 dev.setup_instance(&terms, ctx);
                 // Two branch-current rows (i1, i2), allocated by push_device.
