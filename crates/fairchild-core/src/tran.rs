@@ -134,7 +134,13 @@ impl TranResult {
                 index: n + i,
             });
         }
-        (TranLayout { columns }, n + self.vsrc_currents.len())
+        (
+            TranLayout {
+                columns,
+                n_hint: Some(self.time.len()),
+            },
+            n + self.vsrc_currents.len(),
+        )
     }
 
     /// One row of the layout's storage at timepoint `ti`.
@@ -375,8 +381,9 @@ pub fn tran_nr_with_registry_opts_into(
     let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
     let step = st.step_size();
 
+    let n_hint = ((stop / step).ceil() as usize) + 2;
     let mut sink = TstartSink::new(sink, opts.tstart);
-    sink.begin(&TranLayout::from_topology(st.topology()))?;
+    sink.begin(&TranLayout::from_topology(st.topology()).with_hint(n_hint))?;
 
     // Store t = 0 from DC OP.
     sink.point(0.0, st.solution())?;
@@ -564,8 +571,9 @@ pub fn tran_nr_with_registry_var_opts_into(
     // is the trial step for predictor extrapolation).
     let mut h_prev_accepted = 0.0_f64;
 
+    let n_hint = ((stop / step).ceil() as usize) + 2;
     let mut sink = TstartSink::new(sink, opts.tstart);
-    sink.begin(&TranLayout::from_topology(&topo))?;
+    sink.begin(&TranLayout::from_topology(&topo).with_hint(n_hint))?;
     sink.point(0.0, &x)?;
 
     let mut t = 0.0_f64;

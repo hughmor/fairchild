@@ -775,6 +775,11 @@ solver (cleared after the first iteration converges).
 Post-processed after a `.tran` run; emitted in the output and exposed in
 Python as `result.measurements`.
 
+A `.measure` needs the completed waveform, so a deck carrying one keeps the
+whole run in memory rather than streaming it to the output file. On a 200 000-
+point, 202-signal transient that is 339 MB against 5 MB — see
+[§10](#10-output-formats).
+
 ### Libraries and includes
 
 ```
@@ -1464,9 +1469,31 @@ count, which a run does not know until it ends, so the count is reserved and
 filled in afterwards; that needs a file to seek in. Written to standard output
 instead, the rawfile is assembled in memory first.
 
+The reserved field is padded, so a streamed rawfile's header reads
+`No. Points:                  502` rather than `No. Points: 502`. ngspice reads
+either; a hand-written parser must strip the spaces before it reads the number.
+
 `--probe` narrows a `.tran` rawfile, and the columns nobody asked for are never
 read out of the solution vector. It does *not* narrow a rawfile from `.op`,
 `.dc`, `.ac` or `.noise` — those write every signal, and warn that they have.
+
+### What still holds the whole run
+
+Two things ask for the finished waveform, so they keep it, whatever the output
+format:
+
+- **`.measure`** reads the completed run — a `MAX` cannot be known before the
+  end. A deck with a `.measure` card therefore holds every timepoint in memory
+  and writes the file afterwards. `--probe` still narrows what reaches the file.
+- **The Python and C bindings** return a result object, which is the whole run
+  by definition. Streaming is a property of the CLI's output path.
+
+So the memory figures above are for a CLI transient with no `.measure`. The
+same 200 000-point, 202-signal run peaks at **5 MB** streaming and **339 MB**
+with a `.measure` card, because the second one is holding the whole waveform to
+measure it. If a long run uses more memory than you expect, that card is the
+first thing to look at — move the measurement to a post-processing step on the
+saved file.
 
 Every analysis in the deck writes one plot, appended to the same file in deck
 order, using ngspice's plot names so a reader can classify them:

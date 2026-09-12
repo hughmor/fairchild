@@ -84,6 +84,20 @@ impl TranColumn {
 #[derive(Debug, Clone)]
 pub struct TranLayout {
     pub columns: Vec<TranColumn>,
+    /// Roughly how many points the run will produce, when the driver can say.
+    ///
+    /// A hint, not a count: tstart drops points on the way through and the step
+    /// controller decides the rest, so nothing may be *derived* from it. It
+    /// exists so [`CollectSink`] can size its vectors once instead of growing
+    /// them by doubling — which is not a rounding error. On a 200 000-point,
+    /// 202-signal run, 202 vectors growing independently peaked at 526 MB
+    /// against 330 MB reserved, because a doubling `Vec` holds the old buffer
+    /// and the new one at the same time.
+    ///
+    /// A writing sink ignores it. A rawfile's header needs the *exact* count,
+    /// which is why that is still reserved and patched rather than taken from
+    /// here.
+    pub n_hint: Option<usize>,
 }
 
 impl TranLayout {
@@ -108,7 +122,16 @@ impl TranLayout {
                 index: n + index,
             });
         }
-        TranLayout { columns }
+        TranLayout {
+            columns,
+            n_hint: None,
+        }
+    }
+
+    /// The same layout, carrying the driver's point-count estimate.
+    pub fn with_hint(mut self, n: usize) -> Self {
+        self.n_hint = Some(n);
+        self
     }
 
     /// Every column's label, in order.
@@ -144,7 +167,10 @@ impl TranLayout {
             })
             .map(|(_, c)| c.clone())
             .collect();
-        Ok(TranLayout { columns })
+        Ok(TranLayout {
+            columns,
+            n_hint: self.n_hint,
+        })
     }
 }
 
@@ -213,6 +239,11 @@ impl CollectSink {
 
 impl TranSink for CollectSink {
     fn begin(&mut self, layout: &TranLayout) -> Result<(), SimError> {
+        // Reserve once rather than grow by doubling — see `TranLayout::n_hint`.
+        // Capped so a wildly optimistic hint cannot allocate more than the run
+        // could ever need; growing past it is the ordinary case, not a failure.
+        let cap = layout.n_hint.unwrap_or(0).min(1 << 24);
+        let series = || Vec::with_capacity(cap);
         let mut node_voltages: IndexMap<String, Vec<f64>> = IndexMap::new();
         let mut vsrc_currents: IndexMap<String, Vec<f64>> = IndexMap::new();
         let mut lambda: IndexMap<String, f64> = IndexMap::new();
@@ -225,14 +256,14 @@ impl TranSink for CollectSink {
                         slot: node_voltages.len(),
                         index: *index,
                     });
-                    node_voltages.insert(name.clone(), Vec::new());
+                    node_voltages.insert(name.clone(), series());
                 }
                 TranColumn::Current { name, index } => {
                     plan.push(Sub::Current {
                         slot: vsrc_currents.len(),
                         index: *index,
                     });
-                    vsrc_currents.insert(name.clone(), Vec::new());
+                    vsrc_currents.insert(name.clone(), series());
                 }
                 TranColumn::Lambda { name, value } => {
                     plan.push(Sub::Skip);
@@ -242,7 +273,7 @@ impl TranSink for CollectSink {
         }
         self.plan = plan;
         self.result = Some(TranResult {
-            time: Vec::new(),
+            time: Vec::with_capacity(cap),
             node_voltages,
             vsrc_currents,
             lambda,
@@ -551,6 +582,7 @@ mod tests {
                     index: 2,
                 },
             ],
+            n_hint: None,
         }
     }
 
@@ -577,6 +609,46 @@ mod tests {
         s.end().unwrap();
         let text = String::from_utf8(s.w.into_inner()).unwrap();
         assert_eq!(text, "time,V(out)\n1.000000e-9,5.000000e-1\n");
+    }
+
+    /// The collecting sink must reserve, not grow by doubling.
+    ///
+    /// This is a memory property and it regressed silently once: moving the
+    /// collect path into `CollectSink` dropped the `Vec::with_capacity` the old
+    /// driver had, and 202 vectors growing independently took a 200 000-point
+    /// run from 332 MB to 526 MB — a doubling `Vec` holds the old buffer and
+    /// the new one at the same time. Nothing failed, because nothing was wrong.
+    ///
+    /// Capacity is the observable that separates the two, so it is what this
+    /// asserts, on both the series and the time column.
+    #[test]
+    fn collect_reserves_from_the_layout_hint() {
+        let mut sink = CollectSink::new();
+        sink.begin(&layout().with_hint(4096)).unwrap();
+        sink.point(0.0, &[1.0, 2.0, 3.0]).unwrap();
+        let r = sink.take().unwrap();
+        assert!(
+            r.time.capacity() >= 4096,
+            "time reserved {} of 4096",
+            r.time.capacity()
+        );
+        for (name, v) in &r.node_voltages {
+            assert!(v.capacity() >= 4096, "{name} reserved {}", v.capacity());
+        }
+        for (name, v) in &r.vsrc_currents {
+            assert!(v.capacity() >= 4096, "{name} reserved {}", v.capacity());
+        }
+
+        // A selected layout must carry the hint through, or narrowing the
+        // output would quietly reintroduce the growth.
+        let narrowed = layout().with_hint(4096).select(&["V(out)".into()]).unwrap();
+        assert_eq!(narrowed.n_hint, Some(4096));
+
+        // And no hint must still work, rather than reserving something absurd.
+        let mut sink = CollectSink::new();
+        sink.begin(&layout()).unwrap();
+        sink.point(0.0, &[1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(sink.take().unwrap().time.len(), 1);
     }
 
     /// tstart selects what is saved. The last point survives a tstart past the
@@ -645,6 +717,7 @@ mod tests {
                     value: 1.31e-6,
                 },
             ],
+            n_hint: None,
         };
         let mut collect = CollectSink::new();
         collect.begin(&l).unwrap();
