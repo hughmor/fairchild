@@ -775,6 +775,11 @@ solver (cleared after the first iteration converges).
 Post-processed after a `.tran` run; emitted in the output and exposed in
 Python as `result.measurements`.
 
+A `.measure` needs the completed waveform, so a deck carrying one keeps the
+whole run in memory rather than streaming it to the output file. On a 200 000-
+point, 202-signal transient that is 339 MB against 5 MB — see
+[§10](#10-output-formats).
+
 ### Libraries and includes
 
 ```
@@ -1432,15 +1437,63 @@ filters the column set; a probe that matches no column of an analysis's
 output is an error naming it, never a silently thinner CSV. For an AC sweep,
 `V(node)` selects that node's `mag_`/`phase_deg_` column pair.
 
+A transient's CSV is written as it solves, so a long run costs no more memory
+than a short one, and `--probe` selects the columns before they are formatted
+rather than filtering the text afterwards.
+
 ### Nutmeg rawfile
 
-ASCII-only format compatible with ngspice's `rawread` and the `spyci` Python
-library. Always emits the full signal set.
+Compatible with ngspice's `rawread` and the `spyci` Python library, in two
+spellings: `--format nutmeg` writes the values as text, `--format binary`
+writes them as `f64`.
 
 ```bash
-fairchild -f circuit.sp --format nutmeg -o waveforms.raw
-ngspice -c "rawread waveforms.raw; plot V(out)"
+fairchild -f circuit.sp --format nutmeg -o waveforms.raw   # ASCII
+fairchild -f circuit.sp --format binary -o waveforms.raw   # binary
+ngspice -c "rawread waveforms.raw; plot V(out)"            # reads either
 ```
+
+**Prefer binary for a long run.** The header is identical and the values are
+the same numbers; what changes is that a `f64` is written instead of six
+formatted digits. On a 200 000-point, 202-signal transient the file goes from
+533 MB to 325 MB and the run from 5.7 s to 2.4 s — formatting was 60 % of it.
+ASCII stays the debug and interchange format it always was: you can read it.
+
+Six figures is also all ASCII keeps. Binary round-trips a value bit for bit,
+which matters when the file is an input to something else rather than a plot.
+
+**Give `--output` for a long run.** A transient writes its points as it solves
+them, so memory does not grow with the length of the run — the same 200 000 ×
+202 case peaks at 5 MB rather than 332 MB. A rawfile's header states the point
+count, which a run does not know until it ends, so the count is reserved and
+filled in afterwards; that needs a file to seek in. Written to standard output
+instead, the rawfile is assembled in memory first.
+
+The reserved field is padded, so a streamed rawfile's header reads
+`No. Points:                  502` rather than `No. Points: 502`. ngspice reads
+either; a hand-written parser must strip the spaces before it reads the number.
+
+`--probe` narrows a `.tran` rawfile, and the columns nobody asked for are never
+read out of the solution vector. It does *not* narrow a rawfile from `.op`,
+`.dc`, `.ac` or `.noise` — those write every signal, and warn that they have.
+
+### What still holds the whole run
+
+Two things ask for the finished waveform, so they keep it, whatever the output
+format:
+
+- **`.measure`** reads the completed run — a `MAX` cannot be known before the
+  end. A deck with a `.measure` card therefore holds every timepoint in memory
+  and writes the file afterwards. `--probe` still narrows what reaches the file.
+- **The Python and C bindings** return a result object, which is the whole run
+  by definition. Streaming is a property of the CLI's output path.
+
+So the memory figures above are for a CLI transient with no `.measure`. The
+same 200 000-point, 202-signal run peaks at **5 MB** streaming and **339 MB**
+with a `.measure` card, because the second one is holding the whole waveform to
+measure it. If a long run uses more memory than you expect, that card is the
+first thing to look at — move the measurement to a post-processing step on the
+saved file.
 
 Every analysis in the deck writes one plot, appended to the same file in deck
 order, using ngspice's plot names so a reader can classify them:
@@ -1549,9 +1602,39 @@ converged step disjoint at any tolerance. A clamped iteration is also never the
 last one, since a clamped step is shorter than the one that would arrive.
 
 Convergence aids: per-iteration `|ΔV|` clamp (`vmax`), junction limiting
-(`pnjlim` for diodes, `fetlim` for MOSFETs), GMIN stepping (ramp diagonal
-conductance from `gminmax` to zero), source stepping (ramp sources 0 →
-final in `srcsteps` steps).
+(`pnjlim` for diodes, `fetlim` for MOSFETs).
+
+The DC operating point tries four strategies in order, and stops at the first
+that converges. A circuit answered by an earlier one never reaches a later one,
+so adding a strategy cannot move an answer that already existed.
+
+1. **Direct Newton**, from the `.nodeset` seed or from zero.
+2. **Source stepping** — ramp every source from 0 to its value in `srcsteps`
+   steps.
+3. **GMIN stepping** — ramp a diagonal conductance from `gminmax` down to
+   `gmin`.
+4. **Pseudo-transient continuation** — hang a fictitious capacitor on every
+   node and a fictitious inductor in series with every voltage source, and
+   integrate to steady state.
+
+(4) reaches circuits (3) cannot, and the difference is one term. GMIN stepping
+pulls every node toward **ground** and then lets go, so a circuit with more than
+one DC solution sits wherever the pull holds it and has to cross the whole gap
+in the single Newton solve after the pull is released. Pseudo-transient
+continuation pulls every node toward **where it just was**, so the iterate
+leaves that point gradually and every solve starts near its answer. The
+fictitious timestep lengthens as the residual falls, and the ramp ends with a
+plain Newton solve on the real equations — the trajectory's last point solves
+the fictitious problem, and only its limit solves yours.
+
+A circuit with several DC solutions still returns the one its seed leads to. A
+cross-coupled latch with no `.nodeset` reaches its symmetric equilibrium, which
+is a real solution; `.nodeset` toward one state reaches that state.
+
+Two things it does not do. A topology with no solution — two voltage sources in
+parallel at different values, a node with no DC path to ground — is reported as
+a singular matrix by (3), and (4) is never entered, so the diagnosis survives.
+And it selects nothing: which of several solutions you get is `.nodeset`'s job.
 
 ### Transient integration
 

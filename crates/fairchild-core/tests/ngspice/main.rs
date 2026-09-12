@@ -23,6 +23,7 @@ mod ngspice_junction_cap_temp_golden;
 mod ngspice_method_golden;
 mod ngspice_mosfet_golden;
 mod ngspice_noise_golden;
+mod ngspice_rawfile_golden;
 mod ngspice_switch_golden;
 mod ngspice_temperature_golden;
 mod ngspice_tf_pz_golden;

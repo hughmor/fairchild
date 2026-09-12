@@ -27,6 +27,7 @@ use crate::mna::{
     stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, SparseRow,
 };
 use crate::newton::build_devices;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
 
@@ -56,28 +57,50 @@ impl AcResult {
     /// Write the AC sweep as an ngspice-compatible Nutmeg ASCII rawfile.
     ///
     /// Complex values are written as `<re>,<im>` per ngspice convention.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_vars = 1 + self.voltages.len();
-        let n_pts = self.freq.len();
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: AC Analysis")?;
-        writeln!(w, "Flags: complex")?;
-        writeln!(w, "No. Variables: {n_vars}")?;
-        writeln!(w, "No. Points: {n_pts}")?;
-        writeln!(w, "Variables:")?;
-        writeln!(w, "\t0\tfrequency\tfrequency")?;
-        for (i, name) in self.voltages.keys().enumerate() {
-            writeln!(w, "\t{}\tv({name})\tvoltage", i + 1)?;
-        }
-        writeln!(w, "Values:")?;
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
+        let mut vars = vec![Var::new("frequency", "frequency")];
+        vars.extend(
+            self.voltages
+                .keys()
+                .map(|n| Var::voltage(format!("v({n})"))),
+        );
+        let plot = Plot {
+            title,
+            plotname: "AC Analysis",
+            complex: true,
+            vars,
+            n_points: Some(self.freq.len()),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
+        let mut row = vec![(0.0, 0.0); 1 + self.voltages.len()];
         for (fi, &f) in self.freq.iter().enumerate() {
-            // Frequency is always real; write as real,0 per ngspice complex convention.
-            writeln!(w, " {fi}\t{f:.6e},0")?;
-            for v in self.voltages.values() {
-                let (re, im) = v[fi];
-                writeln!(w, "\t{re:.6e},{im:.6e}")?;
+            // Frequency is always real; ngspice's complex convention still
+            // gives it an imaginary part, and it is zero.
+            row[0] = (f, 0.0);
+            for (k, v) in self.voltages.values().enumerate() {
+                row[k + 1] = v[fi];
             }
+            wr.point_complex(&row)?;
         }
+        wr.done()?;
         Ok(())
     }
 

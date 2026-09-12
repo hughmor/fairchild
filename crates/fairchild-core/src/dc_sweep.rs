@@ -13,6 +13,7 @@ use fairchild_parser::{Element, Netlist, Waveform};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::newton::dc_op_nr_with_registry_opts;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 
 /// One axis of a sweep: name of the swept source plus the linear point grid.
@@ -77,56 +78,69 @@ impl DcSweepResult {
     }
 
     /// Write the sweep as an ngspice-compatible Nutmeg ASCII rawfile.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_vars =
-            1 + self.inner.is_some() as usize + self.node_voltages.len() + self.vsrc_currents.len();
-        let n_pts = self.n_points();
-        writeln!(w, "Title: {title}")?;
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
         // ngspice's own name for this plot.  Readers classify a Nutmeg plot by
         // its `Plotname`, and the ones that don't recognise a name fall back to
         // heuristics — commonly "one point means it's an operating point", which
         // silently mislabels a single-point sweep (`.dc V1 1 1 1`) as an `.op`.
         // Using the conventional name removes the guess.
-        writeln!(w, "Plotname: DC transfer characteristic")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: {n_vars}")?;
-        writeln!(w, "No. Points: {n_pts}")?;
-        writeln!(w, "Variables:")?;
-        let mut idx = 0;
-        writeln!(w, "\t{idx}\t{}\tvoltage", self.outer.src)?;
-        idx += 1;
+        let mut vars = vec![Var::voltage(&self.outer.src)];
         if let Some(inner) = &self.inner {
-            writeln!(w, "\t{idx}\t{}\tvoltage", inner.src)?;
-            idx += 1;
+            vars.push(Var::voltage(&inner.src));
         }
-        for name in self.node_voltages.keys() {
-            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
-            idx += 1;
-        }
-        for name in self.vsrc_currents.keys() {
-            writeln!(w, "\t{idx}\ti({name})\tcurrent")?;
-            idx += 1;
-        }
-        writeln!(w, "Values:")?;
+        vars.extend(
+            self.node_voltages
+                .keys()
+                .map(|n| Var::voltage(format!("v({n})"))),
+        );
+        vars.extend(
+            self.vsrc_currents
+                .keys()
+                .map(|n| Var::current(format!("i({n})"))),
+        );
+        let plot = Plot {
+            title,
+            plotname: "DC transfer characteristic",
+            complex: false,
+            vars,
+            n_points: Some(self.n_points()),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
 
         let inner_len = self.inner.as_ref().map_or(1, |i| i.values.len());
-        let mut point = 0usize;
+        let mut row: Vec<f64> = Vec::new();
         for (i, &outer_v) in self.outer.values.iter().enumerate() {
             for j in 0..inner_len {
                 let k = i * inner_len + j;
-                writeln!(w, " {point}\t{outer_v:.6e}")?;
+                row.clear();
+                row.push(outer_v);
                 if let Some(inner) = &self.inner {
-                    writeln!(w, "\t{:.6e}", inner.values[j])?;
+                    row.push(inner.values[j]);
                 }
-                for series in self.node_voltages.values() {
-                    writeln!(w, "\t{:.6e}", series[k])?;
-                }
-                for series in self.vsrc_currents.values() {
-                    writeln!(w, "\t{:.6e}", series[k])?;
-                }
-                point += 1;
+                row.extend(self.node_voltages.values().map(|s| s[k]));
+                row.extend(self.vsrc_currents.values().map(|s| s[k]));
+                wr.point(&row)?;
             }
         }
+        wr.done()?;
         Ok(())
     }
 }

@@ -27,6 +27,7 @@ use crate::mna::{
     stamp_2port_by_id, stamp_netlist_scaled, stamp_passive_2port, CircuitTopology, SparseRow,
 };
 use crate::newton::build_devices;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 use crate::solver::LinearSolver;
 
@@ -372,25 +373,45 @@ impl NoiseResult {
     /// in the way that looks plausible — a reader has no way to tell V/√Hz from
     /// V²/Hz by inspection, so nothing downstream would report a fault.  The
     /// CSV writer keeps both, since its column names say which is which.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_pts = self.freq.len();
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Noise Spectral Density Curves")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: 3")?;
-        writeln!(w, "No. Points: {n_pts}")?;
-        writeln!(w, "Variables:")?;
-        writeln!(w, "\t0\tfrequency\tfrequency")?;
-        writeln!(w, "\t1\tonoise_spectrum\tvoltage-density")?;
-        writeln!(w, "\t2\tinoise_spectrum\tvoltage-density")?;
-        writeln!(w, "Values:")?;
-        for i in 0..n_pts {
-            // Point index on the first variable's line only, as in the other
-            // analyses' writers.
-            writeln!(w, " {i}\t{:.6e}", self.freq[i])?;
-            writeln!(w, "\t{:.6e}", amplitude_density(self.onoise_psd[i]))?;
-            writeln!(w, "\t{:.6e}", amplitude_density(self.inoise_psd[i]))?;
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
+        let plot = Plot {
+            title,
+            plotname: "Noise Spectral Density Curves",
+            complex: false,
+            vars: vec![
+                Var::new("frequency", "frequency"),
+                Var::new("onoise_spectrum", "voltage-density"),
+                Var::new("inoise_spectrum", "voltage-density"),
+            ],
+            n_points: Some(self.freq.len()),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
+        for i in 0..self.freq.len() {
+            wr.point(&[
+                self.freq[i],
+                amplitude_density(self.onoise_psd[i]),
+                amplitude_density(self.inoise_psd[i]),
+            ])?;
         }
+        wr.done()?;
         Ok(())
     }
 }

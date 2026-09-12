@@ -18,6 +18,7 @@ use crate::error::SimError;
 use crate::mna::CircuitTopology;
 use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
 use crate::options::SimOptions;
+use crate::tran_sink::{CollectSink, TranColumn, TranLayout, TranSink, TstartSink};
 use crate::tran_step::TranStepper;
 
 /// Transient integration method.
@@ -104,48 +105,112 @@ impl TranResult {
         interp(&self.time, i_series, t)
     }
 
+    /// The columns this result carries, in output order, over a row laid out
+    /// as `[node voltages…, branch currents…]`.
+    ///
+    /// One owner for "what columns does a transient have, and in what order",
+    /// shared with [`crate::tran_sink::TranLayout::from_topology`] by way of
+    /// the same [`crate::tran_sink::TranColumn`] vocabulary. Two lists here
+    /// would be two chances for a streamed rawfile and a collected one to
+    /// disagree about which signal a column is.
+    fn layout(&self) -> (TranLayout, usize) {
+        let mut columns = vec![TranColumn::Time];
+        for (i, name) in self.node_voltages.keys().enumerate() {
+            columns.push(TranColumn::Voltage {
+                name: name.clone(),
+                index: i,
+            });
+        }
+        for (name, &wl) in &self.lambda {
+            columns.push(TranColumn::Lambda {
+                name: name.clone(),
+                value: wl,
+            });
+        }
+        let n = self.node_voltages.len();
+        for (i, name) in self.vsrc_currents.keys().enumerate() {
+            columns.push(TranColumn::Current {
+                name: name.clone(),
+                index: n + i,
+            });
+        }
+        (
+            TranLayout {
+                columns,
+                n_hint: Some(self.time.len()),
+            },
+            n + self.vsrc_currents.len(),
+        )
+    }
+
+    /// One row of the layout's storage at timepoint `ti`.
+    fn row_at(&self, ti: usize, row: &mut [f64]) {
+        for (k, v) in self.node_voltages.values().enumerate() {
+            row[k] = v[ti];
+        }
+        let n = self.node_voltages.len();
+        for (k, v) in self.vsrc_currents.values().enumerate() {
+            row[n + k] = v[ti];
+        }
+    }
+
+    /// Feed this result to a sink, point by point.
+    ///
+    /// A collected run re-emitted this way goes through exactly the writers a
+    /// streamed run does, which is what makes "streaming and collecting agree"
+    /// a property of one code path rather than a hope about two.
+    pub fn replay(&self, sink: &mut dyn TranSink) -> Result<(), SimError> {
+        let (layout, width) = self.layout();
+        sink.begin(&layout)?;
+        let mut row = vec![0.0; width];
+        for ti in 0..self.time.len() {
+            self.row_at(ti, &mut row);
+            sink.point(self.time[ti], &row)?;
+        }
+        sink.end()
+    }
+
     /// Write all waveforms as a Nutmeg ASCII rawfile (ngspice `rawread` format).
     ///
     /// One value per line; point index only on the first variable's line per point.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
-        let n_vars = 1 + self.node_voltages.len() + self.lambda.len() + self.vsrc_currents.len();
-        let n_pts = self.time.len();
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Transient Analysis")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: {n_vars}")?;
-        writeln!(w, "No. Points: {n_pts}")?;
-        writeln!(w, "Variables:")?;
-        writeln!(w, "\t0\ttime\ttime")?;
-        let mut idx = 1usize;
-        for name in self.node_voltages.keys() {
-            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
-            idx += 1;
-        }
-        for name in self.lambda.keys() {
-            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
-            idx += 1;
-        }
-        for name in self.vsrc_currents.keys() {
-            writeln!(w, "\t{idx}\ti({name})\tcurrent")?;
-            idx += 1;
-        }
-        writeln!(w, "Values:")?;
-        for (ti, &t) in self.time.iter().enumerate() {
-            // ngspice format: point index on the first variable's line only;
-            // remaining variables each get their own tab-indented line.
-            writeln!(w, " {ti}\t{t:.6e}")?;
-            for v in self.node_voltages.values() {
-                writeln!(w, "\t{:.6e}", v[ti])?;
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, crate::nutmeg::Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, crate::nutmeg::Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// A collected result knows its point count, so this needs no seek — that
+    /// is the only thing it does differently from [`crate::tran_sink::RawSink`].
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: crate::nutmeg::Encoding,
+    ) -> std::io::Result<()> {
+        let (layout, width) = self.layout();
+        let plot = crate::nutmeg::Plot {
+            title,
+            plotname: "Transient Analysis",
+            complex: false,
+            vars: layout.columns.iter().map(|c| c.raw_var()).collect(),
+            n_points: Some(self.time.len()),
+        };
+        let mut wr = crate::nutmeg::Writer::start(w, enc, &plot)?;
+        let mut row = vec![0.0; width];
+        let mut out = vec![0.0; layout.columns.len()];
+        for ti in 0..self.time.len() {
+            self.row_at(ti, &mut row);
+            for (k, c) in layout.columns.iter().enumerate() {
+                out[k] = c.value(self.time[ti], &row);
             }
-            // λ is a label, constant over the run: same value at every point.
-            for wl in self.lambda.values() {
-                writeln!(w, "\t{wl:.6e}")?;
-            }
-            for i in self.vsrc_currents.values() {
-                writeln!(w, "\t{:.6e}", i[ti])?;
-            }
+            wr.point(&out)?;
         }
+        wr.done()?;
         Ok(())
     }
 
@@ -154,34 +219,10 @@ impl TranResult {
     /// Columns: `time`, then `V(<node>)` for every node, then `V(<λ net>)` for
     /// every wavelength label (constant over the run), then `I(<vsrc>)` for
     /// every voltage source. Values are written in scientific notation.
-    pub fn write_csv<W: std::io::Write>(&self, mut w: W) -> std::io::Result<()> {
-        // Header
-        write!(w, "time")?;
-        for name in self.node_voltages.keys() {
-            write!(w, ",V({name})")?;
-        }
-        for name in self.lambda.keys() {
-            write!(w, ",V({name})")?;
-        }
-        for name in self.vsrc_currents.keys() {
-            write!(w, ",I({name})")?;
-        }
-        writeln!(w)?;
-        // Rows
-        for (ti, &t) in self.time.iter().enumerate() {
-            write!(w, "{t:.6e}")?;
-            for v in self.node_voltages.values() {
-                write!(w, ",{:.6e}", v[ti])?;
-            }
-            for wl in self.lambda.values() {
-                write!(w, ",{wl:.6e}")?;
-            }
-            for i in self.vsrc_currents.values() {
-                write!(w, ",{:.6e}", i[ti])?;
-            }
-            writeln!(w)?;
-        }
-        Ok(())
+    pub fn write_csv<W: std::io::Write>(&self, w: W) -> std::io::Result<()> {
+        let mut sink = crate::tran_sink::CsvSink::new(w);
+        self.replay(&mut sink)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 
@@ -245,16 +286,19 @@ pub(crate) fn coupled_inductor_currents(
     ))
 }
 
-/// Append one time-point to a TranResult.
-pub(crate) fn push_timepoint(result: &mut TranResult, t: f64, topo: &CircuitTopology, x: &[f64]) {
-    result.time.push(t);
-    for (name, &idx) in &topo.node_index {
-        result.node_voltages.get_mut(name).unwrap().push(x[idx]);
-    }
-    let n = topo.n_nodes();
-    for (name, &idx) in &topo.vsrc_index {
-        result.vsrc_currents.get_mut(name).unwrap().push(x[n + idx]);
-    }
+/// Run a transient into a [`CollectSink`] and hand back the result.
+///
+/// Every entry point that returns a [`TranResult`] goes through this, so the
+/// collecting path and the streaming path run the same integrator over the
+/// same sink and cannot drift apart.
+fn collect<F>(run: F) -> Result<TranResult, SimError>
+where
+    F: FnOnce(&mut dyn TranSink) -> Result<(), SimError>,
+{
+    let mut sink = CollectSink::new();
+    run(&mut sink)?;
+    sink.take()
+        .ok_or_else(|| SimError::ParameterError("transient produced no layout".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,34 +361,32 @@ pub fn tran_nr_with_registry_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    collect(|sink| tran_nr_with_registry_opts_into(netlist, step, stop, registry, opts, sink))
+}
+
+/// Fixed-step transient, writing every accepted point to `sink`.
+///
+/// The streaming twin of [`tran_nr_with_registry_opts`], which is this with a
+/// [`CollectSink`]. See [`crate::tran_sink`] for why the difference matters.
+pub fn tran_nr_with_registry_opts_into(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    sink: &mut dyn TranSink,
+) -> Result<(), SimError> {
     // The stepper owns its netlist so it can rewrite source waveforms between
     // steps.  One clone per transient run, against thousands of timesteps.
     let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
     let step = st.step_size();
 
-    let n_steps = ((stop / step).ceil() as usize) + 2;
-    let topo = st.topology();
-    let mut result = TranResult {
-        time: Vec::with_capacity(n_steps),
-        node_voltages: topo
-            .node_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
-            .collect(),
-        vsrc_currents: topo
-            .vsrc_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_steps)))
-            .collect(),
-        lambda: topo
-            .lambda_signals()
-            .into_iter()
-            .map(|(k, wl)| (k.to_string(), wl))
-            .collect(),
-    };
+    let n_hint = ((stop / step).ceil() as usize) + 2;
+    let mut sink = TstartSink::new(sink, opts.tstart);
+    sink.begin(&TranLayout::from_topology(st.topology()).with_hint(n_hint))?;
 
     // Store t = 0 from DC OP.
-    push_timepoint(&mut result, 0.0, st.topology(), st.solution());
+    sink.point(0.0, st.solution())?;
 
     // The first timepoint is `step` even when that overshoots `stop` (a
     // stop < step run still produces one solved point); every later one is
@@ -353,7 +395,7 @@ pub fn tran_nr_with_registry_opts(
     loop {
         st.solve_at(t_next)?;
         st.commit(t_next);
-        push_timepoint(&mut result, st.time(), st.topology(), st.solution());
+        sink.point(st.time(), st.solution())?;
         if st.time() >= stop {
             break;
         }
@@ -361,8 +403,7 @@ pub fn tran_nr_with_registry_opts(
         t_next = (st.time() + step).min(stop);
     }
 
-    result.trim_before(opts.tstart);
-    Ok(result)
+    sink.end()
 }
 
 /// Fixed-step Backward Euler transient using only built-in models from `.model` cards.
@@ -431,6 +472,23 @@ pub fn tran_nr_with_registry_var_opts(
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<TranResult, SimError> {
+    collect(|sink| tran_nr_with_registry_var_opts_into(netlist, step, stop, registry, opts, sink))
+}
+
+/// Variable-step transient, writing every accepted point to `sink`.
+///
+/// The streaming twin of [`tran_nr_with_registry_var_opts`]. The point count
+/// here is not known until the run ends — the step controller decides it — so
+/// a sink writing a rawfile reserves the header field and fills it in at
+/// [`TranSink::end`]; see [`crate::nutmeg`].
+pub fn tran_nr_with_registry_var_opts_into(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    sink: &mut dyn TranSink,
+) -> Result<(), SimError> {
     // Adaptive step control and injected noise do not mix: the LTE estimator
     // reads a fresh random sample as a fast signal and shrinks the step to
     // chase it, and the step size then becomes correlated with the noise, which
@@ -514,25 +572,9 @@ pub fn tran_nr_with_registry_var_opts(
     let mut h_prev_accepted = 0.0_f64;
 
     let n_hint = ((stop / step).ceil() as usize) + 2;
-    let mut result = TranResult {
-        time: Vec::with_capacity(n_hint),
-        node_voltages: topo
-            .node_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
-            .collect(),
-        vsrc_currents: topo
-            .vsrc_index
-            .keys()
-            .map(|k| (k.clone(), Vec::with_capacity(n_hint)))
-            .collect(),
-        lambda: topo
-            .lambda_signals()
-            .into_iter()
-            .map(|(k, wl)| (k.to_string(), wl))
-            .collect(),
-    };
-    push_timepoint(&mut result, 0.0, &topo, &x);
+    let mut sink = TstartSink::new(sink, opts.tstart);
+    sink.begin(&TranLayout::from_topology(&topo).with_hint(n_hint))?;
+    sink.point(0.0, &x)?;
 
     let mut t = 0.0_f64;
     let mut h = step;
@@ -776,7 +818,7 @@ pub fn tran_nr_with_registry_var_opts(
             // ones that were stamped, so all of that is already folded in.
             reactive.accept(&devices, &x);
 
-            push_timepoint(&mut result, t, &topo, &x);
+            sink.point(t, &x)?;
 
             h = if lte_norm < 1e-10 {
                 h_actual * 2.0
@@ -804,8 +846,7 @@ pub fn tran_nr_with_registry_var_opts(
         }
     }
 
-    result.trim_before(opts.tstart);
-    Ok(result)
+    sink.end()
 }
 
 /// Variable-step BE + LTE transient using only built-in models from `.model` cards.

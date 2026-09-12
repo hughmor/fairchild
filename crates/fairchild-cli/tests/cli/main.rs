@@ -13,5 +13,6 @@
 
 mod dialect;
 mod dropped_parameters;
+mod output_formats;
 mod quiet;
 mod transient_noise_flatness;
