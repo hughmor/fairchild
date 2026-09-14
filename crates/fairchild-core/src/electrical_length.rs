@@ -190,7 +190,7 @@ pub fn warn_from_sources(netlist: &Netlist, devices: &[Box<dyn Device>], names: 
 /// `n_m` reaches [`LUMPED_FRACTION`] of a wavelength.
 ///
 /// Shared so a device implementing
-/// [`Device::lumped_valid_to_hz`](crate::device::Device::lumped_valid_to_hz)
+/// [`Device::lumped_valid_to_hz`]
 /// does not have to restate the criterion, and so there is one place to change
 /// it.
 pub fn lumped_limit_hz(l_m: f64, n_m: f64) -> Option<f64> {
