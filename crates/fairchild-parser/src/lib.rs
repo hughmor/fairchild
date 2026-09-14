@@ -612,6 +612,20 @@ pub enum Element {
         b_neg: NodeName,
         z0: f64,
         td: f64,
+        /// Total attenuation over the line, in dB. **A fairchild extension** —
+        /// ngspice's `T` is lossless and rejects this key.
+        ///
+        /// Voltage and power dB agree here, because a power ratio is a voltage
+        /// ratio squared and the two definitions differ by the same factor of
+        /// two: `dB = 20·log10(e^(α·l)) = 10·log10(e^(2α·l)) = 8.686·α·l`. That
+        /// is *not* true of the optical `alpha_dB_cm`, where the field carries
+        /// half the power's exponent — see `dB_per_cm_to_neper_per_m`.
+        ///
+        /// The loss is frequency-independent, which makes the line
+        /// *distortionless* (`R'/L' = G'/C'`) rather than merely lossy. Skin
+        /// effect goes as `√f` and has no such form; it needs a convolution
+        /// model, which this is not.
+        loss_db: f64,
     },
     VoltageSource {
         name: String,

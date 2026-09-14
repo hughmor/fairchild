@@ -1374,6 +1374,7 @@ impl Device for GummelPoonBjt {
             // `.ac`/`.noise` want the small-signal C itself, not a charge
             // branch's `∂q/∂v`, so zero is correct rather than conservative.
             dvalue_dstate: 0.0,
+            charge: None,
         };
         let mut v = Vec::new();
         // The transcapacitance is deliberately absent from this list and is

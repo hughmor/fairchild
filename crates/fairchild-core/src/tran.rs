@@ -16,7 +16,7 @@ use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::CircuitTopology;
-use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
+use crate::newton::build_devices_with_footprints;
 use crate::options::SimOptions;
 use crate::tran_sink::{CollectSink, TranColumn, TranLayout, TranSink, TstartSink};
 use crate::tran_step::TranStepper;
@@ -381,7 +381,10 @@ pub fn tran_nr_with_registry_opts_into(
     let mut st = TranStepper::new(netlist.clone(), registry, opts, step)?;
     let step = st.step_size();
 
-    let n_hint = ((stop / step).ceil() as usize) + 2;
+    // Points the sink will see, not internal steps: a delay device may have made
+    // the internal step `substeps` times shorter than the card's (#112).
+    let substeps = st.substeps();
+    let n_hint = ((stop / step).ceil() as usize) / substeps + 2;
     let mut sink = TstartSink::new(sink, opts.tstart);
     sink.begin(&TranLayout::from_topology(st.topology()).with_hint(n_hint))?;
 
@@ -391,12 +394,21 @@ pub fn tran_nr_with_registry_opts_into(
     // The first timepoint is `step` even when that overshoots `stop` (a
     // stop < step run still produces one solved point); every later one is
     // clamped so the run lands exactly on `stop`.
+    //
+    // `substeps` internal steps make one requested interval, so recording every
+    // `substeps`-th point reproduces exactly the grid the card asked for —
+    // landed on, not interpolated to.
+    let mut taken = 0usize;
     let mut t_next = step;
     loop {
         st.solve_at(t_next)?;
         st.commit(t_next);
-        sink.point(st.time(), st.solution())?;
-        if st.time() >= stop {
+        taken += 1;
+        let last = st.time() >= stop;
+        if taken.is_multiple_of(substeps) || last {
+            sink.point(st.time(), st.solution())?;
+        }
+        if last {
             break;
         }
         st.advance_history();
@@ -456,6 +468,54 @@ pub fn tran_nr_with_registry_var(
     )
 }
 
+/// The smallest timestep any device asks for, or `None` when none does.
+///
+/// One place answers "how small must this step be for the devices in the
+/// circuit", so the initial step, the per-step controller and the fixed-step
+/// gate cannot come to different conclusions.
+pub(crate) fn device_max_timestep(devices: &[Box<dyn crate::device::Device>]) -> Option<f64> {
+    devices
+        .iter()
+        .filter_map(|d| d.requested_max_timestep())
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// The largest step at which a delay's linear interpolation still fits inside
+/// the tolerance of the row it lands in — **for the rows the LTE estimate
+/// cannot see**.
+///
+/// `⅛·h²·|y''| ≤ tol` ⇒ `h ≤ √(8·tol/|y''|)`. Infinite when nothing reports a
+/// curvature on such a row, which is most circuits.
+///
+/// The gate is the point, and it is worth the paragraph. A delayed source drives
+/// node voltages, and the LTE estimate — `|corrector − predictor|` on the
+/// solution — already tracks those: both errors are `O(h²·y'')` on the same
+/// signal, so the controller was already holding the step to the right order.
+/// Measured: adding this bound unconditionally cost 25 % more steps on a
+/// matched line carrying a 1 GHz sine and moved the far-end waveform by nothing.
+///
+/// What the LTE genuinely cannot see is a row it excludes. `forced_nodes` are
+/// left out because a source pins them, and branch rows are outside the norm
+/// altogether — so a wave arriving at a line driven by an ideal source shows up
+/// as a *current*, which nothing in the estimate looks at. That is the hole this
+/// closes, and paying for it only there is what keeps it free everywhere else.
+pub(crate) fn device_curvature_limit(
+    devices: &[Box<dyn crate::device::Device>],
+    tol: &crate::tolerance::Tolerances,
+    x: &[f64],
+    blind: &HashSet<usize>,
+) -> f64 {
+    if blind.is_empty() {
+        return f64::INFINITY;
+    }
+    devices
+        .iter()
+        .flat_map(|d| d.delay_curvature())
+        .filter(|(row, curv)| *row < x.len() && *curv > 0.0 && blind.contains(row))
+        .map(|(row, curv)| (8.0 * tol.bound(row, x[row]) / curv).sqrt())
+        .fold(f64::INFINITY, f64::min)
+}
+
 /// Variable-step transient with explicit `SimOptions`.
 ///
 /// `step` is the maximum allowed timestep (upper bound, further capped by
@@ -508,29 +568,45 @@ pub fn tran_nr_with_registry_var_opts_into(
     crate::connectivity::check_connectivity(netlist)?;
     let mut ctx = opts.sim_context();
     let step = step.min(opts.max_step);
-    let (topo, mut x) = if opts.uic {
-        let topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
+    // Devices are built **once**, and the operating point is solved over the
+    // same instances the transient then integrates.  Building them twice
+    // allocated the extra rows twice, so the transient's devices were bound to
+    // rows the DC solve never touched and everything the operating point knew
+    // about their internal state — branch currents, junction charges — was
+    // stranded in the first set (#121).
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
+    let (mut devices, footprints) =
+        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
+    let solver = opts.linear_solver(topo.size);
+    // Structural sparsity pattern: same for every timestep and every NR
+    // iteration within them, so build it once here.  Built after the devices,
+    // whose extra rows widen `topo.size`.
+    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
+    let mut x = if opts.uic {
         let mut x = vec![0.0f64; topo.size];
         for (name, value) in &netlist.ic {
             if let Some(&i) = topo.node_index.get(name) {
                 x[i] = *value;
             }
         }
-        (topo, x)
+        x
     } else {
-        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-        (dc.topo, dc.x)
+        crate::newton::dc_op_solve(&topo, netlist, &mut devices, &ctx, opts, Some(&plan))?.0
     };
-    let mut topo = topo;
-    let (mut devices, footprints) =
-        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
-    // Pad x for any OSDI internal-node rows allocated by build_devices.
     x.resize(topo.size, 0.0);
-    let solver = opts.linear_solver(topo.size);
-    // Structural sparsity pattern: same for every timestep and every NR
-    // iteration within them, so build it once here.
-    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
-    plan.resolve_device_cells(&mut devices);
+
+    // A lumped shifter longer than a tenth of an RF wavelength at the drive's
+    // own knee frequency is not the device the deck asked for, and the lumped
+    // answer looks reasonable either way (#122).
+    crate::electrical_length::warn_from_sources(
+        netlist,
+        &devices,
+        &crate::newton::build_device_names(netlist),
+    );
+    // And the optical side of the same question: a cavity whose round trip is
+    // instantaneous has no photon lifetime (#123).
+    crate::connectivity::warn_if_cavity_without_delay(netlist, opts);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
@@ -558,7 +634,30 @@ pub fn tran_nr_with_registry_var_opts_into(
         .flatten()
         .collect();
 
+    // Every row the LTE estimate does not look at: the nodes a source pins, and
+    // everything past the node block (branch rows, which the norm never
+    // reaches). A delay device reporting a curvature on one of these is
+    // reporting an error nothing else can catch — see `device_curvature_limit`.
+    let lte_blind: HashSet<usize> = forced_nodes
+        .iter()
+        .copied()
+        .chain(n_nodes..topo.size)
+        .collect();
+
+    // Seed device history from the operating point.
+    //
+    // The `eval` is what makes the `commit_timestep` land: a delay line only
+    // records while it is engaged, and it learns that from an `eval` under
+    // transient flags. Without it history begins at the end of the *first
+    // step*, `sample` clamps to that one point, and the whole first delay
+    // window is reconstructed from it — an O(h) answer in a scheme that is
+    // otherwise second order (#120).
+    //
+    // This only works now that the devices are the same instances the
+    // operating point solved, so `x` holds their branch currents rather than
+    // the zeros a second allocation left behind (#121).
     for dev in &mut devices {
+        dev.eval(&x, EvalFlags::tran(), &ctx);
         dev.commit_timestep(&x);
     }
 
@@ -577,7 +676,11 @@ pub fn tran_nr_with_registry_var_opts_into(
     sink.point(0.0, &x)?;
 
     let mut t = 0.0_f64;
-    let mut h = step;
+    // The first step gets the same device-requested bound every later step gets
+    // (see the `requested_max_timestep` call after an accepted step). A delay
+    // device asks for `tau/2`, and a first step longer than the delay would
+    // reconstruct it from a history one sample deep.
+    let mut h = step.min(device_max_timestep(&devices).unwrap_or(f64::INFINITY));
     let mut h_prev = 0.0_f64;
     let mut x_prev = x.clone();
     let mut consecutive_rejects = 0usize;
@@ -826,17 +929,24 @@ pub fn tran_nr_with_registry_var_opts_into(
                 h_actual * (0.9 / lte_norm).sqrt()
             };
             h = h.clamp(h_actual * 0.1, h_actual * 4.0).min(step);
-            // A compiled model may have asked for a smaller next step through
-            // Verilog-A's `$bound_step`. LTE cannot cover that on its own: it
-            // measures the error of a step already taken, and the model is saying
-            // the *next* one will miss something. Native devices return `None`.
-            if let Some(bound) = devices
-                .iter()
-                .filter_map(|d| d.requested_max_timestep())
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            {
+            // A model may have asked for a smaller next step — a compiled one
+            // through Verilog-A's `$bound_step`, a delay device because its
+            // reconstruction needs samples inside the delay window. LTE covers
+            // neither on its own: it measures the error of a step already
+            // taken, and both are saying the *next* one will miss something.
+            if let Some(bound) = device_max_timestep(&devices) {
                 h = h.min(bound);
             }
+            // And the part of a delay's error that depends on a tolerance. The
+            // device reports how fast its delayed quantity is bending; the
+            // tolerance for that row lives here; linear interpolation's error
+            // is `h²·|y''|/8`, so this is the step at which it fits.
+            //
+            // A bound rather than a rejection, and that is not a detail: the
+            // error in a reconstruction lives in history recorded a delay ago,
+            // so rejecting the current step cannot reduce it and a controller
+            // that tries shrinks until it runs out of rejections (#112 part 2).
+            h = h.min(device_curvature_limit(&devices, &tol, &x, &lte_blind));
         } else {
             consecutive_rejects += 1;
             if consecutive_rejects > opts.max_rejections {

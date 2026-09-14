@@ -13,8 +13,8 @@ pub use photonic::{
     pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
     thermal_rc_phase_shifter, ActiveOpticalDevice, NativeAwgr, NativeCirculator, NativeCwLaser,
     NativeDemux, NativeDirectionalCoupler, NativeDrivenLaser, NativeFacet, NativeGratingCoupler,
-    NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter, NativeWaveguide,
-    SpectrumTable,
+    NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector, NativeSplitter,
+    NativeTwPhaseShifter, NativeWaveguide, SpectrumTable,
 };
 pub use switch::{Switch, SwitchControl};
 pub use tline::NativeTLine;

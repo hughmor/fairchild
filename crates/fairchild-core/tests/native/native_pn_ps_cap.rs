@@ -158,3 +158,57 @@ Vmod vmod 0 PULSE({vdc} {vdc_plus:.3} 1n 50p 50p 50n 100n)
         "transient must converge in both bias regimes; got {v_zero_end} / {v_rev_end}"
     );
 }
+
+/// A junction stores `q = ∫C dv`, not `C(v)·v`, and the integrator has to
+/// advance the charge.
+///
+/// The anchor is conservation, with no RC and no reference simulator in it:
+/// drive the junction with a known constant current for a known time, and the
+/// charge delivered is `I·T` exactly. The closed form says which voltage that
+/// much charge reaches.
+///
+/// Integrating `C(v)·v` instead — which is what a branch reporting only a
+/// capacitance gets — makes the junction *faster* than it is. A 10-90 edge that
+/// should take 46 ps through 50 Ω took 20 ps, so every eye, bandwidth and edge
+/// measured through a `fc_pn_ps_cap` was optimistic, with nothing to notice.
+#[test]
+fn a_junction_stores_the_integral_of_its_capacitance() {
+    const C_J0: f64 = 750e-15;
+    const V_BI: f64 = 0.917;
+    const M_J: f64 = 0.5;
+    const V0: f64 = -3.0;
+    const I: f64 = 1e-3; // 1 mA into the junction
+    const T: f64 = 200e-12;
+
+    // q(v) = C_j0·V_bi/(1−m)·[1 − (1 − v/V_bi)^(1−m)]
+    let q = |v: f64| C_J0 * V_BI / (1.0 - M_J) * (1.0 - (1.0 - v / V_BI).powf(1.0 - M_J));
+
+    let net = format!(
+        "* charge conservation on a depletion junction\n\
+         .optical_port a\n\
+         .optical_port b\n\
+         Xl a fc_cw_laser power_mW=1.0 wavelength_nm=1550\n\
+         Xps a b p 0 fc_pn_ps_cap l_um=3000 v_pi_l=0.012 c_j0={C_J0:.6e} \
+         m_j={M_J} v_bi={V_BI} g_pn=0\n\
+         Ic 0 p DC {I:.6e}\n\
+         .ic v(p)={V0}\n\
+         .options uic=1\n"
+    );
+    let parsed = parse_spice(&net).expect("parse");
+    let opts = SimOptions::from_netlist(&parsed);
+    let res = tran_nr_with_registry_opts(&parsed, T / 400.0, T, &DeviceRegistry::new(), &opts)
+        .expect("transient");
+    let v_end = res.voltage_at("p", T).expect("node p");
+
+    let want_q = q(V0) + I * T;
+    let got_q = q(v_end);
+    assert!(
+        (got_q - want_q).abs() < 0.02 * (I * T),
+        "after {:.0} ps at {:.1} mA the junction holds {:.4} pC, expected {:.4} pC \
+         (V ended at {v_end:.4} V). Integrating C·v instead of ∫C dv lands well past this.",
+        T * 1e12,
+        I * 1e3,
+        got_q * 1e12,
+        want_q * 1e12
+    );
+}

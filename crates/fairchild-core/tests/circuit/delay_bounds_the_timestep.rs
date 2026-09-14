@@ -1,0 +1,401 @@
+//! Every device that owns a delay must bound the timestep, and the list of
+//! those devices must not be able to grow silently.
+//!
+//! `DelayLine::sample` clamps above its newest sample, so a step longer than
+//! the delay reconstructs it from the previous accepted point: the effective
+//! delay becomes `max(tau, h)` and tracks the step size rather than the
+//! geometry. Nothing in the LTE norm can see that — it measures the error of a
+//! step already taken, and this is an error in what the circuit *is*.
+//!
+//! The expensive failure here is an absence: a new delay device that forgets
+//! `requested_max_timestep` looks exactly like a correct one, and every
+//! existing test still passes. So this file carries a completeness gate as well
+//! as the behaviour, and the gate reads the source rather than a hand-kept
+//! list.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use fairchild_core::device::{Device, SimContext};
+use fairchild_core::models::{NativeTLine, NativeWaveguide};
+
+/// Devices known to own a `DelayLine`, by the file that declares the field.
+///
+/// Adding a delay to a device means adding it here *and* giving it a
+/// `requested_max_timestep`. The gate below fails on a file that has one and is
+/// not listed, which is the only way to notice the omission.
+const KNOWN_DELAY_OWNERS: &[&str] = &[
+    "models/tline.rs",            // NativeTLine — TD
+    "models/photonic/segment.rs", // OpticalSegment — tau_g, under waveguide_delay
+    "models/photonic/xfer.rs",    // NativeOptical2x2 — tau_s
+];
+
+/// Walk `src/` and report every file declaring a `DelayLine` field.
+fn files_owning_a_delay_line() -> BTreeSet<String> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = BTreeSet::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            // The field declaration, not the `use` line or a doc mention.
+            if text.contains(": DelayLine,") {
+                let rel = path
+                    .strip_prefix(&src)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.insert(rel);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn every_delay_owner_is_accounted_for() {
+    let found = files_owning_a_delay_line();
+    let known: BTreeSet<String> = KNOWN_DELAY_OWNERS.iter().map(|s| s.to_string()).collect();
+    let unlisted: Vec<_> = found.difference(&known).collect();
+    assert!(
+        unlisted.is_empty(),
+        "these files declare a DelayLine and are not in KNOWN_DELAY_OWNERS: {unlisted:?}. \
+         Add each one here and give its device a `requested_max_timestep`, or a step \
+         longer than its delay will silently become its delay."
+    );
+    let vanished: Vec<_> = known.difference(&found).collect();
+    assert!(
+        vanished.is_empty(),
+        "KNOWN_DELAY_OWNERS lists files with no DelayLine any more: {vanished:?}. \
+         Remove them so the gate keeps meaning something."
+    );
+}
+
+#[test]
+fn a_transmission_line_bounds_the_step_to_half_its_delay() {
+    let t = NativeTLine::new(50.0, 1e-9);
+    assert_eq!(
+        t.requested_max_timestep(),
+        Some(0.5e-9),
+        "a T element must ask for TD/2"
+    );
+    // TD = 0 is a wire, not a delay, and must not pin the step to zero.
+    let wire = NativeTLine::new(50.0, 0.0);
+    assert_eq!(wire.requested_max_timestep(), None);
+}
+
+/// A waveguide asks only when the option that engages its delay is on. This is
+/// the on/off pair `CLAUDE.md` asks for: a bound that appeared unconditionally
+/// would throttle every photonic run for a delay it is not modelling.
+#[test]
+fn a_waveguide_bounds_the_step_only_when_the_delay_is_engaged() {
+    let build = |delay: bool| {
+        let ctx = SimContext {
+            waveguide_delay: delay,
+            ..Default::default()
+        };
+        let mut wg = NativeWaveguide::new();
+        wg.setup_model(&ctx);
+        // 1 cm at n_g = 4.19 (the default strip) => tau_g ~ 140 ps.
+        wg.set_real_param("l_m", 1e-2);
+        wg.setup_model(&ctx);
+        wg
+    };
+    assert_eq!(
+        build(false).requested_max_timestep(),
+        None,
+        "delay off: no bound, or every photonic run pays for a delay it is not modelling"
+    );
+    let bound = build(true)
+        .requested_max_timestep()
+        .expect("delay on: a bound");
+    let tau_g = 1e-2 * 4.19 / 299_792_458.0;
+    assert!(
+        (bound - tau_g / 2.0).abs() < 1e-18,
+        "expected tau_g/2 = {:.4e}, got {bound:.4e}",
+        tau_g / 2.0
+    );
+}
+
+/// A fixed-step run keeps its output grid **and** resolves the delay, by taking
+/// an integer number of internal steps per requested point.
+///
+/// The grid is a promise: shrinking the step outright would move every output
+/// time. An integer factor moves none of them — each requested time is still
+/// landed on exactly, with no interpolation — and the delay gets the resolution
+/// it asked for. The cost is reported once rather than hidden.
+///
+/// This used to refuse, which was worse: it handed the user an arithmetic
+/// problem the device had already solved.
+#[test]
+fn a_fixed_step_run_substeps_rather_than_losing_the_delay() {
+    let net = "* coarse step on a 1 ns line\n\
+               Vs s 0 PULSE(0 1 0.5n 10p 10p 100n 200n)\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rterm b 0 1Meg\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    // 2 ns steps on a 1 ns line: four internal steps per output point.
+    let coarse = fairchild_core::tran_nr(&parsed, 2e-9, 12e-9).expect("must not refuse");
+
+    // The output grid is exactly the one asked for.
+    for (k, t) in coarse.time.iter().enumerate().take(6) {
+        let want = k as f64 * 2e-9;
+        assert!(
+            (t - want).abs() < 1e-15,
+            "output point {k} landed at {t:.4e}, the card asked for {want:.4e}"
+        );
+    }
+
+    // And the physics is the physics: the far end doubles one TD after the
+    // launch at 0.5 ns, so by the 2 ns sample it is up. Before sub-stepping
+    // this read 0 here and rose at 4 ns — the line behaving as TD = 2 ns.
+    let v_b = coarse.voltage_at("b", 2e-9).expect("node b");
+    assert!(
+        v_b > 0.9,
+        "far end should be up by t = 2 ns (launch 0.5 ns + TD = 1 ns), got {v_b:.4}"
+    );
+    // The near-end reflection arrives at 2·TD after the launch, so it is up by
+    // the 4 ns sample and not by the 2 ns one.
+    let v_a_early = coarse.voltage_at("a", 2e-9).expect("node a");
+    let v_a_late = coarse.voltage_at("a", 4e-9).expect("node a");
+    assert!(
+        v_a_early < 0.6 && v_a_late > 0.9,
+        "near end should still be at the launched half-step at 2 ns and up at 4 ns, \
+         got {v_a_early:.4} then {v_a_late:.4}"
+    );
+
+    // A step the delay can carry needs no sub-stepping and must be unchanged.
+    let fine = fairchild_core::tran_nr(&parsed, 20e-12, 12e-9).expect("20 ps step");
+    let fine_b = fine.voltage_at("b", 2e-9).expect("node b");
+    assert!(
+        (v_b - fine_b).abs() < 0.02,
+        "the sub-stepped answer must agree with a natively fine run: \
+         {v_b:.4} vs {fine_b:.4}"
+    );
+}
+
+/// The variable-step controller honours the bound instead of refusing, because
+/// there the step is its to choose. The `.tran` card asks for 2 ns; every
+/// accepted step must come in under TD/2.
+#[test]
+fn the_variable_step_controller_honours_the_bound_from_the_first_step() {
+    let net = "* coarse card, adaptive stepping, 1 ns line\n\
+               Vs s 0 PULSE(0 1 0.5n 10p 10p 100n 200n)\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rterm b 0 1Meg\n\
+               .options variable_step=1\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    let res = fairchild_core::tran_nr_var(&parsed, 2e-9, 6e-9).expect("transient");
+    let worst = res
+        .time
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= 0.5e-9 + 1e-15,
+        "largest accepted step {worst:.3e} s exceeds TD/2; the first step is the \
+         one that escapes if the bound is only applied after an acceptance"
+    );
+    // The physics the bound exists to protect: the far end doubles one TD after
+    // the launch, not one timestep after it.
+    let v_b = res.voltage_at("b", 1.6e-9).expect("node b");
+    assert!(
+        v_b > 0.9,
+        "far end should have doubled to ~1 V by t = 1.6 ns (launch 0.5 ns + TD), got {v_b:.4}"
+    );
+    let v_b_early = res.voltage_at("b", 1.2e-9).expect("node b");
+    assert!(
+        v_b_early < 0.1,
+        "far end must still be quiet at t = 1.2 ns, got {v_b_early:.4}"
+    );
+}
+
+// ── the part of the error a tolerance decides (#112 part 2) ──────────────────
+
+/// A line between two ideal sources: every node is forced, so the LTE estimate
+/// has **nothing** to look at.
+///
+/// The estimate covers node rows and excludes the ones a source pins. Here that
+/// is all of them, and the only unknowns left are the two port currents, which
+/// the norm never reaches. Without a bound the controller sees an error of
+/// identically zero and runs at the card's step, whatever the delayed wave is
+/// doing.
+///
+/// The line is lossy so the two sources are not a DC short of each other, which
+/// would be a voltage-source loop and is correctly refused.
+fn two_source_line(freq: f64) -> String {
+    format!(
+        "* line between two ideal sources\n\
+         Vs s 0 SIN(0 1 {freq:e} 0 0 0)\n\
+         Vt b 0 DC 0\n\
+         T1 s 0 b 0 Z0=50 TD=0.7n loss_db=3\n\
+         .options variable_step=1\n"
+    )
+}
+
+#[test]
+fn a_delay_bounds_the_step_where_the_lte_estimate_is_blind() {
+    let parsed = fairchild_parser::parse_spice(&two_source_line(1e9)).expect("parse");
+    // The card asks for 100 ps and TD/2 allows 350, so nothing else in the
+    // controller would go below 100 ps here.
+    let res = fairchild_core::tran_nr_var(&parsed, 100e-12, 4e-9).expect("transient");
+    let steps: Vec<f64> = res.time.windows(2).map(|w| w[1] - w[0]).collect();
+    // Skip the opening steps: the bound needs three samples before it can
+    // estimate a curvature at all, so the first two are unconstrained (#120).
+    let settled = &steps[3..];
+    let worst = settled.iter().copied().fold(0.0f64, f64::max);
+    assert!(
+        worst < 20e-12,
+        "with every node forced, only the delay's own curvature can bound the \
+         step; largest settled step was {:.2} ps against a 100 ps card",
+        worst * 1e12
+    );
+}
+
+/// And the bound is the formula, not a constant.
+///
+/// `h ≤ √(8·tol/|y''|)` with `y'' ∝ ω²`, so the step goes as `1/ω`: doubling
+/// the source frequency roughly halves it. That scaling is a property of the
+/// expression rather than of this circuit, which is what makes it an anchor —
+/// a hard-coded step limit would pass the test above and fail this one, and a
+/// `1/ω²` law would overshoot it by the same margin.
+///
+/// "Roughly", because `tol = vntol + reltol·|x|` moves with the amplitude at
+/// the port, and the reflection pattern of a fixed `TD` is not the same at the
+/// two frequencies. Measured 2.1 against an ideal 2.0; the window below admits
+/// nothing that is not a `1/ω` law.
+#[test]
+fn the_curvature_bound_scales_as_one_over_frequency() {
+    let settled_max = |freq: f64| {
+        let parsed = fairchild_parser::parse_spice(&two_source_line(freq)).expect("parse");
+        let res = fairchild_core::tran_nr_var(&parsed, 100e-12, 3e-9).expect("transient");
+        let mut steps: Vec<f64> = res.time[3..].windows(2).map(|w| w[1] - w[0]).collect();
+        // The median, not the extremes. A sine's curvature passes through zero
+        // twice a cycle, where this bound goes to infinity and something else
+        // limits the step, so the largest step says more about the other
+        // limiter than about this one.
+        steps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        steps[steps.len() / 2]
+    };
+    let (lo, hi) = (settled_max(1e9), settled_max(2e9));
+    let ratio = lo / hi;
+    assert!(
+        (1.5..2.6).contains(&ratio),
+        "doubling the frequency should roughly halve the bound: {:.3} ps at \
+         1 GHz and {:.3} ps at 2 GHz is a ratio of {ratio:.2}. A fixed limit \
+         would give 1 and a 1/omega^2 law would give 4",
+        lo * 1e12,
+        hi * 1e12
+    );
+}
+
+// ── the operating point reaches the transient (#121, #120) ───────────────────
+
+/// Extra rows are allocated **once**.
+///
+/// `push_device` appends fresh rows on every call, so building the devices for
+/// the operating point and again for the transient gave every device two sets
+/// and left the first solved and then discarded. The count is the cheapest
+/// witness: this deck has three nodes, one voltage source and one `T` element
+/// with two branch-current rows, so a single allocation is exactly six
+/// unknowns and a double one would be eight.
+#[test]
+fn a_transient_allocates_its_device_rows_once() {
+    let net = "* row count\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rl b 0 1k\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    let ctx = fairchild_core::SimOptions::from_netlist(&parsed).sim_context();
+    let registry = fairchild_core::DeviceRegistry::new();
+    let mut topo = fairchild_core::mna::CircuitTopology::build_resolved(&parsed, &ctx, &registry);
+    let _ = fairchild_core::newton::build_devices(&parsed, &mut topo, &ctx, &registry)
+        .expect("build devices");
+    assert_eq!(
+        topo.size, 6,
+        "3 nodes + 1 source branch + 2 line branches. Eight means the devices \
+         were built twice and the operating point solved rows nobody reads"
+    );
+}
+
+/// The first delay window is exact, not first-order.
+///
+/// History now starts at `t = 0` with the operating point's state, so the
+/// clamp `sample` applies before the first recorded point is the *rest state*
+/// rather than whatever the first step happened to produce. Inside the first
+/// window nothing has returned from the far end, so the line presents `Z0` and
+/// the current is `−v(t)/Z0` exactly — a closed form with no step in it.
+///
+/// This used to scale linearly with the first step: 23.6 mA / 2.5 mA / 0.25 mA
+/// at 100 / 10 / 1 ps, an O(h) answer where the rest of the reconstruction is
+/// second order (#120). It only became fixable once the devices stopped being
+/// built twice (#121) — before that the seeding had node voltages that were
+/// right and branch currents that were identically zero.
+#[test]
+fn the_first_delay_window_is_step_independent() {
+    const Z0: f64 = 50.0;
+    const F: f64 = 1e9;
+    // A line between two ideal sources, so the port currents are the only
+    // unknowns and nothing else can mask the reconstruction. Lossy, or the two
+    // sources would be a DC short of each other.
+    let net = format!(
+        "* first delay window\n\
+         Vs s 0 SIN(0 1 {F:e} 0 0 0)\n\
+         Vt b 0 DC 0\n\
+         T1 s 0 b 0 Z0={Z0} TD=0.7n loss_db=3\n"
+    );
+    let parsed = fairchild_parser::parse_spice(&net).expect("parse");
+    // 300 ps is inside the first delay window (TD = 700 ps) and away from the
+    // sine's zero crossings, where any answer would look right.
+    let probe = 300e-12;
+    let exact = -(2.0 * std::f64::consts::PI * F * probe).sin() / Z0;
+    for step in [100e-12, 10e-12, 1e-12] {
+        let res = fairchild_core::tran_nr(&parsed, step, 600e-12).expect("transient");
+        let got = res.isrc_at("vs", probe).expect("I(Vs)");
+        assert!(
+            (got - exact).abs() < 1e-9,
+            "at a {:.0} ps step the first window gives {:.6} mA; the line looks \
+             like Z0 there, so it is {:.6} mA at any step",
+            step * 1e12,
+            got * 1e3,
+            exact * 1e3
+        );
+    }
+}
+
+/// And the state that makes it exact is the operating point's own.
+///
+/// A line carrying a DC bias must still be carrying it at the first transient
+/// step. The current through it at `t = 0+` is the one `.op` solved, which for
+/// this divider is `1/(50 + 1000)`.
+#[test]
+fn a_biased_line_keeps_its_operating_point_through_the_first_step() {
+    let net = "* bias through a line, into a transient\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rload b 0 1k\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    let res = fairchild_core::tran_nr(&parsed, 100e-12, 3e-9).expect("transient");
+    let want = 1000.0 / 1050.0;
+    for t in [0.0, 100e-12, 1.5e-9, 3e-9] {
+        let v_b = res.voltage_at("b", t).expect("node b");
+        assert!(
+            (v_b - want).abs() < 1e-9,
+            "V(b) at {:.2} ns is {v_b:.9}, and the operating point says \
+             {want:.9} at every time — nothing in this circuit moves",
+            t * 1e9
+        );
+    }
+}

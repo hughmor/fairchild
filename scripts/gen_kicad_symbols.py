@@ -86,6 +86,30 @@ SYMBOLS = [
         ],
         "pins": [pin("port", LEFT, 0.0)],
     },
+    {
+        "name": "fc_tw_ps",
+        "ref": "TWPS",
+        "params": "type=X model=fc_tw_ps l_um=3000 v_pi_l=0.012 n_m=4.2 z0=35 f_max=50G",
+        "box": (-6.35, 3.81, 6.35, -3.81),
+        # A travelling-wave electrode over a guide: the RF crosses the top and
+        # the light crosses the bottom, with the taps that couple them between.
+        # The picture is the topology, which is the thing a reader needs.
+        "art": [
+            ("poly", [(-6.35, 2.54), (6.35, 2.54)], "none"),
+            ("poly", [(-6.35, -2.54), (6.35, -2.54)], "none"),
+            ("poly", [(-3.81, 2.54), (-3.81, -2.54)], "none"),
+            ("poly", [(-1.27, 2.54), (-1.27, -2.54)], "none"),
+            ("poly", [(1.27, 2.54), (1.27, -2.54)], "none"),
+            ("poly", [(3.81, 2.54), (3.81, -2.54)], "none"),
+        ],
+        # Positional order on the X line: in, out, rf_in, rf_out.
+        "pins": [
+            pin("in", LEFT, -2.54),
+            pin("out", RIGHT, -2.54),
+            pin("rf_in", LEFT, 2.54, ELECTRICAL),
+            pin("rf_out", RIGHT, 2.54, ELECTRICAL),
+        ],
+    },
 ]
 
 PIN_LENGTH = 2.54

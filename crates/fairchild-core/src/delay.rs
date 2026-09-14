@@ -70,9 +70,28 @@ impl DelayLine {
     ///
     /// Clamping semantics: before the first recorded sample the signal is taken
     /// as the earliest snapshot (the DC/initial value); after the last it holds
-    /// the most recent snapshot, so a delay shorter than the current timestep
-    /// degrades gracefully to "no delay" rather than extrapolating. Returns a
-    /// `width`-long zero vector if no history has been recorded yet.
+    /// the most recent snapshot rather than extrapolating.
+    ///
+    /// That second clamp is a trap worth naming. When the step `h` exceeds the
+    /// delay, `t − delay_s` lands past the newest sample and the reconstruction
+    /// returns the *previous accepted solution*. The device does not lose its
+    /// delay, it gets a delay of `h`: the effective delay is `max(τ, h)`, which
+    /// tracks the step size instead of the geometry. Devices owning a delay
+    /// therefore bound the step through
+    /// [`Device::requested_max_timestep`](crate::device::Device::requested_max_timestep)
+    /// so this cannot be reached (#112).
+    ///
+    /// The *first* clamp is what the operating point is for. History is seeded
+    /// at `t = 0` with the DC state, so a query before the run started returns
+    /// the circuit at rest rather than whatever the first step produced. That
+    /// used to be an O(h) error lasting a full delay window, because the
+    /// seeding could not see a device's branch currents — the extra rows were
+    /// allocated twice and the operating point solved a different set (#120,
+    /// #121).
+    ///
+    /// Returns a `width`-long zero vector if no history has been recorded yet.
+    /// A device should treat that case as "no past" and stamp its steady-state
+    /// limit, not as "the past was zero".
     pub fn sample(&self, delay_s: f64, width: usize) -> Vec<f64> {
         let tq = self.time_s - delay_s;
         if self.hist_t.is_empty() {
@@ -98,6 +117,58 @@ impl DelayLine {
         let (a, b) = (&self.hist_vals[i], &self.hist_vals[i + 1]);
         let w = a.len().min(b.len());
         (0..w).map(|j| a[j] + f * (b[j] - a[j])).collect()
+    }
+
+    /// Curvature of the most recently recorded samples, element by element:
+    /// `|d²y/dt²|` from the newest three.
+    ///
+    /// This is what bounds the step, and the reason it is the *newest* samples
+    /// rather than the ones at the query time is worth stating, because the
+    /// obvious version does not work.
+    ///
+    /// `sample` interpolates linearly, whose error is at most `⅛·h²·|f''|`. It
+    /// would seem natural to estimate that error at the query time and hand it
+    /// to the step controller as a local truncation error. That controller then
+    /// rejects the step and tries a smaller one — and the error does not
+    /// improve, because it is a property of history recorded a delay ago at
+    /// whatever step was in force *then*. Shrinking the current step cannot fix
+    /// it retroactively, so the controller shrinks until it runs out of
+    /// rejections and the run fails. Measured, on a matched line carrying a
+    /// 1 GHz sine.
+    ///
+    /// The constraint is therefore forward-looking: record densely enough that a
+    /// future reconstruction will be accurate. The signal a delay line will
+    /// interpolate through is the one it is recording now, so its curvature now
+    /// is exactly the right thing to limit the next step by — no lag, and no
+    /// feedback loop, because a bound is not a rejection (#112 part 2).
+    ///
+    /// Zeros with fewer than three samples, or where the samples are not
+    /// strictly ordered.
+    pub fn recent_curvature(&self, width: usize) -> Vec<f64> {
+        let zero = vec![0.0; width];
+        let n = self.hist_t.len();
+        if n < 3 {
+            return zero;
+        }
+        let (ta, tb, tc) = (self.hist_t[n - 3], self.hist_t[n - 2], self.hist_t[n - 1]);
+        if !(tc > tb && tb > ta) {
+            return zero;
+        }
+        let (va, vb, vc) = (
+            &self.hist_vals[n - 3],
+            &self.hist_vals[n - 2],
+            &self.hist_vals[n - 1],
+        );
+        let w = width.min(va.len()).min(vb.len()).min(vc.len());
+        let mut out = zero;
+        for j in 0..w {
+            // Second divided difference times two is the second derivative of
+            // the quadratic through the three points.
+            let d1 = (vb[j] - va[j]) / (tb - ta);
+            let d2 = (vc[j] - vb[j]) / (tc - tb);
+            out[j] = (2.0 * (d2 - d1) / (tc - ta)).abs();
+        }
+        out
     }
 
     /// Record `snapshot` at the current time (set via [`Self::set_state`]) and trim
@@ -173,6 +244,43 @@ mod tests {
         // Query at/after last (delay < step) → most recent value.
         d.set_state(true, 2.0);
         assert_eq!(d.sample(0.0, 1)[0], 20.0);
+    }
+
+    /// The curvature estimate is exact for a quadratic, which is the only case
+    /// where it has a closed form: `y = a·t²` has `y'' = 2a` everywhere.
+    #[test]
+    fn the_curvature_estimate_is_exact_for_a_quadratic() {
+        for a in [1.0, -3.5, 0.25] {
+            let mut d = DelayLine::new();
+            for t in 0..=4 {
+                let t = t as f64 * 0.5;
+                d.set_state(true, t);
+                d.record(vec![a * t * t], 10.0);
+            }
+            let est = d.recent_curvature(1)[0];
+            assert!(
+                (est - 2.0 * a.abs()).abs() < 1e-9,
+                "a={a}: curvature estimate {est}, exact {}",
+                2.0 * a.abs()
+            );
+        }
+    }
+
+    /// A straight line has no curvature, so it must not shrink anybody's step.
+    #[test]
+    fn the_curvature_estimate_is_zero_for_a_ramp() {
+        let mut d = DelayLine::new();
+        for t in 0..=4 {
+            let t = t as f64;
+            d.set_state(true, t);
+            d.record(vec![3.0 * t - 1.0], 10.0);
+        }
+        assert!(d.recent_curvature(1)[0] < 1e-12);
+        // And with too little history to fit a quadratic at all.
+        let mut thin = DelayLine::new();
+        thin.set_state(true, 0.0);
+        thin.record(vec![0.0], 10.0);
+        assert_eq!(thin.recent_curvature(1)[0], 0.0);
     }
 
     #[test]

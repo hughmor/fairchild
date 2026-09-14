@@ -211,24 +211,57 @@ need. For anything nonlinear, write the `B` element directly.
 > letters and mean something quite different. They are refused by name, with a
 > message pointing at `B` — rather than being read as a node called `POLY(1)`.
 
-### Transmission line (lossless)
+### Transmission line
 
 ```
-T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  TD=<seconds>
+T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  TD=<seconds>  [loss_db=<dB>]
 T<name>  <A+> <A-> <B+> <B->  Z0=<ohms>  F=<hz> [NL=<wavelengths>]
 ```
 
-Ideal lossless two-port delay line (Branin's method), characteristic impedance
-`Z0` and one-way delay `TD`. Instead of `TD` you may give a frequency `F` with
-optional normalised length `NL` (default `0.25`); then `TD = NL / F`. The delay
-is intrinsic and always modelled in transient analysis; at DC the line is an
-ideal through-connection. No `.model` card — parameters are on the element line.
+Two-port delay line (Branin's method), characteristic impedance `Z0` and
+one-way delay `TD`. Instead of `TD` you may give a frequency `F` with optional
+normalised length `NL` (default `0.25`); then `TD = NL / F`. The delay is
+intrinsic and always modelled in transient analysis. No `.model` card —
+parameters are on the element line.
 
 ```spice
-T1  in 0 out 0  Z0=50 TD=1n        ; 50 Ω, 1 ns one-way delay
+T1  in 0 out 0  Z0=50 TD=1n              ; 50 Ω, 1 ns one-way delay
+T2  in 0 out 0  Z0=35 TD=1n loss_db=1.5  ; and 1.5 dB of attenuation
 ```
 
-(Lossy lines with LTRA-style loss/dispersion are not yet supported.)
+`loss_db` is a **fairchild extension** — ngspice's `T` is lossless and rejects
+the key. It is the total one-way attenuation in dB (voltage and power dB agree
+for a line, so there is no factor of two to choose). The result is a
+*distortionless* line: a frequency-independent attenuation is what a line with
+`R'/L' = G'/C'` has, and for that line Branin's form is exact. Frequency
+dependent loss — a real conductor's skin effect, `α ∝ √f` — is **not**
+supported, and neither is LTRA-style dispersion.
+
+Per analysis: `.tran` reconstructs the delayed wave from history and bounds the
+timestep to `TD/2`; `.op`/`.dc` stamp the line's exact DC two-port (an ideal
+through-connection when lossless); `.ac`/`.noise` use the exact
+`k·exp(−jωTD)`; `.pz` **refuses**, because `exp(−s·TD)` has no linear matrix
+pencil and infinitely many poles.
+
+An unrecognised parameter on a `T` card is an error, not a silent drop.
+
+**Both stepping modes honour a delay, by different means.** A delay needs a step
+short enough to reconstruct it, and the two paths get there differently:
+
+* **Variable step** (`.options variable_step=1`) simply chooses it. The
+  controller clamps `h` to `TD/2`, from the first step, and additionally to
+  `√(8·tol/|y''|)` for any row its error estimate cannot see — a wave arriving
+  at a node a source pins, whose effect shows up as a current the estimate never
+  looks at.
+* **Fixed step** keeps the output grid you asked for and takes an integer number
+  of internal steps per point. Every requested time is still landed on exactly,
+  and the extra cost is reported once. Shrinking the step outright would have
+  moved every output time, and refusing would have handed you an arithmetic
+  problem the device had already solved.
+
+Both are seeded from the operating point, so a line already carrying a DC bias
+is still carrying it at the first step, and the first delay window is exact
+rather than first-order.
 
 ### Switches (`S` voltage-controlled, `W` current-controlled)
 
@@ -1171,7 +1204,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `enable_bidirectional` | false | Bundles carry forward **and** backward fields (5 wires/channel instead of 3); reflective devices become meaningful. Aliases: `bidirectional`, `bidirectional_propagation`. See [§14](#14-verilog-a-models-osdi) |
 | `sanity_check` | true | Netlist preflight pass (R=0, duplicate refdes, zero-parameter `fc_*`, …) warning before analysis. Disable with `nosanitycheck` / `sanity_check=0` |
 | `verbose` | false | Solver progress notes to stderr: matrix size/NNZ, which convergence phase ran, top residual rows on NR failure. CLI `-v` |
-| `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). Aliases: `optical_delay`, `wg_delay`. See [`fc_waveguide`](photonic-models.md#fc_waveguide--lossy-waveguide). |
+| `waveguide_delay` | unset | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators. In `.tran` this bounds the timestep to τ_g/2; in `.ac` it is an exact `exp(−jΩτ_g)`; `.pz` refuses it. Aliases: `optical_delay`, `wg_delay`. Three states, not two: unset and `=0` both give instantaneous transmission, but a deck with a **closed optical path** and delays unset is told that its cavity has no photon lifetime. `optical_delay=0` says you meant it and silences that. See [`fc_waveguide`](photonic-models.md#fc_waveguide--lossy-waveguide). |
 
 Setting any of these from the netlist:
 

@@ -959,6 +959,7 @@ pub(super) fn remap_element_nodes(
             b_neg,
             z0,
             td,
+            loss_db,
         } => Element::TransmissionLine {
             name: format!("{prefix}.{name}"),
             a_pos: rn(&a_pos),
@@ -967,6 +968,7 @@ pub(super) fn remap_element_nodes(
             b_neg: rn(&b_neg),
             z0,
             td,
+            loss_db,
         },
     }
 }

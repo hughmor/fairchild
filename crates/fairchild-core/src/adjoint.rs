@@ -297,8 +297,16 @@ pub fn dc_sensitivity(
     let repaired = frozen
         .iter()
         .map(|&col| {
-            let column =
-                fd_jacobian_column(col, &mut mat, &topo, &work, &mut devices, &ctx, &plan, &x);
+            let column = fd_jacobian_column(
+                col,
+                &mut mat,
+                &topo,
+                &work,
+                &mut devices,
+                &ctx,
+                Some(&plan),
+                &x,
+            );
             (col, column)
         })
         .collect::<Vec<_>>();
@@ -455,15 +463,19 @@ pub(crate) fn frozen_columns(topo: &CircuitTopology, devices: &[Box<dyn Device>]
 
 /// One column of `∂f/∂x` by central difference, leaving `mat` stamped wherever
 /// the last probe put it — the caller re-stamps at `x` afterwards.
+///
+/// `plan` is optional because `.ac` repairs the same columns (#113) and has no
+/// sparsity pattern to hand: it assembles once at the operating point rather
+/// than in a hot loop.
 #[allow(clippy::too_many_arguments)]
-fn fd_jacobian_column(
+pub(crate) fn fd_jacobian_column(
     col: usize,
     mat: &mut MnaMatrix,
     topo: &CircuitTopology,
     netlist: &Netlist,
     devices: &mut Vec<Box<dyn Device>>,
     ctx: &crate::device::SimContext,
-    plan: &StampPlan,
+    plan: Option<&StampPlan>,
     x: &[f64],
 ) -> Vec<f64> {
     let n = topo.size;
@@ -476,31 +488,11 @@ fn fd_jacobian_column(
     let mut f_minus = vec![0.0; n];
 
     probe[col] = x[col] + h;
-    let _ = residual_l2(
-        mat,
-        topo,
-        netlist,
-        devices,
-        ctx,
-        1.0,
-        0.0,
-        Some(plan),
-        &probe,
-    );
+    let _ = residual_l2(mat, topo, netlist, devices, ctx, 1.0, 0.0, plan, &probe);
     mat.residual_into(&probe, &mut f_plus);
 
     probe[col] = x[col] - h;
-    let _ = residual_l2(
-        mat,
-        topo,
-        netlist,
-        devices,
-        ctx,
-        1.0,
-        0.0,
-        Some(plan),
-        &probe,
-    );
+    let _ = residual_l2(mat, topo, netlist, devices, ctx, 1.0, 0.0, plan, &probe);
     mat.residual_into(&probe, &mut f_minus);
 
     let scale = 1.0 / (2.0 * h);

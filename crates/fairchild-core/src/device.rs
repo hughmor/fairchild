@@ -163,6 +163,20 @@ pub enum ReactiveKind {
 /// the device instead owns its own state through `commit_timestep` and
 /// stamps the discretised state equation directly in `load_jacobian_tran`.
 /// See the L3 PN-PS implementation for the canonical example (when it lands).
+/// One complex admittance entry at one frequency, from
+/// [`Device::ac_stamps`].
+///
+/// `row`/`col` are MNA indices and `(re, im)` is the complex coefficient added
+/// at that cell — so the real part lands in the `G` block and the imaginary
+/// part in the susceptance block, exactly as `jωC` would.
+#[derive(Clone, Copy, Debug)]
+pub struct AcStamp {
+    pub row: usize,
+    pub col: usize,
+    pub re: f64,
+    pub im: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveBranchSpec {
     pub kind: ReactiveKind,
@@ -187,6 +201,23 @@ pub struct ReactiveBranchSpec {
     /// `fc_pn_ps_cap` arm, the missing term is 22 % of the drive node's
     /// diagonal and put the parameter gradient 16 % out.
     pub dvalue_dstate: f64,
+    /// Stored charge (C) or flux (Wb) at the current iterate, when `value·state`
+    /// is not it.
+    ///
+    /// **This is the state variable the integrator advances**, and for a
+    /// junction it is not `C(v)·v`. The depletion charge is `q(v) = ∫C dv`, and
+    /// with `C ∝ (1 − v/V_bi)^−m` the two differ by a factor of 2.3 over a 2 V
+    /// step. Integrating `C(v)·v` makes the device *faster* than it is — a
+    /// `fc_pn_ps_cap` arm that should take 46 ps to cross 10-90 through 50 Ω
+    /// took 20 ps, and every eye, bandwidth and edge measured through it was
+    /// wrong in the optimistic direction, with nothing to notice.
+    ///
+    /// `None` means `q = value·state`, which is exact for a linear branch and
+    /// is what every constant `C` or `L` reports. A branch reporting a charge
+    /// also gets its Jacobian from `value` alone (`∂i/∂v = α·dq/dv = α·C`), so
+    /// it leaves [`Self::dvalue_dstate`] at zero: the correction that field
+    /// exists for is a correction to the wrong charge model.
+    pub charge: Option<f64>,
 }
 
 /// Bit-flags controlling which contributions `eval` should compute.
@@ -314,6 +345,27 @@ pub trait Device: Send + Sync {
     /// all.
     fn load_reactive_jacobian(&self, _c_mat: &mut [crate::mna::SparseRow]) {}
 
+    /// Complex admittance entries at one frequency that are **not** of the form
+    /// `G + jωC + Λ/(jω)`.
+    ///
+    /// The `G`/`C`/`Λ` matrices cover every device whose small-signal behaviour
+    /// is a rational function of `jω` with the poles the assembly already knows
+    /// about. A delay is not one: its frequency response is `exp(−jωτ)`, which
+    /// is transcendental and cannot be spelled in those three matrices at all.
+    ///
+    /// Such a device stamps the delayed coupling here instead of writing it to
+    /// the residual, which is where the transient keeps it and where no
+    /// frequency-domain analysis reads it (#110). Returning a non-empty list is
+    /// also the declaration that this device has **no linear matrix pencil**,
+    /// which is why `.pz` refuses a circuit containing one rather than solving a
+    /// system it has silently truncated.
+    ///
+    /// Indices are MNA rows/columns, as for [`Device::load_jacobian`], and the
+    /// entries are *added* to whatever `load_jacobian` already stamped.
+    fn ac_stamps(&self, _omega: f64) -> Vec<AcStamp> {
+        Vec::new()
+    }
+
     /// Resolve the matrix cells this device stamps into, once, against the
     /// structural pattern the hot loop's matrix was built with.
     ///
@@ -380,6 +432,48 @@ pub trait Device: Send + Sync {
     /// It exists for compiled models, where Verilog-A's `$bound_step` is the
     /// model saying "do not step past this or you will miss something". LTE alone
     /// cannot cover that, because it measures the error of a step already taken.
+    /// The highest frequency at which this device's *lumped* assumption still
+    /// holds, or `None` if it makes no such assumption.
+    ///
+    /// A lumped phase shifter holds its whole electrode at one voltage. That is
+    /// true while the device is short against the RF wavelength and false where
+    /// a travelling-wave modulator earns its name — and the lumped answer looks
+    /// perfectly reasonable on either side of the line. Reporting the limit lets
+    /// the run say so rather than leaving the user to work it out (#122).
+    ///
+    /// The electrode index is not a parameter of a lumped device, so whatever a
+    /// device returns here rests on an assumed one; say which in the doc of the
+    /// implementation. `crate::electrical_length::lumped_limit_hz` is the shared
+    /// criterion, so there is one place that decides what "short" means.
+    fn lumped_valid_to_hz(&self) -> Option<f64> {
+        None
+    }
+
+    /// Curvature of a delayed quantity this device will have to interpolate,
+    /// as `(row, |d²y/dt²|)`.
+    ///
+    /// A companion to [`Device::requested_max_timestep`] for the part of the
+    /// error that depends on a tolerance. The device knows the physics — how
+    /// fast its delayed quantity is bending — and the controller knows what
+    /// counts as accurate for that row, so the two are reported separately and
+    /// combined as `h ≤ √(8·tol/|y''|)`, the step at which linear
+    /// interpolation's `⅛·h²·|y''|` fits inside the row's tolerance.
+    ///
+    /// It has to be a **bound on the next step**, not a local truncation error.
+    /// An LTE gets a step *rejected* and retried smaller; the error in a
+    /// reconstruction cannot be fixed that way, because it lives in history
+    /// recorded a delay ago at whatever step was in force then. A controller
+    /// that rejects on it shrinks until it runs out of rejections. See
+    /// [`DelayLine::recent_curvature`](crate::delay::DelayLine::recent_curvature).
+    ///
+    /// `row` is the row whose tolerance applies, not necessarily the row the
+    /// quantity is stamped into: a delayed travelling wave is a voltage stamped
+    /// into a *current* row, and comparing volts against a current tolerance
+    /// would be meaningless.
+    fn delay_curvature(&self) -> Vec<(usize, f64)> {
+        Vec::new()
+    }
+
     fn requested_max_timestep(&self) -> Option<f64> {
         None
     }

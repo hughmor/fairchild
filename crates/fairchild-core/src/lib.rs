@@ -21,6 +21,7 @@ pub mod dc_sweep;
 pub mod delay;
 pub mod device;
 pub mod device_registry;
+pub mod electrical_length;
 pub mod error;
 pub mod lambda;
 pub mod measure;

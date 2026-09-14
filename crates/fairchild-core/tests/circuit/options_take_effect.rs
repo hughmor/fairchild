@@ -68,7 +68,7 @@ const ARRIVES: &[(&str, &str, &str)] = &[
     ("trannoise", "1", "trannoise"),
     ("noiseseed", "7", "noiseseed"),
     ("noisescale", "2", "noisescale"),
-    ("waveguide_delay", "1", "waveguide_delay"),
+    ("waveguide_delay", "1", "optical_delay"),
     ("cond_estimate", "1", "cond_estimate"),
     ("equilibrate", "1", "equilibrate"),
     ("sanity_check", "0", "sanity_check"),
@@ -372,8 +372,10 @@ const NOT_OBSERVABLE: &[(&str, &str)] = &[
         "photonic; `bidirectional_option.rs` covers it",
     ),
     (
-        "waveguide_delay",
-        "photonic; opt-in group delay, `native_*` tests cover it",
+        "optical_delay",
+        "photonic; opt-in group delay, `native_*` tests cover it, and its \
+         third state only decides whether a cavity without delays is worth a \
+         word — `connectivity::optical_loop_tests`",
     ),
 ];
 

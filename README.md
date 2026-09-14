@@ -70,7 +70,18 @@ against the closed-form budget — and they agree to 4 %.
 Both rails carry the same noise here, which is the signature of a receiver
 limited by its amplifier rather than by the light. Swap the TIA for a load
 resistor and the noise piles onto the `1` rail instead:
-[`docs/plots/noisy_eye_rin_limited.png`](docs/plots/noisy_eye_rin_limited.png).
+[`docs/plots/noisy_eye_rin_limited.png`](docs/plots/noisy_eye_rin_limited.png)
+— there the budget is RIN 93.7 %, shot 6.1 %, thermal 0.2 % at
+`I_ph = 1.56 mA`, and the three ways of measuring σ agree to 0.9 % on the `1`
+rail.
+
+What this link is *not* is RC-limited: 10 Gb/s against a 17.3 GHz modulator is
+eleven time-constants per bit. Worth knowing, because it is why the junction
+model barely shows here — pinning `C_j` at its bias moves this eye by 0.1 %, and
+by 10.6 % at 40 Gb/s on the same modulator. Which regime a link is in decides
+whether a fixed capacitance is a fine approximation or a wrong circuit, and
+[`large_signal_vs_linearised.py`](examples/photonic/large_signal_vs_linearised.py)
+measures the boundary rather than asserting it.
 
 Run it yourself: `python3 examples/photonic/noisy_eye_and_ber.py --tia`, or
 `--selftest` to assert the physics instead of plotting it. Without `--tia` it
@@ -120,7 +131,7 @@ builds the SuiteSparse KLU backend, which is the fastest on large circuits.
 
 | | |
 |---|---|
-| **Elements** | R, L, C, K, V, I, D, MOSFET (Level 1), BJT (Gummel-Poon), B (behavioural), E/F/G/H (controlled sources), S/W (switches), T (lossless line), X (subckt / Verilog-A) |
+| **Elements** | R, L, C, K, V, I, D, MOSFET (Level 1), BJT (Gummel-Poon), B (behavioural), E/F/G/H (controlled sources), S/W (switches), T (delay line, lossless or distortionless), X (subckt / Verilog-A) |
 | **Sources** | DC, PULSE, PWL, SIN, EXP, SFFM, AM, `AC <mag> [phase]` |
 | **Analyses** | `.op`, `.dc`, `.tran`, `.ac`, `.noise` |
 | **Integration** | Backward Euler, trapezoidal, GEAR (BDF-2); fixed or LTE-controlled step |
@@ -129,7 +140,7 @@ builds the SuiteSparse KLU backend, which is the fastest on large circuits.
 | **Output** | CSV, and ngspice-compatible Nutmeg rawfiles in both ASCII and binary; a transient streams, so memory does not grow with the run |
 | **Verilog-A** | `.va` source compiled on demand (OpenVAF-Reloaded) or pre-built `.osdi` v0.4 — foundry electrical models, and optical models too |
 
-Not supported: lossy transmission lines, `.disto`, `.pz`, native `.mc`, PSF/FSDB.
+Not supported: frequency-dependent line loss (skin effect) and LTRA dispersion, `.disto`, native `.mc`, PSF/FSDB. `.pz` exists but refuses a circuit containing a delay, which has no linear matrix pencil.
 
 Two documents exist because "supported" is not a binary.
 [**SPICE support**](docs/spice_support.md) tabulates every ngspice element
@@ -150,7 +161,7 @@ from any per-device opt-in.
 | **Sources** | `fc_cw_laser`, `fc_driven_laser` |
 | **Passive** | `fc_waveguide`, `fc_dcoupler`, `fc_splitter`, `fc_grating_coupler`, `fc_optical_2x2`, `fc_facet`, `fc_circulator` |
 | **WDM** | `fc_mux`, `fc_demux`, `fc_awgr` (N×N arrayed-waveguide router) |
-| **Modulators** | `fc_pn_ps` ×4 tiers, `fc_thermal_ps` ×2, `fc_pn_th_ps` ×4, `fc_mzm`, `fc_phase_shifter_expr` |
+| **Modulators** | `fc_pn_ps` ×4 tiers, `fc_thermal_ps` ×2, `fc_pn_th_ps` ×4, `fc_mzm`, `fc_tw_ps` (travelling-wave), `fc_phase_shifter_expr` |
 | **Detection** | `fc_photodetector` |
 
 Rings, MZIs and filter banks are composed in the netlist from these primitives.
@@ -160,6 +171,25 @@ back on the return path.
 <p align="center">
   <img alt="Micro-ring through-port transmission, resonance shifting under bias" src="docs/plots/native_mrr_wavelength_sweep.png" width="90%">
 </p>
+
+**Travelling-wave modulators are the ladder, not a transfer function.**
+`fc_tw_ps` cuts itself into `N` slices, each an optical segment driven by its own
+node of a Branin electrode, so the RF and the light accumulate delay at
+different rates down the same structure. Velocity mismatch, RF loss, termination
+ripple, the electrode's loading by its own junction capacitance, and the
+bandwidth collapse when the RF is launched *against* the light are then
+consequences of the topology rather than terms in a formula — none of them is
+computed anywhere in the device.
+
+<p align="center">
+  <img alt="Electro-optic response of a travelling-wave MZM at five microwave indices, each sitting on the walk-off sinc, and the 3 dB bandwidth against velocity mismatch" src="docs/plots/travelling_wave_mzm.png" width="90%">
+</p>
+
+The dashed line under each curve is the closed form
+`sinc(π·f·L·(n_m − n_g)/c)`; the measurements sit on it, and every mismatched
+arm's 3 dB bandwidth lands within 0.5 %. `N` is not a parameter — the card takes
+`f_max` and the device solves for the slice count, refusing outright if the
+loaded ladder's Bragg cutoff would fall inside the band you asked about.
 
 Full reference: [**Photonic models**](docs/photonic-models.md).
 

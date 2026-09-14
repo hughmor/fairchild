@@ -808,6 +808,7 @@ impl Device for ShockleyDiode {
             // `fc_pn_ps_cap`'s was (16 %). `jacobian_check_tran` finds it; do
             // the same thing here as `PnCapDrive` does when someone needs it.
             dvalue_dstate: 0.0,
+            charge: None,
         }]
     }
 

@@ -163,7 +163,10 @@ pub fn bundle_arity_for(model_name: &str) -> BundleArity {
         // card-named `fc_awgr` (the only route to table mode) is refused on the
         // very bundles it exists to route.
         | "fc_pn_ps_inj" | "fc_pn_ps_full" | "fc_pn_th_ps_cap" | "fc_pn_th_ps_inj"
-        | "fc_pn_th_ps_full" => BundleArity::Aware,
+        | "fc_pn_th_ps_full"
+        // The travelling-wave shifter is one electrode over one waveguide, so a
+        // WDM bus shares the electrode exactly as the lumped shifters do.
+        | "fc_tw_ps" => BundleArity::Aware,
         // `fc_cw_laser` / `fc_driven_laser` deliberately stay Scalar — a single laser source
         // produces one wavelength.  Combine multiple lasers via `fc_mux` for
         // WDM operation.  All non-photonic devices (R, C, L, D, MOSFETs)
