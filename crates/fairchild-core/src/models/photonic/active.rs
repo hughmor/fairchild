@@ -317,6 +317,21 @@ impl Device for ActiveOpticalDevice {
         self.seg.requested_max_timestep()
     }
 
+    /// Where this shifter stops being electrically short.
+    ///
+    /// A lumped drive has no electrode model, so there is no `n_m` to read —
+    /// this assumes the same 4.2 that `fc_tw_ps` defaults to, a loaded silicon
+    /// travelling-wave electrode. The number is therefore an order of
+    /// magnitude, which is all a warning needs: a device three wavelengths long
+    /// is wrong under any plausible index, and one at a hundredth of one is
+    /// fine under any.
+    fn lumped_valid_to_hz(&self) -> Option<f64> {
+        // Only a drive with electrical terminals has an electrode to be long.
+        (self.model.num_electrical_terminals() > 0)
+            .then(|| crate::electrical_length::lumped_limit_hz(self.seg.length_m, 4.2))
+            .flatten()
+    }
+
     fn ac_stamps(&self, omega: f64) -> Vec<crate::device::AcStamp> {
         self.seg.ac_stamps(omega)
     }

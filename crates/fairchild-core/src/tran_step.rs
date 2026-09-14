@@ -185,6 +185,15 @@ impl TranStepper {
             dev.commit_timestep(&x);
         }
 
+        // A lumped shifter longer than a tenth of an RF wavelength at the
+        // drive's own knee frequency is not the device the deck asked for, and
+        // the lumped answer looks reasonable either way (#122).
+        crate::electrical_length::warn_from_sources(
+            &netlist,
+            &devices,
+            &crate::newton::build_device_names(&netlist),
+        );
+
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);
 

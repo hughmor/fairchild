@@ -537,6 +537,15 @@ pub fn tran_nr_with_registry_var_opts(
     };
     x.resize(topo.size, 0.0);
 
+    // A lumped shifter longer than a tenth of an RF wavelength at the drive's
+    // own knee frequency is not the device the deck asked for, and the lumped
+    // answer looks reasonable either way (#122).
+    crate::electrical_length::warn_from_sources(
+        netlist,
+        &devices,
+        &crate::newton::build_device_names(netlist),
+    );
+
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
     // Not every unknown is a volt — see `crate::tolerance`.  Serves both the NR

@@ -65,6 +65,14 @@ numerically infinite (the 70+ dB below is the solver's floor, not a spec). A rea
 MZM reaches 20-30 dB, and the 0 rail's noise and the eye closure both depend on
 that.
 
+**This link warns that its arms are electrically long, and it is right to.** A
+3 mm lumped shifter is 0.59 RF wavelengths at the drive's 14 GHz knee, so a real
+electrode would show walk-off that a lumped model holds at one voltage. It is
+left lumped here deliberately: the subject is noise, the eye is not walk-off
+limited at 10 Gb/s, and swapping in `fc_tw_ps` would cost a ladder's worth of
+timesteps to change the answer very little. `travelling_wave_mzm.py` is the
+example that does model the electrode.
+
     python3 examples/photonic/noisy_eye_and_ber.py [--selftest] [--pam4]
 """
 

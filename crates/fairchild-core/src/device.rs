@@ -432,6 +432,23 @@ pub trait Device: Send + Sync {
     /// It exists for compiled models, where Verilog-A's `$bound_step` is the
     /// model saying "do not step past this or you will miss something". LTE alone
     /// cannot cover that, because it measures the error of a step already taken.
+    /// The highest frequency at which this device's *lumped* assumption still
+    /// holds, or `None` if it makes no such assumption.
+    ///
+    /// A lumped phase shifter holds its whole electrode at one voltage. That is
+    /// true while the device is short against the RF wavelength and false where
+    /// a travelling-wave modulator earns its name — and the lumped answer looks
+    /// perfectly reasonable on either side of the line. Reporting the limit lets
+    /// the run say so rather than leaving the user to work it out (#122).
+    ///
+    /// The electrode index is not a parameter of a lumped device, so whatever a
+    /// device returns here rests on an assumed one; say which in the doc of the
+    /// implementation. `crate::electrical_length::lumped_limit_hz` is the shared
+    /// criterion, so there is one place that decides what "short" means.
+    fn lumped_valid_to_hz(&self) -> Option<f64> {
+        None
+    }
+
     /// Curvature of a delayed quantity this device will have to interpolate,
     /// as `(row, |d²y/dt²|)`.
     ///

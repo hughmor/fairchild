@@ -259,9 +259,9 @@ short enough to reconstruct it, and the two paths get there differently:
   moved every output time, and refusing would have handed you an arithmetic
   problem the device had already solved.
 
-The first delay window is the exception to both: history begins at the end of
-the first step, so the first `TD` of a run is reconstructed from one sample and
-is only first-order accurate. Start from a step you would be happy with anyway.
+Both are seeded from the operating point, so a line already carrying a DC bias
+is still carrying it at the first step, and the first delay window is exact
+rather than first-order.
 
 ### Switches (`S` voltage-controlled, `W` current-controlled)
 
