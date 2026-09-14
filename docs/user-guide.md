@@ -1199,7 +1199,7 @@ convenience flags), and Python (`Circuit.run("…", key=val)`).
 | `enable_bidirectional` | false | Bundles carry forward **and** backward fields (5 wires/channel instead of 3); reflective devices become meaningful. Aliases: `bidirectional`, `bidirectional_propagation`. See [§14](#14-verilog-a-models-osdi) |
 | `sanity_check` | true | Netlist preflight pass (R=0, duplicate refdes, zero-parameter `fc_*`, …) warning before analysis. Disable with `nosanitycheck` / `sanity_check=0` |
 | `verbose` | false | Solver progress notes to stderr: matrix size/NNZ, which convergence phase ran, top residual rows on NR failure. CLI `-v` |
-| `waveguide_delay` | false | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators (default: instantaneous transmission). In `.tran` this bounds the timestep to τ_g/2; in `.ac` it is an exact `exp(−jΩτ_g)`; `.pz` refuses it. Aliases: `optical_delay`, `wg_delay`. See [`fc_waveguide`](photonic-models.md#fc_waveguide--lossy-waveguide). |
+| `waveguide_delay` | unset | Model optical group delay τ_g = L·n_g/c as a true delay line on every segment-based device — the waveguide **and** the active phase shifters/modulators. In `.tran` this bounds the timestep to τ_g/2; in `.ac` it is an exact `exp(−jΩτ_g)`; `.pz` refuses it. Aliases: `optical_delay`, `wg_delay`. Three states, not two: unset and `=0` both give instantaneous transmission, but a deck with a **closed optical path** and delays unset is told that its cavity has no photon lifetime. `optical_delay=0` says you meant it and silences that. See [`fc_waveguide`](photonic-models.md#fc_waveguide--lossy-waveguide). |
 
 Setting any of these from the netlist:
 

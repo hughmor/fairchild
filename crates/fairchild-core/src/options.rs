@@ -13,6 +13,37 @@ use crate::device::SimContext;
 use crate::solver::{make_solver, LinearSolver, SolverKind};
 use crate::tran::IntegratorMode;
 
+/// Whether optical group delay is modelled, and whether the deck said so.
+///
+/// Three states rather than two, because "off" and "never asked" are the same
+/// circuit and not the same statement. A deck with a resonator in it and delays
+/// off has a cavity with no photon lifetime; saying so is useful exactly once,
+/// and only to someone who has not already decided (#123).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpticalDelay {
+    /// Not mentioned. Off, and worth a word if the deck has a closed optical
+    /// path.
+    #[default]
+    Auto,
+    /// `waveguide_delay=1` — modelled.
+    On,
+    /// `optical_delay=0` — deliberately lumped. Same physics as `Auto`, and no
+    /// warning, because the question has been answered.
+    Off,
+}
+
+impl OpticalDelay {
+    /// Whether devices should engage their delay lines.
+    pub fn is_on(self) -> bool {
+        matches!(self, OpticalDelay::On)
+    }
+
+    /// Whether running a cavity without delays is worth mentioning.
+    pub fn should_warn_about_cavities(self) -> bool {
+        matches!(self, OpticalDelay::Auto)
+    }
+}
+
 /// Numerical options consumed by every analysis entry point.
 ///
 /// Defaults match the historic hardcoded SPICE-standard constants.  Override
@@ -164,7 +195,7 @@ pub struct SimOptions {
     /// over their length); a zero-length segment (e.g. `fc_thermal_ps`) stays
     /// instantaneous regardless.  Set via `.options waveguide_delay=1`
     /// (aliases `optical_delay`, `wg_delay`) or `--opt waveguide_delay=1`.
-    pub waveguide_delay: bool,
+    pub optical_delay: OpticalDelay,
 
     /// Estimate the 2-norm condition number κ(A) of the MNA matrix at the start
     /// of the DC operating point and print it as a diagnostic.  Useful for
@@ -212,7 +243,7 @@ impl Default for SimOptions {
             trannoise: false,
             noiseseed: 1,
             noisescale: 1.0,
-            waveguide_delay: false,
+            optical_delay: OpticalDelay::Auto,
             cond_estimate: false,
             equilibrate: false,
         }
@@ -282,7 +313,7 @@ impl SimOptions {
             gmin: self.gmin,
             lambda_center_m: self.lambda_center_m,
             bidirectional_propagation: self.bidirectional_propagation,
-            waveguide_delay: self.waveguide_delay,
+            waveguide_delay: self.optical_delay.is_on(),
             time_s: 0.0,
             // Set per step by the transient loops; meaningless in DC/AC.
             discretisation: None,
@@ -389,10 +420,14 @@ impl SimOptions {
                 self.noisescale = parse_num(value).map_or(self.noisescale, |v| v.max(0.0));
             }
             "waveguide_delay" | "wg_delay" | "optical_delay" => {
-                self.waveguide_delay = matches!(
+                self.optical_delay = if matches!(
                     value.to_lowercase().as_str(),
                     "" | "1" | "true" | "yes" | "on"
-                );
+                ) {
+                    OpticalDelay::On
+                } else {
+                    OpticalDelay::Off
+                };
             }
             "cond_estimate" | "estimate_condition_number" | "condest" => {
                 self.cond_estimate = matches!(

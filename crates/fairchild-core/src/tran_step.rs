@@ -193,6 +193,9 @@ impl TranStepper {
             &devices,
             &crate::newton::build_device_names(&netlist),
         );
+        // And the optical side of the same question: a cavity whose round trip
+        // is instantaneous has no photon lifetime (#123).
+        crate::connectivity::warn_if_cavity_without_delay(&netlist, opts);
 
         // Honour opts.max_step as an upper bound on the step size.
         let step = step.min(opts.max_step);

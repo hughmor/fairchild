@@ -545,6 +545,9 @@ pub fn tran_nr_with_registry_var_opts(
         &devices,
         &crate::newton::build_device_names(netlist),
     );
+    // And the optical side of the same question: a cavity whose round trip is
+    // instantaneous has no photon lifetime (#123).
+    crate::connectivity::warn_if_cavity_without_delay(netlist, opts);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
