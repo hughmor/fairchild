@@ -51,6 +51,7 @@ use fairchild_parser::{Element, Netlist, OutVar, Waveform};
 use crate::adjoint::{dc_sensitivity, element_name, Output, ParamRef};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
+use crate::nutmeg::{Encoding, Plot, Var, Writer};
 use crate::options::SimOptions;
 
 /// What `.tf` reports.
@@ -99,29 +100,49 @@ impl TfResult {
 
     pub fn write_nutmeg<W: std::io::Write>(
         &self,
-        mut w: W,
+        w: W,
         title: &str,
         out_label: &str,
         in_label: &str,
     ) -> std::io::Result<()> {
+        self.write_raw(w, title, out_label, in_label, Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        out_label: &str,
+        in_label: &str,
+    ) -> std::io::Result<()> {
+        self.write_raw(w, title, out_label, in_label, Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        out_label: &str,
+        in_label: &str,
+        enc: Encoding,
+    ) -> std::io::Result<()> {
         let rows = self.rows(out_label, in_label);
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Transfer Function")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: {}", rows.len())?;
-        writeln!(w, "No. Points: 1")?;
-        writeln!(w, "Variables:")?;
-        for (i, (name, _)) in rows.iter().enumerate() {
-            writeln!(w, "\t{i}\t{name}\tnotype")?;
-        }
-        writeln!(w, "Values:")?;
-        for (i, (_, v)) in rows.iter().enumerate() {
-            if i == 0 {
-                writeln!(w, " 0\t{v:.6e}")?;
-            } else {
-                writeln!(w, "\t{v:.6e}")?;
-            }
-        }
+        let plot = Plot {
+            title,
+            plotname: "Transfer Function",
+            complex: false,
+            vars: rows.iter().map(|(n, _)| Var::notype(n)).collect(),
+            n_points: Some(1),
+        };
+        let mut wr = Writer::start(w, enc, &plot)?;
+        let values: Vec<f64> = rows.iter().map(|&(_, v)| v).collect();
+        wr.point(&values)?;
+        wr.done()?;
         Ok(())
     }
 }

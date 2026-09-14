@@ -30,7 +30,9 @@ pub mod models;
 pub mod netlist_edit;
 pub mod newton;
 pub mod noise;
+pub mod nutmeg;
 pub mod options;
+pub mod probe;
 pub mod pz;
 pub mod reactive;
 pub mod sanity;
@@ -40,6 +42,7 @@ pub mod temperature;
 pub mod tf;
 pub mod tolerance;
 pub mod tran;
+pub mod tran_sink;
 pub mod tran_step;
 pub mod unmodelled;
 
@@ -79,5 +82,8 @@ pub use tran::{
     tran_nr, tran_nr_configured, tran_nr_tr, tran_nr_var, tran_nr_with_registry,
     tran_nr_with_registry_opts, tran_nr_with_registry_tr, tran_nr_with_registry_var,
     tran_nr_with_registry_var_opts, IntegratorMode, TranResult,
+};
+pub use tran_sink::{
+    CollectSink, CsvSink, RawSink, SelectSink, TranColumn, TranLayout, TranSink, TstartSink,
 };
 pub use tran_step::TranStepper;

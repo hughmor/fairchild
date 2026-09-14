@@ -48,31 +48,46 @@ impl NrResult {
     /// with consumers outside this repo (#71). The variable count and the
     /// `Variables:` block are two statements of one number, so both are
     /// derived from the same three sets.
-    pub fn write_nutmeg<W: std::io::Write>(&self, mut w: W, title: &str) -> std::io::Result<()> {
+    pub fn write_nutmeg<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, crate::nutmeg::Encoding::Ascii)
+    }
+
+    /// The same rawfile in its binary spelling — see [`crate::nutmeg`].
+    pub fn write_binary<W: std::io::Write>(&self, w: W, title: &str) -> std::io::Result<()> {
+        self.write_raw(w, title, crate::nutmeg::Encoding::Binary)
+    }
+
+    /// The rawfile in whichever spelling `enc` asks for.
+    ///
+    /// [`Self::write_nutmeg`] and [`Self::write_binary`] are this with
+    /// the spelling fixed; a caller choosing at run time wants this.
+    pub fn write_raw<W: std::io::Write>(
+        &self,
+        w: W,
+        title: &str,
+        enc: crate::nutmeg::Encoding,
+    ) -> std::io::Result<()> {
+        use crate::nutmeg::{Plot, Var, Writer};
         let n_nodes = self.topo.n_nodes();
         let lambda = self.topo.lambda_signals();
-        let n_vars = n_nodes + lambda.len() + self.topo.vsrc_index.len();
-        writeln!(w, "Title: {title}")?;
-        writeln!(w, "Plotname: Operating Point")?;
-        writeln!(w, "Flags: real")?;
-        writeln!(w, "No. Variables: {n_vars}")?;
-        writeln!(w, "No. Points: 1")?;
-        writeln!(w, "Variables:")?;
-        let mut idx = 0usize;
+        let mut vars: Vec<Var> = Vec::new();
         for name in self.topo.node_index.keys() {
-            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
-            idx += 1;
+            vars.push(Var::voltage(format!("v({name})")));
         }
         for (name, _) in &lambda {
-            writeln!(w, "\t{idx}\tv({name})\tvoltage")?;
-            idx += 1;
+            vars.push(Var::voltage(format!("v({name})")));
         }
         for name in self.topo.vsrc_index.keys() {
-            writeln!(w, "\t{idx}\ti({name})\tcurrent")?;
-            idx += 1;
+            vars.push(Var::current(format!("i({name})")));
         }
-        writeln!(w, "Values:")?;
-        let values = self
+        let plot = Plot {
+            title,
+            plotname: "Operating Point",
+            complex: false,
+            vars,
+            n_points: Some(1),
+        };
+        let values: Vec<f64> = self
             .topo
             .node_index
             .values()
@@ -83,14 +98,11 @@ impl NrResult {
                     .vsrc_index
                     .values()
                     .map(|&idx| self.x[n_nodes + idx]),
-            );
-        for (k, v) in values.enumerate() {
-            if k == 0 {
-                writeln!(w, " 0\t{v:.6e}")?;
-            } else {
-                writeln!(w, "\t{v:.6e}")?;
-            }
-        }
+            )
+            .collect();
+        let mut wr = Writer::start(w, enc, &plot)?;
+        wr.point(&values)?;
+        wr.done()?;
         Ok(())
     }
 
@@ -1227,6 +1239,7 @@ pub(crate) fn residual_l2(
 ///
 /// `dev_names` and `phase` are only used to emit verbose diagnostics on
 /// non-convergence.  Pass an empty slice + "" to suppress.
+#[allow(clippy::too_many_arguments)]
 fn nr_inner(
     topo: &CircuitTopology,
     netlist: &Netlist,
@@ -1237,6 +1250,10 @@ fn nr_inner(
     mut x: Vec<f64>,
     source_scale: f64,
     gmin_extra: f64,
+    // Pseudo-transient continuation, as `(g, x_ref)`: a fictitious capacitor
+    // from every KCL row to `x_ref`, at Backward Euler conductance `g = C/h`.
+    // `None` on every stage but `pseudo_transient`.
+    pseudo: Option<(f64, &[f64])>,
     dev_names: &[String],
     phase: &str,
     plan: Option<&crate::mna::StampPlan>,
@@ -1303,6 +1320,11 @@ fn nr_inner(
         // `gmin_extra` ramps to zero — `opts.gmin` is across the junctions, not
         // here. See CircuitTopology::stamp_gmin.
         topo.stamp_gmin(&mut mat.a, gmin_extra);
+        // Pseudo-transient continuation adds the same conductance again, with
+        // the current source that points it at `x_ref` instead of at ground.
+        if let Some((g, x_ref)) = pseudo {
+            topo.stamp_pseudo_transient(&mut mat.a, &mut mat.b, g, x_ref);
+        }
 
         if first_stamp {
             // The pattern is a structural superset, so a stamped cell outside
@@ -1628,6 +1650,7 @@ fn source_stepping(
             x.clone(),
             next,
             0.0,
+            None,
             &[],
             "",
             plan,
@@ -1657,6 +1680,7 @@ fn source_stepping(
                             x.clone(),
                             (scale + ds * 2.0).min(1.0),
                             0.0,
+                            None,
                             dev_names,
                             &format!("source-stepping @ scale={:.3}", (scale + ds * 2.0).min(1.0)),
                             plan,
@@ -1697,6 +1721,7 @@ fn gmin_stepping(
             x.clone(),
             1.0,
             gmin_extra,
+            None,
             &[],
             "",
             plan,
@@ -1731,6 +1756,7 @@ fn gmin_stepping(
                         x.clone(),
                         1.0,
                         gmin_extra,
+                        None,
                         dev_names,
                         &format!("gmin-stepping @ gmin_extra={gmin_extra:.2e}"),
                         plan,
@@ -1744,6 +1770,179 @@ fn gmin_stepping(
         }
     }
     Ok(x)
+}
+
+/// Pseudo-transient continuation: the fourth and last homotopy stage.
+///
+/// Hangs a fictitious capacitor from every KCL row to ground and integrates to
+/// steady state. Backward Euler on `C·dx/dt = −f(x)` is exactly Newton on
+/// `f(x) + (C/h)·(x − x_prev) = 0`, so the whole method is one extra diagonal
+/// conductance `g = C/h` and one extra current source — see
+/// [`CircuitTopology::stamp_pseudo_transient`].
+///
+/// ## Why this converges where gmin stepping does not
+///
+/// The two stamps differ by one term, and that term is the method. Gmin
+/// stepping puts a resistor from every node to **ground** and ramps it away: a
+/// circuit with more than one DC solution sits at whatever point the pull holds
+/// it at — for a latch, the symmetric one — and then has to cross the entire
+/// gap to a real solution in the single Newton solve after the pull is
+/// released. PTC puts the resistor to **where the circuit just was**, so the
+/// iterate leaves that ridge a little at a time and every solve starts close to
+/// its answer.
+///
+/// Measured on a cross-coupled pair of steep behavioural inverters: direct NR,
+/// source stepping and gmin stepping all fail, and a real transient fails too,
+/// because the feedback loop is algebraic and a capacitor on the two nodes the
+/// deck gives them does not break it. A capacitor on *every* row does.
+///
+/// ## The final solve is on the real equations
+///
+/// The ramp ends with a plain `nr_inner`, seeded from the trajectory's end and
+/// carrying no pseudo term at all. Returning the last pseudo-transient iterate
+/// would be answering a question the user did not ask — that point solves
+/// `f(x) + g·(x − x_prev) = 0`, and only the limit of it solves `f(x) = 0`.
+/// A solver may fail; it must not invent.
+#[allow(clippy::too_many_arguments)]
+fn pseudo_transient(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut [Box<dyn Device>],
+    ctx: &SimContext,
+    opts: &SimOptions,
+    solver: &dyn LinearSolver,
+    x0: Vec<f64>,
+    dev_names: &[String],
+    plan: Option<&crate::mna::StampPlan>,
+) -> Result<Vec<f64>, SimError> {
+    // `s` is the stiffness: C/h in siemens on a KCL row, L/h in ohms on a
+    // branch row.  A large `s` is a short fictitious timestep.  The starting
+    // value is stiff for the kΩ-scale circuits this stage is reached on, and
+    // the controller below finds the right scale for anything else — cheaper
+    // and more reliable than deriving one from the matrix diagonal, whose rows
+    // are not all conductances (see `crate::tolerance`).
+    //
+    let s0 = 1.0_f64;
+    let s_min = opts.gmin.max(1e-14);
+    let s_max = s0 * 1e12;
+    // A step budget, so a trajectory that neither converges nor diverges stops.
+    let max_steps = opts.itl1.max(50) * 4;
+
+    // The residual is measured on the *real* equations, not the pseudo ones,
+    // so the controller below is driven by how far the trajectory still is from
+    // a DC solution rather than by how well each fictitious step converged.
+    let mut scratch = match plan {
+        Some(pl) => crate::mna::MnaMatrix::with_pattern(topo.size, pl.pattern.clone()),
+        None => crate::mna::MnaMatrix::zeros(topo.size),
+    };
+    let residual =
+        |devices: &mut [Box<dyn Device>], scratch: &mut crate::mna::MnaMatrix, x: &[f64]| {
+            residual_l2(scratch, topo, netlist, devices, ctx, 1.0, 0.0, plan, x)
+        };
+
+    let mut x = x0;
+    let r0 = residual(devices, &mut scratch, &x).max(f64::MIN_POSITIVE);
+    let mut s = s0;
+    let mut steps = 0usize;
+
+    while steps < max_steps {
+        steps += 1;
+        match nr_inner(
+            topo,
+            netlist,
+            devices,
+            ctx,
+            opts,
+            solver,
+            x.clone(),
+            1.0,
+            0.0,
+            Some((s, &x)),
+            &[],
+            "",
+            plan,
+        ) {
+            Ok(x_new) => {
+                let tol = crate::tolerance::Tolerances::build(topo, opts);
+                let settled = tol.converged(&x_new, &x);
+                x = x_new;
+                let r = residual(devices, &mut scratch, &x);
+                if settled && r <= r0 * 1e-9 {
+                    break;
+                }
+                // Switched Evolution Relaxation: the fictitious timestep grows
+                // as the residual falls, so the trajectory takes small steps
+                // while it is far from a solution and long ones once it is
+                // close. Without this the stiffness only ever ratchets *up* on
+                // failure, and a bistable circuit that has left its ridge
+                // crawls the rest of the way at the step that got it off —
+                // measured at 600 steps and still moving on a latch that
+                // settles in 30 with the controller in place.
+                //
+                // Clamped per step so one lucky residual cannot jump the whole
+                // ramp, which is how a continuation loses the trajectory it
+                // spent its steps finding.
+                let grow = (r / r0).clamp(1e-2, 1.0);
+                s = (s * grow.max(0.1)).max(s_min);
+                if s <= s_min && settled {
+                    break;
+                }
+            }
+            Err(e) => {
+                // Either the step is too long for this part of the trajectory,
+                // or it sits on the pseudo-elements' resonance, where the
+                // companion is singular however well-posed the real circuit is.
+                // Both want the same answer — a different stiffness — and a
+                // genuinely singular topology cannot reach here, because
+                // gmin-stepping reports that and returns before this stage.
+                if opts.verbose {
+                    eprintln!("info: PTC step {steps}: s={s:.2e} rejected ({e})");
+                }
+                s *= 10.0;
+                if s > s_max {
+                    if opts.verbose {
+                        eprintln!(
+                            "info: PTC gave up at s={s:.2e} (past {s_max:.0e}); \
+                             the trajectory does not advance"
+                        );
+                    }
+                    return Err(SimError::NoConvergence { iters: opts.itl1 });
+                }
+            }
+        }
+    }
+
+    if opts.verbose {
+        eprintln!(
+            "info: PTC ran {steps} step(s) to s={s:.2e}, residual {:.2e} from {r0:.2e}",
+            residual(devices, &mut scratch, &x)
+        );
+    }
+
+    // Land on the real equations, from where the trajectory ended.
+    //
+    // This is a guarantee rather than an optimisation, and it is what the
+    // trajectory's last point cannot be relied on for: that point solves
+    // `f(x) + s·(x − x_prev) = 0`, and only its limit solves `f(x) = 0`. A ramp
+    // that runs to completion arrives close enough that deleting this changes
+    // nothing measurable — which is exactly why it has to stay for the ramp
+    // that does *not*, having spent its step budget. A solver may fail; it must
+    // not invent.
+    nr_inner(
+        topo,
+        netlist,
+        devices,
+        ctx,
+        opts,
+        solver,
+        x,
+        1.0,
+        0.0,
+        None,
+        dev_names,
+        "pseudo-transient continuation (final DC solve)",
+        plan,
+    )
 }
 
 /// Build an initial `x` vector for DC NR, seeding from any `.nodeset` entries
@@ -1764,6 +1963,12 @@ fn build_x0_from_nodeset(netlist: &Netlist, topo: &CircuitTopology) -> Vec<f64> 
 ///   1. Direct Newton-Raphson from the `.nodeset` seed (or x=0).
 ///   2. Source stepping: ramp sources from 0 → full value.
 ///   3. GMIN stepping: add large diagonal conductance, ramp to standard GMIN.
+///   4. Pseudo-transient continuation: hang a fictitious capacitor on every
+///      row and integrate to steady state.  See [`pseudo_transient`] for why
+///      this reaches circuits (3) cannot.
+///
+/// A circuit that converges at an earlier stage never enters a later one, so
+/// adding (4) cannot move an answer that already existed.
 pub fn dc_op_nr_with_registry_opts(
     netlist: &Netlist,
     registry: &DeviceRegistry,
@@ -1785,10 +1990,10 @@ pub fn dc_op_nr_with_registry_opts(
     Ok(NrResult { topo, x, iters })
 }
 
-/// The DC operating point's three-stage homotopy, over devices the caller owns.
+/// The DC operating point's four-stage homotopy, over devices the caller owns.
 ///
 /// Direct Newton from the `.nodeset` seed, then source stepping, then gmin
-/// stepping. Split out so the transient paths can solve their operating point
+/// stepping, then pseudo-transient continuation. Split out so the transient paths can solve their operating point
 /// over the **same** device instances they will then integrate — building them
 /// twice allocates the extra rows twice, and leaves everything the operating
 /// point knew about a device's internal state stranded in the first set (#121).
@@ -1829,6 +2034,7 @@ pub(crate) fn dc_op_solve(
         x0.clone(),
         1.0,
         0.0,
+        None,
         &dev_names,
         "direct NR (DC OP)",
         plan,
@@ -1854,13 +2060,40 @@ pub(crate) fn dc_op_solve(
     if opts.verbose {
         eprintln!("info: DC OP: source-stepping failed; trying gmin-stepping...");
     }
-    let x = gmin_stepping(
+    match gmin_stepping(
         topo, netlist, devices, ctx, opts, &*solver, &dev_names, plan,
+    ) {
+        Ok(x) => {
+            if opts.verbose {
+                eprintln!("info: DC OP: gmin-stepping succeeded");
+            }
+            return Ok((x, 3));
+        }
+        // A topology with no solution fails every stage the same way, and
+        // continuation cannot rescue it. Report the real diagnosis rather than
+        // spending a fourth stage on it.
+        Err(SimError::SingularMatrix) => return Err(SimError::SingularMatrix),
+        Err(_) => {}
+    }
+
+    if opts.verbose {
+        eprintln!("info: DC OP: gmin-stepping failed; trying pseudo-transient continuation...");
+    }
+    let x = pseudo_transient(
+        topo,
+        netlist,
+        devices,
+        ctx,
+        opts,
+        &*solver,
+        build_x0_from_nodeset(netlist, topo),
+        &dev_names,
+        plan,
     )?;
     if opts.verbose {
-        eprintln!("info: DC OP: gmin-stepping succeeded");
+        eprintln!("info: DC OP: pseudo-transient continuation succeeded");
     }
-    Ok((x, 3))
+    Ok((x, 4))
 }
 
 /// DC operating-point with options taken from any `.options` directives in

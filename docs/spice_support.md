@@ -368,8 +368,9 @@ model — not merely in the unset parameters. `LEVEL=1` stays quiet.
 .width out=80           ← hard error
 ```
 
-Output selection is `--probe` (CLI, CSV output only — a nutmeg rawfile always
-carries every signal) or indexing the returned result (Python), so
+Output selection is `--probe` (CLI — CSV for every analysis, and a `.tran`
+rawfile; a rawfile from a bounded analysis carries every signal and warns that
+it has) or indexing the returned result (Python), so
 a deck's version has nowhere to go — every signal is available either way. That
 part is by design. Two things were not: it happened in silence, so a deck whose
 `.print tran V(out)` you expect to narrow the output gets every node instead;

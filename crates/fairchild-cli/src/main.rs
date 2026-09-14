@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -7,10 +7,13 @@ use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 
 use fairchild_core::netlist_edit::set_element_param;
+use fairchild_core::nutmeg::Encoding;
+use fairchild_core::tran::{tran_nr_with_registry_opts_into, tran_nr_with_registry_var_opts_into};
 use fairchild_core::{
     ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
     evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_configured, ArityDecl,
-    Corner, CornerGrid, DeviceRegistry, SimOptions,
+    Corner, CornerGrid, CsvSink, DeviceRegistry, RawSink, SelectSink, SimError, SimOptions,
+    TranSink,
 };
 #[cfg(feature = "osdi")]
 use fairchild_osdi::VaOptions;
@@ -66,7 +69,10 @@ struct Cli {
 
     /// Comma-separated list of signals to include in output.
     /// Example: --probe "V(out),V(in),I(V1)"
-    /// Applies to CSV output only; nutmeg always outputs all signals.
+    /// Applies to CSV for every analysis, and to a `.tran` rawfile — where the
+    /// columns nobody asked for are never formatted at all. A rawfile from a
+    /// bounded analysis (.op/.dc/.ac/.noise) still carries every signal, and
+    /// says so rather than narrowing silently.
     /// A name that matches no column of an analysis's output is an error.
     /// For an AC sweep, V(node) selects the mag_/phase_deg_ column pair.
     #[arg(long, value_name = "SIGNAL,...")]
@@ -200,7 +206,74 @@ struct Cli {
 #[derive(Clone, ValueEnum)]
 enum Format {
     Csv,
+    /// Nutmeg rawfile, ASCII.
     Nutmeg,
+    /// Nutmeg rawfile, binary. Same header, same values, `f64` instead of six
+    /// formatted digits: smaller, exact, and much cheaper to write.
+    Binary,
+}
+
+impl Format {
+    /// The rawfile spelling this format asks for, or `None` for CSV.
+    fn encoding(&self) -> Option<Encoding> {
+        match self {
+            Format::Csv => None,
+            Format::Nutmeg => Some(Encoding::Ascii),
+            Format::Binary => Some(Encoding::Binary),
+        }
+    }
+}
+
+/// Where CLI results go.
+///
+/// A file can seek, which is what lets a streaming rawfile fill in its point
+/// count after the run — so a long transient written with `--output` never has
+/// to be resident. Standard output cannot seek, so a rawfile written there is
+/// built in memory first. Give `--output` for a long run.
+enum Out {
+    File(BufWriter<fs::File>),
+    Stdout(BufWriter<io::Stdout>),
+}
+
+impl Write for Out {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Out::File(w) => w.write(buf),
+            Out::Stdout(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Out::File(w) => w.flush(),
+            Out::Stdout(w) => w.flush(),
+        }
+    }
+}
+
+impl Out {
+    /// Run `f` against a rawfile sink pointed at this output, streaming when
+    /// the output can seek and buffering when it cannot.
+    fn with_raw_sink<T>(
+        &mut self,
+        title: &str,
+        enc: Encoding,
+        f: impl FnOnce(&mut dyn TranSink) -> T,
+    ) -> io::Result<T> {
+        match self {
+            Out::File(w) => {
+                let mut sink = RawSink::new(&mut *w, title, enc);
+                Ok(f(&mut sink))
+            }
+            Out::Stdout(w) => {
+                let mut sink = RawSink::new(Cursor::new(Vec::new()), title, enc);
+                let out = f(&mut sink);
+                if let Some(c) = sink.into_inner() {
+                    w.write_all(&c.into_inner())?;
+                }
+                Ok(out)
+            }
+        }
+    }
 }
 
 // ── Parameter override helpers ─────────────────────────────────────────────
@@ -820,12 +893,12 @@ fn sanitize_label(s: &str) -> String {
         .collect()
 }
 
-fn open_writer(path: &Path) -> Box<dyn Write + Send> {
+fn open_writer(path: &Path) -> Out {
     let f = fs::File::create(path).unwrap_or_else(|e| {
         eprintln!("error: cannot create {path:?}: {e}");
         std::process::exit(1);
     });
-    Box::new(BufWriter::new(f))
+    Out::File(BufWriter::new(f))
 }
 
 /// Run every corner sequentially into a single shared writer.  Used
@@ -841,9 +914,9 @@ fn run_corners_serial(
     title: &str,
     cli: &Cli,
 ) -> bool {
-    let mut w: Box<dyn Write> = match &cli.output {
+    let mut w = match &cli.output {
         Some(path) => open_writer(path),
-        None => Box::new(BufWriter::new(io::stdout())),
+        None => Out::Stdout(BufWriter::new(io::stdout())),
     };
     let va = va_options(cli);
     let mut ran_something = false;
@@ -936,7 +1009,7 @@ fn run_corners_parallel(
         .par_iter()
         .map(|corner| {
             let out_path = corner_path(base, &corner.alter_label, n_alters, corner.temp_k, n_temps);
-            let mut w: Box<dyn Write> = open_writer(&out_path);
+            let mut w = open_writer(&out_path);
             let registry = build_registry(&corner.netlist, netlist_dir.as_ref(), cli_quiet, &va);
             // Build a synthetic Cli reference for run_corner_analyses; we
             // only need a few fields, so pass them explicitly via a
@@ -967,7 +1040,7 @@ fn run_corner_analyses(
     probe_list: &[String],
     title: &str,
     cli: &Cli,
-    w: &mut dyn Write,
+    w: &mut Out,
 ) -> bool {
     let ctx = CornerCtx {
         verbose: cli.verbose,
@@ -984,10 +1057,11 @@ fn run_corner_analyses_ctx(
     probe_list: &[String],
     title: &str,
     ctx: &CornerCtx,
-    w: &mut dyn Write,
+    w: &mut Out,
 ) -> bool {
     let netlist = &corner.netlist;
     let opts = &corner.opts;
+    warn_probe_not_narrowing_raw(netlist, probe_list, ctx.format);
     let mut ran_something = false;
     for analysis in &netlist.analyses {
         match analysis {
@@ -1008,8 +1082,8 @@ fn run_corner_analyses_ctx(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                match ctx.format {
-                    Format::Csv => {
+                match ctx.format.encoding() {
+                    None => {
                         let mut buf = Vec::new();
                         result
                             .write_csv(&mut buf)
@@ -1019,9 +1093,9 @@ fn run_corner_analyses_ctx(
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
-                    Format::Nutmeg => {
+                    Some(enc) => {
                         result
-                            .write_nutmeg(&mut *w, title)
+                            .write_raw(&mut *w, title, enc)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
@@ -1050,40 +1124,14 @@ fn run_corner_analyses_ctx(
                     eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?} {mode})...", opts.method);
                 }
                 let t0 = Instant::now();
-                let result = tran_nr_configured(netlist, *step, *stop, registry, opts)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: tran failed: {e}");
-                        std::process::exit(1);
-                    });
+                let n_points = run_transient(
+                    netlist, *step, *stop, registry, opts, probe_list, title, ctx, w,
+                );
                 if ctx.verbose {
                     eprintln!(
-                        "info: transient complete: {} time-points [{:.1} ms]",
-                        result.time.len(),
+                        "info: transient complete: {n_points} time-points [{:.1} ms]",
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
-                }
-                match ctx.format {
-                    Format::Csv => {
-                        let mut buf = Vec::new();
-                        result
-                            .write_csv(&mut buf)
-                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-                        let csv = String::from_utf8_lossy(&buf);
-                        let filtered = filter_csv_or_exit(&csv, probe_list, "transient");
-                        w.write_all(filtered.as_bytes())
-                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-                    }
-                    Format::Nutmeg => {
-                        result
-                            .write_nutmeg(&mut *w, title)
-                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
-                    }
-                }
-                if !netlist.measurements.is_empty() {
-                    let ms = evaluate_measurements(&netlist.measurements, &result);
-                    for m in ms {
-                        eprintln!("{:<24} = {:.6e}", m.name, m.value);
-                    }
                 }
                 ran_something = true;
             }
@@ -1122,8 +1170,8 @@ fn run_corner_analyses_ctx(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                match ctx.format {
-                    Format::Csv => {
+                match ctx.format.encoding() {
+                    None => {
                         let mut buf = Vec::new();
                         result
                             .write_csv(&mut buf)
@@ -1133,9 +1181,9 @@ fn run_corner_analyses_ctx(
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
-                    Format::Nutmeg => {
+                    Some(enc) => {
                         result
-                            .write_nutmeg(&mut *w, title)
+                            .write_raw(&mut *w, title, enc)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
@@ -1171,8 +1219,8 @@ fn run_corner_analyses_ctx(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                match ctx.format {
-                    Format::Csv => {
+                match ctx.format.encoding() {
+                    None => {
                         let mut buf = Vec::new();
                         result
                             .write_csv(&mut buf)
@@ -1182,9 +1230,9 @@ fn run_corner_analyses_ctx(
                         w.write_all(filtered.as_bytes())
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
-                    Format::Nutmeg => {
+                    Some(enc) => {
                         result
-                            .write_nutmeg(&mut *w, title)
+                            .write_raw(&mut *w, title, enc)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
@@ -1226,8 +1274,8 @@ fn run_corner_analyses_ctx(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                match ctx.format {
-                    Format::Csv => {
+                match ctx.format.encoding() {
+                    None => {
                         let mut buf = Vec::new();
                         result
                             .write_csv(&mut buf)
@@ -1235,9 +1283,9 @@ fn run_corner_analyses_ctx(
                         w.write_all(&buf)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
-                    Format::Nutmeg => {
+                    Some(enc) => {
                         result
-                            .write_nutmeg(&mut *w, title)
+                            .write_raw(&mut *w, title, enc)
                             .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                     }
                 }
@@ -1257,9 +1305,9 @@ fn run_corner_analyses_ctx(
                         });
                 let out_label = outvar_label(out);
                 let mut buf = Vec::new();
-                match ctx.format {
-                    Format::Csv => result.write_csv(&mut buf, &out_label, input_src),
-                    Format::Nutmeg => result.write_nutmeg(&mut buf, title, &out_label, input_src),
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf, &out_label, input_src),
+                    Some(enc) => result.write_raw(&mut buf, title, &out_label, input_src, enc),
                 }
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                 w.write_all(&buf)
@@ -1296,9 +1344,9 @@ fn run_corner_analyses_ctx(
                     );
                 }
                 let mut buf = Vec::new();
-                match ctx.format {
-                    Format::Csv => result.write_csv(&mut buf),
-                    Format::Nutmeg => result.write_nutmeg(&mut buf, title),
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf),
+                    Some(enc) => result.write_raw(&mut buf, title, enc),
                 }
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                 w.write_all(&buf)
@@ -1338,9 +1386,9 @@ fn run_corner_analyses_ctx(
                     );
                 }
                 let mut buf = Vec::new();
-                match ctx.format {
-                    Format::Csv => result.write_csv(&mut buf),
-                    Format::Nutmeg => result.write_nutmeg(&mut buf, title),
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf),
+                    Some(enc) => result.write_raw(&mut buf, title, enc),
                 }
                 .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
                 w.write_all(&buf)
@@ -1350,6 +1398,82 @@ fn run_corner_analyses_ctx(
         }
     }
     ran_something
+}
+
+/// Run one `.tran` card and write its result, streaming where it can.
+///
+/// The transient is the only analysis whose output is unbounded, so it is the
+/// only one that must not be assembled before it is written. It streams —
+/// straight into a rawfile or CSV, one timepoint at a time — unless something
+/// downstream needs the whole run, which today means `.measure`. That is the
+/// entire fork, and it lives here rather than being spread across the format
+/// arms.
+///
+/// Returns the number of timepoints written.
+#[allow(clippy::too_many_arguments)]
+fn run_transient(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    probe_list: &[String],
+    title: &str,
+    ctx: &CornerCtx,
+    w: &mut Out,
+) -> usize {
+    fn die(e: SimError) -> ! {
+        eprintln!("error: tran failed: {e}");
+        std::process::exit(1);
+    }
+
+    // Whether the run is streamed or kept, it reaches the writer the same way:
+    // through `SelectSink`, so `--probe` means one thing here. It used to mean
+    // two — the streamed path selected columns and the `.measure` path wrote
+    // the rawfile straight out of the result — and a deck with a `.measure`
+    // silently ignored the flag. That is the failure `.print` was fixed for.
+    let feed = |sink: &mut dyn TranSink| -> Result<(), SimError> {
+        let mut sel = SelectSink::new(sink, probe_list);
+        // `.measure` reads the finished waveform, so a deck that has one keeps
+        // the run in memory and replays it. Everything else streams, and never
+        // holds more than one timepoint.
+        if netlist.measurements.is_empty() {
+            if opts.variable_step {
+                tran_nr_with_registry_var_opts_into(netlist, step, stop, registry, opts, &mut sel)
+            } else {
+                tran_nr_with_registry_opts_into(netlist, step, stop, registry, opts, &mut sel)
+            }
+        } else {
+            let result = tran_nr_configured(netlist, step, stop, registry, opts)?;
+            result.replay(&mut sel)?;
+            for m in evaluate_measurements(&netlist.measurements, &result) {
+                eprintln!("{:<24} = {:.6e}", m.name, m.value);
+            }
+            Ok(())
+        }
+    };
+
+    match ctx.format.encoding() {
+        None => {
+            let mut sink = CsvSink::new(&mut *w);
+            feed(&mut sink).unwrap_or_else(|e| die(e));
+            sink.points_written()
+        }
+        Some(enc) => {
+            let (outcome, n) = w
+                .with_raw_sink(title, enc, |sink| {
+                    let outcome = feed(sink);
+                    let n = sink.points_written();
+                    (outcome, n)
+                })
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot write transient output: {e}");
+                    std::process::exit(1);
+                });
+            outcome.unwrap_or_else(|e| die(e));
+            n
+        }
+    }
 }
 
 /// `--probe` selects signals out of a waveform table, and the small-signal
@@ -1363,6 +1487,42 @@ fn warn_probe_ignored(probe_list: &[String], card: &str) {
              a signal table, so every row is printed"
         );
     }
+}
+
+/// `--probe` narrows a transient rawfile, and narrows no other analysis's.
+///
+/// The transient selects its columns *before* writing them, because that is
+/// where the size is: its output is unbounded in time and every other
+/// analysis's is bounded by the deck. The bounded ones render a whole result
+/// and filter the text afterwards, which only their CSV writer does.
+///
+/// So the rule has a seam in it, and a silent seam is what this codebase treats
+/// as the worst outcome. Say it out loud instead: the user asked for four
+/// signals and is about to get four hundred.
+fn warn_probe_not_narrowing_raw(netlist: &Netlist, probe_list: &[String], format: &Format) {
+    if probe_list.is_empty() || format.encoding().is_none() {
+        return;
+    }
+    let bounded: Vec<&str> = netlist
+        .analyses
+        .iter()
+        .filter_map(|a| match a {
+            Analysis::Op => Some(".op"),
+            Analysis::Ac { .. } => Some(".ac"),
+            Analysis::Dc { .. } => Some(".dc"),
+            Analysis::Noise { .. } => Some(".noise"),
+            _ => None,
+        })
+        .collect();
+    if bounded.is_empty() {
+        return;
+    }
+    fairchild_core::warn_user!(
+        "--probe does not narrow a rawfile for {}: every signal is written. \
+         Selecting columns before writing is implemented for .tran, where the \
+         output is unbounded in time; use --format csv to filter the rest",
+        bounded.join(", ")
+    );
 }
 
 /// `v(out)` / `v(a,b)` / `i(vsrc)` — how the card spelled the output, for the
