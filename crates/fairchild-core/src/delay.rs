@@ -81,14 +81,13 @@ impl DelayLine {
     /// [`Device::requested_max_timestep`](crate::device::Device::requested_max_timestep)
     /// so this cannot be reached (#112).
     ///
-    /// The *first* clamp has a cost worth knowing about too. History starts at
-    /// the end of the first accepted step, so every query inside the first
-    /// delay window is that one sample — and the answer there is only O(h)
-    /// accurate, in a reconstruction that is otherwise second order. Measured:
-    /// the current inside the first window scales linearly with the first step.
-    /// The fix is to seed history from the operating point, which needs the
-    /// device's DC branch state to survive into the transient; it does not
-    /// today, because the extra rows are allocated twice (#120).
+    /// The *first* clamp is what the operating point is for. History is seeded
+    /// at `t = 0` with the DC state, so a query before the run started returns
+    /// the circuit at rest rather than whatever the first step produced. That
+    /// used to be an O(h) error lasting a full delay window, because the
+    /// seeding could not see a device's branch currents — the extra rows were
+    /// allocated twice and the operating point solved a different set (#120,
+    /// #121).
     ///
     /// Returns a `width`-long zero vector if no history has been recorded yet.
     /// A device should treat that case as "no past" and stamp its steady-state

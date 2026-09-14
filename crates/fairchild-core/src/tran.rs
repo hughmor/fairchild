@@ -16,7 +16,7 @@ use crate::device::EvalFlags;
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::CircuitTopology;
-use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
+use crate::newton::build_devices_with_footprints;
 use crate::options::SimOptions;
 use crate::tran_step::TranStepper;
 
@@ -509,29 +509,33 @@ pub fn tran_nr_with_registry_var_opts(
     crate::connectivity::check_connectivity(netlist)?;
     let mut ctx = opts.sim_context();
     let step = step.min(opts.max_step);
-    let (topo, mut x) = if opts.uic {
-        let topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
+    // Devices are built **once**, and the operating point is solved over the
+    // same instances the transient then integrates.  Building them twice
+    // allocated the extra rows twice, so the transient's devices were bound to
+    // rows the DC solve never touched and everything the operating point knew
+    // about their internal state — branch currents, junction charges — was
+    // stranded in the first set (#121).
+    let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
+    let (mut devices, footprints) =
+        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
+    let solver = opts.linear_solver(topo.size);
+    // Structural sparsity pattern: same for every timestep and every NR
+    // iteration within them, so build it once here.  Built after the devices,
+    // whose extra rows widen `topo.size`.
+    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
+    plan.resolve_device_cells(&mut devices);
+    let mut x = if opts.uic {
         let mut x = vec![0.0f64; topo.size];
         for (name, value) in &netlist.ic {
             if let Some(&i) = topo.node_index.get(name) {
                 x[i] = *value;
             }
         }
-        (topo, x)
+        x
     } else {
-        let dc = dc_op_nr_with_registry_opts(netlist, registry, opts)?;
-        (dc.topo, dc.x)
+        crate::newton::dc_op_solve(&topo, netlist, &mut devices, &ctx, opts, Some(&plan))?.0
     };
-    let mut topo = topo;
-    let (mut devices, footprints) =
-        build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
-    // Pad x for any OSDI internal-node rows allocated by build_devices.
     x.resize(topo.size, 0.0);
-    let solver = opts.linear_solver(topo.size);
-    // Structural sparsity pattern: same for every timestep and every NR
-    // iteration within them, so build it once here.
-    let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
-    plan.resolve_device_cells(&mut devices);
 
     let n_nodes = topo.n_nodes();
     let h_min = step * 1e-6;
@@ -569,7 +573,20 @@ pub fn tran_nr_with_registry_var_opts(
         .chain(n_nodes..topo.size)
         .collect();
 
+    // Seed device history from the operating point.
+    //
+    // The `eval` is what makes the `commit_timestep` land: a delay line only
+    // records while it is engaged, and it learns that from an `eval` under
+    // transient flags. Without it history begins at the end of the *first
+    // step*, `sample` clamps to that one point, and the whole first delay
+    // window is reconstructed from it — an O(h) answer in a scheme that is
+    // otherwise second order (#120).
+    //
+    // This only works now that the devices are the same instances the
+    // operating point solved, so `x` holds their branch currents rather than
+    // the zeros a second allocation left behind (#121).
     for dev in &mut devices {
+        dev.eval(&x, EvalFlags::tran(), &ctx);
         dev.commit_timestep(&x);
     }
 

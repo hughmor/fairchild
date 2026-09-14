@@ -35,7 +35,7 @@ use crate::device::{Device, EvalFlags, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{CircuitTopology, MnaMatrix, StampPlan};
-use crate::newton::{build_devices_with_footprints, dc_op_nr_with_registry_opts};
+use crate::newton::build_devices_with_footprints;
 use crate::options::SimOptions;
 use crate::reactive::{stamp_device_branches, ReactiveState};
 use crate::solver::{Factorisation, LinearSolver};
@@ -135,55 +135,53 @@ impl TranStepper {
         let ctx = opts.sim_context();
         let mode = opts.method;
 
+        // Devices are built **once** and the operating point is solved over the
+        // same instances the transient then integrates.  Building them twice
+        // allocated the extra rows twice, so the transient's devices were bound
+        // to rows the DC solve never touched, and everything the operating
+        // point knew about their internal state was stranded in the first set
+        // (#121).  The seeded path used to rely on that duplication to
+        // reproduce the row layout it was replaying; one allocation gives it
+        // the same layout by construction.
+        let mut topo = CircuitTopology::build_resolved(&netlist, &ctx, registry);
+        let (mut devices, footprints) =
+            build_devices_with_footprints(&netlist, &mut topo, &ctx, registry)?;
+        // Topology is fixed across the whole transient — build the linear
+        // solver and the structural sparsity pattern once.  Both after the
+        // devices, whose extra rows widen `topo.size`.
+        let solver = opts.linear_solver(topo.size);
+        let plan = StampPlan::new(&topo, &netlist, &footprints);
+        plan.resolve_device_cells(&mut devices);
+
         // With UIC: skip DC OP, seed x from `.ic` (or 0 where unspecified).
         // Without UIC (the default): use DC OP as t=0 condition.
-        let (mut topo, mut x) = if let Some(x0) = seed {
-            // Reproduce the row layout the operating-point path arrives at.
-            // `push_device` appends fresh rows on every call, so building the
-            // devices twice — once for the DC solve, once here — is what fixes
-            // where each device's internal nodes live.  The seeded path skips
-            // the solve but must not skip the allocation, or it would be
-            // indexing different unknowns than the run it is replaying.
-            //
-            // ponytail: those first rows are then dead weight in every
-            // non-UIC transient — 6 of 21 on a modest photonic netlist, and the
-            // DC operating point's internal-node values are discarded with
-            // them.  Worth removing, but that moves every matrix index in the
-            // tree and belongs in its own change.
-            let mut t = CircuitTopology::build_resolved(&netlist, &ctx, registry);
-            let _ = build_devices_with_footprints(&netlist, &mut t, &ctx, registry)?;
-            (t, x0.to_vec())
+        let mut x = if let Some(x0) = seed {
+            x0.to_vec()
         } else if opts.uic {
-            let topo = CircuitTopology::build_resolved(&netlist, &ctx, registry);
             let mut x = vec![0.0f64; topo.size];
             for (name, value) in &netlist.ic {
                 if let Some(&i) = topo.node_index.get(name) {
                     x[i] = *value;
                 }
             }
-            (topo, x)
+            x
         } else {
-            let dc = dc_op_nr_with_registry_opts(&netlist, registry, opts)?;
-            // DC OP already allocated extras; reuse its topology so the row
-            // layout (and matrix size) stays consistent through the transient.
-            (dc.topo, dc.x)
+            crate::newton::dc_op_solve(&topo, &netlist, &mut devices, &ctx, opts, Some(&plan))?.0
         };
-
-        let (mut devices, footprints) =
-            build_devices_with_footprints(&netlist, &mut topo, &ctx, registry)?;
-        // After build_devices, topo.size is final.  Pad the initial x vector
-        // to match — when we came via UIC, x was sized to the pre-allocation
-        // topology; OSDI internal nodes get a zero initial guess.
+        // A seeded replay may hand over a vector sized before the extra rows
+        // existed; those unknowns start from zero.
         x.resize(topo.size, 0.0);
-        // Topology is fixed across the whole transient — build the linear
-        // solver and the structural sparsity pattern once.
-        let solver = opts.linear_solver(topo.size);
-        let plan = StampPlan::new(&topo, &netlist, &footprints);
-        plan.resolve_device_cells(&mut devices);
 
         // Seed x_tprev from DC OP (or UIC initial conditions) so reactive
         // history is defined before the first step.
+        //
+        // The `eval` is what makes it land for a delay line, which only records
+        // while engaged and learns that from an `eval` under transient flags.
+        // Without it the whole first delay window is reconstructed from the
+        // first step's state (#120), and it is only correct at all because the
+        // devices are the ones the operating point solved (#121).
         for dev in &mut devices {
+            dev.eval(&x, EvalFlags::tran(), &ctx);
             dev.commit_timestep(&x);
         }
 

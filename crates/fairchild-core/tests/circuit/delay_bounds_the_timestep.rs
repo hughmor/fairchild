@@ -298,3 +298,104 @@ fn the_curvature_bound_scales_as_one_over_frequency() {
         hi * 1e12
     );
 }
+
+// ── the operating point reaches the transient (#121, #120) ───────────────────
+
+/// Extra rows are allocated **once**.
+///
+/// `push_device` appends fresh rows on every call, so building the devices for
+/// the operating point and again for the transient gave every device two sets
+/// and left the first solved and then discarded. The count is the cheapest
+/// witness: this deck has three nodes, one voltage source and one `T` element
+/// with two branch-current rows, so a single allocation is exactly six
+/// unknowns and a double one would be eight.
+#[test]
+fn a_transient_allocates_its_device_rows_once() {
+    let net = "* row count\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rl b 0 1k\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    let ctx = fairchild_core::SimOptions::from_netlist(&parsed).sim_context();
+    let registry = fairchild_core::DeviceRegistry::new();
+    let mut topo = fairchild_core::mna::CircuitTopology::build_resolved(&parsed, &ctx, &registry);
+    let _ = fairchild_core::newton::build_devices(&parsed, &mut topo, &ctx, &registry)
+        .expect("build devices");
+    assert_eq!(
+        topo.size, 6,
+        "3 nodes + 1 source branch + 2 line branches. Eight means the devices \
+         were built twice and the operating point solved rows nobody reads"
+    );
+}
+
+/// The first delay window is exact, not first-order.
+///
+/// History now starts at `t = 0` with the operating point's state, so the
+/// clamp `sample` applies before the first recorded point is the *rest state*
+/// rather than whatever the first step happened to produce. Inside the first
+/// window nothing has returned from the far end, so the line presents `Z0` and
+/// the current is `−v(t)/Z0` exactly — a closed form with no step in it.
+///
+/// This used to scale linearly with the first step: 23.6 mA / 2.5 mA / 0.25 mA
+/// at 100 / 10 / 1 ps, an O(h) answer where the rest of the reconstruction is
+/// second order (#120). It only became fixable once the devices stopped being
+/// built twice (#121) — before that the seeding had node voltages that were
+/// right and branch currents that were identically zero.
+#[test]
+fn the_first_delay_window_is_step_independent() {
+    const Z0: f64 = 50.0;
+    const F: f64 = 1e9;
+    // A line between two ideal sources, so the port currents are the only
+    // unknowns and nothing else can mask the reconstruction. Lossy, or the two
+    // sources would be a DC short of each other.
+    let net = format!(
+        "* first delay window\n\
+         Vs s 0 SIN(0 1 {F:e} 0 0 0)\n\
+         Vt b 0 DC 0\n\
+         T1 s 0 b 0 Z0={Z0} TD=0.7n loss_db=3\n"
+    );
+    let parsed = fairchild_parser::parse_spice(&net).expect("parse");
+    // 300 ps is inside the first delay window (TD = 700 ps) and away from the
+    // sine's zero crossings, where any answer would look right.
+    let probe = 300e-12;
+    let exact = -(2.0 * std::f64::consts::PI * F * probe).sin() / Z0;
+    for step in [100e-12, 10e-12, 1e-12] {
+        let res = fairchild_core::tran_nr(&parsed, step, 600e-12).expect("transient");
+        let got = res.isrc_at("vs", probe).expect("I(Vs)");
+        assert!(
+            (got - exact).abs() < 1e-9,
+            "at a {:.0} ps step the first window gives {:.6} mA; the line looks \
+             like Z0 there, so it is {:.6} mA at any step",
+            step * 1e12,
+            got * 1e3,
+            exact * 1e3
+        );
+    }
+}
+
+/// And the state that makes it exact is the operating point's own.
+///
+/// A line carrying a DC bias must still be carrying it at the first transient
+/// step. The current through it at `t = 0+` is the one `.op` solved, which for
+/// this divider is `1/(50 + 1000)`.
+#[test]
+fn a_biased_line_keeps_its_operating_point_through_the_first_step() {
+    let net = "* bias through a line, into a transient\n\
+               Vs s 0 DC 1\n\
+               Rs s a 50\n\
+               T1 a 0 b 0 Z0=50 TD=1n\n\
+               Rload b 0 1k\n";
+    let parsed = fairchild_parser::parse_spice(net).expect("parse");
+    let res = fairchild_core::tran_nr(&parsed, 100e-12, 3e-9).expect("transient");
+    let want = 1000.0 / 1050.0;
+    for t in [0.0, 100e-12, 1.5e-9, 3e-9] {
+        let v_b = res.voltage_at("b", t).expect("node b");
+        assert!(
+            (v_b - want).abs() < 1e-9,
+            "V(b) at {:.2} ns is {v_b:.9}, and the operating point says \
+             {want:.9} at every time — nothing in this circuit moves",
+            t * 1e9
+        );
+    }
+}

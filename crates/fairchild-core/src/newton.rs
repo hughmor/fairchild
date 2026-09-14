@@ -1775,26 +1775,43 @@ pub fn dc_op_nr_with_registry_opts(
     check_connectivity(netlist)?;
     let ctx = opts.sim_context();
     let mut topo = CircuitTopology::build_resolved(netlist, &ctx, registry);
-
     let (mut devices, footprints) =
         build_devices_with_footprints(netlist, &mut topo, &ctx, registry)?;
-    let dev_names = build_device_names(netlist);
-    let x0 = build_x0_from_nodeset(netlist, &topo);
-    let solver = opts.linear_solver(topo.size);
     // Built after build_devices: extra device rows have to be allocated first,
     // since they widen topo.size.
     let plan = crate::mna::StampPlan::new(&topo, netlist, &footprints);
     plan.resolve_device_cells(&mut devices);
+    let (x, iters) = dc_op_solve(&topo, netlist, &mut devices, &ctx, opts, Some(&plan))?;
+    Ok(NrResult { topo, x, iters })
+}
+
+/// The DC operating point's three-stage homotopy, over devices the caller owns.
+///
+/// Direct Newton from the `.nodeset` seed, then source stepping, then gmin
+/// stepping. Split out so the transient paths can solve their operating point
+/// over the **same** device instances they will then integrate — building them
+/// twice allocates the extra rows twice, and leaves everything the operating
+/// point knew about a device's internal state stranded in the first set (#121).
+pub(crate) fn dc_op_solve(
+    topo: &CircuitTopology,
+    netlist: &Netlist,
+    devices: &mut Vec<Box<dyn Device>>,
+    ctx: &SimContext,
+    opts: &SimOptions,
+    plan: Option<&crate::mna::StampPlan>,
+) -> Result<(Vec<f64>, usize), SimError> {
+    let dev_names = build_device_names(netlist);
+    let x0 = build_x0_from_nodeset(netlist, topo);
+    let solver = opts.linear_solver(topo.size);
 
     if opts.verbose {
-        let nonfinite = report_matrix_stats(opts, &topo, netlist, &mut devices, &ctx);
+        let nonfinite = report_matrix_stats(opts, topo, netlist, devices, ctx);
         if nonfinite {
             let x_probe = vec![0.0f64; topo.size];
-            validate_devices_finite(&topo, netlist, &mut devices, &ctx, &x_probe);
+            validate_devices_finite(topo, netlist, devices, ctx, &x_probe);
         }
         eprintln!(
-            "info: DC OP: trying direct Newton-Raphson from \
-                   {} seed...",
+            "info: DC OP: trying direct Newton-Raphson from {} seed...",
             if !netlist.nodeset.is_empty() {
                 "nodeset"
             } else {
@@ -1803,10 +1820,10 @@ pub fn dc_op_nr_with_registry_opts(
         );
     }
     if let Ok(x) = nr_inner(
-        &topo,
+        topo,
         netlist,
-        &mut devices,
-        &ctx,
+        devices,
+        ctx,
         opts,
         &*solver,
         x0.clone(),
@@ -1814,55 +1831,36 @@ pub fn dc_op_nr_with_registry_opts(
         0.0,
         &dev_names,
         "direct NR (DC OP)",
-        Some(&plan),
+        plan,
     ) {
         if opts.verbose {
             eprintln!("info: DC OP: direct NR succeeded");
         }
-        return Ok(NrResult { topo, x, iters: 1 });
+        return Ok((x, 1));
     }
 
     if opts.verbose {
         eprintln!("info: DC OP: direct NR failed; trying source-stepping...");
     }
     if let Ok(x) = source_stepping(
-        &topo,
-        netlist,
-        &mut devices,
-        &ctx,
-        opts,
-        &*solver,
-        x0,
-        &dev_names,
-        Some(&plan),
+        topo, netlist, devices, ctx, opts, &*solver, x0, &dev_names, plan,
     ) {
         if opts.verbose {
             eprintln!("info: DC OP: source-stepping succeeded");
         }
-        return Ok(NrResult { topo, x, iters: 2 });
+        return Ok((x, 2));
     }
 
     if opts.verbose {
         eprintln!("info: DC OP: source-stepping failed; trying gmin-stepping...");
     }
-    match gmin_stepping(
-        &topo,
-        netlist,
-        &mut devices,
-        &ctx,
-        opts,
-        &*solver,
-        &dev_names,
-        Some(&plan),
-    ) {
-        Ok(x) => {
-            if opts.verbose {
-                eprintln!("info: DC OP: gmin-stepping succeeded");
-            }
-            Ok(NrResult { topo, x, iters: 3 })
-        }
-        Err(e) => Err(e),
+    let x = gmin_stepping(
+        topo, netlist, devices, ctx, opts, &*solver, &dev_names, plan,
+    )?;
+    if opts.verbose {
+        eprintln!("info: DC OP: gmin-stepping succeeded");
     }
+    Ok((x, 3))
 }
 
 /// DC operating-point with options taken from any `.options` directives in
@@ -1885,57 +1883,18 @@ pub fn dc_op_nr_with_devices_opts(
     ctx: &SimContext,
     opts: &SimOptions,
 ) -> Result<NrResult, SimError> {
-    let x0 = vec![0.0f64; topo.size];
-    let solver = opts.linear_solver(topo.size);
-    let dev_names = build_device_names(netlist);
     // No sparsity pattern on this path: the caller handed over pre-built
     // devices, so the per-device terminal footprints the pattern needs are
     // gone.  Falls back to the dense clear + scan.  Sweeps that care can call
     // `dc_op_nr_with_registry_opts` per point instead — they already run in
-    // parallel across points.
-    let plan: Option<&crate::mna::StampPlan> = None;
-
-    if let Ok(x) = nr_inner(
-        topo,
-        netlist,
-        devices,
-        ctx,
-        opts,
-        &*solver,
-        x0.clone(),
-        1.0,
-        0.0,
-        &dev_names,
-        "direct NR (DC OP)",
-        plan,
-    ) {
-        return Ok(NrResult {
-            topo: topo.clone(),
-            x,
-            iters: 1,
-        });
-    }
-
-    if let Ok(x) = source_stepping(
-        topo, netlist, devices, ctx, opts, &*solver, x0, &dev_names, plan,
-    ) {
-        return Ok(NrResult {
-            topo: topo.clone(),
-            x,
-            iters: 2,
-        });
-    }
-
-    match gmin_stepping(
-        topo, netlist, devices, ctx, opts, &*solver, &dev_names, plan,
-    ) {
-        Ok(x) => Ok(NrResult {
-            topo: topo.clone(),
-            x,
-            iters: 3,
-        }),
-        Err(e) => Err(e),
-    }
+    // parallel across points — and the transient paths keep their footprints
+    // and pass a plan through `dc_op_solve` directly.
+    let (x, iters) = dc_op_solve(topo, netlist, devices, ctx, opts, None)?;
+    Ok(NrResult {
+        topo: topo.clone(),
+        x,
+        iters,
+    })
 }
 
 /// DC operating-point with pre-built devices, default options.
