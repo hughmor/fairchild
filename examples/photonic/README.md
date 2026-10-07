@@ -7,6 +7,15 @@ These examples use only the B-phase native photonic primitives
 `fc_thermal_ps`, `fc_photodetector`).  No `.osdi` import, no Verilog-A,
 no Norton hack.  These are the recommended starting points.
 
+- **`ring_photon_lifetime.py`** — a ring modulator driven faster than its
+  cavity can respond.  The same netlist answered twice, with the optical round
+  trip instantaneous and with it taking `n_g·L/c`, which is the difference
+  between what an S-matrix tool gives and what the device does.  The ringing
+  period and the ringdown each sit on a closed form to under 1 %, and the step
+  overshoots to 2.46× the laser's own power because the stored field leaves
+  through the through port.  `--selftest` asserts the physics at three
+  couplings instead of plotting it.
+
 - **`native_mrr_modulator.sp`** — single-channel electro-optic micro-ring
   modulator: CW laser → waveguide → directional coupler → PN-loaded ring →
   waveguide → photodetector + load.  Transient analysis with a single

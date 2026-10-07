@@ -50,6 +50,7 @@ cp examples/photonic/eye_res.png docs/plots/noisy_eye_rin_limited.png
 | `native_weight_bank.png` | a 4-channel WDM weight bank: per-channel weights, passivity, balanced readout |
 | `travelling_wave_mzm.png` | a travelling-wave MZM from two `fc_tw_ps`: the walk-off family at five microwave indices, each sitting on its closed form, and the 3 dB bandwidth against velocity mismatch |
 | `large_signal_vs_linearised.png` | where a fixed junction capacitance stops being enough: the same link answered with `C_j(V)` and with `C_j` pinned at the bias, swept over how much of the curve a bit crosses |
+| `ring_photon_lifetime.png` | a ring modulator driven faster than its cavity can respond: one deck answered with the round trip instantaneous and with it taking `n_g·L/c`, the beat and the ringdown each on a closed form, and the map of where the fast model stops being usable |
 
 Both of the last two come from their own examples:
 
@@ -58,6 +59,8 @@ MPLBACKEND=Agg python3 examples/photonic/travelling_wave_mzm.py
 MPLBACKEND=Agg python3 examples/photonic/large_signal_vs_linearised.py
 cp examples/photonic/travelling_wave_mzm.png docs/plots/
 cp examples/photonic/large_signal_vs_linearised.png docs/plots/
+MPLBACKEND=Agg python3 examples/photonic/ring_photon_lifetime.py
+cp examples/photonic/ring_photon_lifetime.png docs/plots/
 ```
 
 `examples/*/*.png` is gitignored, which is why these are copies rather than
