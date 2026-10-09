@@ -506,10 +506,7 @@ pub fn load_libraries_with_widths(
             for n in widths {
                 let expanded = crate::dialect::expand(&text, &m, n, wpc)?;
                 let gen_path = generated_path(&src, n, opts)?;
-                std::fs::write(&gen_path, &expanded).map_err(|e| OsdiError::CompileFailed {
-                    path: gen_path.clone(),
-                    stderr: format!("cannot write generated source: {e}"),
-                })?;
+                write_atomically(&gen_path, &expanded)?;
                 let compiled = compile(compiler, &gen_path, &gen_opts)?;
                 load_one_with_lambda(
                     &compiled,
@@ -637,8 +634,45 @@ fn load_one_with_lambda(
     // SAFETY: the path came from the deck; `OsdiLibrary::open` validates the
     // OSDI version and descriptor layout before anything is called through.
     let lib = unsafe { OsdiLibrary::open(path) }.map_err(|e| e.with_context(path))?;
+    // Zero descriptors is not an empty success. It is what an empty or
+    // module-less source compiles to, and registering nothing for it hides the
+    // real fault behind an `UnknownModel` from the solver three layers up.
+    if lib.num_descriptors == 0 {
+        return Err(OsdiError::NoModels {
+            path: path.to_path_buf(),
+        });
+    }
     Arc::new(lib).register_into_with_lambda(registry, lambda);
     Ok(())
+}
+
+/// Write `text` to `path` so that no reader ever sees it half-written.
+///
+/// `fs::write` truncates first, so between the truncate and the write the file
+/// is empty — and an empty Verilog-A source *compiles*, to a library with no
+/// models in it. Two threads elaborating the same bundle model at the same
+/// channel count aim at the same generated path, so one would run the
+/// preprocessor over the other's empty file and register nothing. That is #112's
+/// `.osdi` race again, one file earlier, and it cost a CI job on exactly the
+/// test that calls the loader most often.
+///
+/// The final path stays shared on purpose: the bytes are a pure function of the
+/// source, the model and the channel count, so last writer wins and every
+/// writer writes the same thing. `--emit-generated` keeps naming a file the
+/// author can read.
+fn write_atomically(path: &Path, text: &str) -> Result<(), OsdiError> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{seq}.tmp", std::process::id()));
+    let fail = |e: std::io::Error, p: &Path| OsdiError::CompileFailed {
+        path: p.to_path_buf(),
+        stderr: format!("cannot write generated source: {e}"),
+    };
+    std::fs::write(&tmp, text).map_err(|e| fail(e, &tmp))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        fail(e, path)
+    })
 }
 
 #[cfg(test)]
@@ -692,6 +726,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A reader of the generated source never sees it part-written.
+    ///
+    /// Two threads elaborating one bundle model at one channel count aim at the
+    /// same generated path, and `fs::write` truncates before it writes. The
+    /// loser of that race runs the preprocessor over an empty file — which
+    /// *compiles*, to a library with no models in it, so the load succeeds and
+    /// registers nothing. The reader here stands in for that preprocessor.
+    #[test]
+    fn a_generated_source_is_never_visible_part_written() {
+        let dir = scratch("atomic_write");
+        let path = dir.join("model.n4.va");
+        // Large enough that one write is many pages, which is what makes a
+        // short read reachable at all.
+        let text = "// generated\n".repeat(400_000);
+        std::fs::write(&path, &text).unwrap();
+
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..200 {
+                    write_atomically(&path, &text).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                // A missing file is the one state a rename cannot produce and a
+                // truncate can, so it counts as a short read too.
+                let seen = std::fs::read_to_string(&path).map(|s| s.len()).unwrap_or(0);
+                assert_eq!(
+                    seen,
+                    text.len(),
+                    "a reader saw {seen} bytes of {}",
+                    text.len()
+                );
+            }
+        });
     }
 
     /// The whole point of the design: an include the top file does not itself
