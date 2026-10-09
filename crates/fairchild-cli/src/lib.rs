@@ -1,0 +1,1552 @@
+//! The `fairchild` command line, as a library.
+//!
+//! `src/main.rs` is a three-line shell over [`run`]. The body lives here so the
+//! Python wheel can put a `fairchild` command on `PATH` without shipping a
+//! second binary: `fairchild-py` exports `_cli_main`, which calls [`run`].
+//!
+//! That is why nothing below calls `std::process::exit`. It used to, in
+//! nineteen places, which is correct in a binary and fatal in an extension
+//! module — `exit` from inside CPython kills the interpreter with no traceback,
+//! no `finally`, and no flush. Every one of them is now a returned exit code.
+//!
+//! The `deny` below is what keeps it that way. Tests can only reach the error
+//! arms they know how to provoke, and there are nineteen of them — so a
+//! twentieth, added later on a path no test drives, would be invisible. The
+//! lint is not: it covers every arm, including the ones nothing calls yet.
+#![deny(clippy::exit)]
+
+use std::ffi::OsString;
+use std::fs;
+use std::io::{self, BufWriter, Cursor, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use clap::{Parser, ValueEnum};
+use rayon::prelude::*;
+
+use fairchild_core::netlist_edit::set_element_param;
+use fairchild_core::nutmeg::Encoding;
+use fairchild_core::tran::{tran_nr_with_registry_opts_into, tran_nr_with_registry_var_opts_into};
+use fairchild_core::{
+    ac_analysis_opts, dc_op_nr_with_registry_opts, dc_sweep_with_registry_opts,
+    evaluate_measurements, freq_decade, freq_linear, freq_oct, tran_nr_configured, ArityDecl,
+    Corner, CornerGrid, CsvSink, DeviceRegistry, RawSink, SelectSink, SimError, SimOptions,
+    TranSink,
+};
+#[cfg(feature = "osdi")]
+use fairchild_osdi::VaOptions;
+use fairchild_parser::{
+    check_disciplines, AcVariation, Analysis, BundleArity, Netlist, OutVar, PermissiveArity,
+    StaticArity,
+};
+
+/// Stand-in so `build_registry`'s signature does not need a `cfg` at each of
+/// its four call sites when the OSDI feature is off.
+#[cfg(not(feature = "osdi"))]
+#[derive(Default)]
+struct VaOptions;
+
+#[derive(Parser)]
+#[command(
+    name = "fairchild",
+    version,
+    about = "Open-source time-domain electro-optic circuit simulator",
+    long_about = "Fairchild simulates analog circuits containing both electronic and photonic \
+                  components in the same Newton-Raphson loop.  Supports DC, transient, and \
+                  small-signal AC analyses; loads Verilog-A models compiled with OpenVAF \
+                  via the OSDI v0.4 interface."
+)]
+struct Cli {
+    /// Input SPICE netlist file
+    #[arg(short, long)]
+    file: PathBuf,
+
+    /// Netlist dialect: auto, spectre, or spice.
+    ///
+    /// `auto` decides per file from the content, which is what lets a SPICE deck
+    /// include a Spectre model library. Give it explicitly for a Spectre fragment
+    /// that carries neither a `simulator lang=` line nor a `//` comment, which
+    /// `auto` reads as SPICE.
+    #[arg(long, value_name = "auto|spectre|spice", default_value = "auto")]
+    lang: fairchild_parser::Dialect,
+
+    /// Print the deck as SPICE, with every include resolved, and exit.
+    ///
+    /// A Spectre deck is transliterated to SPICE before it is parsed. When one
+    /// fails, this is what it became.
+    #[arg(long)]
+    emit_spice: bool,
+
+    /// Output format
+    #[arg(long, default_value = "csv")]
+    format: Format,
+
+    /// Output file (default: stdout)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Comma-separated list of signals to include in output.
+    /// Example: --probe "V(out),V(in),I(V1)"
+    /// Applies to CSV for every analysis, and to a `.tran` rawfile — where the
+    /// columns nobody asked for are never formatted at all. A rawfile from a
+    /// bounded analysis (.op/.dc/.ac/.noise) still carries every signal, and
+    /// says so rather than narrowing silently.
+    /// A name that matches no column of an analysis's output is an error.
+    /// For an AC sweep, V(node) selects the mag_/phase_deg_ column pair.
+    #[arg(long, value_name = "SIGNAL,...")]
+    probe: Option<String>,
+
+    /// Override a circuit parameter.  Format: ELEMENT.PARAM=VALUE
+    /// Example: --param "Xcoupler.kappa_0=0.05" --param "Rload.resistance=2k"
+    /// Values take the same engineering suffixes as a netlist (k, meg, m, u, n,
+    /// p, f, g, t) — note SPICE's convention that `m` is milli and mega is `meg`.
+    /// Can be specified multiple times.
+    #[arg(long = "param", value_name = "ELEMENT.PARAM=VALUE")]
+    params: Vec<String>,
+
+    /// Parse and discipline-check the netlist, then exit without simulating.
+    /// Exit code 0 if valid, 1 if any errors found.
+    #[arg(long)]
+    check: bool,
+
+    /// List node names parsed from the netlist, then exit.
+    #[arg(long)]
+    list_nodes: bool,
+
+    /// List model cards (.model statements) parsed from the netlist, then exit.
+    #[arg(long)]
+    list_models: bool,
+
+    /// Print simulation progress and iteration counts.
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Suppress all warning messages.
+    #[arg(long, short)]
+    quiet: bool,
+
+    // ── solver tuning knobs (overlay onto netlist `.options`) ────────────
+    /// Override an arbitrary solver option.  Format: KEY=VALUE.  Layered on
+    /// top of any `.options` directives in the netlist.  Can be repeated.
+    ///
+    /// Recognised keys: reltol, abstol, vntol, gmin, vmax, itl1, itl4,
+    /// maxstep, gminmax, srcsteps, method (be|tr|gear), uic, temp,
+    /// variable_step, waveguide_delay, cond_estimate, equilibrate.
+    ///
+    /// Example: --opt reltol=1e-5 --opt method=gear --opt equilibrate=1
+    #[arg(long = "opt", value_name = "KEY=VALUE")]
+    options: Vec<String>,
+
+    /// Convenience flag: relative Newton tolerance.
+    #[arg(long, value_name = "VALUE")]
+    reltol: Option<String>,
+
+    /// Convenience flag: minimum diagonal conductance (S).
+    #[arg(long, value_name = "VALUE")]
+    gmin: Option<String>,
+
+    /// Convenience flag: transient integration method.
+    ///   be    — Backward Euler (BDF-1, robust)
+    ///   tr    — Trapezoidal Rule (2nd-order, can ring)
+    ///   gear  — GEAR / BDF-2 (2nd-order, L-stable, no ringing)
+    #[arg(long, value_name = "be|tr|gear")]
+    method: Option<String>,
+
+    /// Convenience flag: maximum transient step size (s).
+    #[arg(long = "maxstep", value_name = "VALUE")]
+    max_step: Option<String>,
+
+    /// Disable junction-step limiters (pnjlim for diodes/BJTs, fetlim for
+    /// MOSFETs).  Equivalent to `.options nopnjlim`.  Limiters are ON by
+    /// default — turning them off occasionally helps diagnose convergence
+    /// failures by surfacing the raw NR step.
+    #[arg(long = "no-pnjlim")]
+    no_pnjlim: bool,
+
+    /// Linear-system backend.
+    ///   dense  — faer partial-pivot LU (recommended for ≤ ~20 nodes)
+    ///   sparse — faer sparse LU (pure Rust, no C dependencies)
+    ///   klu    — SuiteSparse KLU (requires `klu` cargo feature + system
+    ///            install of suite-sparse; 2–5× faster on circuit matrices)
+    ///   auto   — pick from system size (default): dense below ~20 nodes,
+    ///            then klu when compiled in, sparse otherwise
+    #[arg(long, value_name = "dense|sparse|klu|auto")]
+    solver: Option<String>,
+
+    /// Use the LTE-controlled variable-step transient solver.  `step` in the
+    /// netlist becomes the initial / maximum timestep rather than a fixed
+    /// stride.  Equivalent to `.options variable_step=1`.
+    #[arg(long)]
+    variable_step: bool,
+
+    // ── Verilog-A ────────────────────────────────────────────────────────
+    /// Path to the Verilog-A compiler used for `.va` / `ahdl_include` sources.
+    /// Default: `openvaf-r`, then `openvaf`, from PATH.  `FAIRCHILD_OPENVAF`
+    /// does the same thing for a caller with no command line.
+    #[arg(long = "openvaf", value_name = "PATH")]
+    openvaf: Option<PathBuf>,
+
+    /// Search directory for Verilog-A `include` files (OpenVAF `-I`).  Order
+    /// is preserved and matters: a PDK relies on it.  Can be repeated.  The
+    /// directory of each source is always searched last.
+    #[arg(long = "va-include", value_name = "DIR")]
+    va_include: Vec<PathBuf>,
+
+    /// Never invoke a Verilog-A compiler.  Any `.va` source in the deck becomes
+    /// an error — including one already in the cache, so the result does not
+    /// depend on a directory you cannot see.  This is the reproducible, offline
+    /// route for CI, where models arrive as pre-built `.osdi` artefacts.
+    #[arg(long = "no-va-compile")]
+    no_va_compile: bool,
+
+    /// Write the expanded per-channel-count source of a bundle-dialect
+    /// Verilog-A model here, instead of beside the artefact cache.  A model
+    /// written once for any N is compiled at the width the deck declares, and
+    /// this is how you read what was actually compiled — the first thing wanted
+    /// when a model behaves at one channel and not at eight.
+    #[arg(long = "emit-generated", value_name = "DIR")]
+    emit_generated: Option<PathBuf>,
+
+    /// Bundle all `.alter` × `.temp` corner outputs into the single
+    /// `--output` file (with `# alter=…` / `# temp_c=…` header lines),
+    /// preserving the historic concatenated layout.
+    ///
+    /// Default behaviour when `--output` is given: write one file per
+    /// corner (e.g. `out.alter_pvtfast.temp_-40c.csv`) and run the
+    /// corners in parallel.  With `--single-output`, runs are serial
+    /// so headers and rows stay in deterministic order.  (`--verbose`
+    /// also forces the serial single-file path — interleaved per-corner
+    /// NR diagnostics would be unreadable.)
+    #[arg(long)]
+    single_output: bool,
+}
+
+#[derive(Clone, ValueEnum)]
+enum Format {
+    Csv,
+    /// Nutmeg rawfile, ASCII.
+    Nutmeg,
+    /// Nutmeg rawfile, binary. Same header, same values, `f64` instead of six
+    /// formatted digits: smaller, exact, and much cheaper to write.
+    Binary,
+}
+
+impl Format {
+    /// The rawfile spelling this format asks for, or `None` for CSV.
+    fn encoding(&self) -> Option<Encoding> {
+        match self {
+            Format::Csv => None,
+            Format::Nutmeg => Some(Encoding::Ascii),
+            Format::Binary => Some(Encoding::Binary),
+        }
+    }
+}
+
+/// Where CLI results go.
+///
+/// A file can seek, which is what lets a streaming rawfile fill in its point
+/// count after the run — so a long transient written with `--output` never has
+/// to be resident. Standard output cannot seek, so a rawfile written there is
+/// built in memory first. Give `--output` for a long run.
+enum Out {
+    File(BufWriter<fs::File>),
+    Stdout(BufWriter<io::Stdout>),
+}
+
+impl Write for Out {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Out::File(w) => w.write(buf),
+            Out::Stdout(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Out::File(w) => w.flush(),
+            Out::Stdout(w) => w.flush(),
+        }
+    }
+}
+
+impl Out {
+    /// Run `f` against a rawfile sink pointed at this output, streaming when
+    /// the output can seek and buffering when it cannot.
+    fn with_raw_sink<T>(
+        &mut self,
+        title: &str,
+        enc: Encoding,
+        f: impl FnOnce(&mut dyn TranSink) -> T,
+    ) -> io::Result<T> {
+        match self {
+            Out::File(w) => {
+                let mut sink = RawSink::new(&mut *w, title, enc);
+                Ok(f(&mut sink))
+            }
+            Out::Stdout(w) => {
+                let mut sink = RawSink::new(Cursor::new(Vec::new()), title, enc);
+                let out = f(&mut sink);
+                if let Some(c) = sink.into_inner() {
+                    w.write_all(&c.into_inner())?;
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
+// ── Parameter override helpers ─────────────────────────────────────────────
+
+/// Apply CLI `--param` overrides to a netlist in-place.
+///
+/// Format: `ELEMENT.PARAM=VALUE`, case-insensitive on both names. The matching
+/// itself is [`fairchild_core::netlist_edit::set_element_param`], shared with
+/// the Python and C bindings — this function is only the CLI's parse-and-warn
+/// wrapper around it. It used to be a private re-implementation that reached
+/// X/R/C/L only, so a Verilog-A transistor on an `M`/`Q` line could not be
+/// swept from the command line.
+fn apply_params(netlist: &mut Netlist, overrides: &[String], quiet: bool) {
+    for raw in overrides {
+        let warn = |msg: &str| {
+            if !quiet {
+                eprintln!("warning: --param '{raw}': {msg}");
+            }
+        };
+        let Some((lhs, rhs)) = raw.split_once('=') else {
+            warn("expected ELEMENT.PARAM=VALUE, skipping");
+            continue;
+        };
+        // The netlist's own value syntax, suffixes included — a bare
+        // `f64::parse` here silently rejected `W=1u` and `cjo=10p`, i.e. exactly
+        // what a user copies off the element line they are overriding.
+        let Ok(value) = fairchild_parser::parse_spice_value(rhs) else {
+            warn(&format!("cannot parse value '{rhs}', skipping"));
+            continue;
+        };
+        let Some((elem_name, param_name)) = lhs.split_once('.') else {
+            warn("expected ELEMENT.PARAM, skipping");
+            continue;
+        };
+        if !set_element_param(netlist, elem_name, param_name, value) {
+            warn(&format!(
+                "element '{elem_name}' not found or param '{param_name}' not applicable"
+            ));
+        }
+    }
+}
+
+// ── Probe / column filtering ───────────────────────────────────────────────
+
+/// Parse a comma-separated probe string into signal names, spelled as the user
+/// wrote them (matching is case-insensitive; the original spelling is kept so
+/// an unmatched name can be reported back in the user's own text).
+fn parse_probe(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Case-insensitive probe-to-column match. `V(out)` also selects the AC
+/// sweep's `mag_V(out)` / `phase_deg_V(out)` pair, since those are the columns
+/// that signal produces there.
+fn probe_matches(probe_lc: &str, header_lc: &str) -> bool {
+    header_lc == probe_lc
+        || header_lc
+            .strip_prefix("mag_")
+            .is_some_and(|h| h == probe_lc)
+        || header_lc
+            .strip_prefix("phase_deg_")
+            .is_some_and(|h| h == probe_lc)
+}
+
+/// Filter a CSV string to keep only the header columns that match `probes`.
+///
+/// Matching is case-insensitive.  The first column (analysis / time) is always
+/// kept.  Returns the full CSV if `probes` is empty.
+///
+/// A probe that matches no column is an error carrying the unmatched names
+/// (issue #72): silently dropping it produced a CSV that looked complete and
+/// was not, which downstream is a `KeyError` a long way from the cause.
+fn filter_csv(csv: &str, probes: &[String]) -> Result<String, Vec<String>> {
+    if probes.is_empty() {
+        return Ok(csv.to_string());
+    }
+    let probes_lc: Vec<String> = probes.iter().map(|p| p.to_lowercase()).collect();
+    let mut matched = vec![false; probes.len()];
+    let mut out = String::new();
+    let mut keep_cols: Option<Vec<usize>> = None;
+
+    for line in csv.lines() {
+        if let Some(cols) = &keep_cols {
+            let fields: Vec<&str> = line.split(',').collect();
+            let row: Vec<&str> = cols
+                .iter()
+                .filter_map(|&i| fields.get(i).copied())
+                .collect();
+            out.push_str(&row.join(","));
+            out.push('\n');
+        } else {
+            // Header row — determine which columns to keep
+            let headers: Vec<&str> = line.split(',').collect();
+            let mut cols: Vec<usize> = Vec::new();
+            for (i, h) in headers.iter().enumerate() {
+                let h_lc = h.to_lowercase();
+                let mut keep = i == 0;
+                for (pi, p) in probes_lc.iter().enumerate() {
+                    if probe_matches(p, &h_lc) {
+                        matched[pi] = true;
+                        keep = true;
+                    }
+                }
+                if keep {
+                    cols.push(i);
+                }
+            }
+            // Emit filtered header
+            let header_out: Vec<&str> = cols.iter().map(|&i| headers[i]).collect();
+            out.push_str(&header_out.join(","));
+            out.push('\n');
+            keep_cols = Some(cols);
+        }
+    }
+    let missing: Vec<String> = probes
+        .iter()
+        .zip(&matched)
+        .filter(|(_, &m)| !m)
+        .map(|(p, _)| p.clone())
+        .collect();
+    if missing.is_empty() {
+        Ok(out)
+    } else {
+        Err(missing)
+    }
+}
+
+/// Apply the probe filter, or fail naming every probe that matched nothing —
+/// the same contract `--param` overrides have (#64): a request is honoured or
+/// it is named, never silently dropped.
+fn filter_csv_or_fail(csv: &str, probes: &[String], analysis: &str) -> Result<String, String> {
+    filter_csv(csv, probes).map_err(|missing| {
+        let list = missing
+            .iter()
+            .map(|m| format!("'{m}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "--probe {list} matched no column of the {analysis} output. \
+             Signals are spelled as the CSV header spells them (run without \
+             --probe to see it; --list-nodes prints the deck's nets); for an \
+             AC sweep, V(node) selects the mag_/phase_deg_ column pair."
+        )
+    })
+}
+
+// ── SimOptions builder: netlist .options + CLI flags ───────────────────────
+
+/// Build a `SimOptions` by starting from netlist `.options` and applying the
+/// CLI-specified overlays.  Unknown keys emit a warning (unless `--quiet`).
+fn build_options(netlist: &Netlist, cli: &Cli) -> SimOptions {
+    let mut opts = SimOptions::from_netlist(netlist);
+
+    let mut apply = |key: &str, value: &str| {
+        if !opts.set(key, value) && !cli.quiet {
+            eprintln!("warning: unknown solver option '{key}={value}'");
+        }
+    };
+
+    if let Some(v) = &cli.reltol {
+        apply("reltol", v);
+    }
+    if let Some(v) = &cli.gmin {
+        apply("gmin", v);
+    }
+    if let Some(v) = &cli.method {
+        apply("method", v);
+    }
+    if let Some(v) = &cli.max_step {
+        apply("maxstep", v);
+    }
+    if cli.no_pnjlim {
+        apply("pnjlim", "0");
+    }
+    if let Some(v) = &cli.solver {
+        apply("solver", v);
+    }
+    if cli.variable_step {
+        apply("variable_step", "1");
+    }
+
+    for raw in &cli.options {
+        if let Some((k, v)) = raw.split_once('=') {
+            apply(k.trim(), v.trim().trim_matches('"').trim_matches('\''));
+        } else if !cli.quiet {
+            eprintln!("warning: --opt '{raw}': expected KEY=VALUE, skipping");
+        }
+    }
+
+    if cli.verbose {
+        opts.verbose = true;
+    }
+    opts
+}
+
+// ── OSDI registry builder ─────────────────────────────────────────────────
+
+/// The Verilog-A compile knobs, as flags plus environment fallback.
+///
+/// `--openvaf` / `--va-include` / `--no-va-compile` beat `FAIRCHILD_OPENVAF`
+/// and `FAIRCHILD_VA_CACHE`; the environment fills only what no flag set.
+#[cfg(feature = "osdi")]
+fn va_options(cli: &Cli) -> VaOptions {
+    VaOptions {
+        compiler: cli.openvaf.clone(),
+        include_dirs: cli.va_include.clone(),
+        cache_dir: None,
+        no_compile: cli.no_va_compile,
+        generated_dir: cli.emit_generated.clone(),
+    }
+    .or_env()
+}
+
+#[cfg(not(feature = "osdi"))]
+fn va_options(_cli: &Cli) -> VaOptions {
+    VaOptions
+}
+
+/// Load built-in models, then every model file the netlist named — `.va`
+/// sources compiled on the way in, `.osdi` artefacts as-is.
+///
+/// The resolving and loading itself is `fairchild_osdi::load_libraries`, shared
+/// with the Python binding: two copies of it were two chances to disagree about
+/// which paths a deck meant.
+fn build_registry(
+    netlist: &Netlist,
+    netlist_dir: Option<&PathBuf>,
+    quiet: bool,
+    #[allow(unused_variables)] va: &VaOptions,
+) -> Result<DeviceRegistry, String> {
+    let mut registry = DeviceRegistry::new();
+    registry.register_builtin_models(&netlist.models);
+
+    #[cfg(feature = "osdi")]
+    {
+        // Photonic-model authoring guidance: as of the B-phase refactor, native
+        // Rust photonic devices (`fc_waveguide`, `fc_dcoupler`, `fc_splitter`,
+        // `fc_photodetector`, `fc_thermal_ps`, `fc_pn_ps`) are the recommended
+        // path.  Surface a one-shot info note so users with `.osdi` photonic
+        // models know there's a faster, cleaner alternative.
+        if !quiet {
+            let photonic_count = netlist
+                .osdi_paths
+                .iter()
+                .chain(&netlist.va_sources)
+                .filter(|p| {
+                    p.contains("photonic")
+                        || p.contains("waveguide")
+                        || p.contains("mrr")
+                        || p.contains("mzi")
+                        || p.contains("laser")
+                })
+                .count();
+            if photonic_count > 0 {
+                eprintln!(
+                    "info: {} OSDI photonic library/libraries loaded — note that native Rust devices \
+                     (fc_waveguide etc.) are now the recommended path; see fairchild-osdi crate \
+                     docs for the deprecation rationale.",
+                    photonic_count
+                );
+            }
+        }
+
+        fairchild_osdi::load_libraries_with_widths(
+            &netlist.osdi_paths,
+            &netlist.va_sources,
+            netlist_dir.map(|p| p.as_path()),
+            va,
+            &mut registry,
+            &fairchild_parser::instantiated_widths(netlist),
+            fairchild_parser::wires_per_channel(netlist),
+        )
+        .map_err(|e| e.to_string())?;
+        // `.model <card> <module> (...)` cards naming a descriptor we just
+        // loaded.  After the libraries, so the descriptors exist to alias.
+        registry.register_loaded_model_cards(&netlist.models);
+    }
+
+    #[cfg(not(feature = "osdi"))]
+    if !netlist.osdi_paths.is_empty() || !netlist.va_sources.is_empty() {
+        fairchild_core::warn_user!(
+            "netlist references {} model file(s) but this build was compiled without \
+             OSDI support (--features osdi). Those models will be ignored.",
+            netlist.osdi_paths.len() + netlist.va_sources.len()
+        );
+    }
+
+    Ok(registry)
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────
+
+/// Run the CLI over `args` (argv, program name included) and return the process
+/// exit code. Never exits the process — see the module docs for why.
+///
+/// `--help` and `--version` are not errors: clap reports them through `Err`, and
+/// both return 0 here. A malformed command line returns 2, the conventional
+/// usage-error code; a failed run returns 1.
+pub fn run<I, T>(args: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // clap already picks the stream: help and version to stdout, the
+            // rest to stderr.
+            let _ = e.print();
+            return match e.kind() {
+                clap::error::ErrorKind::DisplayHelp
+                | clap::error::ErrorKind::DisplayVersion
+                | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 0,
+                _ => 2,
+            };
+        }
+    };
+    match run_cli(cli) {
+        Ok(code) => code,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            1
+        }
+    }
+}
+
+fn run_cli(cli: Cli) -> Result<i32, String> {
+    // Before the first parse: `--quiet` promises to suppress *all* warnings, and
+    // most of them come from inside the parser and the solver rather than from
+    // here. Set it before anything can warn.
+    if cli.quiet {
+        fairchild_core::set_quiet(true);
+    }
+
+    // Two passes, because WDM dispatch is the registry's answer and the
+    // registry is built from what a parse produces (#52).  Pass one is
+    // permissive and exists only to harvest `.model` cards and model-file
+    // paths — nothing about those depends on how bundles expand — so the
+    // registry it feeds can then place every instance by what its name really
+    // resolves to, including a card's own name, which the parser cannot know.
+    // Parsing is milliseconds; this is not a hot path.
+    let parse_dir = cli.file.parent().map(|p| p.to_path_buf());
+    // Pass one's warnings are pass two's, so emitting them would double every
+    // one. Silence the library for the probe and put the setting back.
+    let was_quiet = fairchild_parser::warn::quiet();
+    fairchild_parser::warn::set_quiet(true);
+    if cli.emit_spice {
+        match fairchild_parser::emit_spice_file(&cli.file, cli.lang) {
+            Ok(text) => {
+                print!("{text}");
+                return Ok(0);
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    let probe =
+        fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &PermissiveArity, cli.lang);
+    let arity_reg = probe
+        .as_ref()
+        .ok()
+        .map(|n| build_registry(n, parse_dir.as_ref(), true, &va_options(&cli)))
+        .transpose()?;
+    fairchild_parser::warn::set_quiet(was_quiet);
+
+    // A pass-one failure is a real parse error; report it from the pass that
+    // uses the honest oracle so the message is the one the user should see.
+    let mut netlist = match arity_reg {
+        Some(reg) => fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &reg, cli.lang),
+        None => {
+            fairchild_parser::parse_spice_file_with_arity_lang(&cli.file, &StaticArity, cli.lang)
+        }
+    }
+    .map_err(|e| e.to_string())?;
+
+    // Apply --param overrides before any structural checks
+    if !cli.params.is_empty() {
+        apply_params(&mut netlist, &cli.params, cli.quiet);
+    }
+
+    // Discipline check (always performed; fails the run on mismatch)
+    check_disciplines(&netlist).map_err(|e| format!("discipline mismatch: {e}"))?;
+
+    // --check: validate only
+    if cli.check {
+        if !cli.quiet {
+            let n_el = netlist.elements.len();
+            let n_an = netlist.analyses.len();
+            eprintln!(
+                "ok: {} element(s), {} analysis/analyses, disciplines clean",
+                n_el, n_an
+            );
+        }
+        return Ok(0);
+    }
+
+    // --list-nodes: enumerate nodes and exit
+    if cli.list_nodes {
+        // Build a registry for the netlist_dir (needed to load OSDI libs for topology)
+        let netlist_dir_tmp = cli.file.parent().map(|p| p.to_path_buf());
+        let reg_tmp = build_registry(
+            &netlist,
+            netlist_dir_tmp.as_ref(),
+            cli.quiet,
+            &va_options(&cli),
+        )?;
+        let opts_tmp = build_options(&netlist, &cli);
+        let result = dc_op_nr_with_registry_opts(&netlist, &reg_tmp, &opts_tmp)
+            .map_err(|e| format!("cannot build topology: {e}"))?;
+        let mut nodes: Vec<&str> = result.topo.node_index.keys().map(|s| s.as_str()).collect();
+        nodes.sort_unstable();
+        for n in nodes {
+            println!("V({n})");
+        }
+        for n in result.topo.vsrc_index.keys() {
+            println!("I({n})");
+        }
+        return Ok(0);
+    }
+
+    // --list-models: what the deck registers, and the shape of each one.
+    //
+    // The question this answers is "why is my model Scalar" — which used to have
+    // no answer at all, and now has one, because WDM dispatch is a property the
+    // registry can be asked about (#52). For a bundle-dialect source it also says
+    // which channel counts were generated, since one source serves any N and the
+    // artefacts are otherwise invisible in a cache (#55).
+    if cli.list_models {
+        if netlist.models.is_empty() {
+            println!("(no .model cards found)");
+        }
+        for m in &netlist.models {
+            let params: Vec<String> = m.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            println!(".model {} {} {}", m.name, m.kind, params.join(" "));
+        }
+        // Both routes, so `--list-models` shows every model file the deck
+        // names rather than only the pre-compiled half.
+        for path in &netlist.va_sources {
+            println!(".va {path}");
+        }
+        for path in &netlist.osdi_paths {
+            println!(".osdi {path}");
+        }
+
+        #[cfg(feature = "osdi")]
+        {
+            let dir = cli.file.parent().map(|p| p.to_path_buf());
+            let va = va_options(&cli);
+            let reg = build_registry(&netlist, dir.as_ref(), true, &va)?;
+            // Widths a bundle source was generated for, from the artefacts
+            // themselves rather than from what we think we asked for.
+            let mut built: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+            if let Ok(entries) = std::fs::read_dir(va.generated_dir()) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some((stem, rest)) = name.split_once(".n") {
+                        if let Some(n) = rest.strip_suffix(".va").and_then(|d| d.parse().ok()) {
+                            built.entry(stem.to_string()).or_default().push(n);
+                        }
+                    }
+                }
+            }
+            let mut names: Vec<&str> = reg.registered_names().collect();
+            names.sort_unstable();
+            let mut printed_header = false;
+            for name in names {
+                let Some(decl) = reg.arity_decl(name) else {
+                    continue;
+                };
+                let shape = match decl {
+                    ArityDecl::Bundle {
+                        scalars,
+                        per_channel,
+                    } => {
+                        let widths = built
+                            .iter()
+                            .find(|(k, _)| name.starts_with(k.as_str()) || k.starts_with(name))
+                            .map(|(_, v)| {
+                                let mut v = v.clone();
+                                v.sort_unstable();
+                                v.iter()
+                                    .map(|n| n.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "none yet".into());
+                        format!(
+                            "bundle ports, {per_channel} terminals per channel + {scalars} \
+                             scalar; built for N = {widths}"
+                        )
+                    }
+                    ArityDecl::Terminals(n) => {
+                        format!("{n} terminals, fixed — takes a bundle only at that exact width")
+                    }
+                    ArityDecl::Fixed(a) => match a {
+                        BundleArity::Aware => "bundle-aware (native)".to_string(),
+                        BundleArity::Bridge => "bundle bridge (native)".to_string(),
+                        BundleArity::Scalar => "single channel".to_string(),
+                    },
+                };
+                if name.starts_with("fc_") && matches!(decl, ArityDecl::Fixed(_)) {
+                    continue; // built-ins: not what the deck author is asking about
+                }
+                if !printed_header {
+                    println!("\nregistered models:");
+                    printed_header = true;
+                }
+                println!("  {name:<24} {shape}");
+            }
+        }
+        return Ok(0);
+    }
+
+    let title = netlist.title.clone();
+    let probe_list: Vec<String> = cli.probe.as_deref().map(parse_probe).unwrap_or_default();
+
+    // Build device registry: built-in models + OSDI shared libraries.
+    // Constructed inside the .alter loop below so model overrides take effect.
+    let netlist_dir = cli.file.parent().map(|p| p.to_path_buf());
+
+    // Merge netlist `.options` + CLI flag overrides into a single SimOptions.
+    let opts = build_options(&netlist, &cli);
+    if cli.verbose {
+        eprintln!(
+            "info: solver options: reltol={:e} gmin={:e} method={:?} itl1={} itl4={}",
+            opts.reltol, opts.gmin, opts.method, opts.itl1, opts.itl4
+        );
+    }
+
+    // The (alter × temp) grid.  Each corner is an independent simulation; we
+    // either run them serially into one shared writer (`--single-output`, no
+    // `--output`, only one corner, or `--verbose`) or in parallel into
+    // per-corner files.
+    //
+    // Expanded by `fairchild_core::expand_corners`, which is also what
+    // `Circuit.run_all()` calls — one definition of what corners a deck
+    // declares, rather than one per frontend.
+    let CornerGrid {
+        corners,
+        n_alters,
+        n_temps,
+    } = fairchild_core::expand_corners(&netlist, &opts);
+    let n_corners = corners.len();
+
+    // Dispatch: file-per-corner only when (a) an output path is given,
+    // (b) we have more than one corner, (c) the user hasn't asked for
+    // the single-output bundle, and (d) verbose is off (otherwise the
+    // interleaved per-corner NR diagnostics would be unreadable).
+    let parallel_eligible =
+        cli.output.is_some() && n_corners > 1 && !cli.single_output && !cli.verbose;
+
+    let ran_something = if parallel_eligible {
+        run_corners_parallel(
+            &corners,
+            n_alters,
+            n_temps,
+            netlist_dir.as_ref(),
+            &probe_list,
+            &title,
+            &cli,
+        )?
+    } else {
+        run_corners_serial(
+            &corners,
+            n_alters,
+            n_temps,
+            netlist_dir.as_ref(),
+            &probe_list,
+            &title,
+            &cli,
+        )?
+    };
+
+    if !ran_something && !cli.quiet {
+        eprintln!("warning: no analyses found in netlist (add .op, .tran, or .ac)");
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Corner sweep — `.alter` × `.temp` grid
+// ---------------------------------------------------------------------------
+
+/// Derive a per-corner output path by suffixing the base `--output`
+/// path with `.alter_<label>` and `.temp_<C>c` where the corresponding
+/// sweep is non-trivial.  Single-corner runs pass through unchanged.
+fn corner_path(
+    base: &Path,
+    alter_label: &str,
+    n_alters: usize,
+    temp_k: f64,
+    n_temps: usize,
+) -> PathBuf {
+    if n_alters <= 1 && n_temps <= 1 {
+        return base.to_path_buf();
+    }
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = base
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let mut name = stem;
+    if n_alters > 1 {
+        name.push_str(".alter_");
+        name.push_str(&sanitize_label(alter_label));
+    }
+    if n_temps > 1 {
+        let temp_c = temp_k - 273.15;
+        // `{:+.0}` keeps the sign so `-40c` and `27c` are immediately
+        // distinguishable, while `{:.0}` collapses 26.9°C to "27c".
+        name.push_str(&format!(".temp_{:.0}c", temp_c));
+    }
+    if !ext.is_empty() {
+        name.push('.');
+        name.push_str(&ext);
+    }
+    parent.join(name)
+}
+
+/// Replace whitespace and path separators in `.alter` labels so they
+/// produce valid filename suffixes.
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' | '\t' | '/' | '\\' | ':' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+fn open_writer(path: &Path) -> Result<Out, String> {
+    let f = fs::File::create(path).map_err(|e| format!("cannot create {path:?}: {e}"))?;
+    Ok(Out::File(BufWriter::new(f)))
+}
+
+/// Run every corner sequentially into a single shared writer.  Used
+/// when `--single-output` is given, when there's only one corner,
+/// when no `--output` was specified (writes go to stdout), or under
+/// `--verbose` (per-corner diagnostics would otherwise interleave).
+fn run_corners_serial(
+    corners: &[Corner],
+    n_alters: usize,
+    n_temps: usize,
+    netlist_dir: Option<&PathBuf>,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
+) -> Result<bool, String> {
+    let mut w = match &cli.output {
+        Some(path) => open_writer(path)?,
+        None => Out::Stdout(BufWriter::new(io::stdout())),
+    };
+    let va = va_options(cli);
+    let mut ran_something = false;
+    let mut last_alter: Option<usize> = None;
+    let mut registry: Option<DeviceRegistry> = None;
+    for corner in corners {
+        // Rebuild registry on every new alter block (model overrides may
+        // differ); reuse across temperature sweep points within a block.
+        if last_alter != Some(corner.alter_idx) {
+            registry = Some(build_registry(
+                &corner.netlist,
+                netlist_dir,
+                cli.quiet,
+                &va,
+            )?);
+            last_alter = Some(corner.alter_idx);
+        }
+        if n_alters > 1 {
+            writeln!(
+                w,
+                "# alter={} (block {}/{})",
+                corner.alter_label,
+                corner.alter_idx + 1,
+                n_alters
+            )
+            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            if cli.verbose {
+                eprintln!(
+                    "info: .alter block {}/{}: '{}'",
+                    corner.alter_idx + 1,
+                    n_alters,
+                    corner.alter_label
+                );
+            }
+        }
+        if n_temps > 1 {
+            writeln!(
+                w,
+                "# temp_c={:.3} (point {}/{})",
+                corner.temp_k - 273.15,
+                corner.temp_idx + 1,
+                n_temps
+            )
+            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+            if cli.verbose {
+                eprintln!(
+                    "info: temperature sweep point {}/{}: {:.2} °C",
+                    corner.temp_idx + 1,
+                    n_temps,
+                    corner.temp_k - 273.15
+                );
+            }
+        }
+        if run_corner_analyses(
+            corner,
+            registry.as_ref().unwrap(),
+            probe_list,
+            title,
+            cli,
+            &mut w,
+        )? {
+            ran_something = true;
+        }
+    }
+    Ok(ran_something)
+}
+
+/// Run every corner on its own thread, writing to per-corner files
+/// derived from the base `--output` path.  Each thread builds its own
+/// device registry so OSDI library handles aren't shared (the OSDI
+/// loader uses `dlopen` which is process-global, but each registry
+/// owns its own `OsdiLibrary` handles).
+fn run_corners_parallel(
+    corners: &[Corner],
+    n_alters: usize,
+    n_temps: usize,
+    netlist_dir: Option<&PathBuf>,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
+) -> Result<bool, String> {
+    let base = cli
+        .output
+        .as_ref()
+        .expect("--output required for parallel mode");
+    let netlist_dir = netlist_dir.cloned();
+    let probe_list = probe_list.to_vec();
+    let title = title.to_string();
+    let cli_quiet = cli.quiet;
+    let cli_verbose = cli.verbose;
+    let cli_format = cli.format.clone();
+    let va = va_options(cli);
+
+    let ran: Vec<bool> = corners
+        .par_iter()
+        .map(|corner| {
+            let out_path = corner_path(base, &corner.alter_label, n_alters, corner.temp_k, n_temps);
+            let mut w = open_writer(&out_path)?;
+            let registry = build_registry(&corner.netlist, netlist_dir.as_ref(), cli_quiet, &va)?;
+            // Build a synthetic Cli reference for run_corner_analyses; we
+            // only need a few fields, so pass them explicitly via a
+            // miniature struct rather than threading the whole Cli through.
+            let ctx = CornerCtx {
+                verbose: cli_verbose,
+                format: &cli_format,
+            };
+            run_corner_analyses_ctx(corner, &registry, &probe_list, &title, &ctx, &mut w)
+        })
+        // `collect` into a `Result` keeps the first error and drops the rest.
+        // Without it a corner that failed on a worker thread had no way to be
+        // noticed except by killing the process from inside that thread.
+        .collect::<Result<Vec<bool>, String>>()?;
+    Ok(ran.into_iter().any(|x| x))
+}
+
+/// Minimal subset of CLI flags that `run_corner_analyses_ctx` actually
+/// needs.  Used so the parallel path can pass small `Copy`/borrowed
+/// fields per-worker instead of an entire `Cli` (which holds owned
+/// `String` / `Vec<String>` that would force cloning per corner).
+struct CornerCtx<'a> {
+    verbose: bool,
+    format: &'a Format,
+}
+
+/// Convenience wrapper for the serial path that has a `&Cli` available.
+fn run_corner_analyses(
+    corner: &Corner,
+    registry: &DeviceRegistry,
+    probe_list: &[String],
+    title: &str,
+    cli: &Cli,
+    w: &mut Out,
+) -> Result<bool, String> {
+    let ctx = CornerCtx {
+        verbose: cli.verbose,
+        format: &cli.format,
+    };
+    run_corner_analyses_ctx(corner, registry, probe_list, title, &ctx, w)
+}
+
+/// Run every `Analysis` declared on this corner's netlist, writing
+/// results to `w`.  Returns `true` if anything was emitted.
+fn run_corner_analyses_ctx(
+    corner: &Corner,
+    registry: &DeviceRegistry,
+    probe_list: &[String],
+    title: &str,
+    ctx: &CornerCtx,
+    w: &mut Out,
+) -> Result<bool, String> {
+    let netlist = &corner.netlist;
+    let opts = &corner.opts;
+    warn_probe_not_narrowing_raw(netlist, probe_list, ctx.format);
+    let mut ran_something = false;
+    for analysis in &netlist.analyses {
+        match analysis {
+            Analysis::Op => {
+                if ctx.verbose {
+                    eprintln!("info: running DC operating-point analysis...");
+                }
+                let t0 = Instant::now();
+                let result = dc_op_nr_with_registry_opts(netlist, registry, opts)
+                    .map_err(|e| format!("DC op failed: {e}"))?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: DC op converged in {} iteration(s) [{:.1} ms]",
+                        result.iters,
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                match ctx.format.encoding() {
+                    None => {
+                        let mut buf = Vec::new();
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv_or_fail(&csv, probe_list, "DC operating-point")?;
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Some(enc) => {
+                        result
+                            .write_raw(&mut *w, title, enc)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                ran_something = true;
+            }
+
+            Analysis::Tran {
+                step,
+                stop,
+                tstart,
+                tmax,
+                uic,
+            } => {
+                // Each card's tstart/tmax/UIC belong to that card's run only.
+                // Folding them in `SimOptions::from_netlist` gave every run the
+                // tightest `tmax` of every `.tran` line in the deck.
+                let mut local_opts = opts.clone();
+                local_opts.apply_tran_card(*tstart, *tmax, *uic);
+                let opts = &local_opts;
+                if ctx.verbose {
+                    let mode = if opts.variable_step {
+                        "variable-step"
+                    } else {
+                        "fixed-step"
+                    };
+                    eprintln!("info: running transient analysis (step={step:.2e} stop={stop:.2e} method={:?} {mode})...", opts.method);
+                }
+                let t0 = Instant::now();
+                let n_points = run_transient(
+                    netlist, *step, *stop, registry, opts, probe_list, title, ctx, w,
+                )?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: transient complete: {n_points} time-points [{:.1} ms]",
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                ran_something = true;
+            }
+
+            Analysis::Dc {
+                src,
+                start,
+                stop,
+                step,
+                nested,
+            } => {
+                if ctx.verbose {
+                    let extra = match nested {
+                        Some(n) => format!(" × {} {}..{}", n.src, n.start, n.stop),
+                        None => String::new(),
+                    };
+                    eprintln!(
+                        "info: running DC sweep on {src} ({start}..{stop} step={step}){extra}..."
+                    );
+                }
+                let t0 = Instant::now();
+                let nested_arg = nested
+                    .as_ref()
+                    .map(|n| (n.src.as_str(), n.start, n.stop, n.step));
+                let result = dc_sweep_with_registry_opts(
+                    netlist, src, *start, *stop, *step, nested_arg, registry, opts,
+                )
+                .map_err(|e| format!("DC sweep failed: {e}"))?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: DC sweep complete: {} point(s) [{:.1} ms]",
+                        result.n_points(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                match ctx.format.encoding() {
+                    None => {
+                        let mut buf = Vec::new();
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv_or_fail(&csv, probe_list, "DC sweep")?;
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Some(enc) => {
+                        result
+                            .write_raw(&mut *w, title, enc)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                ran_something = true;
+            }
+
+            Analysis::Ac {
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
+                if ctx.verbose {
+                    eprintln!(
+                        "info: running AC analysis ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."
+                    );
+                }
+                let t0 = Instant::now();
+                let freqs = match variation {
+                    AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
+                    AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
+                    AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
+                };
+                let result = ac_analysis_opts(netlist, &freqs, None, registry, opts)
+                    .map_err(|e| format!("AC analysis failed: {e}"))?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: AC analysis complete: {} frequency points [{:.1} ms]",
+                        freqs.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                match ctx.format.encoding() {
+                    None => {
+                        let mut buf = Vec::new();
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        let csv = String::from_utf8_lossy(&buf);
+                        let filtered = filter_csv_or_fail(&csv, probe_list, "AC")?;
+                        w.write_all(filtered.as_bytes())
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Some(enc) => {
+                        result
+                            .write_raw(&mut *w, title, enc)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                ran_something = true;
+            }
+
+            Analysis::Noise {
+                out_pos,
+                out_neg,
+                input_src,
+                variation,
+                points,
+                fstart,
+                fstop,
+            } => {
+                if ctx.verbose {
+                    eprintln!(
+                        "info: running noise analysis V({out_pos},{out_neg}) on {input_src} \
+                              ({fstart:.2e}–{fstop:.2e} Hz, {points} pts)..."
+                    );
+                }
+                let t0 = Instant::now();
+                let freqs = match variation {
+                    AcVariation::Dec => freq_decade(*fstart, *fstop, *points),
+                    AcVariation::Oct => freq_oct(*fstart, *fstop, *points),
+                    AcVariation::Lin => freq_linear(*fstart, *fstop, *points),
+                };
+                let result = fairchild_core::noise_analysis(
+                    netlist, &freqs, out_pos, out_neg, input_src, registry, opts,
+                )
+                .map_err(|e| format!("noise analysis failed: {e}"))?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: noise analysis complete: {} pts [{:.1} ms]",
+                        freqs.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                match ctx.format.encoding() {
+                    None => {
+                        let mut buf = Vec::new();
+                        result
+                            .write_csv(&mut buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                        w.write_all(&buf)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                    Some(enc) => {
+                        result
+                            .write_raw(&mut *w, title, enc)
+                            .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                    }
+                }
+                ran_something = true;
+            }
+
+            Analysis::Tf { out, input_src } => {
+                warn_probe_ignored(probe_list, ".tf");
+                if ctx.verbose {
+                    eprintln!("info: running transfer-function analysis on {input_src}...");
+                }
+                let result =
+                    fairchild_core::transfer_function(netlist, registry, opts, out, input_src)
+                        .map_err(|e| format!(".tf failed: {e}"))?;
+                let out_label = outvar_label(out);
+                let mut buf = Vec::new();
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf, &out_label, input_src),
+                    Some(enc) => result.write_raw(&mut buf, title, &out_label, input_src, enc),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
+
+            Analysis::Sens { out, params } => {
+                warn_probe_ignored(probe_list, ".sens");
+                if ctx.verbose {
+                    let n = if params.is_empty() {
+                        "every element value".to_string()
+                    } else {
+                        format!("{} parameter(s)", params.len())
+                    };
+                    eprintln!("info: running sensitivity analysis over {n}...");
+                }
+                let result = fairchild_core::sensitivity(netlist, registry, opts, out, params)
+                    .map_err(|e| format!(".sens failed: {e}"))?;
+                // Unreached parameters are a zero that was never computed.
+                // Nobody reading a column of numbers can tell the difference,
+                // so say it on stderr as well as in the `reached` column.
+                let missed = result.unreached();
+                if !missed.is_empty() {
+                    let names: Vec<&str> = missed.iter().map(|r| r.name.as_str()).collect();
+                    eprintln!(
+                        "warning: no gradient for {} — their reported 0 is a placeholder, \
+                         not an insensitivity (the model does not accept the parameter; \
+                         see docs/model_status.md)",
+                        names.join(", ")
+                    );
+                }
+                let mut buf = Vec::new();
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf),
+                    Some(enc) => result.write_raw(&mut buf, title, enc),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
+
+            Analysis::Pz {
+                in_pos,
+                in_neg,
+                out_pos,
+                out_neg,
+                drive,
+                want,
+            } => {
+                warn_probe_ignored(probe_list, ".pz");
+                if ctx.verbose {
+                    eprintln!(
+                        "info: running pole-zero analysis ({in_pos},{in_neg}) → \
+                         ({out_pos},{out_neg})..."
+                    );
+                }
+                let t0 = Instant::now();
+                let result = fairchild_core::pole_zero(
+                    netlist, registry, opts, in_pos, in_neg, out_pos, out_neg, *drive, *want,
+                )
+                .map_err(|e| format!(".pz failed: {e}"))?;
+                if ctx.verbose {
+                    eprintln!(
+                        "info: pole-zero complete: {} pole(s), {} zero(s) [{:.1} ms]",
+                        result.poles.len(),
+                        result.zeros.len(),
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                let mut buf = Vec::new();
+                match ctx.format.encoding() {
+                    None => result.write_csv(&mut buf),
+                    Some(enc) => result.write_raw(&mut buf, title, enc),
+                }
+                .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                w.write_all(&buf)
+                    .unwrap_or_else(|e| eprintln!("warning: write error: {e}"));
+                ran_something = true;
+            }
+        }
+    }
+    Ok(ran_something)
+}
+
+/// Run one `.tran` card and write its result, streaming where it can.
+///
+/// The transient is the only analysis whose output is unbounded, so it is the
+/// only one that must not be assembled before it is written. It streams —
+/// straight into a rawfile or CSV, one timepoint at a time — unless something
+/// downstream needs the whole run, which today means `.measure`. That is the
+/// entire fork, and it lives here rather than being spread across the format
+/// arms.
+///
+/// Returns the number of timepoints written.
+#[allow(clippy::too_many_arguments)]
+fn run_transient(
+    netlist: &Netlist,
+    step: f64,
+    stop: f64,
+    registry: &DeviceRegistry,
+    opts: &SimOptions,
+    probe_list: &[String],
+    title: &str,
+    ctx: &CornerCtx,
+    w: &mut Out,
+) -> Result<usize, String> {
+    fn died(e: SimError) -> String {
+        format!("tran failed: {e}")
+    }
+
+    // Whether the run is streamed or kept, it reaches the writer the same way:
+    // through `SelectSink`, so `--probe` means one thing here. It used to mean
+    // two — the streamed path selected columns and the `.measure` path wrote
+    // the rawfile straight out of the result — and a deck with a `.measure`
+    // silently ignored the flag. That is the failure `.print` was fixed for.
+    let feed = |sink: &mut dyn TranSink| -> Result<(), SimError> {
+        let mut sel = SelectSink::new(sink, probe_list);
+        // `.measure` reads the finished waveform, so a deck that has one keeps
+        // the run in memory and replays it. Everything else streams, and never
+        // holds more than one timepoint.
+        if netlist.measurements.is_empty() {
+            if opts.variable_step {
+                tran_nr_with_registry_var_opts_into(netlist, step, stop, registry, opts, &mut sel)
+            } else {
+                tran_nr_with_registry_opts_into(netlist, step, stop, registry, opts, &mut sel)
+            }
+        } else {
+            let result = tran_nr_configured(netlist, step, stop, registry, opts)?;
+            result.replay(&mut sel)?;
+            for m in evaluate_measurements(&netlist.measurements, &result) {
+                eprintln!("{:<24} = {:.6e}", m.name, m.value);
+            }
+            Ok(())
+        }
+    };
+
+    match ctx.format.encoding() {
+        None => {
+            let mut sink = CsvSink::new(&mut *w);
+            feed(&mut sink).map_err(died)?;
+            Ok(sink.points_written())
+        }
+        Some(enc) => {
+            let (outcome, n) = w
+                .with_raw_sink(title, enc, |sink| {
+                    let outcome = feed(sink);
+                    let n = sink.points_written();
+                    (outcome, n)
+                })
+                .map_err(|e| format!("cannot write transient output: {e}"))?;
+            outcome.map_err(died)?;
+            Ok(n)
+        }
+    }
+}
+
+/// `--probe` selects signals out of a waveform table, and the small-signal
+/// reports are not one — their rows are named quantities, all of which are the
+/// answer.  Say so rather than dropping the flag in silence, which is the
+/// failure `.print` was fixed for.
+fn warn_probe_ignored(probe_list: &[String], card: &str) {
+    if !probe_list.is_empty() {
+        fairchild_core::warn_user!(
+            "--probe does not apply to {card}: it reports named quantities, not \
+             a signal table, so every row is printed"
+        );
+    }
+}
+
+/// `--probe` narrows a transient rawfile, and narrows no other analysis's.
+///
+/// The transient selects its columns *before* writing them, because that is
+/// where the size is: its output is unbounded in time and every other
+/// analysis's is bounded by the deck. The bounded ones render a whole result
+/// and filter the text afterwards, which only their CSV writer does.
+///
+/// So the rule has a seam in it, and a silent seam is what this codebase treats
+/// as the worst outcome. Say it out loud instead: the user asked for four
+/// signals and is about to get four hundred.
+fn warn_probe_not_narrowing_raw(netlist: &Netlist, probe_list: &[String], format: &Format) {
+    if probe_list.is_empty() || format.encoding().is_none() {
+        return;
+    }
+    let bounded: Vec<&str> = netlist
+        .analyses
+        .iter()
+        .filter_map(|a| match a {
+            Analysis::Op => Some(".op"),
+            Analysis::Ac { .. } => Some(".ac"),
+            Analysis::Dc { .. } => Some(".dc"),
+            Analysis::Noise { .. } => Some(".noise"),
+            _ => None,
+        })
+        .collect();
+    if bounded.is_empty() {
+        return;
+    }
+    fairchild_core::warn_user!(
+        "--probe does not narrow a rawfile for {}: every signal is written. \
+         Selecting columns before writing is implemented for .tran, where the \
+         output is unbounded in time; use --format csv to filter the rest",
+        bounded.join(", ")
+    );
+}
+
+/// `v(out)` / `v(a,b)` / `i(vsrc)` — how the card spelled the output, for the
+/// labels a `.tf` report is read by.
+fn outvar_label(out: &OutVar) -> String {
+    match out {
+        OutVar::NodeVoltage { pos, neg } if neg == "0" => format!("v({pos})"),
+        OutVar::NodeVoltage { pos, neg } => format!("v({pos},{neg})"),
+        OutVar::BranchCurrent(name) => format!("i({name})"),
+    }
+}

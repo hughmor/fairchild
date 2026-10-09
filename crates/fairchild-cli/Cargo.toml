@@ -18,6 +18,9 @@ fairchild-osdi   = { workspace = true, optional = true }
 clap             = { workspace = true }
 rayon            = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["osdi"]
 osdi = ["dep:fairchild-osdi"]

@@ -6,7 +6,11 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "fairchild"
+# The distribution name, not the import name — `pip install fairchild-sim` gives
+# you `import fairchild`, the way `pip install pillow` gives you `import PIL`.
+# Plain `fairchild` on PyPI was registered by an unrelated project in January
+# 2026, so it is not available and will not be; only this line changes.
+name = "fairchild-sim"
 requires-python = ">=3.9"
 description = "Open-source time-domain electro-optic circuit simulator"
 readme = "README.md"
@@ -16,14 +20,22 @@ dependencies = ["numpy"]
 # Taken from crates/fairchild-py/Cargo.toml, which inherits [workspace.package].
 dynamic = ["version"]
 
-# Keep this table LAST in [project]: a `[project.x]` header ends the [project]
-# table, so any bare key after it (e.g. `dynamic`) silently lands in the wrong
-# table and maturin then refuses to build for want of version information.
+# Every bare key of [project] must appear ABOVE this line: a `[project.x]`
+# header ends the [project] table, so a bare key after it (e.g. `dynamic`)
+# silently lands in the wrong table and maturin then refuses to build for want
+# of version information. Sub-tables may be added freely below.
 [project.optional-dependencies]
 # Live KiCad schematic capture over the IPC API (fairchild.kicad). grpcio-tools
 # is only needed to run python/fairchild/kicad/regen_protos.sh; pynng and
 # protobuf are needed at runtime.
 kicad = ["pynng", "protobuf", "grpcio-tools"]
+
+# The CLI, shipped in the same wheel as the extension module rather than as a
+# separate binary download: this shim calls into the compiled `_cli_main`, so
+# `pip install fairchild-sim` gets you both `import fairchild` and a working
+# `fairchild` command with no Rust toolchain anywhere.
+[project.scripts]
+fairchild = "fairchild.__main__:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
