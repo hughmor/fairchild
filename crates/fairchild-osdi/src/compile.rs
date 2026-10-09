@@ -347,10 +347,24 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
             .to_string(),
         });
     }
-    std::fs::rename(&tmp, &out).map_err(|e| OsdiError::CacheDir {
-        path: out.clone(),
-        detail: format!("cannot install compiled model: {e}"),
-    })?;
+    // "Last writer wins" is a POSIX statement, not a portable one. Renaming
+    // over an open file replaces the directory entry there and leaves the old
+    // inode to its readers; Windows refuses with ERROR_ACCESS_DENIED, and a
+    // `.osdi` another test has already loaded is exactly such a file.
+    //
+    // Losing that race is not a failure. The destination is named by a hash of
+    // the expansion and the compiler, so a file already sitting there is byte
+    // for byte what this compile just produced. Keep it, drop ours, and carry
+    // on; only an absent destination means the rename really failed.
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        let _ = std::fs::remove_file(&tmp);
+        if !out.is_file() {
+            return Err(OsdiError::CacheDir {
+                path: out.clone(),
+                detail: format!("cannot install compiled model: {e}"),
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -669,10 +683,16 @@ fn write_atomically(path: &Path, text: &str) -> Result<(), OsdiError> {
         stderr: format!("cannot write generated source: {e}"),
     };
     std::fs::write(&tmp, text).map_err(|e| fail(e, &tmp))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        fail(e, path)
-    })
+    // Same race, same reasoning as the `.osdi` rename above: on Windows this
+    // can lose to a thread that got there first, and what it wrote is what we
+    // were about to write.
+    let outcome = std::fs::rename(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(_) if path.is_file() => Ok(()),
+        Err(e) => Err(fail(e, path)),
+    }
 }
 
 #[cfg(test)]
@@ -764,6 +784,29 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// A rename that leaves nothing at the destination is still a failure.
+    ///
+    /// Both renames in this file tolerate losing a race, because the thing
+    /// already sitting at the destination is byte for byte what this call was
+    /// about to put there. That reasoning only holds when something *is* there.
+    /// Tolerating the other case would turn a full disk or a bad path into a
+    /// silent success and leave the caller to trip over the missing file later.
+    ///
+    /// Driven through a directory, which no rename can replace, because the
+    /// race itself only loses on Windows and a test cannot wait for that.
+    #[test]
+    fn a_rename_that_lands_nowhere_is_still_an_error() {
+        let dir = scratch("rename_fail");
+        let blocked = dir.join("occupied.n1.va");
+        std::fs::create_dir(&blocked).unwrap();
+        let err = write_atomically(&blocked, "some generated source\n")
+            .expect_err("renaming onto a directory cannot succeed");
+        assert!(
+            err.to_string().contains("occupied.n1.va"),
+            "the error must name the destination: {err}"
+        );
     }
 
     /// The whole point of the design: an include the top file does not itself
