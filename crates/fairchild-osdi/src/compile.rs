@@ -958,7 +958,9 @@ mod tests {
         assert!(err.contains("absent.va"), "{err}");
     }
 
-    fn set_exec(path: &Path) {
+    /// No-op off Unix: Windows decides executability by extension, and the
+    /// stubs these tests write are named for it.
+    fn set_exec(#[allow(unused_variables)] path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

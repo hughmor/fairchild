@@ -1,6 +1,8 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::path::Path;
 use std::sync::Arc;
+
+use libloading::{Library, Symbol};
 
 use fairchild_core::device_registry::{DeviceRegistry, ParamSet};
 use fairchild_core::warn_user;
@@ -10,12 +12,21 @@ use crate::device::OsdiDevice;
 use crate::error::OsdiError;
 use crate::ffi::{OsdiDescriptor, OsdiLimFunction};
 
-/// A loaded `.osdi` shared library (RAII wrapper around dlopen).
+/// A loaded `.osdi` shared library.
 ///
 /// The library is kept open for the lifetime of this struct; all pointers
 /// into the descriptor array are valid as long as `OsdiLibrary` is alive.
+///
+/// Loading goes through `libloading` rather than `libc::dlopen` so that this
+/// crate builds on Windows, where the POSIX `dl*` family does not exist and
+/// the equivalent is `LoadLibraryW`/`GetProcAddress`. The Unix behaviour is
+/// unchanged: `Library::new` opens with `RTLD_LAZY | RTLD_LOCAL`, which is
+/// what the hand-written call asked for.
 pub struct OsdiLibrary {
-    handle: *mut libc::c_void,
+    /// Never read after `init`. It is held because dropping it closes the
+    /// library, and every pointer below points into it.
+    #[allow(dead_code)]
+    lib: Library,
     pub version: (u32, u32),
     pub num_descriptors: usize,
     pub descriptor_size: usize,
@@ -36,30 +47,17 @@ impl OsdiLibrary {
     /// foreign code). The caller must ensure the library is a well-formed
     /// OSDI v0.4 shared object.
     pub unsafe fn open(path: &Path) -> Result<Self, OsdiError> {
-        let path_c = path_to_cstring(path)?;
-
-        let handle = libc::dlopen(path_c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-        if handle.is_null() {
-            let msg = CStr::from_ptr(libc::dlerror())
-                .to_string_lossy()
-                .into_owned();
-            return Err(OsdiError::DlOpen(msg));
-        }
-
-        match Self::init(handle) {
-            Ok(lib) => Ok(lib),
-            Err(e) => {
-                libc::dlclose(handle);
-                Err(e)
-            }
-        }
+        // A failure to load closes nothing: `Library` is dropped on the error
+        // path, and dropping it is the close.
+        let lib = Library::new(path).map_err(|e| OsdiError::DlOpen(e.to_string()))?;
+        Self::init(lib)
     }
 
-    /// Finish initialisation after the handle is opened.
-    unsafe fn init(handle: *mut libc::c_void) -> Result<Self, OsdiError> {
+    /// Finish initialisation once the library is open.
+    unsafe fn init(lib: Library) -> Result<Self, OsdiError> {
         macro_rules! sym_u32 {
             ($name:literal) => {{
-                let ptr = dlsym_or_err(handle, $name)?;
+                let ptr = sym_or_err(&lib, $name)?;
                 *(ptr as *const u32)
             }};
         }
@@ -81,14 +79,15 @@ impl OsdiLibrary {
             });
         }
 
-        // dlsym returns the address of the first element of OSDI_DESCRIPTORS.
-        let descriptors_base = dlsym_or_err(handle, b"OSDI_DESCRIPTORS\0")? as *const u8;
+        // The symbol's own address, which is the first element of
+        // OSDI_DESCRIPTORS — not the value stored there.
+        let descriptors_base = sym_or_err(&lib, b"OSDI_DESCRIPTORS\0")? as *const u8;
 
-        install_lim_table(handle);
-        install_log_hook(handle);
+        install_lim_table(&lib);
+        install_log_hook(&lib);
 
         Ok(Self {
-            handle,
+            lib,
             version: (major, minor),
             num_descriptors,
             descriptor_size,
@@ -170,46 +169,40 @@ impl OsdiLibrary {
     }
 }
 
-impl Drop for OsdiLibrary {
-    fn drop(&mut self) {
-        unsafe { libc::dlclose(self.handle) };
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn path_to_cstring(path: &Path) -> Result<CString, OsdiError> {
-    use std::os::unix::ffi::OsStrExt;
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| OsdiError::DlOpen(format!("path contains null byte: {path:?}")))
+/// The **address** of a symbol, or an error naming it.
+///
+/// Address, not value: every caller here wants where the symbol lives, and two
+/// of them (`osdi_log`, `OSDI_LIM_TABLE`) then write through it.
+///
+/// `try_as_raw_ptr` rather than `*symbol`, although for `T = *mut c_void` the
+/// two agree — `Symbol`'s `Deref` reinterprets its own pointer field, so
+/// dereferencing yields the address rather than the contents. That is a
+/// property of this `T`, chosen so `(*symbol)()` calls a function symbol.
+/// Spelling it out keeps the next `T` from inheriting a silent assumption.
+unsafe fn sym_or_err(lib: &Library, name: &'static [u8]) -> Result<*mut libc::c_void, OsdiError> {
+    // name is always a 'static byte literal from our call sites, so the
+    // resulting &str is also 'static.
+    let sym_name: &'static str = std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("?");
+    let fail = |detail: String| OsdiError::Symbol {
+        symbol: sym_name,
+        detail,
+    };
+    let sym: Symbol<*mut libc::c_void> = lib.get(name).map_err(|e| fail(e.to_string()))?;
+    sym.try_as_raw_ptr()
+        .ok_or_else(|| fail("symbol resolved to null".to_owned()))
 }
 
-unsafe fn dlsym_or_err(
-    handle: *mut libc::c_void,
-    name: &'static [u8],
-) -> Result<*mut libc::c_void, OsdiError> {
-    // Clear any pending error before calling dlsym.
-    libc::dlerror();
-    let ptr = libc::dlsym(handle, name.as_ptr() as *const libc::c_char);
-    if ptr.is_null() {
-        let err_ptr = libc::dlerror();
-        let detail = if err_ptr.is_null() {
-            "symbol resolved to null".to_owned()
-        } else {
-            CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
-        };
-        // name is always a 'static byte literal from our call sites, so the
-        // resulting &str is also 'static.
-        let sym_name: &'static str = std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("?");
-        Err(OsdiError::Symbol {
-            symbol: sym_name,
-            detail,
-        })
-    } else {
-        Ok(ptr)
-    }
+/// As [`sym_or_err`], for a symbol a library is allowed not to have.
+///
+/// A model that never calls `$limit()` exports no `OSDI_LIM_TABLE`, and one
+/// that never logs exports no `osdi_log`. Neither absence is a fault.
+unsafe fn sym_opt(lib: &Library, name: &[u8]) -> Option<*mut libc::c_void> {
+    let sym: Symbol<*mut libc::c_void> = lib.get(name).ok()?;
+    sym.try_as_raw_ptr()
 }
 
 // ── $limit() support ────────────────────────────────────────────────────────
@@ -304,18 +297,20 @@ unsafe extern "C" fn osdi_log_cb(handle: *mut libc::c_void, msg: *const libc::c_
 /// in; OpenVAF's own runtime does exactly this. Leaving it unset is not benign:
 /// a model that emits any diagnostic during setup — which every foundry compact
 /// model does, about its default parameters — takes the process down with it.
-unsafe fn install_log_hook(handle: *mut libc::c_void) {
+unsafe fn install_log_hook(lib: &Library) {
     type LogFn = unsafe extern "C" fn(*mut libc::c_void, *const libc::c_char, u32);
-    let slot = libc::dlsym(handle, c"osdi_log".as_ptr()) as *mut Option<LogFn>;
+    let slot = sym_opt(lib, b"osdi_log\0").unwrap_or(std::ptr::null_mut()) as *mut Option<LogFn>;
     if slot.is_null() {
         return; // no model in this library logs anything
     }
     slot.write(Some(osdi_log_cb));
 }
 
-unsafe fn install_lim_table(handle: *mut libc::c_void) {
-    let table = libc::dlsym(handle, c"OSDI_LIM_TABLE".as_ptr()) as *mut OsdiLimFunction;
-    let len_ptr = libc::dlsym(handle, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32;
+unsafe fn install_lim_table(lib: &Library) {
+    let table =
+        sym_opt(lib, b"OSDI_LIM_TABLE\0").unwrap_or(std::ptr::null_mut()) as *mut OsdiLimFunction;
+    let len_ptr =
+        sym_opt(lib, b"OSDI_LIM_TABLE_LEN\0").unwrap_or(std::ptr::null_mut()) as *const u32;
     if table.is_null() || len_ptr.is_null() {
         return; // no model in this library calls $limit()
     }

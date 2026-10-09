@@ -102,6 +102,11 @@ fairchild -f examples/electronic/rc_step.sp
 The distribution is `fairchild-sim`; what you import is `fairchild`. (Plain
 `fairchild` on PyPI is an unrelated project.)
 
+Wheels are built for Linux (x86_64, aarch64), macOS (Intel and Apple silicon)
+and Windows (x86_64), on CPython 3.9 to 3.13. Apple silicon on 3.9 is the one
+gap and falls back to the sdist, which needs a Rust toolchain. Every platform
+runs the full test suite on each change, Verilog-A included.
+
 **From source**, for the CLI alone or to work on the solver:
 
 ```bash

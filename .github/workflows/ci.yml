@@ -534,3 +534,116 @@ jobs:
             -o /tmp/mixed_signal crates/fairchild-c/examples/mixed_signal.c \
             -I crates/fairchild-c/include -L target/release -lfairchild_c
           LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release /tmp/mixed_signal
+
+  # ── Windows ────────────────────────────────────────────────────────────
+  #
+  # Its own job rather than a third `os` in the matrix above. That job is built
+  # out of bash heredocs, `sudo apt`, `brew`, ngspice and a `cc` invocation,
+  # and making each of them conditional would cost more than it buys. What
+  # Windows needs covered is narrower and worth stating exactly:
+  #
+  #   - the workspace compiles, including `fairchild-osdi`, which until this
+  #     job existed called `libc::dlopen` and could not build here at all;
+  #   - a `.osdi` artefact loads and solves, which is the half of the loader
+  #     port no amount of type-checking can prove. openvaf-r is installed for
+  #     that reason: without it every OSDI suite skips and this job would pass
+  #     against a loader that does not work;
+  #   - the wheel builds, imports, and runs a deck through the bundled command.
+  #
+  # Deliberately not covered: the ngspice goldens, which skip (no supported
+  # Windows install), and the C example, which needs a toolchain this job does
+  # not set up. Both are covered on the other two platforms, and neither is
+  # where a Windows-specific fault would hide.
+  windows:
+    name: Test (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git Bash. The steps below are the same shell as everywhere else, so
+        # a Windows-only quoting bug cannot be introduced by the runner alone.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustc --version && cargo clippy --version && cargo fmt --version
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'rust-toolchain.toml') }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache openvaf-r
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/openvaf
+          key: Windows-openvaf-${{ env.OPENVAF_VERSION }}
+
+      # The ucrt build, not the mingw one: the runner's CPython and our own
+      # binaries are ucrt, and mixing C runtimes in one process is how a
+      # perfectly good DLL fails to load for reasons nothing reports.
+      #
+      # The archive is one flat directory holding `openvaf-r.exe` and the DLLs
+      # it needs beside it. Windows resolves a DLL from the executable's own
+      # directory first, so they are kept together rather than split into
+      # `bin/` and `lib/` the way the Unix tarballs are.
+      - name: Install openvaf-r
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.local/openvaf/openvaf-r.exe" ]; then
+            asset="openvaf-r-$OPENVAF_VERSION-windows-x86_64-ucrt.zip"
+            url="https://github.com/OpenVAF/OpenVAF-Reloaded/releases/download/$OPENVAF_VERSION/$asset"
+            curl -fsSL -o "$RUNNER_TEMP/openvaf.zip" "$url"
+            mkdir -p "$HOME/.local"
+            unzip -q "$RUNNER_TEMP/openvaf.zip" -d "$RUNNER_TEMP/openvaf-extract"
+            mv "$RUNNER_TEMP/openvaf-extract/openvaf-r-$OPENVAF_VERSION-windows-x86_64-ucrt" \
+               "$HOME/.local/openvaf"
+          fi
+          echo "FAIRCHILD_OPENVAF=$HOME/.local/openvaf/openvaf-r.exe" >> "$GITHUB_ENV"
+
+      # Same assertion the other platforms make: the OSDI suites skip silently
+      # without a compiler, so a job that does not check this can go green
+      # having tested none of the thing it exists for.
+      - name: The compiler is really there
+        run: "$FAIRCHILD_OPENVAF --version"
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python bindings build, import and run a deck
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet maturin
+          maturin build --release --out dist --interpreter python
+          python -m pip install --quiet --find-links dist --force-reinstall fairchild-sim
+          printf '* rc\nV1 in 0 PULSE(0 1 0 1n 1n 1u 2u)\nR1 in out 1k\nC1 out 0 1n\n.tran 1e-8 2e-6\n.end\n' > rc.sp
+          fairchild --version
+          fairchild --file rc.sp --probe "V(out)" --output rc.csv
+          head -2 rc.csv
+          python - <<'PY'
+          import fairchild
+          from fairchild.fairchild import _cli_main
+          c = fairchild.Circuit()
+          c.load_str("* rc\nV1 in 0 DC 1\nR1 in out 1k\nC1 out 0 1u\n.op\n")
+          assert abs(float(c.op()["V(out)"][0]) - 1.0) < 1e-9
+          # The whole reason `run` returns codes: exiting from inside CPython
+          # would take the interpreter down with it.
+          assert _cli_main(["fairchild", "--file", "no/such.sp"]) == 1
+          assert _cli_main(["fairchild", "--not-a-flag"]) == 2
+          print("ok: solved, and the error paths left the interpreter alive")
+          PY
