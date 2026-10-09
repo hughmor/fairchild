@@ -96,11 +96,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 was retired; `-intel` images are the x86_64 line now and
-        # every unsuffixed macos-* label is Apple silicon.
-        include:
-          - { runner: macos-15-intel, target: x86_64 }
-          - { runner: macos-14,       target: aarch64 }
+        # `target` and `python` are the real axes, and `runner` is attached
+        # to each by the `include` below. It has to be this way round: GitHub
+        # builds the cross product from the axes alone, applies `exclude` to
+        # it, and only then merges `include`. A key that exists only in
+        # `include` is therefore not a key `exclude` can name, and naming one
+        # is a parse error that fails the whole workflow before a job starts.
+        target: [x86_64, aarch64]
         # No abi3: pyo3 is built against a specific CPython here, so each
         # version needs its own wheel. Switching to abi3 would collapse this
         # matrix to one job per target — worth revisiting once rust-numpy's
@@ -112,6 +114,13 @@ jobs:
           # Apple-silicon users on 3.9 fall back to the sdist. Revisit if
           # anyone asks; dropping requires-python to >=3.10 would also do it.
           - { target: aarch64, python: '3.9' }
+        # Neither entry adds a job: each names an existing `target`, so its
+        # `runner` is merged into the combinations already there.
+        # macos-13 was retired; `-intel` images are the x86_64 line now and
+        # every unsuffixed macos-* label is Apple silicon.
+        include:
+          - { target: x86_64,  runner: macos-15-intel }
+          - { target: aarch64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
