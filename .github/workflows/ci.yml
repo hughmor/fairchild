@@ -615,15 +615,27 @@ jobs:
       - name: The compiler is really there
         run: "$FAIRCHILD_OPENVAF --version"
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
-
+      # Before cargo, not after: `--workspace` builds `fairchild-py`, and pyo3
+      # picks its interpreter at build time. Leaving that to whatever the image
+      # happens to ship makes the wheel step test a different Python from the
+      # one the suite built against.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # `--exclude fairchild-klu`, which is not the same as leaving the `klu`
+      # feature off. The feature is off by default and nothing here turns it
+      # on, but `--workspace` builds every member regardless, and that crate's
+      # build script exists to find SuiteSparse and fails when it cannot. There
+      # is no apt or brew line for SuiteSparse on Windows, and the solver does
+      # not need one: `SolverKind::Auto` falls back to the pure-Rust sparse LU.
+      # Linux and macOS still build and test it, so the crate itself stays
+      # covered.
+      - name: Clippy
+        run: cargo clippy --workspace --exclude fairchild-klu --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --exclude fairchild-klu
 
       - name: Python bindings build, import and run a deck
         run: |
