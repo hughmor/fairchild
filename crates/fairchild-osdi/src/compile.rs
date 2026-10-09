@@ -770,6 +770,10 @@ mod tests {
     /// contain still changes the key, because the key is the compiler's
     /// expansion. Uses a stub compiler so it runs without OpenVAF.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+    )]
     fn key_follows_the_include_closure() {
         let dir = scratch("closure");
         let top = dir.join("top.va");
@@ -809,6 +813,10 @@ mod tests {
 
     /// A compiler upgrade invalidates too — the OSDI it emits is an ABI.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+    )]
     fn key_follows_the_compiler_version() {
         let dir = scratch("version");
         let top = dir.join("top.va");
@@ -847,6 +855,10 @@ mod tests {
     /// on disk; what they need is the operating system's reason — no execute
     /// bit, not a binary, a directory, or another process still writing it.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+    )]
     fn a_compiler_that_will_not_run_is_not_reported_as_missing() {
         let dir = scratch("wontrun");
 
@@ -882,6 +894,10 @@ mod tests {
 
     /// `--no-va-compile` refuses; it does not quietly load nothing.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+    )]
     fn no_compile_refuses_rather_than_skips() {
         let dir = scratch("nocompile");
         let top = dir.join("top.va");

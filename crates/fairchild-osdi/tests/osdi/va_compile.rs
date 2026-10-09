@@ -93,6 +93,10 @@ fn compiles(counter: &Path) -> usize {
 /// A `.va` source becomes a registered device with no `.osdi` line anywhere —
 /// the step this change exists to remove from the user's hands.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+)]
 fn a_va_source_registers_its_device() {
     let Some(artefact) = common::compiled("rc_shunt") else {
         return;
@@ -128,6 +132,10 @@ fn a_va_source_registers_its_device() {
 /// Edited source must. Both directions, because only one of them is a bug that
 /// shows up as a wrong answer.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+)]
 fn the_cache_hits_on_unchanged_source_and_misses_on_edited() {
     let Some(artefact) = common::compiled("rc_shunt") else {
         return;
@@ -167,6 +175,10 @@ fn the_cache_hits_on_unchanged_source_and_misses_on_edited() {
 /// A deck may mix both routes. `.va` sources load first, then `.osdi`
 /// artefacts, and the returned order says which is which.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+)]
 fn va_sources_and_osdi_artefacts_load_in_a_defined_order() {
     let Some(artefact) = common::compiled("rc_shunt") else {
         return;
@@ -203,6 +215,10 @@ fn va_sources_and_osdi_artefacts_load_in_a_defined_order() {
 /// holds: a flag whose effect depends on an unseen directory is not offline
 /// reproducibility. It must never load the circuit with the device absent.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the stub compiler is a /bin/sh script; what it covers is platform-independent and runs on the other two"
+)]
 fn no_va_compile_refuses_and_names_the_source() {
     let dir = scratch("refuse");
     let counter = dir.join("compiles");

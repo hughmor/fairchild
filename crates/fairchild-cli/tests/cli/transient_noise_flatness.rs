@@ -53,6 +53,11 @@ fn deck(kf: f64) -> String {
     )
 }
 
+/// Where output nobody reads goes. `/dev/null` is a POSIX spelling, and
+/// Windows answers to `NUL` instead — it is a real device there, so the CLI's
+/// `File::create` works on it unchanged.
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
 /// stderr from a run of the real binary.
 fn stderr_for(kf: f64) -> String {
     let mut path = std::env::temp_dir();
@@ -60,7 +65,7 @@ fn stderr_for(kf: f64) -> String {
     std::fs::write(&path, deck(kf)).expect("write deck");
     let path: PathBuf = path;
     let out = Command::new(env!("CARGO_BIN_EXE_fairchild"))
-        .args(["-f", path.to_str().unwrap(), "-o", "/dev/null"])
+        .args(["-f", path.to_str().unwrap(), "-o", NULL_DEVICE])
         .output()
         .expect("run fairchild");
     assert!(out.status.success(), "fairchild exited {:?}", out.status);
@@ -128,7 +133,7 @@ fn quiet_silences_the_probe() {
     path.push(format!("fc_flatness_quiet_{}.sp", std::process::id()));
     std::fs::write(&path, deck(1e-12)).expect("write deck");
     let out = Command::new(env!("CARGO_BIN_EXE_fairchild"))
-        .args(["-f", path.to_str().unwrap(), "-o", "/dev/null", "--quiet"])
+        .args(["-f", path.to_str().unwrap(), "-o", NULL_DEVICE, "--quiet"])
         .output()
         .expect("run fairchild");
     let err = String::from_utf8_lossy(&out.stderr);
