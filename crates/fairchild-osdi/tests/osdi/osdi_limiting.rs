@@ -27,19 +27,26 @@ use fairchild_osdi::OsdiLibrary;
 
 use crate::common;
 
-/// Read the table out of the library we just loaded. `dlopen` of an
+/// Read the table out of the library we just loaded. Opening an
 /// already-loaded library returns the same handle and the same table, so this
 /// observes exactly what `OsdiLibrary::open` wrote.
 unsafe fn lim_table(path: &Path) -> &'static [OsdiLimFunction] {
-    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-    let h = libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-    assert!(!h.is_null(), "dlopen failed");
-    let tbl = libc::dlsym(h, c"OSDI_LIM_TABLE".as_ptr()) as *const OsdiLimFunction;
-    let len = *(libc::dlsym(h, c"OSDI_LIM_TABLE_LEN".as_ptr()) as *const u32);
-    assert!(
-        !tbl.is_null(),
-        "a model calling $limit must export OSDI_LIM_TABLE"
-    );
+    // `libloading`, not `libc::dlopen`, for the reason the loader itself uses
+    // it: there is no `dl*` on Windows. The second open is the point of the
+    // test and is unaffected — every platform hands back the library that is
+    // already in the process.
+    let lib = libloading::Library::new(path).expect("open the already-loaded library");
+    let tbl: libloading::Symbol<*const OsdiLimFunction> = lib
+        .get(b"OSDI_LIM_TABLE\0")
+        .expect("a model calling $limit must export OSDI_LIM_TABLE");
+    let len: libloading::Symbol<*const u32> = lib
+        .get(b"OSDI_LIM_TABLE_LEN\0")
+        .expect("OSDI_LIM_TABLE_LEN goes with the table");
+    let tbl = tbl.try_as_raw_ptr().unwrap() as *const OsdiLimFunction;
+    let len = *(len.try_as_raw_ptr().unwrap() as *const u32);
+    // Leaked on purpose: the slice below outlives this scope, and the library
+    // is in the process to stay either way.
+    std::mem::forget(lib);
     std::slice::from_raw_parts(tbl, len as usize)
 }
 

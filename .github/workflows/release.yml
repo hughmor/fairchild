@@ -135,6 +135,39 @@ jobs:
           name: dist-macos-${{ matrix.target }}-${{ matrix.python }}
           path: dist
 
+  # ── Windows wheels ─────────────────────────────────────────────────────
+  #
+  # x86_64 only. GitHub has no hosted Windows-on-arm runner, and a wheel built
+  # by cross-compiling could not be imported anywhere in this workflow, which
+  # would make it the one artefact here that nothing has ever run.
+  #
+  # Each CPython gets its own job, as on macOS and for the same reason: pyo3 is
+  # built against a specific interpreter, so there is no abi3 wheel to collapse
+  # them into.
+  wheels-windows:
+    name: wheels (windows ${{ matrix.target }} py${{ matrix.python }})
+    needs: guard
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64]
+        python: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.target }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-${{ matrix.target }}-${{ matrix.python }}
+          path: dist
+
   # Install the built wheel on a clean machine and use it — both ways in.
   # A wheel that builds and does not import is the failure this catches, and
   # it is invisible to every other job here.
@@ -176,7 +209,7 @@ jobs:
 
   pypi:
     name: Publish to PyPI
-    needs: [guard, sdist, wheels-linux, wheels-macos, smoke-wheel]
+    needs: [guard, sdist, wheels-linux, wheels-macos, wheels-windows, smoke-wheel]
     if: needs.guard.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: pypi
@@ -227,26 +260,50 @@ jobs:
           - { runner: ubuntu-24.04-arm, name: linux-aarch64 }
           - { runner: macos-15-intel,   name: macos-x86_64 }
           - { runner: macos-14,         name: macos-aarch64 }
+          - { runner: windows-latest,   name: windows-x86_64 }
+    defaults:
+      run:
+        # Git Bash on the Windows runner, so one `Package` step serves all four
+        # platforms instead of a PowerShell copy of it that would drift.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --release -p fairchild-cli -p fairchild-c
 
       # Two tarballs, because they answer different questions: one is "give me
       # the simulator", the other is "let me link against it".
+      # Windows names its artefacts differently at every turn: `fairchild.exe`,
+      # `fairchild_c.dll` beside an import library `fairchild_c.dll.lib`, and
+      # no `lib` prefix anywhere. Each is copied by name rather than by a glob,
+      # so a missing one fails this step instead of shipping a tarball that is
+      # quietly short a file.
       - name: Package
         run: |
+          set -euo pipefail
           v="${{ needs.guard.outputs.version }}"
           n="${{ matrix.name }}"
-          mkdir -p out stage/cli stage/lib/{include,lib}
+          mkdir -p out stage/cli stage/lib/include stage/lib/lib
 
-          cp target/release/fairchild stage/cli/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/fairchild.exe stage/cli/
+            cp target/release/fairchild_c.dll stage/lib/lib/
+            # The import library. Without it nothing can link against the DLL.
+            cp target/release/fairchild_c.dll.lib stage/lib/lib/
+            # And the static half, which MSVC spells without the `lib` prefix
+            # and with `.lib` rather than `.a`. Both halves ship on the other
+            # platforms, so both ship here.
+            cp target/release/fairchild_c.lib stage/lib/lib/
+          else
+            cp target/release/fairchild stage/cli/
+            cp target/release/libfairchild_c.a stage/lib/lib/
+            cp target/release/libfairchild_c.so stage/lib/lib/ 2>/dev/null || \
+              cp target/release/libfairchild_c.dylib stage/lib/lib/
+          fi
+
           cp LICENSE README.md stage/cli/
           tar -C stage/cli -czf "out/fairchild-$v-$n.tar.gz" .
 
           cp crates/fairchild-c/include/fairchild.h stage/lib/include/
-          cp target/release/libfairchild_c.a stage/lib/lib/
-          cp target/release/libfairchild_c.so stage/lib/lib/ 2>/dev/null || \
-            cp target/release/libfairchild_c.dylib stage/lib/lib/
           cp LICENSE crates/fairchild-c/README.md stage/lib/
           tar -C stage/lib -czf "out/libfairchild_c-$v-$n.tar.gz" .
 

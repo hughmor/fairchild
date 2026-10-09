@@ -10,6 +10,7 @@ description = "OSDI v0.4 runtime for fairchild: loads Verilog-A models compiled 
 [dependencies]
 fairchild-core = { workspace = true }
 libc      = { workspace = true }
+libloading = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
