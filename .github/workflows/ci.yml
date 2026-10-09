@@ -157,6 +157,18 @@ jobs:
       - name: Version strings agree
         run: ./scripts/check_versions.sh
 
+      # `release.yml` runs on a tag and on nothing else, so a release is the
+      # first time anybody would learn it does not parse. That is exactly how
+      # it broke. The script checks the rule that broke it, because actionlint
+      # does not: 1.7.7 exits 0 on the file GitHub refused.
+      #
+      # Linux only: it reads YAML, and the answer cannot differ by runner.
+      - name: Workflows parse
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_workflows.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
