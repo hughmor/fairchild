@@ -13,7 +13,7 @@ Produces, into `results/`:
 Reads the transient traces that `rnn_hunt` saved as npz; recomputes the
 single-ring curves directly (cheap).
 
-Run:  .venv/bin/python experiments/giona/rnn_plots.py
+Run:  .venv/bin/python experiments/giona/rnn_characterization/rnn_plots.py
 """
 from __future__ import annotations
 

@@ -30,8 +30,12 @@ examples/kicad_photonics/~*
 # committed. Fit outputs (results/*.json) and the model card do.
 /experiments/*/data/
 /experiments/*/kicad/
+# Each experiment under a chip directory owns its own netlists and results, so
+# the same two rules apply one level deeper.
 /experiments/*/netlists/
 /experiments/*/results/*.png
+/experiments/*/*/netlists/
+/experiments/*/*/results/*.png
 
 
 # kicad_to_fairchild.py transpiled wrappers + sim outputs

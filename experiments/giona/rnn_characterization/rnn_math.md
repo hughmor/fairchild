@@ -345,5 +345,5 @@ Caveats, stated rather than smoothed over:
 | bias solve for a given $I^\ast$ | `rnn_drive.solve_bias` (coupled Newton on $\partial V_i/\partial\mathrm{PD\_B}_j$) |
 
 Device coefficients are the `mrm.sp` defaults, fitted in
-`experiments/giona/ringfit.py`; the $i_s$/$\partial n/\partial I$/$\partial\alpha/\partial I$
+`experiments/giona/common/ringfit.py`; the $i_s$/$\partial n/\partial I$/$\partial\alpha/\partial I$
 trio is only meaningful as a set and is pending a refit from a clean on-die IV.

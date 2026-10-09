@@ -16,7 +16,7 @@ Protocol (the ordering matters):
 """
 import sys, numpy as np, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 import rnn_drive as rnn
 import fairchild as fc
 SC = str(Path(__file__).resolve().parent / "results")

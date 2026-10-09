@@ -223,3 +223,39 @@ fn no_va_compile_refuses_and_names_the_source() {
     assert!(msg.contains("no-va-compile"), "{msg}");
     assert_eq!(compiles(&counter), 0, "the compiler must not have run");
 }
+
+// ── The generated source is shared state, and it was not written safely ──
+
+/// An empty source compiles. That is the whole problem, so it is the whole test.
+///
+/// OpenVAF accepts a file with no `module` in it and emits a valid OSDI library
+/// holding zero descriptors. Registering that silently leaves the deck one
+/// device short, and the user hears about it as `UnknownModel` from the solver,
+/// which names the deck rather than the artefact. The loader refuses it here
+/// instead, where the path is still in hand.
+#[test]
+fn a_library_declaring_no_models_is_refused_at_load() {
+    if !common::have_compiler() {
+        return;
+    }
+    let dir = scratch("nomodels");
+    let src = dir.join("nothing.va");
+    std::fs::write(&src, "// no module here\n").unwrap();
+
+    let mut reg = DeviceRegistry::new();
+    let err = load_libraries(
+        &[],
+        &[src.to_string_lossy().to_string()],
+        None,
+        &VaOptions {
+            cache_dir: Some(dir.clone()),
+            ..VaOptions::from_env()
+        },
+        &mut reg,
+    )
+    .expect_err("a source with no module must not load as an empty success");
+    assert!(
+        matches!(err, fairchild_osdi::OsdiError::NoModels { .. }),
+        "expected NoModels, got: {err}"
+    );
+}

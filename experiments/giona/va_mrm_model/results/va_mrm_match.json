@@ -1,0 +1,8 @@
+{
+  "p_mW": 0.126,
+  "mode": "card-compatible",
+  "muted_worst_pm": 0.003590820597310085,
+  "ship_worst_pm": 27.668685622984412,
+  "heater_worst_pm": 0.9692052137779683,
+  "self_heating_pm_at_1mW": 54.5826651854543
+}

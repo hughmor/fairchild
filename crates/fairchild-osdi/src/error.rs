@@ -76,6 +76,19 @@ pub enum OsdiError {
 
     #[error("Verilog-A cache '{}': {detail}", path.display())]
     CacheDir { path: PathBuf, detail: String },
+
+    /// The library loaded and declares nothing. OpenVAF compiles a source with
+    /// no `module` — an empty file included — without complaint, so the result
+    /// is a valid OSDI library holding zero descriptors. Loading it quietly
+    /// leaves the deck short a device, and the failure then surfaces as
+    /// `UnknownModel` at solve time, which names the deck rather than the
+    /// artefact that is actually at fault.
+    #[error(
+        "OSDI library '{}' declares no models. Its Verilog-A source compiled but contained no \
+         `module` — check that the source is not empty and that every `include` resolved",
+        path.display()
+    )]
+    NoModels { path: PathBuf },
 }
 
 impl OsdiError {

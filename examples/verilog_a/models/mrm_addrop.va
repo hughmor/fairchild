@@ -1,0 +1,404 @@
+// mrm_addrop — an add-drop silicon microring modulator, any number of WDM
+// channels, written to be interchangeable with the native discrete cell it
+// replaces.
+//
+// `mrm_wdm.va` is the all-pass sibling: one bus, one coupler, a ring that only
+// ever subtracts. This is the four-port form — in / thru / add / drop — which is
+// what a weight bank or a WDM router actually uses, because the light a ring
+// takes off the bus has to come out somewhere.
+//
+// ── Why the parameter names look like a SPICE card ───────────────────────────
+//
+// The device this model is calibrated against is not another Verilog-A model,
+// it is `examples/photonic/pcells/mrm.sp`: two `fc_dcoupler`s and two
+// `fc_pn_th_ps LEVEL=4` arcs wired into a ring. Every parameter below carries
+// that cell's name so a `.model` card, a fit script, or a `set_param` call moves
+// between the two without a translation table — the point of the exercise is
+// that you can swap one for the other and diff the answer.
+//
+// Where the two disagree on *convention* rather than value, this model takes the
+// whole-ring reading and the header says so, because the discrete cell splits
+// the ring into two arcs and several of its numbers are per arc:
+//
+//   * `i_sat`, `c_j0` — the cell's two junctions sit in parallel on one anode,
+//     so the ring's terminal values are twice an arc's (5.099e-8 -> 1.0198e-7).
+//   * `r_heater` — the cell's two heaters sit in series, so the ring's terminal
+//     resistance is twice an arc's (184.4 -> 368.8).
+//   * `dn_dv`, `da_dv`, `alpha_db_cm`, `beta_tpa` — intensive, applied over a
+//     length. Two arcs of pi*R is one ring of 2*pi*R, so these carry unchanged.
+//
+// ── Where the physics is genuinely different, not just re-spelled ────────────
+//
+// Three of the cell's mechanisms are *calibrations*; here they are solved, which
+// is the entire reason to write this model.
+//
+// **One carrier population, not two parametrisations of it.** The cell has
+// `dn_dv`/`da_dv` for reverse bias and `dn_di`/`da_di` for forward, as though a
+// field effect and a carrier effect were competing. Silicon is centrosymmetric:
+// there is no Pockels coefficient to have, and the DC-Kerr and Franz-Keldysh
+// contributions at these fields are around 1e-6. Every bit of the electro-optic
+// response is plasma dispersion, so `dn_dv` was only ever a LINEARISATION of the
+// carriers a widening depletion region sweeps out of the mode.
+//
+// So this model counts carriers once. The depleted density comes from the
+// junction charge — the same integral `C_j` already needs, so it costs no new
+// physics and inherits the FEM-extracted `c_j0`/`v_bi`/`m_j`:
+//
+//     n_dep = -q_j(V) / (q * vol_dep)          > 0 under reverse bias
+//     n_net = V(nc) - n_dep                    < 0 when the junction is depleted
+//
+// and both go through Soref-Bennett, with the hole index term's 0.8 exponent,
+// rather than through two fitted slopes. What that buys: the depletion response
+// comes out sqrt-shaped, as a depletion width is, instead of linear. The card's
+// straight line crosses the correct curve near -2 V and is 9 % low at -4 V and
+// 24 % high at -1 V — invisible on the May capture, which only spans -1 to +1 V,
+// and waiting for anyone who biases outside it.
+//
+// Electrons and holes are tracked separately because Soref-Bennett gives them
+// very different absorption per unit index — 9 700 vs 1 900 cm^-1, a factor of
+// five — so a single lumped density cannot get both the resonance shift and the
+// notch depth right. `ratio_h` is the lever; 1.0 is ambipolar.
+//
+// **Carriers leave two ways.** The pool drains through `tau_carrier`, which is
+// recombination and does not depend on bias. Under reverse bias the junction
+// field also sweeps carriers out, in a transit time rather than a lifetime, and
+// that second channel is what makes turn-off faster than turn-on and pre-
+// emphasis work. `tau_sweep` is it, scaled by the reverse bias:
+//
+//     dNc/dt = I_fwd/(q*vol_inj) + G_tpa - Nc*(1/tau_carrier + V_rev/(v_bi*tau_sweep))
+//
+// It has no DC signature, so no fit against a CW capture can see it; 10 ps is a
+// transit time across a 70 nm depletion region at saturation velocity.
+//
+// **Heat.** The cell has `p_pi_th`, milliwatts per pi, measured. Here the heater
+// dissipates into a thermal port and the temperature moves the index through
+// `dn_dt`, so `r_th` carries what `p_pi_th` used to:
+//
+//     r_th = lambda_ref / (2 * dn_dt * L_ring * p_pi_th)
+//
+// Two consequences, both deliberate. Thermal tuning is now weakly wavelength-
+// dependent (a phase from an index is; a calibrated phase is not) — about 1 %
+// across the C band. And the junction's own dissipation and the light the ring
+// absorbs now heat it too, because they arrive at the same node.
+//
+// `th` is a port rather than an internal node so eight rings on one chip can
+// share a substrate — wire their `th` nodes through plain resistors, whose value
+// on a thermal node IS a thermal resistance in K/W.
+//
+// ── Reproducing the card exactly ─────────────────────────────────────────────
+//
+// The card's four linearisations are still here, defaulted to zero, and the
+// Soref-Bennett coefficients are parameters that can be zeroed. Between them,
+// this instance line is the cell, term for term:
+//
+//     + dn_dv=-3.62e-5 da_dv=3.29e-4 dn_dnc=-8.8e-28 dalpha_dnc=1.0212e-21
+//     + vol_dep=0 sb_dn_e=0 sb_dn_h=0 sb_da_e=0 sb_da_h=0
+//     + i_sat=1.0198e-7 vol_inj=2.7531e-17 c_j0=2.75e-13 tau_sweep=1
+//
+// Eleven overrides is not incidental — it is the size of the difference, and
+// every one of them is a line in this header. It is also the regression anchor:
+// `crates/fairchild-osdi/tests/photonic/mrm_addrop_example.rs` holds that line
+// to the native cell at 0.2 %, so the change below cannot have broken the port
+// without the suite noticing.
+//
+// ── What it does NOT model ───────────────────────────────────────────────────
+//
+// Backward propagation (no reflections, so no counter-clockwise mode and no
+// Rayleigh-backscatter doublet), the cavity photon lifetime (the ring is
+// instantaneous — valid well below its ~9 ps ring-down), wavelength-dependent
+// coupling (`kappa_l` is one number), and any asymmetry between the two
+// couplers. Series resistance is absent because the cell's `r_series` is 0: the
+// giona PCB network belongs in the testbench, not in the device.
+
+`include "constants.vams"
+`include "disciplines.vams"
+`include "optical.vams"
+
+module mrm_addrop(bus_in, thru_out, add_in, drop_out, anode, cathode, htr_p, htr_n, th);
+
+    // Width bound at elaboration from the deck's `.optical_port <net> N`.
+    optical_bundle bus_in, thru_out, add_in, drop_out;
+
+    inout anode, cathode, htr_p, htr_n;
+    electrical anode, cathode, htr_p, htr_n;
+    inout th;
+    thermal th;
+
+    // Carrier density in the ring waveguide, m^-3, as a potential.
+    electrical nc;
+
+    // ── geometry, coupling, passive loss ─────────────────────────────────────
+    parameter real radius      = 8.0e-6 from (0:inf);  // ring radius, m
+    parameter real n_g         = 4.2    from (0:inf);  // group index at wl_ref
+    parameter real n_eff       = 2.2810 from (0:inf);  // effective index at wl_ref
+    parameter real alpha_db_cm = 10.7   from [0:inf);  // POWER loss, dB/cm
+    parameter real kappa_l     = 0.183  from [0:1.5];  // kappa*L, both couplers
+    parameter real wl_ref_nm   = 1550.0 from (0:inf);  // where n_eff/n_g are quoted
+
+    // ── PN junction: the depletion region ────────────────────────────────────
+    // `c_j0` is the FEM extraction's 0.1375 fF/um scaled to this ring's
+    // circumference. The card carries 1.375e-13, which is that same number with
+    // its units dropped — `C_j_per_um_at_0V_F` read as farads. It is right for a
+    // 1 mm phase shifter and 39x too large for a 25 um arc, and because `c_j0`
+    // never enters a DC solve, no fit against a CW capture could have caught it.
+    // Rescale it if you change `radius`.
+    parameter real c_j0        = 6.913e-15 from [0:inf); // zero-bias junction C, whole ring
+    parameter real v_bi        = 0.917  from (0:inf);  // built-in potential
+    parameter real m_j         = 0.5    from [0:0.99]; // grading coefficient
+    // Effective volume the depleted charge is spread over, as the optical mode
+    // sees it. Comparable to the waveguide's own 5.5e-18 m^3, which is the check
+    // that this is a physical quantity and not a fudge factor.
+    parameter real vol_dep     = 6.786e-18 from [0:inf); // 0 disables the depletion path
+
+    // ── PN junction: conduction, the carrier pool, and how it drains ─────────
+    // `i_sat` is the MEASURED terminal saturation current. The card's 5.099e-8
+    // is the same number, but `mrm.sp` uses it per arc with two junctions in
+    // parallel, so the cell draws twice what the device does. Confirmed against
+    // the May capture at +0.842 V, the one bias where the 2 kOhm pad shunt drops
+    // to 86 % of the terminal current and the diode branch is visible.
+    parameter real i_sat       = 5.099e-8 from (0:inf); // whole-ring saturation current, A
+    parameter real n_diode     = 5.0    from (0:inf);  // ideality (assembly-effective)
+    parameter real tau_carrier = 10e-9  from (0:inf);  // recombination lifetime, s
+    parameter real tau_sweep   = 10e-12 from (0:inf);  // drift extraction time at v_bi of reverse
+    parameter real vol_inj     = 8.31e-17 from (0:inf); // effective injected-carrier volume, m^3
+
+    // ── plasma dispersion: Soref & Bennett 1987 at 1550 nm ───────────────────
+    // Quoted the way everyone quotes them: densities in cm^-3, loss in cm^-1.
+    //   dn     = -(sb_dn_e*Ne + sb_dn_h*Nh^sb_p_h)
+    //   dalpha =   sb_da_e*Ne + sb_da_h*Nh
+    // Change them for another wavelength; these are constants, not fit knobs.
+    parameter real sb_dn_e     = 8.8e-22;              // cm^3
+    parameter real sb_dn_h     = 8.5e-18;              // cm^(3*sb_p_h)
+    parameter real sb_p_h      = 0.8    from (0:1];    // hole index exponent
+    parameter real sb_da_e     = 8.5e-18;              // cm^2
+    parameter real sb_da_h     = 6.0e-18;              // cm^2
+    // Hole density as a multiple of the electron density. 1.0 is ambipolar,
+    // which is what forward injection gives and what the May capture's depletion
+    // side agrees with to 1 %. The FEM leans hole-heavy (its junction sits 100 nm
+    // off the core centre, so the mode overlaps the p-side more); raise it if you
+    // trust that over the measurement.
+    parameter real ratio_h     = 1.0    from (0:inf);
+    // Regularises the hole term's fractional power at zero excess carriers,
+    // where d|N|^0.8/dN diverges. 1e13 cm^-3 is four decades below anything this
+    // device reaches, and zero bias is the commonest operating point there is.
+    parameter real n_reg_cm3   = 1e13   from (0:inf);
+
+    // ── legacy: the card's linearisations, all off by default ────────────────
+    // Four straight lines standing in for the two curves above: `dn_dv`/`da_dv`
+    // for the depletion side (not a field effect — see the header) and
+    // `dn_dnc`/`dalpha_dnc` for the injected pool. Additive with the
+    // Soref-Bennett path, so switching between them means zeroing one side.
+    // The header has the full card-compatible instance line.
+    parameter real dn_dv       = 0.0;                  // index per volt
+    parameter real da_dv       = 0.0;                  // Np/m per volt of reverse bias
+    parameter real dn_dnc      = 0.0;                  // index per m^-3 of injected carriers
+    parameter real dalpha_dnc  = 0.0;                  // Np/m per m^-3 of injected carriers
+
+    // ── two-photon absorption ────────────────────────────────────────────────
+    parameter real beta_tpa    = 7.9e-12 from [0:inf); // m/W
+    parameter real a_eff_m2    = 1.257e-13 from (0:inf); // effective mode area, m^2
+
+    // ── thermal ──────────────────────────────────────────────────────────────
+    parameter real r_th        = 3139.9 from (0:inf);  // K/W  (== 26.4 mW/pi)
+    parameter real c_th        = 6.37e-10 from (0:inf);// J/K  (tau_th = 2 us; NOT fitted)
+    parameter real dn_dt       = 1.86e-4;              // thermo-optic, 1/K
+    parameter real r_heater    = 368.8  from (0:inf);  // whole-ring heater R at ambient
+    parameter real alpha_r     = 0.0;                  // heater tempco, 1/K (no giona evidence)
+
+    real vt, v_j, i_d, v_rev, dT, wl_ref, l_ring, l_arc, t_c, s_c;
+    real n_dep, n_net, n_e_cm, n_h_cm, h_mag, dn_pl, da_pl;
+    real v_k, c_k, dc_k, q_k, q_j, p_htr, r_htr, p_abs, gen_tpa, i_fwd;
+    real alpha_lin, alpha_tot, n_lam, n_tot, lam, phi_h, a_h;
+    real ph_re, ph_im, a_re, a_im, d_re, d_im, d_sq;
+    real nt_re, nt_im, nd_re, nd_im, ht_re, ht_im, hd_re, hd_im;
+    real in_re, in_im, ad_re, ad_im, nb_re, nb_im, rb_re, rb_im;
+    real rd_re, rd_im, i_circ;
+    integer k;
+
+    analog begin
+        l_ring = 2.0 * `M_PI * radius;
+        l_arc  = 0.5 * l_ring;
+        wl_ref = wl_ref_nm * 1e-9;
+        t_c    = cos(kappa_l);
+        s_c    = sin(kappa_l);
+        vt     = n_diode * `P_K * $temperature / `P_Q;
+
+        // ── junction ─────────────────────────────────────────────────────────
+        // `n_diode` at 5.0 is not an ideality anyone should defend: it is where
+        // the giona fit's assembly-effective diode landed, at its bound, seen
+        // through a PCB network. It is here so the terminal I(V) matches the
+        // cell's; refit it and the two injection coefficients together from a
+        // clean on-die IV, never one without the others.
+        v_j = V(anode, cathode);
+        i_d = i_sat * (limexp(v_j / vt) - 1.0);
+        I(anode, cathode) <+ i_d;
+
+        // Junction CHARGE, not C(v)*v — `ddt(c_j*v_j)` would contribute an
+        // extra v*dC/dv and silently over-count a nonlinear capacitor. Below
+        // the v_bi/2 knee this is the textbook integral of c_j0/(1-v/v_bi)^m_j;
+        // past it the capacitance is linearised (as the native model does, so
+        // forward bias cannot run away) and the charge is its integral.
+        v_k  = 0.5 * v_bi;
+        c_k  = c_j0 / pow(0.5, m_j);
+        dc_k = c_k * m_j / v_k;
+        q_k  = c_j0 * v_bi / (1.0 - m_j) * (1.0 - pow(0.5, 1.0 - m_j));
+        if (v_j < v_k)
+            q_j = c_j0 * v_bi / (1.0 - m_j)
+                * (1.0 - pow(1.0 - v_j / v_bi, 1.0 - m_j));
+        else
+            q_j = q_k + c_k * (v_j - v_k) + 0.5 * dc_k * (v_j - v_k) * (v_j - v_k);
+        // Diffusion charge tau*I_d: its derivative is tau*g_d, which is exactly
+        // the term the native model adds to its effective capacitance.
+        I(anode, cathode) <+ ddt(q_j + tau_carrier * i_d);
+
+        dT    = Temp(th);
+        i_fwd = max(i_d, 0.0);
+        v_rev = max(-v_j, 0.0);
+
+        // ── one carrier population ───────────────────────────────────────────
+        // What the depletion region has taken out of the mode, from the charge
+        // already integrated above, plus what the junction has injected into it.
+        // Referenced to zero bias, which is where `n_eff` and `alpha_db_cm` were
+        // measured, so both perturbations vanish there by construction.
+        n_dep = (vol_dep > 0.0) ? -q_j / (`P_Q * vol_dep) : 0.0;
+        n_net = V(nc) - n_dep;
+
+        // ── Soref-Bennett, electrons and holes apart ─────────────────────────
+        // The hole index term's fractional power needs |N|^p with N of either
+        // sign — depletion runs it negative — and d|N|^p/dN diverges at zero for
+        // p < 1. Softening the magnitude by `n_reg_cm3` keeps the derivative
+        // finite at the one bias every deck starts from.
+        n_e_cm = n_net * 1e-6;
+        n_h_cm = ratio_h * n_net * 1e-6;
+        h_mag  = sqrt(n_h_cm * n_h_cm + n_reg_cm3 * n_reg_cm3);
+        dn_pl  = -(sb_dn_e * n_e_cm
+                 + sb_dn_h * (n_h_cm / h_mag) * pow(h_mag, sb_p_h));
+        da_pl  = 100.0 * (sb_da_e * n_e_cm + sb_da_h * n_h_cm);
+
+        // ── index and loss, shared by every channel ──────────────────────────
+        // One ring, one carrier population, one temperature. Only the detuning
+        // is per channel, because only lambda is.
+        n_tot     = dn_pl + dn_dnc * V(nc) + dn_dv * v_j + dn_dt * dT;
+        alpha_lin = alpha_db_cm * 100.0 * `M_LN10 / 10.0
+                  + da_pl + dalpha_dnc * V(nc) + da_dv * v_rev;
+
+        // ── circulating power, and the TPA it drives ─────────────────────────
+        // Pass one uses the linear loss only. TPA then corrects the transfer but
+        // not the power that produced it.
+        // ponytail: one-shot, not a fixed point. At 1 mW in and a finesse near
+        // 70 the TPA term is ~2% of alpha, so the neglected feedback is ~0.04%.
+        // Promote the circulating power to its own solved node if you ever run
+        // this near the TPA-limited regime.
+        a_h    = exp(-alpha_lin * l_arc / 2.0);
+        i_circ = 0.0;
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            lam   = LAMBDA(bus_in, k);
+            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;
+            phi_h = 2.0 * `M_PI * n_lam * l_arc / lam;
+            ph_re = a_h * cos(phi_h);
+            ph_im = a_h * sin(phi_h);
+            a_re  = ph_re * ph_re - ph_im * ph_im;
+            a_im  = 2.0 * ph_re * ph_im;
+            d_re  = 1.0 - t_c * t_c * a_re;
+            d_im  =     - t_c * t_c * a_im;
+            d_sq  = d_re * d_re + d_im * d_im;
+
+            in_re = OF(E_RE(bus_in, k));
+            in_im = OF(E_IM(bus_in, k));
+            ad_re = OF(E_RE(add_in, k));
+            ad_im = OF(E_IM(add_in, k));
+
+            // Field just past the bus coupler, and just past arc 2 — the two
+            // arcs' inputs, which are exactly the intensities the discrete
+            // cell's two segments each see.
+            //   rb = -j*s*(in + t*P*ad)/D,   rd = t*P*rb - j*s*ad
+            nb_re =  s_c * (in_im + t_c * (ph_re * ad_im + ph_im * ad_re));
+            nb_im = -s_c * (in_re + t_c * (ph_re * ad_re - ph_im * ad_im));
+            rb_re = (nb_re * d_re + nb_im * d_im) / d_sq;
+            rb_im = (nb_im * d_re - nb_re * d_im) / d_sq;
+            rd_re = t_c * (ph_re * rb_re - ph_im * rb_im) + s_c * ad_im;
+            rd_im = t_c * (ph_re * rb_im + ph_im * rb_re) - s_c * ad_re;
+
+            i_circ = i_circ + 0.5 * (rb_re * rb_re + rb_im * rb_im
+                                   + rd_re * rd_re + rd_im * rd_im);
+        end
+
+        // Cross-TPA between distinct lines is twice self-TPA, so the loss a
+        // channel sees goes as (2*sum - its own). Driving one shared alpha off
+        // the mean circulating intensity is the single-alpha reading of that;
+        // it is exact for one channel and within a factor of two of the spread
+        // across a fully loaded bus.
+        alpha_tot = alpha_lin + beta_tpa * i_circ / a_eff_m2;
+        a_h       = exp(-alpha_tot * l_arc / 2.0);
+
+        // Absorbed power heats the ring; TPA-generated pairs join the pool. Two
+        // photons per pair, hence the 2 in the denominator, and the photon
+        // energy is what turns W/m^3 into pairs per m^3 per second — the term
+        // is a generation RATE, not a power density.
+        p_abs   = i_circ * (1.0 - exp(-alpha_tot * l_ring));
+        gen_tpa = beta_tpa * i_circ * i_circ * l_ring
+                / (a_eff_m2 * vol_inj * 2.0 * `P_H * `P_C / wl_ref);
+
+        // ── carriers: filled by the junction, drained two ways ───────────────
+        // Recombination is a material property and does not know about bias.
+        // The junction field is the second channel: under reverse bias it sweeps
+        // carriers out in a transit time instead of waiting for them to
+        // recombine, which is why turn-off is faster than turn-on and why
+        // pre-emphasis works. Scaled by v_rev/v_bi so it is inert in forward.
+        I(nc) <+ ddt(V(nc))
+               + V(nc) * (1.0 / tau_carrier + v_rev / (v_bi * tau_sweep))
+               - i_fwd / (`P_Q * vol_inj) - gen_tpa;
+
+        // ── heater ───────────────────────────────────────────────────────────
+        r_htr = r_heater * (1.0 + alpha_r * dT);
+        I(htr_p, htr_n) <+ V(htr_p, htr_n) / r_htr;
+        p_htr = V(htr_p, htr_n) * V(htr_p, htr_n) / r_htr;
+
+        // ── temperature ──────────────────────────────────────────────────────
+        Pwr(th) <+ c_th * ddt(Temp(th)) + Temp(th) / r_th
+                 - p_htr - p_abs - v_j * i_d;
+
+        // ── the add-drop transfer, per channel ───────────────────────────────
+        // With both couplers (t, -j*s), t = cos(kappa_l), and one round trip
+        // A = P^2 = (a_h * e^{j*phi_h})^2, the ring is
+        //     thru = t*(1-A)/D * in  -  s^2*P/D * ad
+        //     drop = -s^2*P/D  * in  +  t*(1-A)/D * ad          D = 1 - t^2*A
+        // — symmetric, as a ring with two identical couplers must be.
+        for (k = 0; k < N(bus_in); k = k + 1) begin
+            lam   = LAMBDA(bus_in, k);
+            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;
+            phi_h = 2.0 * `M_PI * n_lam * l_arc / lam;
+            ph_re = a_h * cos(phi_h);
+            ph_im = a_h * sin(phi_h);
+            a_re  = ph_re * ph_re - ph_im * ph_im;
+            a_im  = 2.0 * ph_re * ph_im;
+            d_re  = 1.0 - t_c * t_c * a_re;
+            d_im  =     - t_c * t_c * a_im;
+            d_sq  = d_re * d_re + d_im * d_im;
+
+            nt_re =  t_c * (1.0 - a_re);
+            nt_im = -t_c * a_im;
+            nd_re = -s_c * s_c * ph_re;
+            nd_im = -s_c * s_c * ph_im;
+
+            ht_re = (nt_re * d_re + nt_im * d_im) / d_sq;
+            ht_im = (nt_im * d_re - nt_re * d_im) / d_sq;
+            hd_re = (nd_re * d_re + nd_im * d_im) / d_sq;
+            hd_im = (nd_im * d_re - nd_re * d_im) / d_sq;
+
+            in_re = OF(E_RE(bus_in, k));
+            in_im = OF(E_IM(bus_in, k));
+            ad_re = OF(E_RE(add_in, k));
+            ad_im = OF(E_IM(add_in, k));
+
+            OF(E_RE(thru_out, k)) <+ ht_re * in_re - ht_im * in_im
+                                   + hd_re * ad_re - hd_im * ad_im;
+            OF(E_IM(thru_out, k)) <+ ht_re * in_im + ht_im * in_re
+                                   + hd_re * ad_im + hd_im * ad_re;
+            OF(E_RE(drop_out, k)) <+ hd_re * in_re - hd_im * in_im
+                                   + ht_re * ad_re - ht_im * ad_im;
+            OF(E_IM(drop_out, k)) <+ hd_re * in_im + hd_im * in_re
+                                   + ht_re * ad_im + ht_im * ad_re;
+        end
+    end
+endmodule

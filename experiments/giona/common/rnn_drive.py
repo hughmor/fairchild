@@ -1,6 +1,6 @@
 """rnn_drive.py — drive the hand-written giona RNN deck from Python.
 
-Read-only on netlists/giona_rnn_perfectW.sp: `.param` values are substituted at
+Read-only on rnn_characterization/netlists/giona_rnn_perfectW.sp: `.param` values are substituted at
 parse time, so they cannot be reached with set_param, and overriding the deck
 TEXT is the honest way to sweep them.
 
@@ -11,7 +11,8 @@ TEXT is the honest way to sweep them.
   transient()   run a transient, return (t, V[8], bus[8], wall seconds)
 """
 import fairchild as fc, numpy as np, re, pathlib, time
-NET = pathlib.Path(__file__).resolve().parent / "netlists" / "giona_rnn_perfectW.sp"
+NET = (pathlib.Path(__file__).resolve().parents[1] / "rnn_characterization"
+       / "netlists" / "giona_rnn_perfectW.sp")
 CAL=[7.9998737e-06,8.0074122e-06,8.0149580e-06,8.0224153e-06,8.0300681e-06,8.0376334e-06,8.0452040e-06,8.0527814e-06]
 N=8
 

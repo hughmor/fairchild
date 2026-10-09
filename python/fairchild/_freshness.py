@@ -34,6 +34,13 @@ ALLOW_STALE = "FAIRCHILD_ALLOW_STALE"
 # one level up.
 NOT_IN_EXTENSION = ("fairchild-cli", "fairchild-c")
 
+# Directories inside a linked crate that are still not linked into it. A crate's
+# tests, benches and examples are separate targets: touching one cannot change
+# what `import fairchild` does, and the guard used to say it could — which is the
+# same false alarm as above, arriving from inside a crate that IS in the
+# extension rather than from one that is not.
+NOT_LINKED_DIRS = ("tests", "benches", "examples")
+
 _SOURCE_GLOBS = (
     "crates/**/*.rs",
     "crates/**/Cargo.toml",
@@ -72,6 +79,11 @@ def newest_source(root: pathlib.Path) -> tuple[float, pathlib.Path] | None:
         for path in root.glob(pattern):
             posix = path.as_posix()
             if "/target/" in posix or any(f"/{c}/" in posix for c in NOT_IN_EXTENSION):
+                continue
+            rel = path.relative_to(root).parts
+            # crates/<crate>/<dir>/… — only that position counts, so a module
+            # honestly named `src/tests.rs` is still a source.
+            if len(rel) > 3 and rel[0] == "crates" and rel[2] in NOT_LINKED_DIRS:
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -176,6 +188,22 @@ def _self_check() -> None:
         os.utime(source, (time.time() - 60, time.time() - 60))
         os.utime(cli_src, (time.time() + 60, time.time() + 60))
         assert staleness_error(pkg, suffix) is None, "the CLI is not in the extension"
+
+        # Nor can a linked crate's own tests, which are a separate target.
+        tests = tmp / "crates" / "fairchild-core" / "tests" / "photonic"
+        tests.mkdir(parents=True)
+        t_src = tests / "a_test.rs"
+        t_src.write_text("// pretend\n")
+        os.utime(t_src, (time.time() + 60, time.time() + 60))
+        assert staleness_error(pkg, suffix) is None, "a test file is not in the extension"
+
+        # But a module named `tests` inside `src` is source and must still count.
+        in_src = crate / "tests.rs"
+        in_src.write_text("// pretend\n")
+        os.utime(in_src, (time.time() + 90, time.time() + 90))
+        msg = staleness_error(pkg, suffix)
+        assert msg is not None and "tests.rs" in msg, f"src/tests.rs is source: {msg}"
+        in_src.unlink()
 
         # An installed wheel has no checkout around it and must be left alone.
         lonely = tmp / "site-packages" / "fairchild"

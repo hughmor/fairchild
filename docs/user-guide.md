@@ -1623,7 +1623,26 @@ while self-heating stays solved on top.
 
 `examples/verilog_a/models/mrm_wdm.va` is a worked example: a microring whose
 resonance moves with a solved temperature, with `th` exposed so a deck can wire
-ring-to-ring thermal crosstalk.
+ring-to-ring thermal crosstalk. `mrm_addrop.va` beside it is the four-port
+version — in / thru / add / drop — and is also the worked example of *replacing*
+a native cell. It was calibrated against `examples/photonic/pcells/mrm.sp` and
+carries that cell's parameter names, but its defaults are no longer the cell's:
+it counts carriers once and runs both depletion and injection through
+Soref-Bennett, where the cell carries four fitted straight lines. Its header has
+the instance line that restores the cell exactly, and `mrm_addrop_example.rs`
+holds it to that — so the compatibility path is a tested one, not a claim.
+
+`ring_nheater.va` is the third: the same add-drop ring with no junction at all,
+tuned by doping its own waveguide n-type and running current through it. It is
+worth reading for one loop the other two do not have: light lands in the
+resistance twice and with opposite signs. Absorbed photons make carriers, which
+conduct and pull R down; what everything dissipates warms silicon whose tempco
+pushes R up. The carriers win, so ramping the heater current with a laser on the
+bus finds the resonance as a *dip in resistance*, with no detector in the
+circuit (`experiments/giona/va_weight_ring_model/nheater_readout.py` plots it). Which way the
+self-heating then feeds back depends on the drive — amplifying at constant
+current, opposing at constant voltage — so these are characterised in current
+mode, and the model says why in its header.
 
 The `vmax` clamp is not flat: a row's allowance is `vmax + reltol·|V|`, so a
 node whose operating point is far from the seed can still get there. A flat

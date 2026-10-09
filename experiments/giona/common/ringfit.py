@@ -75,9 +75,13 @@ from lightlab.util.sweep import NdSweeper
 
 #%% ── dataset path & window ──────────────────────────────────────────────────
 
-HERE = Path(__file__).resolve().parent
-DATA_DIR = HERE / "data"        # raw lightlab captures (gitignored, large)
-RESULTS = HERE / "results"     # fitted params (.json) + plots (.png)
+HERE = Path(__file__).resolve().parent      # experiments/giona/common
+GIONA = HERE.parent
+DATA_DIR = GIONA / "data"                   # raw captures, shared by every experiment
+# This module is the shared library, but its own CLI is the staged fit, which
+# belongs to `pn_modulator_fit`. A caller that wants figures elsewhere assigns
+# `ringfit.RESULTS` before calling.
+RESULTS = GIONA / "pn_modulator_fit" / "results"
 
 DATA_PATH = str(DATA_DIR / "giona_neuron2_mod_joint_IV_spec")
 
