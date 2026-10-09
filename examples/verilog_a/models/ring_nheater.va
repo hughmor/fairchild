@@ -223,7 +223,7 @@ module ring_nheater(bus_in, thru_out, add_in, drop_out, htr_p, htr_n, th);
         i_circ = 0.0;
         for (k = 0; k < N(bus_in); k = k + 1) begin
             lam   = LAMBDA(bus_in, k);
-            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;
+            n_lam = n_eff + (lam - wl_ref) * (n_eff - n_g) / wl_ref + n_tot;  // n_g = n(λ) - λ(dn/dλ)
             phi_h = 2.0 * `M_PI * n_lam * l_arc / lam;
             ph_re = a_h * cos(phi_h);
             ph_im = a_h * sin(phi_h);
