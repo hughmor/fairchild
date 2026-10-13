@@ -6,6 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "C ABI for fairchild: batch simulation plus host-driven transient stepping for mixed-signal co-simulation."
+# Not on crates.io. Nobody writes `cargo add fairchild-c` — what this crate
+# exists to produce is a `.so`, a `.dylib` or a `.dll` for a C host, and the
+# `binaries` job in the release workflow ships those for four platforms through
+# GitHub Releases. A registry page would carry a crate that no cargo build ever
+# depends on. Nothing in the workspace depends on it either, so this costs
+# nothing. `fairchild-py` is `publish = false` for the same kind of reason.
+publish = false
 
 [lib]
 # NOT "fairchild": fairchild-py's extension module already claims that name, and
