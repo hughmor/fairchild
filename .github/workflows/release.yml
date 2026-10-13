@@ -241,11 +241,29 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
       # Dependency order, not alphabetical: each crate must find its deps
-      # already on the registry. fairchild-py is publish = false — it only
-      # ever builds a CPython extension module.
+      # already on the registry. `fairchild-py` and `fairchild-c` are missing
+      # because both are `publish = false`. Each builds a shared library for a
+      # foreign runtime rather than something a cargo build depends on.
+      #
+      # A publish that stops part way must be restartable. crates.io accepts
+      # five new crates and then one per ten minutes, so a first release
+      # reaches the sixth crate and stops there. `cargo publish` refuses a
+      # version the registry already holds, so without this check a re-run
+      # fails on the five that worked.
+      #
+      # The sparse index is the registry's own answer and has no rate limit.
+      # `cargo info` cannot do this job: inside the workspace it answers from
+      # the local path and reports every crate as present.
       - run: |
+          set -euo pipefail
+          v="${{ needs.guard.outputs.version }}"
           for crate in fairchild-parser fairchild-klu fairchild-core \
-                       fairchild-osdi fairchild-cli fairchild-c; do
+                       fairchild-osdi fairchild-cli; do
+            if curl -fsS "https://index.crates.io/${crate:0:2}/${crate:2:2}/$crate" \
+                 | grep -q "\"vers\":\"$v\""; then
+              echo "$crate $v is on crates.io already"
+              continue
+            fi
             echo "::group::publish $crate"
             cargo publish -p "$crate"
             echo "::endgroup::"
