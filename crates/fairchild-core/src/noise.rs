@@ -20,7 +20,7 @@ use indexmap::IndexMap;
 
 use fairchild_parser::{Element, Netlist};
 
-use crate::device::{Device, EvalFlags, NodeId, ReactiveKind, SimContext};
+use crate::device::{Device, EvalFlags, NodeId, PhaseDiffusion, ReactiveKind, SimContext};
 use crate::device_registry::DeviceRegistry;
 use crate::error::SimError;
 use crate::mna::{
@@ -55,6 +55,14 @@ pub struct NoiseSources {
     resistors: Vec<(NodeId, NodeId, f64)>,
 }
 
+/// The one enumeration includes additive densities and phase diffusion. A
+/// Wiener phase is integrated exactly in time; flattening its 1/f^2 phase PSD
+/// into held white noise would describe a different source.
+enum NoiseGenerator<'a> {
+    Additive(&'a [(NodeId, NodeId, f64)], f64),
+    Phase(PhaseDiffusion),
+}
+
 impl NoiseSources {
     pub fn build(netlist: &Netlist, topo: &CircuitTopology, temp_k: f64) -> Self {
         let four_kt = 4.0 * KB * temp_k;
@@ -81,14 +89,13 @@ impl NoiseSources {
     /// Visit `(taps, psd)` for every generator at the devices' current bias and
     /// at frequency `freq` (Hz).
     ///
-    /// `psd` is one-sided, in A²/Hz for an injection into a node row and in the
-    /// square of the enforced potential's unit for a branch row. Taps belonging
-    /// to one generator are driven by one random process and must be combined
-    /// coherently by the caller.
+    /// `psd` is one-sided; tap weights convert from the generator's units to
+    /// each row's units. For phase diffusion it is rad²/Hz, with field-per-radian
+    /// taps. Taps of one generator must be combined coherently by the caller.
     ///
-    /// Every native generator here is flat, so `freq` changes nothing for them.
-    /// It exists because an OSDI model may call `flicker_noise()`, and a hook
-    /// that cannot express frequency dependence would silently flatten it.
+    /// Additive sources may have frequency-dependent densities (native or OSDI
+    /// flicker noise). Phase diffusion has the small-signal phase spectrum
+    /// `linewidth_hz / (pi f^2)`.
     pub fn for_each(
         &self,
         devices: &[Box<dyn Device>],
@@ -96,15 +103,35 @@ impl NoiseSources {
         freq: f64,
         mut f: impl FnMut(&[(NodeId, NodeId, f64)], f64),
     ) {
+        self.for_each_generator(devices, ctx, freq, |source| match source {
+            NoiseGenerator::Additive(taps, psd) => f(taps, psd),
+            NoiseGenerator::Phase(src) => {
+                let [re, im] = src.field;
+                let psd = src.linewidth_hz / (std::f64::consts::PI * freq * freq);
+                f(&[(src.rows[0], None, -im), (src.rows[1], None, re)], psd);
+            }
+        });
+    }
+
+    fn for_each_generator(
+        &self,
+        devices: &[Box<dyn Device>],
+        ctx: &SimContext,
+        freq: f64,
+        mut f: impl FnMut(NoiseGenerator<'_>),
+    ) {
         for &(p, n, s_i) in &self.resistors {
-            f(&[(p, n, 1.0)], s_i);
+            f(NoiseGenerator::Additive(&[(p, n, 1.0)], s_i));
         }
         for dev in devices {
             for (p, n, s_i) in dev.noise_sources(ctx, freq) {
-                f(&[(p, n, 1.0)], s_i);
+                f(NoiseGenerator::Additive(&[(p, n, 1.0)], s_i));
             }
             for src in dev.correlated_noise_sources(ctx) {
-                f(&src.taps, src.psd);
+                f(NoiseGenerator::Additive(&src.taps, src.psd));
+            }
+            for src in dev.phase_diffusion_sources() {
+                f(NoiseGenerator::Phase(src));
             }
         }
     }
@@ -198,10 +225,10 @@ impl Rng {
 ///
 /// # What is missing
 ///
-/// Flicker (1/f) and RTS noise, which `.noise` does not model either — this
-/// injects exactly the generators that analysis knows about, no more. The
-/// sequence is white and gaussian per generator, and independent generators are
-/// independent here as they are there.
+/// Additive coloured sources are still flattened to a mid-band density with
+/// a warning. Phase diffusion is handled separately as an integrated Wiener
+/// process, not flattened: its increment variance is `2 pi linewidth_hz dt`.
+/// Independent sources remain independent in both analyses.
 pub struct TransientNoise {
     sources: NoiseSources,
     rng: Rng,
@@ -211,6 +238,11 @@ pub struct TransientNoise {
     rhs: Vec<f64>,
     /// The flatness probe in `draw` runs once, not once per timestep.
     flatness_checked: bool,
+    /// Committed and proposed phases in source enumeration order. Drawing for
+    /// a failed step must not advance physical phase or elapsed noise time.
+    phase: Vec<f64>,
+    proposed_phase: Vec<f64>,
+    accepted_time: f64,
 }
 
 impl TransientNoise {
@@ -226,6 +258,9 @@ impl TransientNoise {
             scale: opts.noisescale,
             rhs: vec![0.0; topo.size],
             flatness_checked: false,
+            phase: Vec::new(),
+            proposed_phase: Vec::new(),
+            accepted_time: 0.0,
         })
     }
 
@@ -241,9 +276,8 @@ impl TransientNoise {
         // A held i.i.d. sample sequence is white by construction, so there is
         // exactly one density it can realise. Probe mid-band of what this step
         // resolves — [0, 1/2h], so 1/4h — and check once that the generators
-        // really are flat across it. Every native source is; an OSDI model
-        // calling `flicker_noise()` is not, and silently flattening it is the
-        // shape of bug this file exists to avoid.
+        // really are flat across it. Phase diffusion is exempt because its
+        // coloured phase is integrated explicitly, not injected as white noise.
         let f_mid = 1.0 / (4.0 * h);
         if !self.flatness_checked {
             self.flatness_checked = true;
@@ -253,23 +287,61 @@ impl TransientNoise {
         let rng = &mut self.rng;
         let scale = self.scale;
         let rhs = &mut self.rhs;
-        self.sources.for_each(devices, ctx, f_mid, |taps, psd| {
-            if psd <= 0.0 {
-                return;
-            }
-            let amp = scale * (psd / (2.0 * h)).sqrt() * rng.normal();
-            for &(p, n, w) in taps {
-                // Same sign convention as `stamp_current_source_at`, mirrored:
-                // a positive sample drives current INTO `pos`, which is the
-                // direction `.noise`'s `λ[p] − λ[n]` transfer assumes.
-                if let Some(i) = p {
-                    rhs[i] += amp * w;
+        let mut phase_sources = Vec::new();
+        self.sources
+            .for_each_generator(devices, ctx, f_mid, |source| {
+                let NoiseGenerator::Additive(taps, psd) = source else {
+                    if let NoiseGenerator::Phase(src) = source {
+                        phase_sources.push(src);
+                    }
+                    return;
+                };
+                if psd <= 0.0 {
+                    return;
                 }
-                if let Some(i) = n {
-                    rhs[i] -= amp * w;
+                let amp = scale * (psd / (2.0 * h)).sqrt() * rng.normal();
+                for &(p, n, w) in taps {
+                    if let Some(i) = p {
+                        rhs[i] += amp * w;
+                    }
+                    if let Some(i) = n {
+                        rhs[i] -= amp * w;
+                    }
                 }
+            });
+        self.phase.resize(phase_sources.len(), 0.0);
+        self.proposed_phase.resize(phase_sources.len(), 0.0);
+        // The last output point may clamp the fixed grid: use elapsed time,
+        // not the nominal companion step, for the Wiener increment.
+        let dt = (ctx.time_s - self.accepted_time).max(0.0);
+        for (i, src) in phase_sources.iter().enumerate() {
+            let sigma = scale * (std::f64::consts::TAU * src.linewidth_hz * dt).sqrt();
+            let phase = (self.phase[i] + sigma * rng.normal()).rem_euclid(std::f64::consts::TAU);
+            self.proposed_phase[i] = phase;
+            // Rotate the source AND its radial intensity noise together. A
+            // small additive quadrature approximation would spuriously change
+            // power and fail once phase wanders by more than a small angle.
+            if phase == 0.0 {
+                continue;
             }
-        });
+            let [base_re, base_im] = src.field;
+            let re = base_re + src.rows[0].map_or(0.0, |j| rhs[j]);
+            let im = base_im + src.rows[1].map_or(0.0, |j| rhs[j]);
+            let (sin, cos) = phase.sin_cos();
+            if let Some(j) = src.rows[0] {
+                rhs[j] = re * cos - im * sin - base_re;
+            }
+            if let Some(j) = src.rows[1] {
+                rhs[j] = re * sin + im * cos - base_im;
+            }
+        }
+    }
+
+    /// Accept the held realisation after a successful solve. Re-stamps and
+    /// failed trials leave the last accepted phase unchanged.
+    pub(crate) fn commit(&mut self, time: f64) {
+        self.phase.clone_from(&self.proposed_phase);
+        self.accepted_time = time;
     }
 
     /// Warn once if any generator's density varies across the resolved band.
@@ -283,17 +355,25 @@ impl TransientNoise {
         let (f_lo, f_hi) = (1.0 / (20.0 * h), 1.0 / (2.2 * h));
         let mut lo = Vec::new();
         self.sources
-            .for_each(devices, ctx, f_lo, |_, psd| lo.push(psd));
+            .for_each_generator(devices, ctx, f_lo, |source| {
+                if let NoiseGenerator::Additive(_, psd) = source {
+                    lo.push(psd);
+                }
+            });
         let mut worst = 1.0_f64;
         let mut i = 0;
-        self.sources.for_each(devices, ctx, f_hi, |_, psd| {
-            if let Some(&a) = lo.get(i) {
-                if a > 0.0 && psd > 0.0 {
-                    worst = worst.max((psd / a).max(a / psd));
+        self.sources
+            .for_each_generator(devices, ctx, f_hi, |source| {
+                let NoiseGenerator::Additive(_, psd) = source else {
+                    return;
+                };
+                if let Some(&a) = lo.get(i) {
+                    if a > 0.0 && psd > 0.0 {
+                        worst = worst.max((psd / a).max(a / psd));
+                    }
                 }
-            }
-            i += 1;
-        });
+                i += 1;
+            });
         if worst > 1.05 {
             warn_user!(
                 "a noise generator varies by {worst:.2}x across the band this \
@@ -439,6 +519,18 @@ pub fn noise_analysis(
 
     // DC operating point.
     let mut devices = build_devices(netlist, &mut topo, &ctx, registry)?;
+    // Preserve the existing white-noise DC limit, but a diffusing phase has
+    // no finite DC PSD. Refuse rather than producing inf * 0 = NaN at a
+    // phase-insensitive output.
+    if freqs.iter().any(|f| !f.is_finite() || *f <= 0.0)
+        && devices
+            .iter()
+            .any(|d| !d.phase_diffusion_sources().is_empty())
+    {
+        return Err(SimError::ParameterError(
+            "phase-noise frequencies must be finite and positive".into(),
+        ));
+    }
     let n_nodes = topo.n_nodes();
     let size = topo.size;
     let dc_solver = opts.linear_solver(size);
@@ -680,6 +772,49 @@ fn run_dc_op(
 mod tests {
     use super::*;
     use fairchild_parser::parse_spice;
+
+    /// Failed trials do not advance diffusion; the last clamped interval uses
+    /// elapsed time even when the companion's nominal h is different.
+    #[test]
+    fn phase_diffusion_advances_only_on_commit_and_uses_elapsed_time() {
+        let net = fairchild_parser::parse_spice(
+            ".optical_port a\nXlas a fc_cw_laser power_W=1 linewidth_hz=1\n",
+        )
+        .unwrap();
+        let opts = crate::options::SimOptions {
+            trannoise: true,
+            noiseseed: 7,
+            ..Default::default()
+        };
+        let mut ctx = opts.sim_context();
+        let registry = crate::DeviceRegistry::new();
+        let mut topo = crate::mna::CircuitTopology::build_resolved(&net, &ctx, &registry);
+        let devices = crate::newton::build_devices(&net, &mut topo, &ctx, &registry).unwrap();
+        let source = devices[0].phase_diffusion_sources()[0];
+        let mut noise = super::TransientNoise::new(&net, &topo, &opts).unwrap();
+        let mut rng = super::Rng::new(7);
+        let first = rng.normal();
+        let second = rng.normal();
+        let third = rng.normal();
+        let tau = std::f64::consts::TAU;
+        let check = |noise: &super::TransientNoise, phase: f64| {
+            let re = 1.0 + noise.rhs()[source.rows[0].unwrap()];
+            let im = noise.rhs()[source.rows[1].unwrap()];
+            assert!((re - phase.cos()).hypot(im - phase.sin()) < 1e-12);
+        };
+        ctx.time_s = 1.0;
+        noise.draw(&devices, &ctx, 1.0);
+        check(&noise, tau.sqrt() * first);
+        // Reject the proposed first interval; draw from the original phase.
+        ctx.time_s = 2.0;
+        noise.draw(&devices, &ctx, 99.0);
+        let accepted = (2.0 * tau).sqrt() * second;
+        check(&noise, accepted);
+        noise.commit(2.0);
+        ctx.time_s = 2.25;
+        noise.draw(&devices, &ctx, 99.0);
+        check(&noise, accepted + (0.25 * tau).sqrt() * third);
+    }
 
     /// Resistor-divider thermal noise.  At any frequency:
     ///   S_V_out = 4kT·(R1 ‖ R2)

@@ -575,6 +575,9 @@ impl TranStepper {
 
     /// Accept the solved iterate as the state at `t_next`.
     pub(crate) fn commit(&mut self, t_next: f64) {
+        if let Some(noise) = self.noise.as_mut() {
+            noise.commit(t_next);
+        }
         for dev in &mut self.devices {
             dev.commit_timestep(&self.x);
         }

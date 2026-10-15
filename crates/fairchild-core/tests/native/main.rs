@@ -10,6 +10,7 @@
 //! and does not compile the files beside it on their own — so declaring them
 //! as modules here collapses that without touching a single test. Name
 //! filters still read the same way: `cargo test --test native <name>`.
+mod laser_linewidth;
 mod native_awgr;
 mod native_circulator;
 mod native_driven_laser;
