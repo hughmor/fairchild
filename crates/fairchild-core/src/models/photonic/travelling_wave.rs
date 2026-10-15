@@ -4,7 +4,9 @@
 //! true while the device is short against the RF wavelength and false exactly
 //! where a travelling-wave modulator earns its name. This device is the
 //! interleaved ladder instead: `N` optical slices, `N` electrode sections, and
-//! slice `i` driven by node `i` of the electrode.
+//! each slice driven by the average voltage at the photon's entry and exit.
+//! The entry voltage is delayed by the optical slice transit time; the exit
+//! voltage stays live, retaining its Newton cross-term.
 //!
 //! ```text
 //!   rf_in ──[T]──┬──[T]──┬── … ──┬──[T]── rf_out
@@ -72,6 +74,7 @@
 //!   need its own ladder, and leaving it undriven would be worse.
 
 use super::segment::{OpticalSegment, PerChannel};
+use crate::delay::DelayLine;
 use crate::device::{AcStamp, Device, EvalFlags, NodeId, SimContext};
 use crate::mna::MnaMatrix;
 use crate::models::tline::NativeTLine;
@@ -117,6 +120,8 @@ pub struct NativeTwPhaseShifter {
     elec: Vec<NodeId>,
     /// The per-slice drive voltage at the current iterate.
     v_slice: Vec<f64>,
+    /// Entry electrode voltages, committed only at accepted timesteps.
+    drive_history: DelayLine,
     /// Per-slice junction capacitance and stored charge at the current iterate.
     c_j_slice: Vec<f64>,
     q_j_slice: Vec<f64>,
@@ -159,6 +164,7 @@ impl NativeTwPhaseShifter {
             rf_out: None,
             elec: Vec::new(),
             v_slice: Vec::new(),
+            drive_history: DelayLine::new(),
             c_j_slice: Vec::new(),
             q_j_slice: Vec::new(),
             delay_option: false,
@@ -275,6 +281,7 @@ impl Device for NativeTwPhaseShifter {
             .map(|_| NativeTLine::with_loss(self.z0, td, loss_db))
             .collect();
         self.v_slice = vec![0.0; n];
+        self.drive_history.clear();
         self.c_j_slice = vec![0.0; n];
         self.q_j_slice = vec![0.0; n];
 
@@ -366,7 +373,7 @@ impl Device for NativeTwPhaseShifter {
             }
             let ctx = SimContext::default();
             self.segs[i].setup_instance(&wires, &ctx);
-            self.segs[i].set_control_nodes(&[self.elec[i]]);
+            self.segs[i].set_control_nodes(&[self.elec[i], self.elec[i + 1]]);
         }
 
         // Children's own rows.
@@ -467,6 +474,13 @@ impl Device for NativeTwPhaseShifter {
     fn eval(&mut self, x: &[f64], flags: EvalFlags, ctx: &SimContext) {
         let delay_active = flags.transient && self.delay_option;
         let c_j0_slice = self.c_j0 / self.segs.len().max(1) as f64;
+        let tau = self.segs.first().map_or(0.0, |s| s.tau_g_s());
+        self.drive_history
+            .set_state(delay_active && tau > 0.0, ctx.time_s);
+        let past = (self.drive_history.is_active()
+            && ctx.discretisation.is_some()
+            && !self.drive_history.is_empty())
+        .then(|| self.drive_history.sample(tau, self.segs.len()));
         for i in 0..self.segs.len() {
             let v = self.elec[i].map_or(0.0, |j| x[j]);
             self.v_slice[i] = v;
@@ -479,7 +493,19 @@ impl Device for NativeTwPhaseShifter {
                 self.c_j_slice[i] = c;
                 self.q_j_slice[i] = q;
             }
-            let dn = PerChannel::Uniform(self.dn_dv * v);
+            // Trapezoidal quadrature along the photon's trajectory:
+            // V(z_i, t-tau_o) and V(z_{i+1}, t). Sampling the SAME node at
+            // two times leaves an O(dz) spatial phase error. A purely delayed
+            // midpoint instead loses the live electrical/optical cross-term.
+            // With no history (DC / initial seed), use the steady-state limit.
+            let entry = past.as_ref().map_or(v, |p| p[i]);
+            let exit = self.elec[i + 1].map_or(0.0, |j| x[j]);
+            let dn = PerChannel::Uniform(self.dn_dv * 0.5 * (entry + exit));
+            let entry_sens = if past.is_some() {
+                0.0
+            } else {
+                0.5 * self.dn_dv
+            };
             let engaged = delay_active && self.segs[i].tau_g_s() > 0.0;
             self.segs[i].refresh_with_sens(
                 x,
@@ -488,8 +514,14 @@ impl Device for NativeTwPhaseShifter {
                 PerChannel::zero(),
                 engaged,
                 ctx,
-                // One control node per slice, with the analytic derivative.
-                &[(PerChannel::Uniform(self.dn_dv), 0.0, PerChannel::zero())],
+                &[
+                    (PerChannel::Uniform(entry_sens), 0.0, PerChannel::zero()),
+                    (
+                        PerChannel::Uniform(0.5 * self.dn_dv),
+                        0.0,
+                        PerChannel::zero(),
+                    ),
+                ],
             );
         }
         for line in &mut self.lines {
@@ -537,6 +569,9 @@ impl Device for NativeTwPhaseShifter {
         let mut out = Vec::new();
         for seg in &self.segs {
             out.extend(seg.ac_stamps(omega));
+            if self.delay_option {
+                out.extend(seg.ac_control_delay_stamps(omega, 0, seg.tau_g_s()));
+            }
         }
         for line in &self.lines {
             out.extend(line.ac_stamps(omega));
@@ -572,10 +607,26 @@ impl Device for NativeTwPhaseShifter {
         for line in &self.lines {
             out.extend(line.delay_curvature());
         }
+        if self.drive_history.is_active() {
+            out.extend(
+                self.drive_history
+                    .recent_curvature(self.segs.len())
+                    .into_iter()
+                    .zip(&self.elec)
+                    .filter_map(|(c, node)| node.map(|j| (j, c))),
+            );
+        }
         out
     }
 
     fn commit_timestep(&mut self, x: &[f64]) {
+        if self.drive_history.is_active() {
+            let entry = self.elec[..self.segs.len()]
+                .iter()
+                .map(|node| node.map_or(0.0, |j| x[j]))
+                .collect();
+            self.drive_history.record(entry, self.segs[0].tau_g_s());
+        }
         for seg in &mut self.segs {
             seg.commit(x);
         }

@@ -1282,8 +1282,18 @@ X<name>  in  out  rf_in  rf_out  fc_tw_ps  [param=val …]
 A lumped phase shifter says the whole electrode is at one voltage. That is true
 while the device is short against the RF wavelength, and false exactly where a
 travelling-wave modulator earns its name. This element is the interleaved
-ladder instead: `N` optical slices, `N` electrode sections, and slice `i`
-driven by node `i` of the electrode.
+ladder instead: `N` optical slices and `N` electrode sections. Slice `i` uses
+the average voltage at the photon's entry and exit events:
+
+```
+  V_slice(t) = [V_i(t − τ_o,slice) + V_{i+1}(t)] / 2
+```
+
+This is trapezoidal quadrature along the photon's trajectory. The exit voltage
+stays in the current Newton solve; its optical cross-term is stamped. Entry
+voltages come from accepted-step history, with the biased operating point
+seeding the past. AC applies the same delay to the entry coupling. With
+`waveguide_delay=0`, both endpoint voltages are instantaneous.
 
 ```
   rf_in ──[T]──┬──[T]──┬── … ──┬──[T]── rf_out
@@ -1343,13 +1353,18 @@ Each is pinned against its closed form in
 | Walk-off | `sinc(ω·L·(n_m − n_g)/2c)` |
 | RF launched against the light | the same, with `n_m + n_g` |
 | Termination mismatch | ripple of period `c/(2·n_m·L)` |
-| RF loss | `(1 − e^−(α+jΔβ)L) / ((α+jΔβ)L)` |
+| RF loss (constant attenuation) | `(1 − e^−(α+jΔβ)L) / ((α+jΔβ)L)` |
 
 **Why `N` is not yours to pick.** The RF voltage has to be roughly constant
 across one slice, so `Δz ≪ c/(f_max·n_m)`. The card takes `f_max` and the
 device solves `N = ceil(slices_per_wave · L · n_m · f_max / c)`. Convergence is
-`O(Δz²)`; raise `slices_per_wave` until the answer stops moving, or pin
-`n_slices` to sweep it.
+`O(Δz²)` for the optical quadrature; the convergence test checks the complex
+response (amplitude **and phase**) against the distributed integral for forward
+and reverse drive, lossless and lossy electrodes, with optical delay on and
+off. A magnitude-only test misses a first-order timing error. Raise
+`slices_per_wave` until the answer stops moving, or pin `n_slices` to sweep it.
+This order claim is for the unloaded electrode; discrete junction loading has
+its own approximation and Bragg limit.
 
 **The cost.** Both delays are per slice, so the transient timestep is bounded
 by the *slice* transit time, not the device's. A finer ladder is a slower run,

@@ -783,6 +783,41 @@ impl OpticalSegment {
         out
     }
 
+    /// Replace a live forward-control coupling in G with its delayed AC form.
+    /// The owning device supplies the corresponding time-domain control history.
+    /// This adds `(exp(-j omega tau) - 1)` times the existing Jacobian entry,
+    /// so DC sensitivity is preserved and the control is not counted twice.
+    pub(super) fn ac_control_delay_stamps(
+        &self,
+        omega: f64,
+        control: usize,
+        tau: f64,
+    ) -> Vec<crate::device::AcStamp> {
+        use crate::device::AcStamp;
+        let Some(col) = self.ctrl_nodes[control] else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(2 * self.n_channels);
+        let (qr, qi) = ((omega * tau).cos() - 1.0, -(omega * tau).sin());
+        for k in 0..self.n_channels {
+            let (g_re, g_im) = self.dout_dv(k, control);
+            for (row, g) in [
+                (self.branches[Self::bpc(self.wpc) * k], g_re),
+                (self.branches[Self::bpc(self.wpc) * k + 1], g_im),
+            ] {
+                if let Some(row) = row {
+                    out.push(AcStamp {
+                        row,
+                        col,
+                        re: -g * qr,
+                        im: -g * qi,
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// How fast each channel's delayed field is bending, as
     /// `(row, |d²y/dt²|)` against the output wire's own tolerance.
     ///
