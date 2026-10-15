@@ -220,8 +220,22 @@ impl Device for ActiveOpticalDevice {
 
     fn bind_extra_nodes(&mut self, first_idx: usize) {
         self.seg.bind_branches(first_idx);
-        self.model
-            .bind_internal(first_idx + self.seg.num_aux_branches());
+        let model_first = first_idx + self.seg.num_aux_branches();
+        self.model.bind_internal(model_first);
+        // A drive's perturbation can be a function of its internal rows — the
+        // junction voltage behind a series resistance, a thermal RC's state —
+        // and `eval` finite-differences only against the control nodes. A row
+        // left off that list contributes no ∂(field)/∂x entry, so the optical
+        // Jacobian loses the coupling entirely. Extend rather than replace: the
+        // electrical terminals still drive what they drove.
+        let n = self.model.num_internal_nodes();
+        if n > 0 {
+            self.elec_nodes
+                .extend((model_first..model_first + n).map(Some));
+            self.seg.set_control_nodes(&self.elec_nodes);
+            self.dpert_dv
+                .resize(self.elec_nodes.len(), Default::default());
+        }
     }
 
     fn set_real_param(&mut self, name: &str, value: f64) -> bool {
@@ -642,8 +656,10 @@ pub struct Injection {
     g_d_cached: f64,
     i_eq_cached: f64,
     c_d_cached: f64,
-    /// `dC_d/dV` at the cached bias; see `ReactiveBranchSpec::dvalue_dstate`.
-    dc_d_dv_cached: f64,
+    /// Stored diffusion charge at the cached bias. `∫τ·g_d dv = τ·I`, which is
+    /// the textbook minority-carrier charge and is what the integrator
+    /// advances; see `ReactiveBranchSpec::charge`.
+    q_d_cached: f64,
 }
 
 impl Injection {
@@ -659,7 +675,7 @@ impl Injection {
             g_d_cached: 1e-9,
             i_eq_cached: 0.0,
             c_d_cached: 0.0,
-            dc_d_dv_cached: 0.0,
+            q_d_cached: 0.0,
         }
     }
 }
@@ -691,9 +707,8 @@ impl PhotonicActiveModel for Injection {
         self.g_d_cached = self.i_sat * e / vt;
         self.i_eq_cached = i_diode - self.g_d_cached * v_pn;
         self.c_d_cached = self.tau_carrier * self.g_d_cached;
-        // g_d is Shockley, so dg_d/dv = g_d/vt (vt already carries n_diode) and
-        // the diffusion cap inherits that slope exactly.
-        self.dc_d_dv_cached = self.c_d_cached / vt;
+        // ∫₀^v τ·g_d dv' = τ·i_sat·(e − 1) = τ·I, the minority-carrier charge.
+        self.q_d_cached = self.tau_carrier * i_diode;
         // Normalised injected carrier density (≥ 0; reverse bias contributes 0).
         let inj = (e - 1.0).max(0.0);
         OpticalPerturbation {
@@ -721,15 +736,16 @@ impl PhotonicActiveModel for Injection {
             kind: ReactiveKind::Capacitor,
             pos: self.anode,
             neg: self.cathode,
-            // Still the `q = C·v` state, which is wrong for the depletion
-            // half of this capacitance in the same way `PnDrive`'s was — the
-            // device comes out faster than it is. Not converted with it because
-            // the charge here is a function of the *internal* junction voltage,
-            // which the series resistance separates from the branch voltage, so
-            // the branch cannot report `q(v_branch)` without solving for it.
+            // The diffusion charge is `τ·I`, not `C_d·V`. The two differ by the
+            // factor `V/V_T` — about 20 at normal forward bias, and growing
+            // with bias — so integrating `C_d·V` gave a device that relaxed far
+            // slower than its own `tau_carrier` and never reached the operating
+            // point the same deck reports under `.op`. This drive has no series
+            // resistance, so its branch voltage is its junction voltage and the
+            // charge is a function of the branch's own state.
             value: self.c_d_cached,
-            dvalue_dstate: self.dc_d_dv_cached,
-            charge: None,
+            dvalue_dstate: 0.0,
+            charge: Some(self.q_d_cached),
         }]
     }
 
@@ -804,11 +820,16 @@ pub struct FullPnDrive {
     alpha_neper_m: f64,
     anode: NodeId,
     cathode: NodeId,
+    /// The junction node, when `r_series > 0` puts one between the anode and
+    /// the diode. `None` when the series resistance is zero and the anode *is*
+    /// the junction. See [`FullPnDrive::num_internal_nodes`].
+    junc: NodeId,
     g_pn_cached: f64,
     i_eq_cached: f64,
     c_eff_cached: f64,
-    /// `dC_eff/dV` at the cached bias; see `ReactiveBranchSpec::dvalue_dstate`.
-    dc_eff_dv_cached: f64,
+    /// Depletion + diffusion charge at the cached junction voltage; the state
+    /// the integrator advances. See `ReactiveBranchSpec::charge`.
+    q_eff_cached: f64,
 }
 
 impl FullPnDrive {
@@ -835,11 +856,18 @@ impl FullPnDrive {
             alpha_neper_m: dB_per_cm_to_neper_per_m(1.0),
             anode: None,
             cathode: None,
+            junc: None,
             g_pn_cached: 1e-9,
             i_eq_cached: 0.0,
             c_eff_cached: 1.375e-13,
-            dc_eff_dv_cached: 0.0,
+            q_eff_cached: 0.0,
         }
+    }
+
+    /// The node the diode and its charge hang off: the internal junction row
+    /// when a series resistance made one, the anode otherwise.
+    fn junc_node(&self) -> NodeId {
+        self.junc.or(self.anode)
     }
 }
 
@@ -854,66 +882,64 @@ impl PhotonicActiveModel for FullPnDrive {
         2 // anode, cathode
     }
 
+    /// One row for the junction node, and only when a series resistance puts
+    /// one there.
+    ///
+    /// The junction's charge is a function of `V_j`, and a reactive branch
+    /// reports a charge against the voltage across *its own* nodes. Without a
+    /// row for `V_j` there is nothing to report it against, which is why this
+    /// model kept integrating `C(v)·v` after `fc_pn_ps_cap` stopped (#117).
+    /// With `r_series = 0` the anode already is the junction, so the row would
+    /// be a short across nothing — the conditional count is the BJT's, whose
+    /// `RB`/`RC`/`RE` nodes appear the same way. `push_device` asks this after
+    /// the factory has applied the instance parameters.
+    fn num_internal_nodes(&self) -> usize {
+        usize::from(self.r_series > 0.0)
+    }
+
     fn set_terminals(&mut self, electrical: &[NodeId]) {
         self.anode = electrical[0];
         self.cathode = electrical[1];
     }
 
+    fn bind_internal(&mut self, first_idx: usize) {
+        // Called whatever `num_internal_nodes` said, so a model whose count is
+        // conditional has to apply the same condition here or it claims a row
+        // nobody allocated.
+        if self.num_internal_nodes() > 0 {
+            self.junc = Some(first_idx);
+        }
+    }
+
     fn eval(&mut self, x: &[f64], intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
-        let v_a = self.anode.map_or(0.0, |i| x[i]);
         let v_c = self.cathode.map_or(0.0, |i| x[i]);
-        let v_pn = v_a - v_c;
         let vt = ctx.vt() * self.n_diode;
 
-        // Junction voltage: implicit when R_s > 0 (solve V_j + R_s·I_d = V_pn).
-        let v_junc = if self.r_series <= 0.0 {
-            v_pn
-        } else {
-            let mut vj = v_pn;
-            for _ in 0..50 {
-                let arg = (vj / vt).clamp(-40.0, 40.0);
-                let e = arg.exp();
-                let id = self.i_sat * (e - 1.0);
-                let f = vj + self.r_series * id - v_pn;
-                let gd = self.i_sat * e / vt;
-                let delta = f / (1.0 + self.r_series * gd);
-                vj -= delta;
-                if delta.abs() < 1e-12 {
-                    break;
-                }
-            }
-            vj
-        };
+        // The junction voltage is a row Newton owns, so it is read rather than
+        // solved for. The inner iteration this replaces was state the outer
+        // Newton could not see: it converged against a junction voltage that
+        // never appeared in the Jacobian, and left the node between R_s and the
+        // junction unprobeable.
+        let v_junc = self.junc_node().map_or(0.0, |i| x[i]) - v_c;
 
         let arg = (v_junc / vt).clamp(-40.0, 40.0);
         let e = arg.exp();
         let i_diode = self.i_sat * (e - 1.0);
         let g_d = self.i_sat * e / vt;
-        // Norton stamp accounting for series resistance.
-        let g_eff = g_d / (1.0 + g_d * self.r_series);
-        self.g_pn_cached = g_eff.max(1e-15);
-        self.i_eq_cached = i_diode - g_eff * v_pn;
+        // Norton at the junction itself; the series resistance is its own
+        // branch now, not a correction folded into this conductance.
+        self.g_pn_cached = g_d.max(1e-15);
+        self.i_eq_cached = i_diode - self.g_pn_cached * v_junc;
 
-        // Depletion C_j(V_j) (linear past the V_bi/2 knee) + diffusion C_d.
-        let (c_j_v, dc_j_dvj) = {
-            let v_knee = 0.5 * self.v_bi;
-            if v_junc < v_knee {
-                let c = self.c_j0 / (1.0 - v_junc / self.v_bi).powf(self.m_j);
-                (c, c * self.m_j / (self.v_bi - v_junc))
-            } else {
-                let c_knee = self.c_j0 / (1.0 - v_knee / self.v_bi).powf(self.m_j);
-                let dc_dv = c_knee * self.m_j / (self.v_bi - v_knee);
-                (c_knee + dc_dv * (v_junc - v_knee), dc_dv)
-            }
-        };
+        // Depletion C_j(V_j) and its stored charge, linear past the V_bi/2
+        // knee. Same helper as `PnDrive`, so there is one junction law rather
+        // than two copies to disagree.
+        let (c_j_v, q_j) = junction_cap_and_charge(v_junc, self.c_j0, self.v_bi, self.m_j);
         self.c_eff_cached = c_j_v + self.tau_carrier * g_d;
-        // Both terms are functions of the *junction* voltage, and the branch is
-        // stamped across the terminals.  With `r_series = 0` those are the same
-        // node pair and this is exact; with series resistance they differ by
-        // `dv_junc/dv_pn = 1/(1 + g_d·r_series)`, which is applied here so the
-        // derivative is against the branch's own state either way.
-        let dvj_dv = 1.0 / (1.0 + g_d * self.r_series);
-        self.dc_eff_dv_cached = (dc_j_dvj + self.tau_carrier * g_d / vt) * dvj_dv;
+        // ∫(C_j + τ·g_d) dv = q_j + τ·I, the depletion charge plus the
+        // minority-carrier charge. Both are functions of V_j, which is now the
+        // branch's own voltage either way.
+        self.q_eff_cached = q_j + self.tau_carrier * i_diode;
 
         // Optical back-action, over the whole bus and both directions
         // (`channel_intensities` counts both). A shared effect must be driven by
@@ -975,11 +1001,14 @@ impl PhotonicActiveModel for FullPnDrive {
     }
 
     fn stamp(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.anode, self.cathode, self.g_pn_cached);
+        stamp_resistor(mat, self.junc_node(), self.cathode, self.g_pn_cached);
+        if let Some(j) = self.junc {
+            stamp_resistor(mat, self.anode, Some(j), 1.0 / self.r_series);
+        }
     }
 
     fn stamp_residual(&self, b: &mut [f64]) {
-        if let Some(a) = self.anode {
+        if let Some(a) = self.junc_node() {
             b[a] -= self.i_eq_cached;
         }
         if let Some(c) = self.cathode {
@@ -990,17 +1019,14 @@ impl PhotonicActiveModel for FullPnDrive {
     fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
         vec![ReactiveBranchSpec {
             kind: ReactiveKind::Capacitor,
-            pos: self.anode,
+            // The junction node, which is the anode when nothing separates
+            // them. Either way the branch voltage is the junction voltage the
+            // charge below is a function of.
+            pos: self.junc_node(),
             neg: self.cathode,
-            // Still the `q = C·v` state, which is wrong for the depletion
-            // half of this capacitance in the same way `PnDrive`'s was — the
-            // device comes out faster than it is. Not converted with it because
-            // the charge here is a function of the *internal* junction voltage,
-            // which the series resistance separates from the branch voltage, so
-            // the branch cannot report `q(v_branch)` without solving for it.
             value: self.c_eff_cached,
-            dvalue_dstate: self.dc_eff_dv_cached,
-            charge: None,
+            dvalue_dstate: 0.0,
+            charge: Some(self.q_eff_cached),
         }]
     }
 

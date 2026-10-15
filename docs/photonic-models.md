@@ -1151,7 +1151,7 @@ as `V → V_bi`, and injection index and loss changes that are *exponential* in
 |---|---|---|
 | `i_sat` | 1e-12 | Shockley saturation current (A) |
 | `n_diode` | 1.05 | ideality factor |
-| `tau_carrier` | 10n | minority-carrier lifetime, sets `C_d` |
+| `tau_carrier` | 10n | minority-carrier lifetime. Sets `C_d`, and is the time constant a forced-current step relaxes with |
 | `dn_dv_inj` | 1.311e-4 | injection index prefactor |
 | `da_dv_inj` | 150 | injection loss prefactor (Np/m) |
 
@@ -1173,7 +1173,7 @@ One model across `V_pn = 0`, smoothly. It carries both regimes' parameters plus:
 | `a_eff_um2` | 0.1257 | effective mode area, sets the TPA intensity |
 | `r_th_k_per_w` | 0 | thermal resistance to substrate; 0 disables self-heating |
 | `dn_dt` | 1.86e-4 | thermo-optic coefficient of silicon (1/K) |
-| `r_series` | 0 | series access resistance (Ω) |
+| `r_series` | 0 | series access resistance (Ω). A non-zero value allocates an internal junction node, which you can probe like any other row |
 
 TPA adds `α_TPA = β_TPA·|A|²/A_eff` on top of the free-carrier loss, and the
 carriers it generates add their own FCA. Self-heating is **static**: absorbed
