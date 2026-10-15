@@ -309,29 +309,25 @@ pub fn compile(compiler: &VaCompiler, src: &Path, opts: &VaOptions) -> Result<Pa
     // to come out of it. Compiling the *expansion* costs diagnostics that point
     // into a generated file, so it is done only when it is the difference
     // between running and crashing — and the warning says where to look.
-    let source = if removed.is_empty() {
-        src.to_path_buf()
+    let run_compiler = |source: &Path| {
+        // OpenVAF's output parent must exist; the file need not exist yet.
+        compiler
+            .command(opts, source)
+            .arg("-o")
+            .arg(&tmp)
+            .output()
+            .map_err(|e| OsdiError::CompilerFailed {
+                path: compiler.path.clone(),
+                detail: e.to_string(),
+            })
+    };
+    let status = if removed.is_empty() {
+        run_compiler(src)?
     } else {
         portability::report(src, &removed);
         let path = sanitised_path(src, key, opts)?;
-        std::fs::write(&path, &clean).map_err(|e| OsdiError::CompileFailed {
-            path: path.clone(),
-            stderr: format!("cannot write the transformed source: {e}"),
-        })?;
-        path
+        with_generated_source(&path, &clean, || run_compiler(&path))?
     };
-
-    // OpenVAF's `--output` parser requires the parent to exist but not the
-    // file; it also refuses to overwrite anything that is not a plain file.
-    let status = compiler
-        .command(opts, &source)
-        .arg("-o")
-        .arg(&tmp)
-        .output()
-        .map_err(|e| OsdiError::CompilerFailed {
-            path: compiler.path.clone(),
-            detail: e.to_string(),
-        })?;
     if !status.status.success() {
         let _ = std::fs::remove_file(&tmp);
         // The compiler's own diagnostics, verbatim: they carry file, line and
@@ -520,8 +516,9 @@ pub fn load_libraries_with_widths(
             for n in widths {
                 let expanded = crate::dialect::expand(&text, &m, n, wpc)?;
                 let gen_path = generated_path(&src, n, opts)?;
-                write_atomically(&gen_path, &expanded)?;
-                let compiled = compile(compiler, &gen_path, &gen_opts)?;
+                let compiled = with_generated_source(&gen_path, &expanded, || {
+                    compile(compiler, &gen_path, &gen_opts)
+                })?;
                 load_one_with_lambda(
                     &compiled,
                     registry,
@@ -660,6 +657,43 @@ fn load_one_with_lambda(
     Ok(())
 }
 
+/// Publish a generated input and keep it stable through all compiler reads.
+/// Atomic replacement alone prevents partial reads, not replacement while an
+/// OpenVAF process resolves and reopens the path (Windows may expose a deleted
+/// NTFS name in that interval). Both preprocessing and compilation belong in
+/// `read`; transformed sources use this same lifetime around the compiler.
+fn with_generated_source<T>(
+    path: &Path,
+    text: &str,
+    read: impl FnOnce() -> Result<T, OsdiError>,
+) -> Result<T, OsdiError> {
+    // Lock a sidecar, not the replaceable source. Every producer must lock the
+    // same persistent file; deleting it on release could let a new producer
+    // bypass a waiter that still holds the old lock-file handle.
+    let lock_path = path.with_extension("va.lock");
+    let fail = |e: std::io::Error| OsdiError::CompileFailed {
+        path: path.to_path_buf(),
+        stderr: format!(
+            "cannot lock generated source '{}': {e}",
+            lock_path.display()
+        ),
+    };
+    let guard = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(fail)?;
+    guard.lock().map_err(fail)?;
+    let result = write_atomically(path, text).and_then(|()| read());
+    // Explicitly unlock: on Unix, a sibling thread can fork while this handle
+    // is open. Its inherited descriptor otherwise keeps flock alive until
+    // exec even after this thread drops the handle. Release on errors too.
+    let released = guard.unlock().map_err(fail);
+    result.and_then(|value| released.map(|()| value))
+}
+
 /// Write `text` to `path` so that no reader ever sees it half-written.
 ///
 /// `fs::write` truncates first, so between the truncate and the write the file
@@ -670,10 +704,10 @@ fn load_one_with_lambda(
 /// `.osdi` race again, one file earlier, and it cost a CI job on exactly the
 /// test that calls the loader most often.
 ///
-/// The final path stays shared on purpose: the bytes are a pure function of the
-/// source, the model and the channel count, so last writer wins and every
-/// writer writes the same thing. `--emit-generated` keeps naming a file the
-/// author can read.
+/// `with_generated_source` protects the complete write/read transaction. This
+/// helper guarantees complete snapshots when publishing; it cannot by itself
+/// keep a compiler's input at the same filesystem identity while it is read.
+/// The final path stays shared so `--emit-generated` remains inspectable.
 fn write_atomically(path: &Path, text: &str) -> Result<(), OsdiError> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -746,6 +780,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// OpenVAF may resolve and reopen its input more than once. Another
+    /// producer must be excluded for the entire read, not just publication.
+    /// A nonblocking independent handle makes the missing exclusion fail
+    /// deterministically on every OS, rather than waiting for the NTFS race.
+    #[test]
+    fn generated_source_stays_exclusive_until_the_compiler_finishes() {
+        let dir = scratch("source_read_lifetime");
+        let path = dir.join("model.n1.va");
+        let lock_path = path.with_extension("va.lock");
+        // The contender represents a sibling producer in another process.
+        let contender = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        for text in ["// first model\n", "// edited model\n"] {
+            with_generated_source(&path, text, || {
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+                assert!(
+                    matches!(contender.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "a sibling producer can replace the source while the compiler is reading it"
+                );
+                Ok(())
+            })
+            .unwrap();
+            contender
+                .try_lock()
+                .expect("a finished reader releases the source");
+            contender.unlock().unwrap();
+        }
+        let failure = with_generated_source(&path, "// invalid model\n", || {
+            Err::<(), _>(OsdiError::CompileFailed {
+                path: path.clone(),
+                stderr: "intentional compiler failure".into(),
+            })
+        });
+        assert!(failure
+            .unwrap_err()
+            .to_string()
+            .contains("intentional compiler failure"));
+        contender
+            .try_lock()
+            .expect("a failed compiler releases the source too");
+        contender.unlock().unwrap();
     }
 
     /// A reader of the generated source never sees it part-written.

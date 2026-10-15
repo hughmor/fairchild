@@ -11,17 +11,11 @@
 //! path. The whole point of the exercise is that the ladder reproduces physics
 //! nobody stamped into it.
 //!
-//! Nothing here is a new device. The ladder is forty lines of deck built from
-//! `fc_pn_ps` and `T`, which is what makes it a cheap way to validate the
-//! physics *before* `fc_tw_ps` exists.
-//!
-//! # What is not covered
-//!
-//! The RF-loss case — `H(ω) = (1 − e^(−(α+jΔβ)L)) / ((α+jΔβ)L)` — needs a lossy
-//! line, and `T` is lossless (`O`/LTRA is not implemented; see
-//! `docs/spice_support.md`). Adding series resistors between sections gives a
-//! loss that is only first-order right and brings its own dispersion, which
-//! would be checking an approximation against a different approximation.
+//! The hand-written ladder pins the topology independently of `fc_tw_ps`.
+//! The device additionally uses endpoint quadrature along each photon's
+//! trajectory, tested against the complex distributed integral as N increases.
+//! RF attenuation here is frequency-independent (a distortionless line);
+//! skin-effect loss and LTRA dispersion remain outside this model's contract.
 
 use fairchild_core::{ac_analysis, DeviceRegistry, SimOptions};
 use fairchild_parser::parse_spice;
@@ -281,9 +275,8 @@ fn a_detuned_termination_ripples_at_the_round_trip_period() {
 
 // ── fc_tw_ps: the same construction, built by the device ─────────────────────
 
-/// The device deck: one element where the hand-written ladder needs `2N + 3`
-/// lines. `n_slices` is set explicitly so the two are the same circuit — the
-/// derived count is checked separately.
+/// The device deck, with an explicit slice count for refinement tests.
+/// The derived count is checked separately.
 fn tw_device(n_m: f64, n_slices: usize, z_term: f64) -> String {
     format!(
         "* fc_tw_ps\n\
@@ -312,34 +305,159 @@ fn device_response(deck: &str, freqs: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// `fc_tw_ps` is the hand-written ladder, to the digit.
+/// Complex EO response against the distributed voltage integral. A magnitude-only
+/// convergence check misses the old O(dz) timing error: a left-end sum can have
+/// second-order magnitude error while its phase is only first order.
 ///
-/// Not an anchor — both sides are fairchild — but it is the right test for
-/// *this* claim, which is that the device builds the construction the closed
-/// forms above already validated. The physics is pinned upstream; what is at
-/// risk here is the wiring, and a wiring error shows up as a mismatch with the
-/// deck that is known to be right.
+/// The reference integrates a distortionless electrode with CONSTANT attenuation,
+/// not a real conductor's frequency-dependent skin-effect loss. No model code
+/// computes this integral. The zero-loss rows are the sinc limit and control.
 #[test]
-fn the_device_reproduces_the_hand_written_ladder() {
+fn the_complex_response_converges_quadratically_to_the_distributed_integral() {
     const N_M: f64 = 2.1;
-    let freqs: Vec<f64> = (1..=10).map(|k| k as f64 * 5e9).collect();
-    let hand = eo_response(&ladder(N_M, Drive::Co, Z0), &freqs);
-    let dev = device_response(&tw_device(N_M, N_SLICES, Z0), &freqs);
-    let scale = dev[0] / hand[0];
-    assert!(
-        (scale - 1.0).abs() < 1e-6,
-        "low-frequency response differs by {scale:.6}x before any walk-off"
-    );
-    for (i, f) in freqs.iter().enumerate() {
-        let rel = (dev[i] - hand[i]).abs() / hand[0];
+    let freqs = [10e9, 25e9, 40e9];
+    for (delay, drive, loss) in [false, true].into_iter().flat_map(|delay| {
+        [Drive::Co, Drive::Counter]
+            .into_iter()
+            .flat_map(move |drive| {
+                [0.0, 6.0, 30.0]
+                    .into_iter()
+                    .map(move |loss| (delay, drive, loss))
+            })
+    }) {
+        let mut errors = Vec::new();
+        for n in [12, 24, 48] {
+            let mut deck = tw_probe(N_M, n, 0.0, loss, 0.0);
+            if !delay {
+                deck = deck.replace("waveguide_delay=1", "waveguide_delay=0");
+            }
+            if drive == Drive::Counter {
+                deck = deck
+                    .replace("Rs rf e0", "Rs rf eN")
+                    .replace("Rt eN", "Rt e0");
+            }
+            let parsed = parse_spice(&deck).expect("parse");
+            let ac = ac_analysis(&parsed, &freqs, Some("vrf"), &DeviceRegistry::new())
+                .expect("ac sweep");
+            let mut error = 0.0f64;
+            for (i, &f) in freqs.iter().enumerate() {
+                let want = distributed_response(f, N_M, drive, loss, delay);
+                let got = ac.voltages["oo_im_0"][i];
+                error = error.max((got.0 - want.0).hypot(got.1 - want.1));
+            }
+            errors.push(error);
+        }
+        eprintln!(
+            "delay={delay}, counter={}, loss={loss}: complex errors {errors:?}",
+            drive == Drive::Counter
+        );
+        for pair in errors.windows(2) {
+            let order = (pair[0] / pair[1]).log2();
+            assert!(
+                (1.9..2.1).contains(&order),
+                "doubling N must quarter the COMPLEX error, order={order:.3}, errors={errors:?}"
+            );
+        }
+        let peak = 1e-3f64.sqrt() * std::f64::consts::PI * L_M / V_PI_L / 2.0;
         assert!(
-            rel < 1e-6,
-            "at {:.0} GHz the device gives {:.6e} and the hand ladder {:.6e}",
-            f / 1e9,
-            dev[i],
-            hand[i]
+            errors[2] < 0.002 * peak,
+            "48 slices: error={:.3}% of peak",
+            100.0 * errors[2] / peak
         );
     }
+}
+
+/// Output-imaginary envelope phasor for an AC-1 source into a matched line.
+/// The carrier is real, so d(A_im)/dV = -sqrt(P) pi L / V_pi_l. The source
+/// divider contributes 1/2. Forward drive has a whole-device optical delay;
+/// reverse drive has the sum of optical and RF transit times in its integral.
+fn distributed_response(f: f64, n_m: f64, drive: Drive, loss: f64, delay: bool) -> (f64, f64) {
+    let w = 2.0 * std::f64::consts::PI * f;
+    let tau_o = if delay { N_G * L_M / C0 } else { 0.0 };
+    let tau_e = n_m * L_M / C0;
+    let a = loss * L_M * 100.0 * std::f64::consts::LN_10 / 20.0;
+    let b = w * if drive == Drive::Co {
+        tau_e - tau_o
+    } else {
+        tau_e + tau_o
+    };
+    let (nr, ni) = (1.0 - (-a).exp() * b.cos(), (-a).exp() * b.sin());
+    let den = a * a + b * b;
+    let (hr, hi) = ((nr * a + ni * b) / den, (ni * a - nr * b) / den);
+    let phase = if drive == Drive::Co { -w * tau_o } else { 0.0 };
+    let scale = -1e-3f64.sqrt() * std::f64::consts::PI * L_M / V_PI_L / 2.0;
+    (
+        scale * (hr * phase.cos() - hi * phase.sin()),
+        scale * (hr * phase.sin() + hi * phase.cos()),
+    )
+}
+
+/// A matched, velocity-matched line carries the SAME voltage alongside each
+/// photon. Its exact nonlinear output is -sqrt(P) sin(pi L V(t-tau)/V_pi_l),
+/// including a DC bias. Two slices suffice: there is no quadrature error in
+/// this limit, so changing N must not hide incorrect time sampling.
+#[test]
+fn the_transient_follows_the_photon_with_a_live_exit_voltage() {
+    const F: f64 = 20e9;
+    const AMPLITUDE: f64 = 0.8;
+    const BIAS: f64 = -1.0;
+    let deck = tw_probe(N_G, 2, 0.0, 0.0, 0.0).replace(
+        "Vrf rf 0 DC 0 AC 1",
+        &format!("Vrf rf 0 SIN({BIAS} {AMPLITUDE} {F:e})"),
+    );
+    let parsed = parse_spice(&deck).expect("parse");
+    let opts = SimOptions::from_netlist(&parsed);
+    let r = fairchild_core::tran_nr_with_registry_opts(
+        &parsed,
+        0.2e-12,
+        200e-12,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .expect("transient");
+    // The waveform can converge even with a missing optical/electrical
+    // Jacobian column. Probe it separately, after history is populated.
+    let bad = fairchild_core::adjoint_tran::jacobian_check_tran(
+        &parsed,
+        &DeviceRegistry::new(),
+        &opts,
+        0.2e-12,
+        100e-12,
+        1e-5,
+        1e-9,
+    )
+    .expect("transient Jacobian probe");
+    let undeclared: Vec<_> = bad.iter().filter(|m| !m.frozen).collect();
+    assert!(
+        undeclared.is_empty(),
+        "missing live cross-term: {undeclared:?}"
+    );
+    let out_re = &r.node_voltages["oo_re_0"];
+    let out_im = &r.node_voltages["oo_im_0"];
+    let tau = N_G * L_M / C0;
+    let mut max_error = 0.0f64;
+    for (i, &t) in r.time.iter().enumerate() {
+        // Exclude the initial source turn-on reaching the output. The DC seed
+        // is separately checked at t=0 below.
+        if t < 2.0 * tau {
+            continue;
+        }
+        let v = 0.5 * (BIAS + AMPLITUDE * (2.0 * std::f64::consts::PI * F * (t - tau)).sin());
+        let phi = std::f64::consts::PI * L_M * v / V_PI_L;
+        let amp = 1e-3f64.sqrt();
+        max_error =
+            max_error.max((out_re[i] - amp * phi.cos()).hypot(out_im[i] + amp * phi.sin()) / amp);
+    }
+    eprintln!("matched transient maximum field error {max_error:.6e}");
+    assert!(
+        max_error < 0.001,
+        "field error {max_error:.3e} exceeds interpolation tolerance"
+    );
+    let phi_dc = std::f64::consts::PI * L_M * 0.5 * BIAS / V_PI_L;
+    assert!(
+        (out_im[0] + 1e-3f64.sqrt() * phi_dc.sin()).abs() < 1e-10,
+        "the initial history must contain the biased operating point"
+    );
 }
 
 /// The slice count follows `f_max`, and the answer converges as it rises.
@@ -543,109 +661,6 @@ fn the_junction_loads_the_electrode_by_the_analytic_factor() {
         r_mismatched > 0.05 * r_loaded.max(1e-6) && r_mismatched > 0.01,
         "a loaded line terminated in its unloaded impedance must ripple; got {:.2}%",
         100.0 * r_mismatched
-    );
-}
-
-/// Step 3 of #116's validation ladder, which needed a lossy line to exist.
-///
-/// With RF attenuation the walk-off form becomes
-///
-/// ```text
-///   H(w) = (1 − exp(−(alpha + j·dbeta)·L)) / ((alpha + j·dbeta)·L)
-///   dbeta = w·(n_m − n_g)/c
-/// ```
-///
-/// which is the same integral as the lossless sinc with a complex argument. The
-/// visible difference is that the nulls fill in: a lossy electrode cannot
-/// cancel exactly, because the far slices contribute less than the near ones.
-#[test]
-fn rf_loss_follows_the_complex_walkoff_form() {
-    const N_M: f64 = 2.1;
-    const N: usize = 32;
-    const LOSS_DB_CM: f64 = 6.0;
-    let delta_n = N_G - N_M;
-    // Nepers over the whole device, from dB/cm: 1 dB = 1/8.686 Np.
-    let alpha_l = LOSS_DB_CM * (L_M * 100.0) * std::f64::consts::LN_10 / 20.0;
-
-    let deck = tw_probe(N_M, N, 0.0, LOSS_DB_CM, 0.0);
-    let freqs: Vec<f64> = (1..=12).map(|k| k as f64 * 5e9).collect();
-    let parsed = parse_spice(&deck).expect("parse");
-    let ac = ac_analysis(&parsed, &freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac");
-    let got: Vec<f64> = (0..freqs.len())
-        .map(|i| {
-            let re = ac.magnitude("oo_re_0", i).expect("re");
-            let im = ac.magnitude("oo_im_0", i).expect("im");
-            (re * re + im * im).sqrt()
-        })
-        .collect();
-
-    // |(1 − e^{−z})/z| with z = alpha_l + j·dbeta·L.
-    let form = |f: f64| {
-        let db = 2.0 * std::f64::consts::PI * f * delta_n / C0 * L_M;
-        let (zr, zi) = (alpha_l, db);
-        let e = (-zr).exp();
-        let (nr, ni) = (1.0 - e * zi.cos(), e * zi.sin());
-        ((nr * nr + ni * ni) / (zr * zr + zi * zi)).sqrt()
-    };
-
-    let norm = got[0] / form(freqs[0]);
-    for (f, v) in freqs.iter().zip(&got) {
-        let want = form(*f) * norm;
-        assert!(
-            (v - want).abs() < 0.05 * norm,
-            "at {:.0} GHz the lossy ladder gives {v:.4e}, the complex walk-off \
-             form says {want:.4e}",
-            f / 1e9
-        );
-    }
-
-    // Divide the walk-off out and what is left is the loss alone. The same
-    // ladder without `rf_loss_db_cm` is the control, so this compares two
-    // measurements against the *ratio* of two closed forms — a wrong `k` cannot
-    // survive that, while it could hide inside a single normalised curve.
-    let lossless = tw_probe(N_M, N, 0.0, 0.0, 0.0);
-    let parsed_ll = parse_spice(&lossless).expect("parse");
-    let ac_ll = ac_analysis(&parsed_ll, &freqs, Some("vrf"), &DeviceRegistry::new()).expect("ac");
-    let sinc = |f: f64| {
-        let x = std::f64::consts::PI * f * L_M * delta_n / C0;
-        if x.abs() < 1e-12 {
-            1.0
-        } else {
-            (x.sin() / x).abs()
-        }
-    };
-    for (i, f) in freqs.iter().enumerate() {
-        let re = ac_ll.magnitude("oo_re_0", i).expect("re");
-        let im = ac_ll.magnitude("oo_im_0", i).expect("im");
-        let base = (re * re + im * im).sqrt();
-        // Skip the neighbourhood of the null, where both sides go through zero
-        // and a ratio is meaningless rather than wrong.
-        if sinc(*f) < 0.15 {
-            continue;
-        }
-        let got_ratio = got[i] / base;
-        let want_ratio = form(*f) / sinc(*f);
-        assert!(
-            (got_ratio / want_ratio - 1.0).abs() < 0.06,
-            "at {:.0} GHz loss costs a factor {got_ratio:.4}; the ratio of the two \
-             closed forms says {want_ratio:.4}",
-            f / 1e9
-        );
-    }
-
-    // And the DC end is the cleanest statement of all: at zero frequency the
-    // walk-off is 1 and the whole response is the loss integral
-    // `(1 − e^−αL)/(αL)`, which is a pure number.
-    let dc_ratio = {
-        let re = ac_ll.magnitude("oo_re_0", 0).expect("re");
-        let im = ac_ll.magnitude("oo_im_0", 0).expect("im");
-        got[0] / (re * re + im * im).sqrt()
-    };
-    let want_dc = (1.0 - (-alpha_l).exp()) / alpha_l;
-    assert!(
-        (dc_ratio / want_dc - 1.0).abs() < 0.03,
-        "a lossy electrode delivers {dc_ratio:.4} of the drive integral; \
-         (1 − e^−αL)/(αL) with αL = {alpha_l:.4} says {want_dc:.4}"
     );
 }
 

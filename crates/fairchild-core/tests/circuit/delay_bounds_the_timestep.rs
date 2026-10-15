@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use fairchild_core::device::{Device, SimContext};
-use fairchild_core::models::{NativeTLine, NativeWaveguide};
+use fairchild_core::models::{NativeTLine, NativeTwPhaseShifter, NativeWaveguide};
 
 /// Devices known to own a `DelayLine`, by the file that declares the field.
 ///
@@ -25,9 +25,10 @@ use fairchild_core::models::{NativeTLine, NativeWaveguide};
 /// `requested_max_timestep`. The gate below fails on a file that has one and is
 /// not listed, which is the only way to notice the omission.
 const KNOWN_DELAY_OWNERS: &[&str] = &[
-    "models/tline.rs",            // NativeTLine — TD
-    "models/photonic/segment.rs", // OpticalSegment — tau_g, under waveguide_delay
-    "models/photonic/xfer.rs",    // NativeOptical2x2 — tau_s
+    "models/tline.rs",                    // NativeTLine — TD
+    "models/photonic/segment.rs",         // OpticalSegment — tau_g, under waveguide_delay
+    "models/photonic/xfer.rs",            // NativeOptical2x2 — tau_s
+    "models/photonic/travelling_wave.rs", // entry control history — tau_g per slice
 ];
 
 /// Walk `src/` and report every file declaring a `DelayLine` field.
@@ -122,6 +123,37 @@ fn a_waveguide_bounds_the_step_only_when_the_delay_is_engaged() {
         (bound - tau_g / 2.0).abs() < 1e-18,
         "expected tau_g/2 = {:.4e}, got {bound:.4e}",
         tau_g / 2.0
+    );
+}
+
+/// The TW entry-voltage history needs the same transit-time bound as its
+/// optical segments. Use a slower electrode so the electrical bound alone
+/// would permit steps too long for the entry history. Disabling optical delay
+/// must leave only the electrode bound.
+#[test]
+fn a_travelling_wave_drive_history_is_covered_by_the_optical_step_bound() {
+    let bound = |delay: bool| {
+        let ctx = SimContext {
+            waveguide_delay: delay,
+            ..Default::default()
+        };
+        let mut tw = NativeTwPhaseShifter::new();
+        tw.setup_model(&ctx);
+        tw.set_real_param("l_m", 3e-3);
+        tw.set_real_param("n_m", 8.4);
+        tw.set_real_param("n_g", 4.2);
+        tw.set_real_param("n_slices", 2.0);
+        tw.validate().expect("valid ladder");
+        tw.requested_max_timestep().expect("ladder has delays")
+    };
+    let optical = 3e-3 * 4.2 / 299_792_458.0 / 2.0 / 2.0;
+    assert!(
+        (bound(true) / optical - 1.0).abs() < 1e-12,
+        "entry history must be sampled at no more than half the optical slice transit time"
+    );
+    assert!(
+        (bound(false) / (2.0 * optical) - 1.0).abs() < 1e-12,
+        "with optical delay off, only the slower electrode's TD/2 must bound the step"
     );
 }
 
