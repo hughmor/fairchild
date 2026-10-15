@@ -24,6 +24,7 @@ mod native_photonic_expr;
 mod native_photonic_level;
 mod native_pn_ps_cap;
 mod native_pn_ps_full;
+mod native_pn_ps_inj;
 mod native_pn_th_ps;
 mod native_splitter_asymmetric;
 mod native_thermal_ps_rc;

@@ -150,6 +150,41 @@ fn electro_optic_devices_declare_what_they_freeze() {
              Vh vh 0 DC 2.0\n.op\n"
         ),
     );
+    // The RC heater's phase is driven by its filtered-power state row, not by
+    // either terminal, so the optical Jacobian needs that row as a control
+    // node. This is the same gap as the junction row below and it predates it:
+    // `fc_thermal_ps_rc` has had an internal row driving `dphi` since it was
+    // written, and nothing asked for the column.
+    assert_complete(
+        "thermal phase shifter with a thermal RC",
+        &format!(
+            ".optical_port in0\n.optical_port out0\n{LASER}\
+             Xth in0 out0 vh 0 fc_thermal_ps_rc r_heater=1k p_pi=10m tau_th=10u\n\
+             Vh vh 0 DC 2.0\n.op\n"
+        ),
+    );
+    // With `r_series` the junction sits on an internal row (#117), and the
+    // index change reads *that* row rather than either terminal. The segment
+    // builds its optical Jacobian by finite-differencing the control nodes, so
+    // a drive's internal rows have to be on that list — off it, ∂(field)/∂V_j
+    // is zero and the gradient through the junction disappears. Both
+    // resistances, because at zero there is no internal row and the check is
+    // the r_series = 0 structure again.
+    //
+    // `beta_tpa=0` is load-bearing and is not tidying: TPA reads the optical
+    // field and stamps no derivative for it, which is a second undeclared block
+    // (#140) that would mask this one. Restore the default once #140 lands.
+    for r_series in ["0", "120"] {
+        assert_complete(
+            &format!("full pn phase shifter, r_series = {r_series}"),
+            &format!(
+                ".optical_port in0\n.optical_port out0\n{LASER}\
+                 Xpn in0 out0 vmod 0 fc_pn_ps_full L_um=100 dn_dv_rev=5e-5 c_j0=100f \
+                 v_bi=0.7 m_j=0.5 beta_tpa=0 r_series={r_series}\n\
+                 Vm vmod 0 DC -1.0\n.op\n"
+            ),
+        );
+    }
     assert_complete(
         "optical 2x2 weight bank",
         ".optical_port bus\n.optical_port dark\n.optical_port thru\n.optical_port drop\n\
