@@ -47,8 +47,8 @@ against, see [model status](model_status.md) §9.
 | WDM demultiplexer | `fc_demux` | [4](#fc_demux--1--n-wdm-demultiplexer) |
 | AWG router | `fc_awgr` | [4](#fc_awgr--nn-arrayed-waveguide-grating-router) |
 | PN phase shifter (4 tiers) | `fc_pn_ps`, `_cap`, `_inj`, `_full` | [5](#5-modulators-and-phase-shifters) |
-| Thermal phase shifter (2 tiers) | `fc_thermal_ps`, `_rc` | [5](#fc_thermal_ps--thermo-optic-phase-shifter) |
-| Combined PN + thermal (4 tiers) | `fc_pn_th_ps`, `_cap`, `_inj`, `_full` | [5](#fc_pn_th_ps--combined-pn--thermal-phase-shifter) |
+| Thermal phase shifter (2 tiers) | `fc_thermal_ps`, `_rc` | [5](#5-modulators-and-phase-shifters) |
+| Combined PN + thermal (4 tiers) | `fc_pn_th_ps`, `_cap`, `_inj`, `_full` | [5](#5-modulators-and-phase-shifters) |
 | Mach-Zehnder modulator | `fc_mzm` | [5](#fc_mzm--idealised-testbench-mach-zehnder-modulator) |
 | Expression-driven phase shifter | `fc_phase_shifter_expr` | [5](#declarative-models-no-recompile--fc_phase_shifter_expr) |
 | Photodetector | `fc_photodetector` | [6](#fc_photodetector--pin-photodetector) |
@@ -969,72 +969,199 @@ moves — with CW lasers, once.
 
 ## 5. Modulators and phase shifters
 
-Everything that changes the phase of light with a voltage is one family, and
-the family comes in **tiers**. Every tier shares the same optical interface
-(bundle in, bundle out, two electrical terminals) and the same passive
-waveguide defaults; they differ only in which voltage-dependent effects are
-active.
+### One model, and what switches it off
+
+There is **one** PN phase-shifter model. Every effect it can have is a
+parameter, and **0 switches that effect off**:
+
+| Parameter | What 0 switches off |
+|---|---|
+| `g_pn` | the ohmic junction conductance |
+| `i_sat` | the Shockley diode |
+| `c_j0` | the depletion charge `∫C_j dv` |
+| `tau_carrier` | the diffusion charge `τ·I` |
+| `dn_dv_rev`, `da_dv_rev` | reverse index change and free-carrier loss |
+| `dn_dv_inj`, `da_dv_inj` | forward injection index change and loss |
+| `dn_di`, `da_di` | the same two, parametrised by current instead of voltage |
+| `r_series` | the access resistance, and the junction's own node |
+| `beta_tpa` | two-photon absorption |
+| `r_th` | static self-heating |
+| `p_pi` | the heater (on the cards that have heater pins) |
+| `tau_th` | the heater's thermal lag |
+
+The card names `fc_pn_ps`, `fc_pn_ps_cap`, `fc_pn_ps_inj` and `fc_pn_ps_full`
+are **presets**: each one is that model with a group of these set to 0. They are
+not different models, and the table below says exactly which group each one
+switches off. A deck can start from any preset and change any parameter, so no
+combination is out of reach.
 
 > **Pick the lowest tier that captures the physics your circuit is sensitive
 > to.** A higher tier is not more correct on a circuit that never leaves the
 > regime the lower one covers — it is the same answer with more Newton
 > iterations and more parameters to get wrong.
 
-### The tiers
+### The tiers, as the parameters they set
 
-| | `fc_pn_ps` | `_cap` | `_inj` | `_full` |
-|---|:-:|:-:|:-:|:-:|
-| Linear EO `Δn ∝ V` | ✓ | ✓ | ✓ | ✓ |
-| Constant `α` | ✓ | | | |
-| `C_j(V)` depletion | | ✓ | | ✓ |
-| `C_d(V)` diffusion | | | ✓ | ✓ |
-| Bias-dependent `α(V)`, reverse | | ✓ | | ✓ |
-| Bias-dependent `α(V)`, forward | | | ✓ | ✓ |
-| Shockley I-V | | ✓ reverse | ✓ forward | ✓ both |
-| Nonlinear `Δn_eff(V)`, reverse | | ✓ | | ✓ |
-| Nonlinear `Δn_eff(V)`, forward | | | ✓ | ✓ |
-| Two-photon absorption + TPA-induced FCA | | | | ✓ |
-| Self-heating `Δn` | | | | ✓ static |
-| Bias regime | either | reverse only | forward only | either |
-| Junction offset assumed | symmetric | 100 nm to N | 100 nm to N | 100 nm to N |
+This is the whole taxonomy. It lives in `PRESETS` in
+`crates/fairchild-core/src/models/photonic/active.rs`, and the device registry
+registers that table rather than keeping a list of its own.
 
-Choosing between them:
+| Card | Sets |
+|---|---|
+| `fc_pn_ps` | `g_pn=1e-3 i_sat=0 c_j0=0 tau_carrier=0 da_dv_rev=0 dn_dv_inj=0 da_dv_inj=0 beta_tpa=0` |
+| `fc_pn_ps_cap` | `g_pn=1e-3 i_sat=0 tau_carrier=0 dn_dv_inj=0 da_dv_inj=0 beta_tpa=0` |
+| `fc_pn_ps_inj` | `c_j0=0 dn_dv_rev=0 da_dv_rev=0 beta_tpa=0` |
+| `fc_pn_ps_full` | nothing — every term is on |
+| `fc_pn_th_ps`, `_cap`, `_inj`, `_full` | the same four, plus heater pins |
+| `fc_thermal_ps` | a heater alone, no junction |
+| `fc_thermal_ps_rc` | a heater alone, `tau_th=10u` |
+
+So `fc_pn_ps` is a linear conductance and a linear `Δn`, with nothing stored
+and no optical back-action. `fc_pn_ps_cap` adds the depletion charge and the
+reverse-bias loss. `fc_pn_ps_inj` is the diode, its diffusion charge and the
+exponential forward terms, with the depletion half switched off.
+`fc_pn_ps_full` is all of it.
+
+`tests/native/native_ps_tiers.rs` checks this: `fc_pn_ps_full` driven with a
+tier's own parameters reproduces that tier bit for bit, and each tier is also
+anchored against the closed form of the physics it claims.
+
+### Choosing
 
 - **`fc_pn_ps`** — wiring up a topology, an AC small-signal response, a
-  functional check at a fixed bias. Linear `Δn ∝ V`, linear junction
-  conductance, constant loss. No `C_j`, so no RC bandwidth limit.
-- **`fc_pn_ps_cap`** — a reverse-biased depletion modulator that needs realistic
-  `C_j(V)` and `α(V)` for DC and transient. This is the tier most silicon
-  photonic modulators belong in. Above about `V_pn = +0.3 V` it is wrong: it
-  under-counts both loss and `dn/dV`, because injection is not modelled.
+  functional check at a fixed bias. No `C_j`, so no RC bandwidth limit.
+- **`fc_pn_ps_cap`** — a reverse-biased depletion modulator that needs
+  realistic `C_j(V)` and `α(V)`. This is the tier most silicon photonic
+  modulators belong in. Above about `V_pn = +0.3 V` it under-counts both loss
+  and `dn/dV`, because injection is switched off.
 - **`fc_pn_ps_inj`** — a forward-biased carrier-injection device, `V_pn` in
   roughly `[0, 0.8] V`: variable optical attenuators, slow ring tuners.
   Injection `Δn` is exponential in `V_pn` and far larger than depletion's.
-  Separate from `_cap` rather than a switch inside it, because one mediocre fit
-  covering both regimes is worse than two good fits covering one each.
 - **`fc_pn_ps_full`** — the modulator visits both regimes in normal operation,
   or the optical power is high enough that two-photon absorption matters.
-  Smooth through `V_pn = 0`, plus TPA, TPA-generated free carriers, and static
-  self-heating.
-
-`fc_thermal_ps` has two tiers — instantaneous and `_rc` with a thermal time
-constant — and `fc_pn_th_ps` crosses the two families, offering the same four
-PN tiers with a heater on each.
 
 A dynamic-carrier tier (`dN/dt = G − N/τ` plus a thermal RC, for self-pulsing
 and Q-switching at high power) is **not implemented**.
 
+### Pin order
+
+The drive decides the pin order, and there are three.
+
+```
+X<name>  in out  anode cathode           fc_pn_ps | _cap | _inj | _full
+X<name>  in out  heat_p heat_n           fc_thermal_ps | fc_thermal_ps_rc
+X<name>  in out  anode cathode heat_p heat_n
+                                         fc_pn_th_ps | _cap | _inj | _full
+```
+
+`in` and `out` are bundles and carry all N WDM channels. The electrical
+terminals are scalar nodes, and there is **one** of each per device however
+many optical channels it carries: the supply sees one junction and one heater,
+not N. Each channel's wavelength is resolved independently, so one modulator
+produces wavelength-diverse phase shifts from one drive.
+
+### Every parameter
+
+Shared by every card in the family (these are the optical segment's):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `l_um` | 1000 (0 for the heater-only cards) | Section length, µm. |
+| `l_m` / `length` | — | The same, in metres. |
+| `n_eff` | 2.7654 (2.445 heater-only) | Effective index at `wl_ref_nm`. |
+| `n_g` | 4.02 (4.19 heater-only) | Group index, which sets the dispersion slope `n_eff(λ) = n_eff + (λ−λ_0)·(n_eff−n_g)/λ_0`. |
+| `wl_ref_nm` / `lambda_ref_nm` | 1550 | Reference wavelength: the propagation phase is zero here. Also `wl_ref_m` / `lambda_ref_m` in metres. There is **no** `wavelength_nm` on a phase shifter — that name belongs to `fc_cw_laser`. |
+| `alpha_db_cm` | 2.59 (0 heater-only) | Propagation loss along the section. For a closed-loop ring this sets the extinction ratio of the resonance dip. |
+| `pin_at_ref` | 0 | 1 zeroes the absolute propagation phase at `wl_ref`. |
+
+The junction, on every `fc_pn_ps*` and `fc_pn_th_ps*` card:
+
+| Parameter | Aliases | Default | Description |
+|---|---|---|---|
+| `dn_dv_rev` | `dn_dv` | 5.024e-5 | `Δn = dn_dv_rev·V_j`, the reverse/linear index change. |
+| `v_pi_l` | — | — | Convenience: sets `dn_dv_rev` to `λ_ref/(2·V_πL)`. Re-set it if you change `λ_ref` afterwards. |
+| `da_dv_rev` | `da_dv` | 7.83 | Reverse free-carrier loss, Np/m per volt of reverse bias. |
+| `g_pn` | — | 0 | Ohmic conductance across the junction, in parallel with the diode. |
+| `c_j0` | — | 137.5 fF | Zero-bias depletion capacitance. The stored charge is `∫C_j dv`, linear past the `V_bi/2` knee. |
+| `v_bi` | — | 0.917 | Built-in voltage. |
+| `m_j` | — | 0.5 | Grading coefficient, clamped to `[0, 0.99]`. |
+| `i_sat` | `is` | 1e-12 | Shockley saturation current. |
+| `n_diode` | `n` | 1.05 | Ideality factor. |
+| `tau_carrier` | `tau` | 10 ns | Minority-carrier lifetime. Sets the diffusion charge `q = τ·I`, and is the time constant a forced-current step relaxes with. |
+| `dn_dv_inj` | — | 1.311e-4 | `Δn = −dn_dv_inj·(e−1)`, where `e = exp(V_j/(n·V_T))`. |
+| `da_dv_inj` | — | 150 | `Δα = da_dv_inj·(e−1)`, Np/m. |
+| `dn_di` | `dn_di_per_a` | 0 | `Δn = −dn_di·I_fwd`. Use *either* this pair or `dn_dv_inj`/`da_dv_inj`, not both. |
+| `da_di` | `da_di_per_a` | 0 | `Δα = da_di·I_fwd`, Np/m per amp. |
+| `r_series` | — | 0 | Series access resistance. Above 0 the junction gets its own MNA node, which you can probe like any other. |
+| `beta_tpa` | `beta_tpa_m_per_w` | 7.9e-12 | Two-photon absorption coefficient, m/W. |
+| `a_eff_um2` | `a_eff_m2` | 0.1257 | Effective mode area, which sets the TPA intensity. |
+| `r_th` | `r_th_k_per_w` | 0 | Thermal resistance to the substrate. 0 disables self-heating. |
+| `dn_dt` | — | 1.86e-4 | Thermo-optic coefficient of silicon, 1/K. |
+
+The heater, on every `fc_thermal_ps*` and `fc_pn_th_ps*` card:
+
+| Parameter | Aliases | Default | Description |
+|---|---|---|---|
+| `r_heater` | `r` | 1000 Ω | Heater resistance between `heat_p` and `heat_n`. |
+| `p_pi` | `p_pi_w`, `p_pi_th` | 10 mW | Heater power for a π phase shift. |
+| `tau_th` | — | 0 (10 µs on `fc_thermal_ps_rc`) | First-order thermal time constant. |
+
+**`tau_th` works on every card with heater pins**, including the `fc_pn_th_ps*`
+composites. It used to be a separate model, so a PN composite could not have a
+thermal lag at all. Write `fc_pn_th_ps_cap tau_th=20u` and it does.
+
+`tau_th = 0` converts Joule power to phase algebraically, with no state. Above
+0 the phase tracks the filtered power on one internal MNA row,
+`dT/dt = (P − T)/τ_th`, so warm-up and cool-down show up in a transient. At DC
+the state equation reduces to `T = P`, so an operating point never depends on
+`tau_th`.
+
+`tau_th` is spelt out rather than offered as `tau`, because a composite carries
+both this and the junction's `tau_carrier`, and one short name for two time
+constants would set whichever it reached.
+
+### Physics
+
+Optical phase is `φ = φ_prop + φ_eo + φ_th`:
+
+- `φ_prop = 2π·n_g·L·(1/λ − 1/λ_ref)` — the wavelength-dependent propagation
+  phase, zeroed at the reference wavelength.
+- `φ_eo = 2π·L·Δn_eff/λ`, where `Δn_eff = dn_dv_rev·V_j − dn_dv_inj·(e−1) −
+  dn_di·I_fwd + dn_dt·R_th·P_abs`.
+- `φ_th = π·P/P_π` from the heater, applied identically to every channel.
+
+The transfer is `A_out = A_in · exp(−αL/2) · exp(−jφ)`, with
+`α = α_0 + da_dv_rev·max(0, −V_j) + da_dv_inj·(e−1) + da_di·I_fwd + α_TPA`.
+Wavelength passes through unchanged.
+
+Electrically the junction is a Shockley diode and `g_pn` in parallel, Nortoned
+at the junction node, with `r_series` between that node and the anode. The
+stored charge is `∫C_j dv + τ·I` — the depletion integral, not `C(v)·v`, and
+the minority-carrier charge, not `C_d·V`.
+
+Two-photon absorption is per channel, because cross-TPA between distinct
+frequencies is twice self-TPA:
+`α_TPA,j = β/A_eff·(2·Σ_k I_k − I_j)`. A single channel reduces this to
+self-TPA exactly. Self-heating is **static**: absorbed power raises the
+temperature by `R_th·P_abs` and the resulting `Δn` applies immediately, with no
+thermal time constant of its own. Leave `r_th` at 0 unless you have a number
+for it — a guessed thermal resistance moves the resonance of every ring in the
+circuit.
+
+Not modelled at this tier: the dynamic decay of TPA-generated carriers within a
+transient, and pulsed self-heating.
+
 ### Selecting a tier with `LEVEL`
 
-The tiers have dedicated card names, and they also answer to a `LEVEL`
-selector on a `.model` card — the same idiom as MOSFET `LEVEL`. The base type
-is the family; `LEVEL` picks the electrical sophistication. Model-card params
-bake in at construction, and per-instance `X…` params still apply on top.
+The tiers also answer to a `LEVEL` selector on a `.model` card, the same idiom
+as MOSFET `LEVEL`. The base type is the family and `LEVEL` picks the tier.
+Model-card parameters bake in at construction, and per-instance `X…` parameters
+still apply on top.
 
 ```spice
-.model myps  fc_pn_ps      LEVEL=2  L_um=480 v_pi_l=0.012   ; ≡ fc_pn_ps_cap
-.model myth  fc_thermal_ps LEVEL=2  tau_th=20u              ; ≡ fc_thermal_ps_rc
-.model mymod fc_pn_th_ps   LEVEL=4                          ; ≡ fc_pn_th_ps_full
+.model myps  fc_pn_ps      LEVEL=2  L_um=480 v_pi_l=0.012   ; = fc_pn_ps_cap
+.model myth  fc_thermal_ps LEVEL=2  tau_th=20u              ; = fc_thermal_ps_rc
+.model mymod fc_pn_th_ps   LEVEL=4                          ; = fc_pn_th_ps_full
 Xps  in out  a 0  myps
 ```
 
@@ -1044,14 +1171,17 @@ Xps  in out  a 0  myps
 | `fc_thermal_ps` | instantaneous | `_rc` | — | — |
 | `fc_pn_th_ps` | linear + heater | `_cap` | `_inj` | `_full` |
 
-`LEVEL` absent means 1, so a bare `.model` card is always valid. An unsupported
-`LEVEL` on a recognised family warns and falls back to 1 rather than failing —
-the opposite of the usual rule here, because the deck is otherwise valid and
-the warning names the problem.
+`LEVEL` is a card-name suffix underneath, so the two routes cannot disagree.
+`LEVEL` absent means 1, and a bare `.model` card is always valid. An
+unsupported `LEVEL` on a recognised family warns and falls back to 1 rather
+than failing, because the deck is otherwise valid and the warning names the
+problem.
 
 ### Where the parameters come from
 
-The shipped defaults are not invented. They come from
+The shipped defaults are not invented, and there is **one** set of them. Every
+preset starts from the same extraction and switches terms off; none of them
+re-calibrates. The numbers come from
 `scripts/waveguide_simulations/pn_modulator/pn_modulator.py`, run at
 5e17 N_A / 5e17 N_D, 100 nm junction offset toward N, 300 K, 1550 nm:
 
@@ -1076,233 +1206,14 @@ drift-diffusion, a thermal solve for `R_th`, or a carrier-lifetime measurement
 | Extracted quantity | Device parameter |
 |---|---|
 | `mode.n_eff_rib_straight` | `n_eff` |
-| `linearised.alpha_at_0V_dB_cm` | `alpha_dB_cm` (add bend and scattering loss on top) |
-| `linearised.dn_dv_reverse_per_V` | `dn_dv` |
+| `linearised.alpha_at_0V_dB_cm` | `alpha_db_cm` (add bend and scattering loss on top) |
+| `linearised.dn_dv_reverse_per_V` | `dn_dv_rev` |
 | `depletion.C_j_per_um_at_0V_F` × `L_um` | `c_j0` |
 | `depletion.V_bi` | `v_bi` |
-| slope of `delta_alpha_vs_v`, `V ≤ 0` | `da_dv` |
+| slope of `delta_alpha_vs_v`, `V ≤ 0` | `da_dv_rev` |
 | fit of `delta_neff_vs_v`, `V ≥ 0` | `dn_dv_inj` |
 | `tpa.beta_TPA_m_per_W` | `beta_tpa` |
 | `mode.A_eff_um2` | `a_eff_um2` |
-
-### `fc_pn_ps` — PN-junction phase shifter
-
-```
-X<name>  in  out  anode  cathode  fc_pn_ps  [param=val …]
-```
-
-| Port | Role |
-|---|---|
-| `in` / `out` | bundles, optical pass-through |
-| `anode` / `cathode` | scalar electrical nodes (PN-junction terminals) |
-
-| Parameter | Default | Description |
-|---|---|---|
-| `L_um` | 1000 (1 mm) | PN-section length, µm. |
-| `L_m` / `length` | — | Same, in metres. |
-| `n_eff` | 2.445 | Effective index at `wl_ref_nm` (sets the propagation phase). |
-| `n_g` | 4.2 | Group index at `wl_ref_nm` (sets the dispersion slope so `n_eff(λ) = n_eff + (λ−λ_0)·(n_eff−n_g)/λ_0`). |
-| `wavelength_nm` | 1550 | Reference wavelength: propagation phase is zero at `λ = wavelength_nm`. Pin this to your laser's λ so the device is "on resonance" by default. (Alias: `wl_ref_nm`.) |
-| `dn_dv` | 1e-4 | Effective-index change per applied volt (small-signal). |
-| `V_pi_L` | — | Convenience override: `Vπ·L` in V·m. Setting this overrides `dn_dv` so that `φ = π` when `V = Vπ`. |
-| `g_pn` | 1e-3 | Linearised PN-junction conductance (S). Connects anode and cathode through `1/g_pn`. ONE conductance shared across all N optical channels — see WDM note below. |
-| `alpha_dB_cm` | 0 | Propagation loss along the PN section. For a closed-loop ring this loss sets the extinction ratio of the resonance dip — without it the ring is all-pass. |
-
-**WDM behaviour.** `fc_pn_ps` is bundle-aware. On an N-channel optical
-bus, ONE `fc_pn_ps` instance handles all N optical paths and presents ONE
-shared electrical interface — the V_pn supply sees exactly `g_pn`, not
-`N · g_pn`. Each channel's wavelength is resolved independently, so a single
-Vπ-driven modulator naturally produces wavelength-diverse phase shifts.
-
-**Physics.** Optical: `φ = φ_prop + φ_eo` where
-
-- `φ_prop = 2π n_g L (1/λ − 1/λ_ref)` — wavelength-dependent propagation
-  phase, zeroed at the reference wavelength.
-- `φ_eo = 2π L (dn/dV) V_pn / λ` — the electro-optic shift.
-
-The transfer is `A_out = A_in · exp(−α L / 2) · exp(−j φ)`. Wavelength
-passes through unchanged.
-
-Electrical: a single linear conductance `g_pn` between anode and cathode.
-The model does not yet capture the diode I-V or the bias-dependent
-depletion-region capacitance — for a forward-biased carrier-injection
-device, replace `g_pn` with a more complete junction model in a future
-revision.
-
-`V_pi_L` and `dn_dv` are not orthogonal: setting `V_pi_L` recomputes
-`dn_dv` from the current `wavelength_nm` and `L`. If you set `V_pi_L`
-and later change `wavelength_nm`, **re-set `V_pi_L`** so the EO calibration
-tracks the new λ_ref.
-
-### `fc_pn_ps_cap` — depletion-mode PN phase shifter with C_j(V)
-
-```
-X<name>  in  out  anode  cathode  fc_pn_ps_cap  [param=val …]
-```
-
-Same pin layout as `fc_pn_ps` (bundle-aware optical in/out plus PN
-anode/cathode).  Adds bias-dependent junction capacitance and an
-optional linear loss-vs-bias coefficient on top of the small-signal
-`dn_dv` from `fc_pn_ps`.
-
-| Parameter | Default | Description |
-|---|---|---|
-| (all `fc_pn_ps` params) | — | `L_um`, `n_g`, `dn_dv`, `g_pn`, `V_pi_L`, `alpha_dB_cm` carry over. |
-| `c_j0` | 20 fF | Zero-bias junction capacitance (F). |
-| `v_bi` | 0.7 | Built-in voltage (V) — knee at V_pn = V_bi/2. |
-| `m_j` | 0.5 | Grading coefficient (0.5 = abrupt junction). |
-| `da_dv` | 0 | Linear loss-vs-bias coefficient (Np/m per V); adds extra propagation absorption in reverse bias. |
-
-**Physics.** `C_j(V_pn) = C_j0 / (1 − V_pn/V_bi)^m_j` for V_pn ≤ V_bi/2,
-linearly continued above the knee for NR stability when the user drives
-the junction into forward bias.  The integrator owns the companion-model
-state for this junction capacitance via the new `Device::reactive_branches`
-hook (a single Capacitor branch between anode and cathode, value
-re-queried per NR iteration).  Forward-injection physics (high dn/dV,
-carrier recombination time constants, large da/dV) is reserved for a
-future `fc_pn_ps_inj` class.
-
-### `fc_pn_ps_inj` — carrier-injection phase shifter (forward bias)
-
-```
-X<name>  in out  anode cathode  fc_pn_ps_inj  [param=val …]
-```
-
-Forward-biased operation, `V_pn ∈ [0, ~0.8] V`. A Shockley diode with proper
-forward I-V, a diffusion capacitance `C_d = τ·g_d` that replaces depletion `C_j`
-as `V → V_bi`, and injection index and loss changes that are *exponential* in
-`V_pn` rather than linear:
-
-```
-Δn_eff = −dn_dv_inj · (exp(V/(n·V_T)) − 1)
-Δα     =  da_dv_inj · (exp(V/(n·V_T)) − 1)
-```
-
-| Param | Default | Meaning |
-|---|---|---|
-| `i_sat` | 1e-12 | Shockley saturation current (A) |
-| `n_diode` | 1.05 | ideality factor |
-| `tau_carrier` | 10n | minority-carrier lifetime, sets `C_d` |
-| `dn_dv_inj` | 1.311e-4 | injection index prefactor |
-| `da_dv_inj` | 150 | injection loss prefactor (Np/m) |
-
-Plus the passive waveguide parameters shared by the whole family. Reverse bias
-is out of scope — use `fc_pn_ps_cap`, or `fc_pn_ps_full` if the device visits
-both.
-
-### `fc_pn_ps_full` — depletion + injection + TPA (both regimes)
-
-```
-X<name>  in out  anode cathode  fc_pn_ps_full  [param=val …]
-```
-
-One model across `V_pn = 0`, smoothly. It carries both regimes' parameters plus:
-
-| Param | Default | Meaning |
-|---|---|---|
-| `beta_tpa` | 7.9e-12 | two-photon absorption coefficient (m/W) |
-| `a_eff_um2` | 0.1257 | effective mode area, sets the TPA intensity |
-| `r_th_k_per_w` | 0 | thermal resistance to substrate; 0 disables self-heating |
-| `dn_dt` | 1.86e-4 | thermo-optic coefficient of silicon (1/K) |
-| `r_series` | 0 | series access resistance (Ω) |
-
-TPA adds `α_TPA = β_TPA·|A|²/A_eff` on top of the free-carrier loss, and the
-carriers it generates add their own FCA. Self-heating is **static**: absorbed
-power raises the temperature by `R_th·P_abs` and the resulting `Δn` applies
-immediately, with no thermal time constant. Leave `r_th_k_per_w` at 0 unless you
-have a number for it — a guessed thermal resistance moves the resonance of every
-ring in the circuit.
-
-Not modelled at this tier: the dynamic decay of TPA-generated carriers within a
-transient, and pulsed self-heating.
-
-### `fc_thermal_ps` — thermo-optic phase shifter
-
-```
-X<name>  in  out  heat_p  heat_n  fc_thermal_ps  [param=val …]
-```
-
-| Port | Role |
-|---|---|
-| `in` / `out` | bundles, optical pass-through |
-| `heat_p` / `heat_n` | scalar electrical nodes (heater drive) |
-
-| Parameter | Default | Description |
-|---|---|---|
-| `r_heater` / `r` | 1000 | Heater resistance (Ω). |
-| `p_pi` / `p_pi_w` | 10e-3 | Heater power for π phase shift (W). |
-
-**WDM behaviour.** Like `fc_pn_ps`, this is bundle-aware. One device, one
-shared heater, all N optical channels see the same phase shift (no
-wavelength dependence in this first-pass model).
-
-**Physics.** Electrical: linear resistor `R_heater` between `heat_p` and
-`heat_n`. Joule power `P = V² / R_heater` is converted instantaneously into
-an optical phase shift `φ = π · P / P_pi`. No thermal RC — the conversion
-is algebraic, no transient lag. For a circuit where thermal time constants
-matter (most real heaters), build an external RC between the drive node
-and an intermediate `T_dev` net and feed `T_dev` to the heater pin pair
-with a B-element converting temperature to equivalent voltage.
-
-The transfer is `A_out = A_in · exp(−j φ)` — lossless. Wavelength passes
-through unchanged.
-
-### `fc_thermal_ps_rc` — thermal phase shifter with τ_th
-
-```
-X<name>  in  out  heat_p  heat_n  fc_thermal_ps_rc  [param=val …]
-```
-
-Same pin layout as `fc_thermal_ps`.  Adds a first-order thermal RC: the
-optical phase shift tracks the *filtered* heater dissipation rather than
-the instantaneous Joule power, so transient warm-up / cool-down on the
-thermo-optic time scale shows up in the simulation.
-
-| Parameter | Default | Description |
-|---|---|---|
-| (all `fc_thermal_ps` params) | — | `r_heater` / `r`, `p_pi` carry over. |
-| `tau_th` (or `tau`) | 10 µs | Thermal time constant (s). |
-
-**Physics.** `dT/dt = (P − T) / tau_th`, with T in normalised "power-
-equivalent" units so steady-state φ = π · T / P_pi matches the L1
-model.  In transient, an abrupt change in V_h propagates to T (and
-hence to φ) through the LPF.  At DC the state equation reduces to
-T = P and the optical output is identical to `fc_thermal_ps`.
-
-This is the canonical "path B" device — T(t) lives as an MNA state row
-the device allocates via `num_extra_nodes` and stamps a discretised
-state equation in `load_jacobian_tran`.  The previous-timestep T_old
-is captured via `commit_timestep`.
-
-### `fc_pn_th_ps` — combined PN + thermal phase shifter
-
-```
-X<name>  in  out  anode  cathode  heat_p  heat_n  fc_pn_th_ps  [param=val …]
-```
-
-| Port | Role |
-|---|---|
-| `in` / `out` | bundles, optical pass-through |
-| `anode` / `cathode` | scalar nodes — PN-junction terminals |
-| `heat_p` / `heat_n` | scalar nodes — heater terminals |
-
-| Parameter | Default | Description |
-|---|---|---|
-| `L_um` / `L_m` / `length` | 1 mm | Section length. |
-| `n_g` | 4.2 | Group index. |
-| `dn_dv` | 1e-4 | Effective-index change per applied PN volt. |
-| `V_pi_L` | — | Convenience override (V·m) — sets `dn_dv` to give `Vπ·L`. |
-| `g_pn` | 1e-3 | PN-junction conductance (S) between anode and cathode. |
-| `r_heater` / `r` | 1000 | Heater resistance (Ω) between heat_p and heat_n. |
-| `p_pi` / `p_pi_th` | 10e-3 | Heater power for π phase shift (W). |
-| `alpha_dB_cm` | 0 | Propagation loss along the section. |
-
-**Physics.** φ_total = φ_prop + φ_eo_pn + φ_th_heater. The two electrical
-interfaces are independent — driving only the PN gives `fc_pn_ps`
-behaviour, driving only the heater gives `fc_thermal_ps`, driving both
-sums the phase shifts. Bundle-aware: ONE physical device handles all N
-optical channels with one shared PN junction AND one shared heater
-resistor.
 
 ### `fc_tw_ps` — travelling-wave phase shifter
 
@@ -1587,19 +1498,26 @@ heating — is expressible), and returns an `OpticalPerturbation`
 
 - **Bias-dependent reactance** (junction `C_j(V)`, electrode cap): return
   it from `PhotonicActiveModel::reactive_branches`; the integrator does
-  the BE / TR / BDF-2 companion handling and state advance. `PnDrive`
-  (`fc_pn_ps_cap`) is the canonical example, and the same caps now also
-  appear in `.ac` / `.noise`.
-- **Device-owned discretised state** (a thermal-RC node, carrier density):
+  the BE / TR / BDF-2 companion handling and state advance. Report the
+  stored **charge**, not `C·v` — for a junction they differ by a factor of
+  about 2 and the device comes out faster than it is. `PnDrive` is the
+  canonical example, and the same caps also appear in `.ac` / `.noise`.
+- **Device-owned discretised state** (a thermal node, carrier density):
   allocate it via `num_internal_nodes`, bind it in `bind_internal`, and
   override `stamp_tran` / `stamp_residual_tran` for the BE state equation.
-  `HeaterRc` (`fc_thermal_ps_rc`) is the canonical example.
+  `Heater` is the canonical example — its `T(t)` row appears only when
+  `tau_th > 0`, which is how one model covers both thermal tiers.
+  A conditional `num_internal_nodes` must repeat its condition in
+  `bind_internal`, or the model claims a row nobody allocated.
+- **A parameter-selected term**: give it a sensible default and make `0`
+  switch it off, then add a row to `PRESETS` rather than a new struct.
+  That table *is* the card list — the registry iterates it.
 - **Bolt a heater onto any drive**: wrap it in `WithHeater` (the
   `fc_pn_th_ps*` family) — no new struct needed.
 
-The L3 `FullPnDrive` (`fc_pn_ps_full`) exercises the full surface at once:
-implicit junction-voltage solve (series resistance), TPA + self-heating
-read from the optical intensity, and depletion + injection regimes.
+`PnDrive` exercises the full surface at once: an internal junction node
+behind a series resistance, TPA and self-heating read from the optical
+intensity, both bias regimes, and both stored charges.
 
 ### Registering PDK-specific aliases
 

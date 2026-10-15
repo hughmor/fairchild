@@ -6,10 +6,7 @@ use fairchild_parser::{ArityOracle, ArityQuery, BundleArity, Expr, ModelCard};
 
 use crate::device::{Device, NodeId, SimContext};
 use crate::models::{
-    expr_phase_shifter, pn_phase_shifter, pn_phase_shifter_cap, pn_phase_shifter_full,
-    pn_phase_shifter_inj, pn_thermal_phase_shifter, pn_thermal_phase_shifter_cap,
-    pn_thermal_phase_shifter_full, pn_thermal_phase_shifter_inj, thermal_phase_shifter,
-    thermal_rc_phase_shifter, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeAwgr,
+    expr_phase_shifter, preset, ActiveOpticalDevice, GummelPoonBjt, Mosfet1, NativeAwgr,
     NativeCirculator, NativeCwLaser, NativeDemux, NativeDirectionalCoupler, NativeDrivenLaser,
     NativeFacet, NativeGratingCoupler, NativeMux, NativeMzm, NativeOptical2x2, NativePhotodetector,
     NativeSplitter, NativeTwPhaseShifter, NativeWaveguide, ShockleyDiode, SpectrumTable,
@@ -518,7 +515,11 @@ impl DeviceRegistry {
     /// Register a device built by a constructor function (the active-photonic
     /// `ActiveOpticalDevice` builders, which are not `Default`). Same setup +
     /// instance-param flow as [`register_default`](Self::register_default).
-    fn register_ctor(&mut self, name: impl Into<String>, ctor: fn() -> ActiveOpticalDevice) {
+    fn register_ctor(
+        &mut self,
+        name: impl Into<String>,
+        ctor: impl Fn() -> ActiveOpticalDevice + Send + Sync + 'static,
+    ) {
         self.register(name, move |terminals, params: &ParamSet, ctx| {
             finish(ctor(), terminals, params, ctx)
         });
@@ -906,39 +907,40 @@ impl DeviceRegistry {
                 .find(|(k, _)| k.eq_ignore_ascii_case("level"))
                 .map(|(_, v)| v.round() as i64)
                 .unwrap_or(1);
-            let ctor: fn() -> ActiveOpticalDevice = match (kind.as_str(), level) {
-                ("fc_pn_ps", 1) => pn_phase_shifter,
-                ("fc_pn_ps", 2) => pn_phase_shifter_cap,
-                ("fc_pn_ps", 3) => pn_phase_shifter_inj,
-                ("fc_pn_ps", 4) => pn_phase_shifter_full,
-                ("fc_thermal_ps", 1) => thermal_phase_shifter,
-                ("fc_thermal_ps", 2) => thermal_rc_phase_shifter,
-                ("fc_pn_th_ps", 1) => pn_thermal_phase_shifter,
-                ("fc_pn_th_ps", 2) => pn_thermal_phase_shifter_cap,
-                ("fc_pn_th_ps", 3) => pn_thermal_phase_shifter_inj,
-                ("fc_pn_th_ps", 4) => pn_thermal_phase_shifter_full,
-                // Not a photonic family (or unknown LEVEL) — leave for others;
-                // warn on a recognised family with a bad LEVEL.
-                (k @ ("fc_pn_ps" | "fc_thermal_ps" | "fc_pn_th_ps"), bad) => {
+            // `LEVEL` names a tier, and a tier is a card-name suffix. Appending
+            // it and looking the result up in the preset table keeps one list
+            // of tiers instead of a second copy of the whole grid.
+            const PN_TIERS: [&str; 4] = ["", "_cap", "_inj", "_full"];
+            const TH_TIERS: [&str; 2] = ["", "_rc"];
+            let tiers: &[&str] = match kind.as_str() {
+                "fc_pn_ps" | "fc_pn_th_ps" => &PN_TIERS,
+                "fc_thermal_ps" => &TH_TIERS,
+                // Not a photonic phase-shifter family — leave it for the
+                // diode/MOSFET/BJT registrars.
+                _ => continue,
+            };
+            let suffix = usize::try_from(level)
+                .ok()
+                .and_then(|l| l.checked_sub(1))
+                .and_then(|i| tiers.get(i))
+                .copied()
+                .unwrap_or_else(|| {
                     warn_user!(
-                        "photonic model '{}' has unsupported {k} LEVEL={bad}; \
+                        "photonic model '{}' has unsupported {kind} LEVEL={level}; \
                          using LEVEL=1",
                         card.name
                     );
-                    match k {
-                        "fc_thermal_ps" => thermal_phase_shifter,
-                        "fc_pn_th_ps" => pn_thermal_phase_shifter,
-                        _ => pn_phase_shifter,
-                    }
-                }
-                _ => continue,
+                    ""
+                });
+            let Some(p) = preset(&format!("{kind}{suffix}")) else {
+                continue;
             };
-            // `LEVEL` selected the constructor above and is not a device
-            // parameter, so it does not go in the table — otherwise every
-            // instance would report it as unrecognised.
+            // `LEVEL` selected the preset above and is not a device parameter,
+            // so it does not go in the table — otherwise every instance would
+            // report it as unrecognised.
             self.declare_card_defaults(&card.name, without_level(&card.params));
             self.register(card.name.clone(), move |terminals, ps: &ParamSet, ctx| {
-                finish(ctor(), terminals, ps, ctx)
+                finish(p.build(), terminals, ps, ctx)
             });
         }
     }
@@ -1066,17 +1068,12 @@ impl DeviceRegistry {
         self.register_default::<NativeOptical2x2>("fc_optical_2x2");
         self.register_default::<NativeAwgr>("fc_awgr");
 
-        // Active phase shifters (built by constructors → ActiveOpticalDevice).
-        self.register_ctor("fc_thermal_ps", thermal_phase_shifter);
-        self.register_ctor("fc_thermal_ps_rc", thermal_rc_phase_shifter);
-        self.register_ctor("fc_pn_ps", pn_phase_shifter);
-        self.register_ctor("fc_pn_ps_cap", pn_phase_shifter_cap);
-        self.register_ctor("fc_pn_th_ps", pn_thermal_phase_shifter);
-        self.register_ctor("fc_pn_th_ps_cap", pn_thermal_phase_shifter_cap);
-        self.register_ctor("fc_pn_ps_inj", pn_phase_shifter_inj);
-        self.register_ctor("fc_pn_th_ps_inj", pn_thermal_phase_shifter_inj);
-        self.register_ctor("fc_pn_ps_full", pn_phase_shifter_full);
-        self.register_ctor("fc_pn_th_ps_full", pn_thermal_phase_shifter_full);
+        // Active phase shifters. The preset table is the list of cards — this
+        // registers it rather than restating it, so a card cannot exist
+        // without a row nor a row without a card.
+        for p in crate::models::PRESETS {
+            self.register_ctor(p.name, || p.build());
+        }
     }
 
     /// Build a `Mosfet1` for `model_name` with specific instance params (W, L).

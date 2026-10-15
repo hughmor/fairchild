@@ -29,8 +29,8 @@ fn pn_ps_full_reverse_bias_depletion() {
     let r = solve("fc_pn_ps_full", -2.0, 1.0, "");
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - 0.030_670_69).abs() < 1e-7, "out_re={re:.8}");
-    assert!((im - 0.006_334_093).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - 0.030_391_25).abs() < 1e-7, "out_re={re:.8}");
+    assert!((im - 0.006_276_383).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Mild forward bias 0.1 V: injection Δn (negative) + forward FCA loss.
@@ -39,8 +39,8 @@ fn pn_ps_full_forward_injection() {
     let r = solve("fc_pn_ps_full", 0.1, 1.0, "");
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - (-0.004_819_248)).abs() < 1e-8, "out_re={re:.9}");
-    assert!((im - (-0.005_559_183)).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - (-0.004_775_340)).abs() < 1e-8, "out_re={re:.9}");
+    assert!((im - (-0.005_508_533)).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Current-parametrized injection (dn_di/da_di) is the same physics as the
@@ -57,8 +57,8 @@ fn pn_ps_full_dn_di_reparametrization_equivalent() {
     );
     let re = r.node_voltage("out0_re_0").unwrap();
     let im = r.node_voltage("out0_im_0").unwrap();
-    assert!((re - (-0.004_819_248)).abs() < 1e-8, "out_re={re:.9}");
-    assert!((im - (-0.005_559_183)).abs() < 1e-8, "out_im={im:.9}");
+    assert!((re - (-0.004_775_340)).abs() < 1e-8, "out_re={re:.9}");
+    assert!((im - (-0.005_508_533)).abs() < 1e-8, "out_im={im:.9}");
 }
 
 /// Forward bias 0.7 V through R_series = 100 Ω: the junction voltage is solved
@@ -296,4 +296,145 @@ Vb a 0 DC 0
         "the two channels are attenuated by {f0:.6} and {f1:.6} — a single Δα \
          would make these identical, so this test would not be testing anything"
     );
+}
+
+/// Newton stops on the step alone here, with no residual test (#139), so on a
+/// node this stiff it stops while the junction is still far out of KCL. The
+/// symptom is sharp: at the default `reltol` the electrical answer below moves
+/// from -2.467 V to -2.881 V when the segment's **optical** loss changes, which
+/// no charge model can do. At a converged tolerance a 20x change in that loss
+/// leaves it identical to seven digits. Tightening isolates the charge, which
+/// is what these two test. Drop it back to the defaults when #139 lands.
+const TOL: &str = "reltol=1e-9 abstol=1e-16 vntol=1e-9";
+
+// ── the charge the integrator advances (#117) ──────────────────────────────
+
+/// ABSOLUTE anchor on the depletion half: a known current for a known time
+/// delivers a known charge, and `q(v) = ∫C dv` says which voltage that reaches.
+///
+/// The same construction as `a_junction_stores_the_integral_of_its_capacitance`
+/// in `native_pn_ps_cap.rs`, pointed at the model that kept integrating
+/// `C(v)·v` after `fc_pn_ps_cap` stopped. `i_sat` is tiny so the diode carries
+/// nothing against 1 mA, which leaves the depletion charge as the only thing
+/// the node can store.
+#[test]
+fn full_pn_stores_the_integral_of_its_capacitance() {
+    const C_J0: f64 = 750e-15;
+    const V_BI: f64 = 0.917;
+    const M_J: f64 = 0.5;
+    const V0: f64 = -3.0;
+    const I: f64 = 1e-3;
+    const T: f64 = 200e-12;
+
+    let q = |v: f64| C_J0 * V_BI / (1.0 - M_J) * (1.0 - (1.0 - v / V_BI).powf(1.0 - M_J));
+
+    let netlist = format!(
+        "* charge conservation on the full PN drive's depletion half
+.optical_port ch0
+.optical_port out0
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xpn ch0 out0 a 0 fc_pn_ps_full L_um=3000 c_j0={C_J0:.6e} m_j={M_J} v_bi={V_BI} i_sat=1e-18
+Ic 0 a DC {I:.6e}
+.ic v(a)={V0}
+.options uic=1 {TOL}
+"
+    );
+    let net = parse_spice(&netlist).expect("parse");
+    let opts = fairchild_core::SimOptions::from_netlist(&net);
+    let res = fairchild_core::tran_nr_with_registry_opts(
+        &net,
+        T / 400.0,
+        T,
+        &DeviceRegistry::new(),
+        &opts,
+    )
+    .expect("transient");
+    let v_end = res.voltage_at("a", T).expect("node a");
+
+    let want_q = q(V0) + I * T;
+    let got_q = q(v_end);
+    assert!(
+        (got_q - want_q).abs() < 0.02 * (I * T),
+        "after {:.0} ps at {:.1} mA the junction holds {:.4} pC, expected {:.4} pC \
+         (V ended at {v_end:.4} V). Integrating C·v instead of ∫C dv lands well past this.",
+        T * 1e12,
+        I * 1e3,
+        got_q * 1e12,
+        want_q * 1e12
+    );
+}
+
+/// The charge is a function of the **junction** voltage, which a series
+/// resistance separates from the terminal. `r_series > 0` gives the junction
+/// its own MNA row, so the same anchor applies there with the resistive drop
+/// taken off the terminal first.
+///
+/// Both resistances must put the junction in the same place, because the same
+/// current delivered the same charge to it. Only the terminal moves, by
+/// `R_s·I`. Reporting the charge against the terminal instead would charge the
+/// terminal to the closed-form voltage and leave the junction `R_s·I` short, so
+/// the two runs would land on the same terminal voltage rather than on the same
+/// junction voltage.
+///
+/// The junction starts at zero charge: `uic` leaves an internal row that no
+/// `.ic` can name at zero, which is `q = 0` here, so the charge after `T` is
+/// `I·T` outright.
+#[test]
+fn series_resistance_charges_the_junction_not_the_terminal() {
+    const C_J0: f64 = 750e-15;
+    const V_BI: f64 = 0.917;
+    const M_J: f64 = 0.5;
+    const I: f64 = 1e-3;
+    const T: f64 = 200e-12;
+
+    let q = |v: f64| C_J0 * V_BI / (1.0 - M_J) * (1.0 - (1.0 - v / V_BI).powf(1.0 - M_J));
+
+    // The heater composite is in here because `WithHeater` hands out the
+    // internal rows itself, offsetting the heater's by the drive's count. A
+    // conditional count on the drive is exactly what that offset can get wrong,
+    // and the bare device would never show it.
+    let terminal_at = |card: &str, extra_nets: &str, r_series: f64| {
+        let netlist = format!(
+            "* the junction behind a series resistance
+.optical_port ch0
+.optical_port out0
+Xl0 ch0 fc_cw_laser power_mW=1.0 wavelength_nm=1550
+Xpn ch0 out0 a 0 {extra_nets}{card} L_um=3000 c_j0={C_J0:.6e} m_j={M_J} v_bi={V_BI} \
+i_sat=1e-18 da_dv_inj=0 r_series={r_series}
+Ic 0 a DC {I:.6e}
+Vh hp 0 DC 2.0
+.ic v(a)=0
+.options uic=1 {TOL}
+"
+        );
+        let net = parse_spice(&netlist).expect("parse");
+        let opts = fairchild_core::SimOptions::from_netlist(&net);
+        fairchild_core::tran_nr_with_registry_opts(
+            &net,
+            T / 400.0,
+            T,
+            &DeviceRegistry::new(),
+            &opts,
+        )
+        .expect("transient")
+        .voltage_at("a", T)
+        .expect("node a")
+    };
+
+    for (card, extra_nets) in [("fc_pn_ps_full", ""), ("fc_pn_th_ps_full", "hp 0 ")] {
+        for r_series in [0.0, 100.0, 500.0] {
+            let v_term = terminal_at(card, extra_nets, r_series);
+            let v_junc = v_term - r_series * I;
+            let got_q = q(v_junc);
+            assert!(
+                (got_q - I * T).abs() < 0.02 * (I * T),
+                "{card} with r_series = {r_series} Ω ended its terminal at {v_term:.6} V, \
+                 putting the junction at {v_junc:.6} V and holding {:.4} pC. {:.4} pC was \
+                 delivered. A charge reported against the terminal lands the *terminal* here \
+                 instead.",
+                got_q * 1e12,
+                I * T * 1e12
+            );
+        }
+    }
 }
