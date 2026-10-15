@@ -246,10 +246,10 @@ mod tests {
     /// device it recommends. A passive waveguide has no electrode at all.
     #[test]
     fn only_a_lumped_electrode_reports_a_limit() {
-        use crate::models::{pn_phase_shifter_cap, NativeTwPhaseShifter, NativeWaveguide};
+        use crate::models::{preset, NativeTwPhaseShifter, NativeWaveguide};
 
         let arm = |l_um: f64| {
-            let mut d = pn_phase_shifter_cap();
+            let mut d = preset("fc_pn_ps_cap").unwrap().build();
             d.set_real_param("l_um", l_um);
             d.lumped_valid_to_hz()
         };
@@ -285,9 +285,9 @@ mod tests {
     /// message needs to be useful.
     #[test]
     fn the_limits_carry_the_element_name() {
-        use crate::models::pn_phase_shifter_cap;
+        use crate::models::preset;
 
-        let mut d = pn_phase_shifter_cap();
+        let mut d = preset("fc_pn_ps_cap").unwrap().build();
         d.set_real_param("l_um", 3000.0);
         let devices: Vec<Box<dyn Device>> = vec![Box::new(d)];
         let names = vec!["xarm1".to_string()];

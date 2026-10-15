@@ -371,423 +371,225 @@ impl Device for ActiveOpticalDevice {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Device constructors (defaults live here, where the dB→Neper helper lives)
+// Presets: a card name is a row in a table, not a type
 // ────────────────────────────────────────────────────────────────────────
 
-/// Build the `fc_pn_ps` device — a linear free-carrier PN-junction phase
-/// shifter. SOI rib waveguide PN modulator section (R = 8 µm bent) defaults;
-/// `dn_dv` follows from `V_pi_L = 0.015 V·m` (≈ 15 V·π at the 1-mm default
-/// length). `pin_at_ref = false`: physical absolute propagation phase, so ring
-/// resonances depend on L.
-pub fn pn_phase_shifter() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
-    ActiveOpticalDevice::new(seg, Box::new(PnDrive::new()))
+/// An optical segment's shape: `(length_m, n_eff, n_g, alpha_dB_cm)`.
+type SegShape = (f64, f64, f64, f64);
+
+/// The lateral-PN section every PN preset sits on, and the source of every
+/// electrical default in [`PnDrive::new`].
+///
+/// One extraction, not several: a Femwell mode solve plus a 1-D abrupt-junction
+/// depletion model at 5e17/5e17, 100 nm junction offset toward N, 300 K,
+/// 1550 nm. `scripts/waveguide_simulations/pn_modulator/` regenerates it.
+///
+/// The tiers used to carry three different propagation losses (20, 2.59 and
+/// 1 dB/cm) and two different junctions (20 fF at V_bi = 0.7, and 137.5 fF at
+/// 0.917) for the same physics, so a device changed shape when you changed its
+/// tier. There is one of each now.
+const SOI_PN: SegShape = (1e-3, 2.7654, 4.02, 2.59);
+
+/// A heater on its own has no waveguide of its own to attenuate: it is a pure
+/// phase rotation, so its segment is zero-length and lossless.
+const ZERO_LEN: SegShape = (0.0, 2.445, 4.19, 0.0);
+
+/// Which drive a preset builds.
+///
+/// This is not the tier. A tier is a set of parameters, and these three differ
+/// in how many terminals the device has, which a parameter cannot express.
+#[derive(Clone, Copy)]
+enum Drive {
+    /// `heat_p`, `heat_n`.
+    Heater,
+    /// `anode`, `cathode`.
+    Pn,
+    /// `anode`, `cathode`, `heat_p`, `heat_n`.
+    PnWithHeater,
 }
 
-/// Build the `fc_pn_ps_cap` device — the PN phase shifter plus a bias-dependent
-/// depletion junction capacitance (and optional `da/dV` reverse-bias loss).
-/// Same SOI-rib optics as `fc_pn_ps`.
-pub fn pn_phase_shifter_cap() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
-    ActiveOpticalDevice::new(seg, Box::new(PnDrive::with_depletion_cap()))
+/// Linear tier: an ohmic junction, `Δn ∝ V`, and nothing stored.
+const T_LINEAR: &[(&str, f64)] = &[
+    ("g_pn", 1e-3),
+    ("i_sat", 0.0),
+    ("c_j0", 0.0),
+    ("tau_carrier", 0.0),
+    ("da_dv_rev", 0.0),
+    ("dn_dv_inj", 0.0),
+    ("da_dv_inj", 0.0),
+    ("beta_tpa", 0.0),
+];
+
+/// Depletion tier: adds `C_j(V)` and the reverse-bias free-carrier loss.
+const T_CAP: &[(&str, f64)] = &[
+    ("g_pn", 1e-3),
+    ("i_sat", 0.0),
+    ("tau_carrier", 0.0),
+    ("dn_dv_inj", 0.0),
+    ("da_dv_inj", 0.0),
+    ("beta_tpa", 0.0),
+];
+
+/// Injection tier: the diode and its diffusion charge, forward terms only.
+const T_INJ: &[(&str, f64)] = &[
+    ("c_j0", 0.0),
+    ("dn_dv_rev", 0.0),
+    ("da_dv_rev", 0.0),
+    ("beta_tpa", 0.0),
+];
+
+/// Full tier: nothing switched off.
+const T_FULL: &[(&str, f64)] = &[];
+
+/// A card name, the drive it builds, and the terms its tier does not model.
+pub struct Preset {
+    /// The card name a deck writes.
+    pub name: &'static str,
+    seg: SegShape,
+    drive: Drive,
+    /// Applied over the drive's own defaults, in order. Every entry is a term
+    /// this tier leaves out, which is why nearly all of them are zero.
+    params: &'static [(&'static str, f64)],
 }
 
-/// Build the `fc_pn_ps_inj` device — a forward-bias carrier-injection PN phase
-/// shifter (Shockley diode + diffusion cap + exponential injection Δn/Δα).
-pub fn pn_phase_shifter_inj() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
-    ActiveOpticalDevice::new(seg, Box::new(Injection::new()))
+/// Every phase-shifter card in the tree.
+///
+/// A card name is a row here, and a row is an optical segment, a drive, and the
+/// terms that tier leaves out. Nothing else. There is no per-tier model and no
+/// per-tier calibration: `0` switches an effect off, so `fc_pn_ps` is the same
+/// drive as `fc_pn_ps_full` with its diode, its charge and its optical
+/// back-action zeroed.
+///
+/// `LEVEL` on a `.model` card picks a row by name, and `device_registry`
+/// registers this table rather than keeping a list of its own — so a card
+/// cannot exist without a row, nor a row without a card.
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "fc_pn_ps",
+        seg: SOI_PN,
+        drive: Drive::Pn,
+        params: T_LINEAR,
+    },
+    Preset {
+        name: "fc_pn_ps_cap",
+        seg: SOI_PN,
+        drive: Drive::Pn,
+        params: T_CAP,
+    },
+    Preset {
+        name: "fc_pn_ps_inj",
+        seg: SOI_PN,
+        drive: Drive::Pn,
+        params: T_INJ,
+    },
+    Preset {
+        name: "fc_pn_ps_full",
+        seg: SOI_PN,
+        drive: Drive::Pn,
+        params: T_FULL,
+    },
+    Preset {
+        name: "fc_pn_th_ps",
+        seg: SOI_PN,
+        drive: Drive::PnWithHeater,
+        params: T_LINEAR,
+    },
+    Preset {
+        name: "fc_pn_th_ps_cap",
+        seg: SOI_PN,
+        drive: Drive::PnWithHeater,
+        params: T_CAP,
+    },
+    Preset {
+        name: "fc_pn_th_ps_inj",
+        seg: SOI_PN,
+        drive: Drive::PnWithHeater,
+        params: T_INJ,
+    },
+    Preset {
+        name: "fc_pn_th_ps_full",
+        seg: SOI_PN,
+        drive: Drive::PnWithHeater,
+        params: T_FULL,
+    },
+    // A heater on its own has no junction to switch off, so these two carry no
+    // PN terms rather than nine zeroes.
+    Preset {
+        name: "fc_thermal_ps",
+        seg: ZERO_LEN,
+        drive: Drive::Heater,
+        params: &[],
+    },
+    Preset {
+        name: "fc_thermal_ps_rc",
+        seg: ZERO_LEN,
+        drive: Drive::Heater,
+        params: &[("tau_th", 10e-6)],
+    },
+];
+
+impl Preset {
+    /// The terms this tier switches off, as `(name, value)`.
+    ///
+    /// Public so a test can drive `fc_pn_ps_full` with a tier's own parameters
+    /// and check it reproduces that tier, without restating the table and
+    /// becoming a second copy of it.
+    pub fn params(&self) -> &'static [(&'static str, f64)] {
+        self.params
+    }
+
+    /// Build the device this row describes.
+    pub fn build(&self) -> ActiveOpticalDevice {
+        let (length_m, n_eff, n_g, alpha_db_cm) = self.seg;
+        let seg = OpticalSegment::new(length_m, n_eff, n_g, dB_per_cm_to_neper_per_m(alpha_db_cm));
+        let mut model: Box<dyn PhotonicActiveModel> = match self.drive {
+            Drive::Heater => Box::new(Heater::new()),
+            Drive::Pn => Box::new(PnDrive::new()),
+            Drive::PnWithHeater => Box::new(WithHeater::new(Box::new(PnDrive::new()))),
+        };
+        for (name, value) in self.params {
+            model.set_param(name, *value);
+        }
+        ActiveOpticalDevice::new(seg, model)
+    }
 }
 
-/// Build the `fc_pn_th_ps_inj` device — the injection PN phase shifter with a
-/// metal heater bolted on.
-pub fn pn_thermal_phase_shifter_inj() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
-    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(Injection::new()))))
-}
-
-/// Build the `fc_thermal_ps` device — a metal-heater thermo-optic phase shifter
-/// (no PN junction). A pure phase rotation `φ = π·P/P_π`, modelled on a
-/// zero-length segment (no propagation phase, no loss).
-pub fn thermal_phase_shifter() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(0.0, 2.445, 4.19, 0.0);
-    ActiveOpticalDevice::new(seg, Box::new(Heater::new()))
-}
-
-/// Build the `fc_pn_ps_full` device — the L3 PN modulator (depletion +
-/// injection + TPA + static self-heating + series resistance).
-pub fn pn_phase_shifter_full() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
-    ActiveOpticalDevice::new(seg, Box::new(FullPnDrive::new()))
-}
-
-/// Build the `fc_pn_th_ps_full` device — the L3 PN modulator with a metal
-/// heater bolted on.
-pub fn pn_thermal_phase_shifter_full() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(1.0));
-    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(FullPnDrive::new()))))
-}
-
-/// Build the `fc_thermal_ps_rc` device — a metal-heater phase shifter with a
-/// first-order thermal RC (filtered heater power). Zero-length segment.
-pub fn thermal_rc_phase_shifter() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(0.0, 2.445, 4.19, 0.0);
-    ActiveOpticalDevice::new(seg, Box::new(HeaterRc::new()))
-}
-
-/// Build the `fc_pn_th_ps` device — a PN phase shifter with a metal heater
-/// bolted on (Δn_eff from V_pn and φ_th from Joule power sum). Terminal order:
-/// optical bundle, then anode, cathode, heat_p, heat_n.
-pub fn pn_thermal_phase_shifter() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, dB_per_cm_to_neper_per_m(20.0));
-    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(PnDrive::new()))))
-}
-
-/// Build the `fc_pn_th_ps_cap` device — depletion-mode PN (C_j(V) + reverse-bias
-/// FCA) plus a metal heater. Calibrated defaults from a lateral-PN modulator
-/// extraction (5e17/5e17, 300 K): distinct dn_dv, loss, and C_j from the plain
-/// `fc_pn_ps_cap`.
-pub fn pn_thermal_phase_shifter_cap() -> ActiveOpticalDevice {
-    let seg = OpticalSegment::new(1e-3, 2.7654, 4.02, 29.78); // 2.59 dB/cm in Np/m
-    let mut pn = PnDrive::with_depletion_cap();
-    pn.set_param("dn_dv", 5.024e-5);
-    pn.set_param("c_j0", 1.375e-13);
-    pn.set_param("v_bi", 0.917);
-    pn.set_param("da_dv", 7.83);
-    // g_pn (1e-3) and m_j (0.5) already match the PnDrive defaults.
-    ActiveOpticalDevice::new(seg, Box::new(WithHeater::new(Box::new(pn))))
+/// The preset a card name selects, if any.
+pub fn preset(name: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.name == name)
 }
 
 // ────────────────────────────────────────────────────────────────────────
 // Drive models
 // ────────────────────────────────────────────────────────────────────────
 
-/// Free-carrier PN-junction drive (the `fc_pn_ps` / `fc_pn_ps_cap` physics):
-/// a single shared junction conductance `g_pn` between anode and cathode, a
-/// linear electro-optic index change `Δn_eff = (dn/dV)·V_pn`, an optional
-/// bias-dependent depletion capacitance `C_j(V_pn)` (active only when
-/// `c_j0 > 0`), and an optional linear reverse-bias free-carrier loss
-/// `Δα = (dα/dV)·max(0, −V_pn)`.
+/// The PN-junction drive, and the only one.
 ///
-/// `c_j0 = 0` / `da_dv = 0` reproduce `fc_pn_ps` exactly (no cap, no loss
-/// change); a non-zero `c_j0` makes it `fc_pn_ps_cap`. This is the LEVEL
-/// collapse in miniature — one drive model, parameters select the electrical
-/// sophistication. Forward-injection and full (TPA/self-heat) regimes are
-/// separate models, not flags here (they are alternative / superset physics).
+/// Every electrical and electro-optic effect a PN phase shifter can have is a
+/// parameter here, and **zero switches it off**:
+///
+/// | Parameter | Off at 0 |
+/// |---|---|
+/// | `g_pn` | ohmic junction conductance |
+/// | `i_sat` | Shockley diode |
+/// | `c_j0` | depletion charge `∫C_j dv` |
+/// | `tau_carrier` | diffusion charge `τ·I` |
+/// | `dn_dv_rev`, `da_dv_rev` | reverse index and free-carrier loss |
+/// | `dn_dv_inj`, `da_dv_inj` | forward injection index and loss |
+/// | `dn_di`, `da_di` | the same two, parametrised by current |
+/// | `r_series` | access resistance, and the junction's own node |
+/// | `beta_tpa` | two-photon absorption |
+/// | `r_th` | static self-heating |
+///
+/// So the tiers are not different physics. `fc_pn_ps` is this drive with the
+/// diode, the charge and the back-action zeroed; `fc_pn_ps_inj` is it with the
+/// depletion and reverse terms zeroed. [`PRESETS`] holds which is which, and
+/// the three separate drive models that used to encode it are gone.
+///
+/// `g_pn` and the diode are in parallel, which is what lets one drive cover
+/// both: an ohmic tier sets `i_sat = 0`, and a diode tier leaves `g_pn` at 0.
+/// A real device may want both, and now can.
 pub struct PnDrive {
-    dn_dv: f64,
-    g_pn: f64,
-    /// Design wavelength for the `V_pi_L → dn_dv` conversion. Tracks the
-    /// segment's `wl_ref_m` (both default to the band centre and both update on
-    /// a `wl_ref` param), kept here so the conversion needs no segment handle.
-    wl_ref_m: f64,
-    // Optional depletion junction cap (inactive when c_j0 == 0).
-    c_j0: f64,
-    v_bi: f64,
-    m_j: f64,
-    // Optional linear reverse-bias FCA loss (Np/m per volt of reverse bias).
-    da_dv: f64,
-    // Per-eval cache: C_j(V_pn) at the current iterate.
-    c_j_cached: f64,
-    /// The junction's stored charge at the cached bias, `∫C dv`.
-    ///
-    /// This is the state the integrator advances, and it is *not* `C·V`. See
-    /// `ReactiveBranchSpec::charge`. Carrying it also removes the need for
-    /// `dC/dV`: the Jacobian of a charge branch is `α·dq/dv = α·C`.
-    q_j_cached: f64,
-    anode: NodeId,
-    cathode: NodeId,
-}
-
-impl PnDrive {
-    /// The `fc_pn_ps` drive: linear EO only (no junction cap, no loss change).
-    pub fn new() -> Self {
-        PnDrive {
-            dn_dv: 1.55e-6 / (2.0 * 0.015),
-            g_pn: 1e-3,
-            wl_ref_m: 1.55e-6,
-            c_j0: 0.0,
-            v_bi: 0.7,
-            m_j: 0.5,
-            da_dv: 0.0,
-            c_j_cached: 0.0,
-            q_j_cached: 0.0,
-            anode: None,
-            cathode: None,
-        }
-    }
-
-    /// The `fc_pn_ps_cap` drive: adds the depletion junction capacitance.
-    pub fn with_depletion_cap() -> Self {
-        PnDrive {
-            c_j0: 20e-15,
-            c_j_cached: 20e-15,
-            q_j_cached: 0.0,
-            ..Self::new()
-        }
-    }
-}
-
-impl Default for PnDrive {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PhotonicActiveModel for PnDrive {
-    fn num_electrical_terminals(&self) -> usize {
-        2 // anode, cathode
-    }
-
-    fn setup_model(&mut self, ctx: &SimContext) {
-        self.wl_ref_m = ctx.lambda_center_m;
-    }
-
-    fn set_terminals(&mut self, electrical: &[NodeId]) {
-        self.anode = electrical[0];
-        self.cathode = electrical[1];
-    }
-
-    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], _ctx: &SimContext) -> OpticalPerturbation {
-        let v_a = self.anode.map_or(0.0, |i| x[i]);
-        let v_c = self.cathode.map_or(0.0, |i| x[i]);
-        let v_pn = v_a - v_c;
-
-        // Depletion C_j(V_pn) and its stored charge, with a linear tangent past
-        // V_bi/2 to stay finite and keep the NR Jacobian smooth (only
-        // meaningful when c_j0 > 0).
-        if self.c_j0 > 0.0 {
-            let (c, q) = junction_cap_and_charge(v_pn, self.c_j0, self.v_bi, self.m_j);
-            self.c_j_cached = c;
-            self.q_j_cached = q;
-        }
-
-        // Reverse-bias FCA loss: Δα = (dα/dV)·max(0, −V_pn).
-        let v_rev = (-v_pn).max(0.0);
-        OpticalPerturbation {
-            dn_eff: (self.dn_dv * v_pn).into(),
-            dphi: 0.0,
-            dalpha_neper_m: (self.da_dv * v_rev).into(),
-        }
-    }
-
-    fn stamp(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.anode, self.cathode, self.g_pn);
-    }
-
-    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
-        if self.c_j0 <= 0.0 {
-            return Vec::new();
-        }
-        vec![ReactiveBranchSpec {
-            kind: ReactiveKind::Capacitor,
-            pos: self.anode,
-            neg: self.cathode,
-            value: self.c_j_cached,
-            dvalue_dstate: 0.0,
-            charge: Some(self.q_j_cached),
-        }]
-    }
-
-    fn set_param(&mut self, name: &str, value: f64) -> bool {
-        match name {
-            "dn_dv" => {
-                self.dn_dv = value;
-                true
-            }
-            "g_pn" => {
-                self.g_pn = value;
-                true
-            }
-            "v_pi_l" => {
-                // dn_dv such that 2π·L·dn_dv·Vπ/λ = π at V = Vπ ⇒
-                // dn_dv = λ_ref / (2·V_pi_L).
-                if value > 0.0 {
-                    self.dn_dv = self.wl_ref_m / (2.0 * value);
-                }
-                true
-            }
-            "c_j0" => {
-                self.c_j0 = value.max(0.0);
-                true
-            }
-            "v_bi" => {
-                self.v_bi = value.max(1e-3);
-                true
-            }
-            "m_j" => {
-                self.m_j = value.clamp(0.0, 0.99);
-                true
-            }
-            "da_dv" => {
-                self.da_dv = value;
-                true
-            }
-            // wl_ref is also consumed by the segment; cache it for v_pi_l.
-            "wl_ref_m" | "lambda_ref_m" => {
-                self.wl_ref_m = value;
-                false // let the segment record it as the authoritative copy
-            }
-            "wl_ref_nm" | "lambda_ref_nm" => {
-                self.wl_ref_m = value * 1e-9;
-                false
-            }
-            _ => false,
-        }
-    }
-}
-
-/// Forward-bias carrier-injection PN drive (the `fc_pn_ps_inj` physics).
-/// Forward bias only (V_pn ∈ [0, ~0.8 V]); does not model depletion. Differs
-/// from [`PnDrive`]:
-///   - nonlinear Shockley diode `I = I_s·(exp(V/(n·V_T)) − 1)`, Norton-stamped
-///     at the operating point (`g_d` Jacobian + `i_eq` residual);
-///   - diffusion capacitance `C_d = τ_carrier·g_d` (replaces depletion C_j);
-///   - exponential injection `Δn_eff = −K_inj·(e−1)` and `Δα = K_α·(e−1)`,
-///     where `e = exp(V/(n·V_T))` (Soref–Bennett carrier-density form).
-pub struct Injection {
-    i_sat: f64,
-    n_diode: f64,
-    tau_carrier: f64,
-    dn_dv_inj: f64,
-    da_dv_inj: f64,
-    anode: NodeId,
-    cathode: NodeId,
-    g_d_cached: f64,
-    i_eq_cached: f64,
-    c_d_cached: f64,
-    /// Stored diffusion charge at the cached bias. `∫τ·g_d dv = τ·I`, which is
-    /// the textbook minority-carrier charge and is what the integrator
-    /// advances; see `ReactiveBranchSpec::charge`.
-    q_d_cached: f64,
-}
-
-impl Injection {
-    pub fn new() -> Self {
-        Injection {
-            i_sat: 1e-12,
-            n_diode: 1.05,
-            tau_carrier: 10e-9,
-            dn_dv_inj: 1.311e-4,
-            da_dv_inj: 150.0,
-            anode: None,
-            cathode: None,
-            g_d_cached: 1e-9,
-            i_eq_cached: 0.0,
-            c_d_cached: 0.0,
-            q_d_cached: 0.0,
-        }
-    }
-}
-
-impl Default for Injection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PhotonicActiveModel for Injection {
-    fn num_electrical_terminals(&self) -> usize {
-        2 // anode, cathode
-    }
-
-    fn set_terminals(&mut self, electrical: &[NodeId]) {
-        self.anode = electrical[0];
-        self.cathode = electrical[1];
-    }
-
-    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], ctx: &SimContext) -> OpticalPerturbation {
-        let v_a = self.anode.map_or(0.0, |i| x[i]);
-        let v_c = self.cathode.map_or(0.0, |i| x[i]);
-        let v_pn = v_a - v_c;
-        let vt = ctx.vt() * self.n_diode;
-        let arg = (v_pn / vt).clamp(-40.0, 40.0);
-        let e = arg.exp();
-        let i_diode = self.i_sat * (e - 1.0);
-        self.g_d_cached = self.i_sat * e / vt;
-        self.i_eq_cached = i_diode - self.g_d_cached * v_pn;
-        self.c_d_cached = self.tau_carrier * self.g_d_cached;
-        // ∫₀^v τ·g_d dv' = τ·i_sat·(e − 1) = τ·I, the minority-carrier charge.
-        self.q_d_cached = self.tau_carrier * i_diode;
-        // Normalised injected carrier density (≥ 0; reverse bias contributes 0).
-        let inj = (e - 1.0).max(0.0);
-        OpticalPerturbation {
-            dn_eff: (-self.dn_dv_inj * inj).into(), // more carriers → lower index
-            dphi: 0.0,
-            dalpha_neper_m: (self.da_dv_inj * inj).into(),
-        }
-    }
-
-    fn stamp(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.anode, self.cathode, self.g_d_cached);
-    }
-
-    fn stamp_residual(&self, b: &mut [f64]) {
-        if let Some(a) = self.anode {
-            b[a] -= self.i_eq_cached;
-        }
-        if let Some(c) = self.cathode {
-            b[c] += self.i_eq_cached;
-        }
-    }
-
-    fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
-        vec![ReactiveBranchSpec {
-            kind: ReactiveKind::Capacitor,
-            pos: self.anode,
-            neg: self.cathode,
-            // The diffusion charge is `τ·I`, not `C_d·V`. The two differ by the
-            // factor `V/V_T` — about 20 at normal forward bias, and growing
-            // with bias — so integrating `C_d·V` gave a device that relaxed far
-            // slower than its own `tau_carrier` and never reached the operating
-            // point the same deck reports under `.op`. This drive has no series
-            // resistance, so its branch voltage is its junction voltage and the
-            // charge is a function of the branch's own state.
-            value: self.c_d_cached,
-            dvalue_dstate: 0.0,
-            charge: Some(self.q_d_cached),
-        }]
-    }
-
-    fn set_param(&mut self, name: &str, value: f64) -> bool {
-        match name {
-            "i_sat" | "is" => {
-                self.i_sat = value;
-                true
-            }
-            "n_diode" | "n" => {
-                self.n_diode = value;
-                true
-            }
-            "tau_carrier" | "tau" => {
-                self.tau_carrier = value;
-                true
-            }
-            "dn_dv_inj" | "dn_dv" => {
-                self.dn_dv_inj = value;
-                true
-            }
-            "da_dv_inj" | "da_dv" => {
-                self.da_dv_inj = value;
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-/// "Full" L3 PN drive (the `fc_pn_ps_full` physics): both bias regimes
-/// (reverse depletion + forward injection), depletion + diffusion capacitance,
-/// reverse/forward free-carrier absorption, two-photon absorption (TPA), static
-/// thermal self-heating from absorbed optical power, and an optional ohmic
-/// series resistance (the junction voltage is solved implicitly each iterate).
-///
-/// This is the model that exercises the optical→thermal/carrier **back-action**:
-/// `eval` reads the segment's optical `intensity_w` to compute TPA loss and
-/// self-heating Δn — the in-tree proof that the abstraction admits back-action
-/// (no new stub device needed). It caches `length_m`/`alpha_neper_m` (the
-/// segment geometry its self-heating needs) the way [`PnDrive`] caches `wl_ref`.
-pub struct FullPnDrive {
     // Reverse / depletion.
     dn_dv_rev: f64,
     da_dv_rev: f64,
@@ -808,6 +610,13 @@ pub struct FullPnDrive {
     // (off); use EITHER this or dn_dv_inj/da_dv_inj, not both.
     dn_di: f64,
     da_di: f64,
+    /// Ohmic conductance across the junction, in parallel with the diode. This
+    /// is the whole electrical model of the linear tier and 0 everywhere else.
+    g_pn: f64,
+    /// Design wavelength for the `V_pi_L → dn_dv_rev` conversion. Set from the
+    /// band centre in `setup_model`, and updated by a `wl_ref` parameter, which
+    /// the segment also consumes.
+    wl_ref_m: f64,
     // Series resistance.
     r_series: f64,
     // TPA + thermal.
@@ -822,9 +631,9 @@ pub struct FullPnDrive {
     cathode: NodeId,
     /// The junction node, when `r_series > 0` puts one between the anode and
     /// the diode. `None` when the series resistance is zero and the anode *is*
-    /// the junction. See [`FullPnDrive::num_internal_nodes`].
+    /// the junction. See [`PnDrive::num_internal_nodes`].
     junc: NodeId,
-    g_pn_cached: f64,
+    g_cached: f64,
     i_eq_cached: f64,
     c_eff_cached: f64,
     /// Depletion + diffusion charge at the cached junction voltage; the state
@@ -832,9 +641,11 @@ pub struct FullPnDrive {
     q_eff_cached: f64,
 }
 
-impl FullPnDrive {
+impl PnDrive {
+    /// Every term on, at the one extracted calibration. A preset switches terms
+    /// off; nothing re-calibrates them.
     pub fn new() -> Self {
-        FullPnDrive {
+        PnDrive {
             dn_dv_rev: 5.024e-5,
             da_dv_rev: 7.83,
             c_j0: 1.375e-13,
@@ -847,6 +658,8 @@ impl FullPnDrive {
             da_dv_inj: 150.0,
             dn_di: 0.0,
             da_di: 0.0,
+            g_pn: 0.0,
+            wl_ref_m: 1.55e-6,
             r_series: 0.0,
             beta_tpa_m_per_w: 7.9e-12,
             a_eff_m2: 1.257e-13,
@@ -857,7 +670,7 @@ impl FullPnDrive {
             anode: None,
             cathode: None,
             junc: None,
-            g_pn_cached: 1e-9,
+            g_cached: 1e-9,
             i_eq_cached: 0.0,
             c_eff_cached: 1.375e-13,
             q_eff_cached: 0.0,
@@ -869,15 +682,23 @@ impl FullPnDrive {
     fn junc_node(&self) -> NodeId {
         self.junc.or(self.anode)
     }
+
+    /// Whether the optical field feeds back on the drive. TPA and self-heating
+    /// are the only two that read it, and both are off by default, so the
+    /// common case skips summing the bus on every Newton iteration and every
+    /// finite-difference probe beside it.
+    fn has_back_action(&self) -> bool {
+        self.beta_tpa_m_per_w != 0.0 || self.r_th_k_per_w != 0.0
+    }
 }
 
-impl Default for FullPnDrive {
+impl Default for PnDrive {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PhotonicActiveModel for FullPnDrive {
+impl PhotonicActiveModel for PnDrive {
     fn num_electrical_terminals(&self) -> usize {
         2 // anode, cathode
     }
@@ -895,6 +716,10 @@ impl PhotonicActiveModel for FullPnDrive {
     /// the factory has applied the instance parameters.
     fn num_internal_nodes(&self) -> usize {
         usize::from(self.r_series > 0.0)
+    }
+
+    fn setup_model(&mut self, ctx: &SimContext) {
+        self.wl_ref_m = ctx.lambda_center_m;
     }
 
     fn set_terminals(&mut self, electrical: &[NodeId]) {
@@ -926,27 +751,22 @@ impl PhotonicActiveModel for FullPnDrive {
         let e = arg.exp();
         let i_diode = self.i_sat * (e - 1.0);
         let g_d = self.i_sat * e / vt;
-        // Norton at the junction itself; the series resistance is its own
-        // branch now, not a correction folded into this conductance.
-        self.g_pn_cached = g_d.max(1e-15);
-        self.i_eq_cached = i_diode - self.g_pn_cached * v_junc;
+        // Diode and ohmic conductance in parallel, Nortoned at the junction
+        // itself. `i_sat = 0` leaves `g_pn` alone, which is the linear tier;
+        // `g_pn = 0` leaves the diode, which is every other tier. Only the
+        // diode is nonlinear, so only it contributes an equivalent current.
+        self.g_cached = (g_d + self.g_pn).max(1e-15);
+        self.i_eq_cached = i_diode - g_d * v_junc;
 
         // Depletion C_j(V_j) and its stored charge, linear past the V_bi/2
-        // knee. Same helper as `PnDrive`, so there is one junction law rather
-        // than two copies to disagree.
+        // knee. `c_j0 = 0` gives (0, 0), which is the tier with no depletion.
         let (c_j_v, q_j) = junction_cap_and_charge(v_junc, self.c_j0, self.v_bi, self.m_j);
         self.c_eff_cached = c_j_v + self.tau_carrier * g_d;
         // ∫(C_j + τ·g_d) dv = q_j + τ·I, the depletion charge plus the
-        // minority-carrier charge. Both are functions of V_j, which is now the
+        // minority-carrier charge. Both are functions of V_j, which is the
         // branch's own voltage either way.
         self.q_eff_cached = q_j + self.tau_carrier * i_diode;
 
-        // Optical back-action, over the whole bus and both directions
-        // (`channel_intensities` counts both). A shared effect must be driven by
-        // the shared total: reading channel 0 alone under-counted by 1/N with
-        // every channel lit, and gave *exactly zero* whenever channel 0 was the
-        // dark one.
-        let total: f64 = intensity_w.iter().copied().map(|i| i.max(0.0)).sum();
         let inj = (e - 1.0).max(0.0);
         let i_fwd = i_diode.max(0.0);
         let v_rev = (-v_junc).max(0.0);
@@ -954,6 +774,23 @@ impl PhotonicActiveModel for FullPnDrive {
         // absorption. Forward FCA has two equivalent parametrizations (see the
         // field docs).
         let dalpha_shared = self.da_dv_rev * v_rev + self.da_dv_inj * inj + self.da_di * i_fwd;
+        let dn_bias = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd;
+
+        if !self.has_back_action() {
+            // Nothing reads the field, so nothing has to sum it.
+            return OpticalPerturbation {
+                dn_eff: dn_bias.into(),
+                dphi: 0.0,
+                dalpha_neper_m: dalpha_shared.into(),
+            };
+        }
+
+        // Optical back-action, over the whole bus and both directions
+        // (`channel_intensities` counts both). A shared effect must be driven by
+        // the shared total: reading channel 0 alone under-counted by 1/N with
+        // every channel lit, and gave *exactly zero* whenever channel 0 was the
+        // dark one.
+        let total: f64 = intensity_w.iter().copied().map(|i| i.max(0.0)).sum();
 
         // TPA is PER CHANNEL, because cross-TPA between distinct frequencies is
         // twice self-TPA:
@@ -977,8 +814,6 @@ impl PhotonicActiveModel for FullPnDrive {
             })
             .sum();
         let dn_self = self.dn_dt * self.r_th_k_per_w * p_abs;
-        // All three index changes are λ-dependent ⇒ fold into dn_eff.
-        let dn_eff = self.dn_dv_rev * v_junc - self.dn_dv_inj * inj - self.dn_di * i_fwd + dn_self;
 
         // One channel (or none) needs no vector: keep the scalar path allocation
         // free, since this runs per Newton iteration and again per FD probe.
@@ -994,14 +829,15 @@ impl PhotonicActiveModel for FullPnDrive {
         };
 
         OpticalPerturbation {
-            dn_eff: dn_eff.into(),
+            // All three index changes are λ-dependent ⇒ fold into dn_eff.
+            dn_eff: (dn_bias + dn_self).into(),
             dphi: 0.0,
             dalpha_neper_m: dalpha,
         }
     }
 
     fn stamp(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.junc_node(), self.cathode, self.g_pn_cached);
+        stamp_resistor(mat, self.junc_node(), self.cathode, self.g_cached);
         if let Some(j) = self.junc {
             stamp_resistor(mat, self.anode, Some(j), 1.0 / self.r_series);
         }
@@ -1017,6 +853,11 @@ impl PhotonicActiveModel for FullPnDrive {
     }
 
     fn reactive_branches(&self) -> Vec<ReactiveBranchSpec> {
+        // A tier with neither charge stores nothing, and a zero-valued branch
+        // is the same thing as no branch.
+        if self.c_j0 <= 0.0 && self.tau_carrier <= 0.0 {
+            return Vec::new();
+        }
         vec![ReactiveBranchSpec {
             kind: ReactiveKind::Capacitor,
             // The junction node, which is the anode when nothing separates
@@ -1040,6 +881,18 @@ impl PhotonicActiveModel for FullPnDrive {
                 self.da_dv_rev = value;
                 true
             }
+            "v_pi_l" => {
+                // dn_dv such that 2π·L·dn_dv·Vπ/λ = π at V = Vπ ⇒
+                // dn_dv = λ_ref / (2·V_pi_L).
+                if value > 0.0 {
+                    self.dn_dv_rev = self.wl_ref_m / (2.0 * value);
+                }
+                true
+            }
+            "g_pn" => {
+                self.g_pn = value;
+                true
+            }
             "c_j0" => {
                 self.c_j0 = value.max(0.0);
                 true
@@ -1053,7 +906,7 @@ impl PhotonicActiveModel for FullPnDrive {
                 true
             }
             "i_sat" | "is" => {
-                self.i_sat = value;
+                self.i_sat = value.max(0.0);
                 true
             }
             "n_diode" | "n" => {
@@ -1061,7 +914,7 @@ impl PhotonicActiveModel for FullPnDrive {
                 true
             }
             "tau_carrier" | "tau" => {
-                self.tau_carrier = value;
+                self.tau_carrier = value.max(0.0);
                 true
             }
             "dn_dv_inj" => {
@@ -1104,6 +957,15 @@ impl PhotonicActiveModel for FullPnDrive {
                 self.r_series = value.max(0.0);
                 true
             }
+            // wl_ref is also consumed by the segment; cache it for v_pi_l.
+            "wl_ref_m" | "lambda_ref_m" => {
+                self.wl_ref_m = value;
+                false // let the segment record it as the authoritative copy
+            }
+            "wl_ref_nm" | "lambda_ref_nm" => {
+                self.wl_ref_m = value * 1e-9;
+                false
+            }
             // Geometry the self-heating needs; segment stays authoritative.
             "l_um" => {
                 self.length_m = value * 1e-6;
@@ -1122,16 +984,32 @@ impl PhotonicActiveModel for FullPnDrive {
     }
 }
 
-/// Resistive metal-heater drive (thermo-optic). A heater resistor `1/R_heater`
-/// between `heat_p`/`heat_n`; Joule power `P = V²/R` produces a calibrated,
-/// wavelength-independent phase `φ_th = π·P/P_π` applied to every channel — the
-/// `fc_thermal_ps` physics. No optical loss, no index dispersion (it is a pure
-/// phase rotation; modelled on a zero-length segment when standalone).
+/// Resistive metal-heater drive (thermo-optic), with an optional thermal lag.
+///
+/// A heater resistor `1/R_heater` between `heat_p`/`heat_n`. Joule power
+/// `P = V²/R` becomes a calibrated, wavelength-independent phase
+/// `φ_th = π·P/P_π` on every channel, with no loss and no index dispersion.
+///
+/// `tau_th` is the first-order thermal time constant, and **0 switches it
+/// off**: the conversion is then algebraic and the device carries no state.
+/// Above zero the phase tracks the *filtered* power `T(t)` on one internal MNA
+/// row — `dT/dt = (P − T)/τ_th` — so warm-up and cool-down appear in a
+/// transient. That used to be a second model, which is why no `fc_pn_th_ps`
+/// variant could have a thermal lag at all. It is an ordinary parameter now, so
+/// every one can.
+///
+/// At DC the state equation reduces to `T = P` either way, so an operating
+/// point does not depend on `tau_th`.
 pub struct Heater {
     r_heater: f64,
     p_pi: f64,
+    tau_th: f64,
     heat_p: NodeId,
     heat_n: NodeId,
+    /// The `T` row, allocated only when `tau_th > 0`.
+    t_state_idx: Option<usize>,
+    t_old: f64,
+    v_h_op: f64,
 }
 
 impl Heater {
@@ -1139,9 +1017,23 @@ impl Heater {
         Heater {
             r_heater: 1000.0,
             p_pi: 10e-3,
+            tau_th: 0.0,
             heat_p: None,
             heat_n: None,
+            t_state_idx: None,
+            t_old: 0.0,
+            v_h_op: 0.0,
         }
+    }
+
+    fn stamp_heater_resistor(&self, mat: &mut MnaMatrix) {
+        stamp_resistor(mat, self.heat_p, self.heat_n, 1.0 / self.r_heater);
+    }
+
+    /// `2·V_h/R`, the derivative of `P = V²/R` at the cached bias. Both state
+    /// stamps need it and neither should re-derive it.
+    fn dp_dv(&self) -> f64 {
+        2.0 * self.v_h_op / self.r_heater
     }
 }
 
@@ -1156,91 +1048,9 @@ impl PhotonicActiveModel for Heater {
         2 // heat_p, heat_n
     }
 
-    fn set_terminals(&mut self, electrical: &[NodeId]) {
-        self.heat_p = electrical[0];
-        self.heat_n = electrical[1];
-    }
-
-    fn eval(&mut self, x: &[f64], _intensity_w: &[f64], _ctx: &SimContext) -> OpticalPerturbation {
-        let v = self.heat_p.map_or(0.0, |i| x[i]) - self.heat_n.map_or(0.0, |i| x[i]);
-        let p = v * v / self.r_heater;
-        OpticalPerturbation {
-            dn_eff: PerChannel::zero(),
-            dphi: std::f64::consts::PI * p / self.p_pi,
-            dalpha_neper_m: PerChannel::zero(),
-        }
-    }
-
-    fn stamp(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.heat_p, self.heat_n, 1.0 / self.r_heater);
-    }
-
-    fn set_param(&mut self, name: &str, value: f64) -> bool {
-        match name {
-            "r_heater" | "r" => {
-                self.r_heater = value;
-                true
-            }
-            // `p_pi_th` is the alias the combined PN+thermal devices used.
-            "p_pi" | "p_pi_w" | "p_pi_th" => {
-                self.p_pi = value;
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-/// Metal-heater drive with a first-order thermal RC (the `fc_thermal_ps_rc`
-/// physics). The optical phase tracks the *filtered* heater power `T(t)` rather
-/// than the instantaneous Joule dissipation: `dT/dt = (P − T)/τ_th`, with `T` a
-/// device-owned state on one internal MNA row. At steady state `T = P`, so the
-/// phase reduces to the L1 `φ = π·P/P_π`. This is the "path B" pattern (device
-/// stamps its own discretised state equation), so it overrides `stamp_tran` /
-/// `stamp_residual_tran` for the BE form.
-pub struct HeaterRc {
-    r_heater: f64,
-    p_pi: f64,
-    tau_th: f64,
-    heat_p: NodeId,
-    heat_n: NodeId,
-    t_state_idx: Option<usize>,
-    t_old: f64,
-    v_h_op: f64,
-}
-
-impl HeaterRc {
-    pub fn new() -> Self {
-        HeaterRc {
-            r_heater: 1000.0,
-            p_pi: 10e-3,
-            tau_th: 10e-6,
-            heat_p: None,
-            heat_n: None,
-            t_state_idx: None,
-            t_old: 0.0,
-            v_h_op: 0.0,
-        }
-    }
-
-    fn stamp_heater_resistor(&self, mat: &mut MnaMatrix) {
-        stamp_resistor(mat, self.heat_p, self.heat_n, 1.0 / self.r_heater);
-    }
-}
-
-impl Default for HeaterRc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PhotonicActiveModel for HeaterRc {
-    fn num_electrical_terminals(&self) -> usize {
-        2 // heat_p, heat_n
-    }
-
+    /// The `T(t)` state row, and only when there is a lag to filter with.
     fn num_internal_nodes(&self) -> usize {
-        1 // the T(t) state row
+        usize::from(self.tau_th > 0.0)
     }
 
     fn set_terminals(&mut self, electrical: &[NodeId]) {
@@ -1249,13 +1059,22 @@ impl PhotonicActiveModel for HeaterRc {
     }
 
     fn bind_internal(&mut self, first_idx: usize) {
-        self.t_state_idx = Some(first_idx);
+        // Called whatever `num_internal_nodes` said, so the condition has to be
+        // repeated here or the model claims a row nobody allocated.
+        if self.num_internal_nodes() > 0 {
+            self.t_state_idx = Some(first_idx);
+        }
     }
 
     fn eval(&mut self, x: &[f64], _intensity_w: &[f64], _ctx: &SimContext) -> OpticalPerturbation {
         self.v_h_op = self.heat_p.map_or(0.0, |i| x[i]) - self.heat_n.map_or(0.0, |i| x[i]);
-        // Phase driven by the filtered heater power state T (power-equivalent W).
-        let t = self.t_state_idx.map_or(0.0, |i| x[i]);
+        // With a lag the phase follows the filtered power on the state row.
+        // Without one it follows the instantaneous Joule power, which is the
+        // same number at steady state.
+        let t = match self.t_state_idx {
+            Some(i) => x[i],
+            None => self.v_h_op * self.v_h_op / self.r_heater,
+        };
         OpticalPerturbation {
             dn_eff: PerChannel::zero(),
             dphi: std::f64::consts::PI * t / self.p_pi,
@@ -1268,12 +1087,12 @@ impl PhotonicActiveModel for HeaterRc {
         // DC state row: T − P_lin(V_h) = 0  (T = P at steady state).
         if let Some(t) = self.t_state_idx {
             mat.a[t][t] += 1.0;
-            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            let dp_dv = self.dp_dv();
             if let Some(hp) = self.heat_p {
-                mat.a[t][hp] -= two_vop_over_r;
+                mat.a[t][hp] -= dp_dv;
             }
             if let Some(hn) = self.heat_n {
-                mat.a[t][hn] += two_vop_over_r;
+                mat.a[t][hn] += dp_dv;
             }
         }
     }
@@ -1284,12 +1103,12 @@ impl PhotonicActiveModel for HeaterRc {
         if let Some(t) = self.t_state_idx {
             let inv_tau = 1.0 / self.tau_th;
             mat.a[t][t] += alpha + inv_tau;
-            let two_vop_over_r = 2.0 * self.v_h_op / self.r_heater;
+            let dp_dv = self.dp_dv() * inv_tau;
             if let Some(hp) = self.heat_p {
-                mat.a[t][hp] -= two_vop_over_r * inv_tau;
+                mat.a[t][hp] -= dp_dv;
             }
             if let Some(hn) = self.heat_n {
-                mat.a[t][hn] += two_vop_over_r * inv_tau;
+                mat.a[t][hn] += dp_dv;
             }
         }
     }
@@ -1320,12 +1139,17 @@ impl PhotonicActiveModel for HeaterRc {
                 self.r_heater = value;
                 true
             }
-            "p_pi" | "p_pi_w" => {
+            // `p_pi_th` is the alias the combined PN+thermal devices used.
+            "p_pi" | "p_pi_w" | "p_pi_th" => {
                 self.p_pi = value;
                 true
             }
-            "tau_th" | "tau" => {
-                self.tau_th = value.max(1e-30);
+            // Spelt out rather than `tau`: a composite carries both this and
+            // the PN drive's carrier lifetime, and `WithHeater` offers a
+            // parameter to both. One short name for two time constants would
+            // set whichever it reached, silently.
+            "tau_th" => {
+                self.tau_th = value.max(0.0);
                 true
             }
             _ => false,
@@ -1558,7 +1382,7 @@ mod tests {
     /// with it off, the path is instantaneous (homogeneous residual).
     #[test]
     fn pn_ps_group_delay_engages_under_option() {
-        // pn_phase_shifter defaults: L = 1 mm, n_g = 4.02.
+        // fc_pn_ps defaults: L = 1 mm, n_g = 4.02.
         let tau = 1e-3 * 4.02 / 299_792_458.0;
         let ctx = |delay: bool, t: f64| SimContext {
             waveguide_delay: delay,
@@ -1568,7 +1392,7 @@ mod tests {
         // 8 terminals: in re/im/λ, out re/im/λ, anode, cathode; branches at 8.
         let terminals: Vec<NodeId> = (0..8).map(Some).collect();
         let build = |delay: bool| {
-            let mut d = pn_phase_shifter();
+            let mut d = preset("fc_pn_ps").expect("fc_pn_ps is a preset").build();
             d.setup_model(&ctx(delay, 0.0));
             d.setup_instance(&terminals, &ctx(delay, 0.0));
             d.bind_extra_nodes(8);
@@ -1588,10 +1412,12 @@ mod tests {
         on.eval(&x_lo, EvalFlags::tran(), &ctx(true, 2.0 * tau));
         let mut b = vec![0.0; 11];
         on.load_residual(&mut b);
-        let out_mag = (b[8] * b[8] + b[9] * b[9]).sqrt();
+        let out_mag: f64 = (b[8] * b[8] + b[9] * b[9]).sqrt();
         // The delayed input was 1.0; the output is it attenuated by the
-        // propagation loss over L: t_amp = exp(-α·L/2), α from 20 dB/cm.
-        let t_amp = (-dB_per_cm_to_neper_per_m(20.0) * 1e-3 / 2.0).exp();
+        // propagation loss over L: t_amp = exp(-α·L/2). Read α off the preset
+        // rather than restating it, so a calibration change moves both.
+        let (length_m, _, _, alpha_db_cm) = preset("fc_pn_ps").unwrap().seg;
+        let t_amp = (-dB_per_cm_to_neper_per_m(alpha_db_cm) * length_m / 2.0).exp();
         assert!(
             (out_mag - t_amp).abs() < 1e-6,
             "delay-on: output should be the delayed input × t_amp ({t_amp:.4}); got {out_mag:.4}"
@@ -1606,15 +1432,52 @@ mod tests {
         let mut b_off = vec![0.0; 11];
         off.load_residual(&mut b_off);
         assert!(
-            b_off.iter().all(|v| v.abs() < 1e-12),
+            b_off.iter().all(|v| v.abs() < 1e-12_f64),
             "delay-off: residual must be homogeneous, got {b_off:?}"
         );
     }
 
+    /// COMPLETENESS GATE over the preset table.
+    ///
+    /// A tier is a list of parameter names, and a name the drive does not
+    /// recognise would be dropped in silence — the tier would then simply fail
+    /// to switch that term off, which is a wrong answer rather than an error.
+    /// `set_param` reports whether it consumed the name, so ask it.
+    ///
+    /// Adding a row, or renaming a parameter out from under one, fails here.
     #[test]
-    fn pn_drive_dn_eff_is_linear_in_vpn() {
+    fn every_preset_parameter_is_one_its_drive_honours() {
+        for p in PRESETS {
+            let mut model: Box<dyn PhotonicActiveModel> = match p.drive {
+                Drive::Heater => Box::new(Heater::new()),
+                Drive::Pn => Box::new(PnDrive::new()),
+                Drive::PnWithHeater => Box::new(WithHeater::new(Box::new(PnDrive::new()))),
+            };
+            for (name, value) in p.params {
+                assert!(
+                    model.set_param(name, *value),
+                    "preset '{}' sets '{name}', which its drive does not honour",
+                    p.name
+                );
+            }
+        }
+    }
+
+    /// The linear tier is the full drive with its forward and back-action terms
+    /// zeroed, so it has to come out exactly linear in `V_pn` and lossless.
+    /// That is the claim the collapse rests on: `fc_pn_ps` is not a different
+    /// model, it is this one with terms off.
+    ///
+    /// 0.5 V forward is the discriminating bias. The injection term is
+    /// `exp(V/(n·V_T)) − 1`, which is about 5e7 there, so a tier that failed to
+    /// zero it would miss by seven orders of magnitude rather than subtly.
+    #[test]
+    fn the_linear_tier_is_linear_in_vpn() {
         let mut m = PnDrive::new();
-        m.dn_dv = 1e-4;
+        for (name, value) in T_LINEAR {
+            m.set_param(name, *value);
+        }
+        m.set_param("dn_dv", 1e-4);
         m.set_terminals(&[Some(0), Some(1)]); // anode=node0, cathode=node1
         let x = [0.7, 0.2]; // V_pn = 0.5
         let p = m.eval(&x, &[], &SimContext::default());
@@ -1624,6 +1487,10 @@ mod tests {
             p.dn_eff
         );
         assert_eq!(p.dalpha_neper_m, PerChannel::zero());
+        assert!(
+            m.reactive_branches().is_empty(),
+            "the linear tier stores no charge, so it declares no branch"
+        );
     }
 
     #[test]
@@ -1632,6 +1499,16 @@ mod tests {
         m.wl_ref_m = 1.55e-6;
         assert!(m.set_param("v_pi_l", 0.015));
         // dn_dv = λ_ref / (2·V_pi_L).
-        assert!((m.dn_dv - 1.55e-6 / (2.0 * 0.015)).abs() < 1e-20);
+        assert!((m.dn_dv_rev - 1.55e-6 / (2.0 * 0.015)).abs() < 1e-20);
+    }
+
+    /// `tau_th = 0` is the instantaneous heater, and it must own no row. The
+    /// two used to be separate models; the row is what separated them.
+    #[test]
+    fn a_heater_takes_a_state_row_only_when_it_has_a_lag() {
+        let mut h = Heater::new();
+        assert_eq!(h.num_internal_nodes(), 0, "no lag, no state");
+        h.set_param("tau_th", 10e-6);
+        assert_eq!(h.num_internal_nodes(), 1, "a lag needs a row to filter on");
     }
 }
