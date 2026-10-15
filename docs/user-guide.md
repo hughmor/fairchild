@@ -638,9 +638,9 @@ v = r["V(det)"]                                    # now a noisy waveform
 | `noiseseed` | `1` | RNG seed. Same seed ⇒ same waveform; sweep it for independent trials. |
 | `noisescale` | `1.0` | Multiplier on the noise **amplitude**, so power goes as its square. `noisescale=3` gives 9× the noise power — the usual way to pull a deep-BER eye closure into a simulation short enough to run, then extrapolate. |
 
-Every generator in the `.noise` table above is drawn once per timestep, held
-across the step, and injected as a current at the same terminals the PSD is
-defined between. A generator with one-sided PSD `S` is realised as
+Additive generators in the `.noise` table above are drawn once per timestep,
+held across the step, and injected at the same terminals or branch rows the
+PSD is defined on. A generator with one-sided PSD `S` is realised as
 
 ```
 i_n = √(S / 2h) · N(0, 1)          h = timestep
@@ -649,6 +649,14 @@ i_n = √(S / 2h) · N(0, 1)          h = timestep
 because a zero-order-held sequence of variance `σ²` at interval `h` has PSD
 `2σ²h` below its Nyquist frequency. Integrating `S` over the resolved band
 `[0, 1/2h]` gives back `σ²`, which is the consistency the two analyses share.
+
+CW laser **phase diffusion** is integrated separately: `linewidth_hz` gives
+Wiener increments with variance `2π · linewidth_hz · Δt`, multiplied by
+`noisescale²`. This rotates the field without changing its power, instead of
+flattening the phase's `1/f²` spectrum to white. `.noise` reports that
+linearized phase spectrum; `.tran` resolves finite-angle coherence loss. See
+[laser linewidth](photonic-models.md#fc_cw_laser--constant-wave-laser) and
+`examples/photonic/laser_linewidth.py` for a delayed-interferometer measurement.
 
 **Off by default, and deterministic when off** — a `.tran` is expected to be
 reproducible, and every golden in the tree depends on it. A noisy run is still

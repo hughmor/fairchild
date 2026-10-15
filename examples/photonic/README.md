@@ -89,3 +89,11 @@ The legacy `mrr_compound.sp` / `mrr_adddrop_compound.sp` /
 `mzi_pn_compound.sp` files demonstrate `.subckt`-based compound photonic
 devices; the same compositions can be built today from native primitives
 directly in the netlist.
+
+### Finite laser coherence
+
+`laser_linewidth.py` measures fringe visibility in a delayed Mach-Zehnder
+against `exp(-pi * linewidth_hz * delay)`, with a coherent zero-linewidth
+control. Build the CLI with `cargo build --release -p fairchild-cli`, then run
+`python3 examples/photonic/laser_linewidth.py --selftest` or omit `--selftest`
+to write a plot. `--fairchild /path/to/fairchild` selects another CLI build.

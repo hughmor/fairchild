@@ -844,7 +844,7 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 
 | Device | Parameters | Validated |
 |---|---|---|
-| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp`, `rin_db_hz` | ⚠️ analytic |
+| `fc_cw_laser` | `power_mW`, `power_W`, `wavelength_nm`, `wavelength_m`, `phi_0_deg`, `re_amp`, `im_amp`, `rin_db_hz`, `linewidth_hz` | ⚠️ analytic; phase diffusion checked against Wiener increment variance, constant power, exponential field coherence at two timesteps, independent/repeatable seeds, zero-linewidth/RIN control, and linearized phase PSD; delayed-interferometer example checks visibility |
 | `fc_driven_laser` | `slope_w_v`/`slope_mw_v`, `v_th`, `p_floor_w`, `r_in`, `phi_0_deg`, `wavelength_nm`, `rin_db_hz` | ⚠️ analytic L–V + a transient through a PD; the opto-electronic-loop test is what pins the stamped `dA/dV` |
 | `fc_facet` | `reflectance`/`r`, `transmittance`/`t`, `loss`, `phase_deg` | ⚠️ analytic (`native_facet`): power fraction, phase rotation, round-trip loss, budget rejection |
 | `fc_waveguide` | `l_um`, `l_m`/`length`, `n_g`, `n_eff`, `alpha_db_cm`, `wl_ref_nm`/`wl_ref_m`, `pin_at_ref` | ⚠️ analytic closed form (loss, phase, group delay) |
@@ -865,7 +865,7 @@ otherwise. What each parameter *means*, and which tier to pick, is in
 
 | Gap | Status |
 |---|---|
-| Optical noise — laser RIN, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). Both flat with frequency; no relaxation-oscillation peak, no APD excess-noise factor |
+| Optical noise — laser RIN/linewidth, PD shot noise | ✅ `2q(I_ph+I_dark)` from `fc_photodetector`, `RIN·P²` from the lasers (`rin_db_hz`, off unless set), in **both** `.noise` and `.tran` (`.options trannoise=1`). RIN and shot are flat. CW laser `linewidth_hz` adds Wiener phase diffusion in noisy `.tran` and `linewidth_hz/(π f²)` linearized phase PSD in `.noise`; no relaxation-oscillation peak or APD excess-noise factor |
 | Bidirectional propagation | ⚠️ infrastructure present (`enable_bidirectional`); `fc_facet` is the only source of backward light. No distributed backscatter, and no laser sensitivity to back-reflection — lasers absorb what returns, they do not respond to it |
 | Waveguide group delay | ⚠️ opt-in via `.options waveguide_delay=1`, **off by default**. In `.tran` it bounds the timestep to `τ_g/2`. In `.ac` it is the exact `exp(−jΩτ_g)` coupling; `.pz` refuses a circuit containing one |
 | Junction charge in transient | ✅ `fc_pn_ps_cap` integrates `q = ∫C dv`, pinned by a charge-conservation test. ⚠️ the forward-injection drives (`fc_pn_ps_full`, `fc_pn_th_ps` composites) still integrate `C(v)·v`, which makes their depletion half faster than it is — their charge depends on an internal junction voltage the branch cannot report |

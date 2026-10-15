@@ -1,4 +1,4 @@
-use crate::device::{CorrelatedNoise, Device, EvalFlags, NodeId, SimContext};
+use crate::device::{CorrelatedNoise, Device, EvalFlags, NodeId, PhaseDiffusion, SimContext};
 use crate::mna::MnaMatrix;
 
 /// How many of a laser's `wpc` bundle wires it actually drives: the two forward
@@ -80,9 +80,10 @@ pub(super) fn rin_source(
 // Native CW laser source
 // ────────────────────────────────────────────────────────────────────────
 
-/// Constant-amplitude SVEA source.  Drives the three output wires of a
-/// single optical-port bundle to a fixed (re, im, λ) value via direct
-/// potential contributions — no electrical input.
+/// CW SVEA source with optional RIN and phase diffusion, and no electrical
+/// input. The coherent field is enforced by direct potential contributions;
+/// the shared noise injector applies stochastic amplitude and phase in `.tran`.
+/// Wavelength is a resolved parameter.
 ///
 /// `A_re = √P · cos(φ₀)`, `A_im = √P · sin(φ₀)` where `P = power_mW · 1e−3`.
 /// Drives ONE optical channel: `(re, im, λ)` under unidirectional propagation,
@@ -99,6 +100,8 @@ pub struct NativeCwLaser {
     /// Relative intensity noise in dB/Hz (e.g. −155).  `None` = noiseless,
     /// which is the default because 0 dB/Hz is not a sane fallback.
     rin_db_hz: Option<f64>,
+    /// Lorentzian optical FWHM, zero for a perfectly coherent source.
+    linewidth_hz: f64,
     wpc: usize, // 3 (unidir) or 5 (bidir)
     /// Smallest terminal count that would have worked, recorded when
     /// `setup_instance` refuses. `num_terminals()` otherwise reports the
@@ -124,6 +127,7 @@ impl NativeCwLaser {
             wavelen_m: 1550e-9,
             src_scale: 1.0,
             rin_db_hz: None,
+            linewidth_hz: 0.0,
             wpc: 3,
             min_terminals: None,
             nodes: Vec::new(),
@@ -200,6 +204,10 @@ impl Device for NativeCwLaser {
                 self.wavelen_m = value;
                 true
             }
+            "linewidth_hz" => {
+                self.linewidth_hz = value;
+                true
+            }
             "rin_db_hz" | "rin" => {
                 self.rin_db_hz = Some(value);
                 true
@@ -214,6 +222,24 @@ impl Device for NativeCwLaser {
             }
             _ => false,
         }
+    }
+
+    fn validate(&mut self) -> Result<(), String> {
+        if !self.linewidth_hz.is_finite() || self.linewidth_hz < 0.0 {
+            return Err("linewidth_hz must be finite and nonnegative".into());
+        }
+        Ok(())
+    }
+
+    fn phase_diffusion_sources(&self) -> Vec<PhaseDiffusion> {
+        if self.linewidth_hz == 0.0 {
+            return Vec::new();
+        }
+        vec![PhaseDiffusion {
+            rows: [self.branches[0], self.branches[1]],
+            field: [self.src_scale * self.re_amp, self.src_scale * self.im_amp],
+            linewidth_hz: self.linewidth_hz,
+        }]
     }
 
     fn set_source_scale(&mut self, scale: f64) {

@@ -282,17 +282,48 @@ X<name>  out  fc_cw_laser  [param=val …]
 | `phase_deg` | 0 | Initial phase of the SVEA carrier. |
 | `wavelength_nm` | 1550 | Output wavelength (drives the `λ` wire). |
 | `re_amp` / `im_amp` | derived | Direct override of the SVEA components. |
-| `rin_db_hz` | unset | Relative intensity noise, dB/Hz (e.g. `-155`). Unset = noiseless; `.noise` only. |
+| `rin_db_hz` | unset | Relative intensity noise, dB/Hz (e.g. `-155`). Unset = no RIN; `.noise` and noisy `.tran`. |
+| `linewidth_hz` | 0 | Lorentzian optical linewidth, FWHM in Hz. Nonnegative and finite. Zero gives a coherent carrier. |
 
 `power_mW`, `power_W`, and `phase_deg` are not orthogonal: `power_*` set
 the magnitude of `(re, im)` while preserving phase; `phase_deg` rotates the
 current magnitude. Setting `re_amp` / `im_amp` directly bypasses both.
 
-**Physics.** Three direct-potential equations fix `V(out_re) = √P · cos(φ₀)`,
-`V(out_im) = √P · sin(φ₀)`, `V(out_λ) = λ`. No electrical input and no spectral
-linewidth. `rin_db_hz` adds intensity noise — see
-[Optical noise](#optical-noise) — and reaches `.tran` only under
-`.options trannoise=1`; it never affects `.op`, `.dc` or `.ac`.
+**Physics.** The source fixes `V(out_re) = √P · cos(φ₀)` and
+`V(out_im) = √P · sin(φ₀)`; wavelength is a resolved parameter. There is no
+electrical input. `rin_db_hz` adds intensity noise — see
+[Optical noise](#optical-noise).
+
+With `linewidth_hz > 0` and `.options trannoise=1`, the field undergoes phase
+diffusion, with one held phase increment per internal timestep:
+
+```
+  Δφ = noisescale · sqrt(2π · linewidth_hz · Δt) · N(0, 1)
+  E(t) = sqrt(P) · exp(j(φ₀ + φ(t)))
+  <E(t) E*(t − τ)> / P = exp(−π · linewidth_hz · |τ|)
+```
+
+The phase rotates both the carrier and its RIN together; phase diffusion alone
+preserves power exactly. Increments use actual elapsed time, including a
+clamped final step, and phase advances only on accepted steps. Newton iterations
+reuse the held field. `noiseseed` controls repeatability, and independent laser
+instances receive independent increments. `noisescale` multiplies the phase
+increment, so effective linewidth scales as its square. Zero linewidth consumes
+no phase random draws and preserves existing seeded waveforms.
+
+`.op`, `.dc`, and `.ac` use the coherent carrier. `.noise` reports the
+**linearized phase-quadrature** spectrum `S_φ(f) = linewidth_hz/(π f²)`
+(one-sided, `f > 0`), with coherent taps on both field quadratures. It does not
+report the optical Lorentzian lineshape: use a long transient for that. A direct
+power detector rejects pure phase noise; an interferometer or resonator converts
+it to intensity noise. Transient noise currently requires fixed timesteps.
+Resolve phase diffusion with `linewidth_hz · Δt ≪ 1`; resolving a lineshape
+also requires a long observation window (`Δf ≈ 1/T_sim`).
+
+[`laser_linewidth.py`](../examples/photonic/laser_linewidth.py) measures fringe
+visibility in a delayed Mach-Zehnder against the exponential above, including
+a zero-linewidth control. It uses the CLI; run `cargo build --release -p
+fairchild-cli`, then `python3 examples/photonic/laser_linewidth.py --selftest`.
 
 ### `fc_driven_laser` — voltage-driven laser (direct modulation)
 

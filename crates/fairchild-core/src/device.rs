@@ -26,6 +26,20 @@ pub struct CorrelatedNoise {
     pub taps: Vec<(NodeId, NodeId, f64)>,
 }
 
+/// Phase diffusion of a source that enforces a complex field on two branch
+/// rows. The transient injector rotates the whole field (including its RIN)
+/// by a Wiener phase, preserving power; `.noise` uses its small-signal phase
+/// PSD `linewidth_hz / (pi f^2)` and the coherent taps `(-im, re)`.
+#[derive(Clone, Copy)]
+pub struct PhaseDiffusion {
+    /// Branch rows enforcing the real and imaginary field, in that order.
+    pub rows: [NodeId; 2],
+    /// Coherent field before phase diffusion, in the same order.
+    pub field: [f64; 2],
+    /// Lorentzian optical linewidth, FWHM in Hz.
+    pub linewidth_hz: f64,
+}
+
 /// Simulator context passed to device model callbacks at every eval.
 pub struct SimContext {
     pub temperature: f64, // Kelvin; default 300.15 K (27 °C, SPICE TNOM)
@@ -539,6 +553,14 @@ pub trait Device: Send + Sync {
     /// Noise generators whose one random process reaches the circuit at more
     /// than one place at once — see [`CorrelatedNoise`].  Default is empty.
     fn correlated_noise_sources(&self, _ctx: &SimContext) -> Vec<CorrelatedNoise> {
+        Vec::new()
+    }
+
+    /// Independent phase-diffusion generators. Kept in the shared noise-source
+    /// enumeration so `.noise` and `.tran` describe the same linewidth. Empty
+    /// for devices that do not emit a field with stochastic phase. Source
+    /// identities and order must stay fixed within one transient run.
+    fn phase_diffusion_sources(&self) -> Vec<PhaseDiffusion> {
         Vec::new()
     }
 
